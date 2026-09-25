@@ -1,5 +1,7 @@
-"""NEXT-19 (#207): the credential broker contract — the resolution step
-between a bound REF and the env slot a dispatched lane consumes.
+"""NEXT-19 (#207) + R38-02 (#303): the credential broker contract — the
+resolution step between a bound REF and the env slot a dispatched lane
+consumes, and the DELIVERY plan that decides how the credential reaches
+the lane (one supported transport per profile, references only).
 
 Covered here: the protocol shape (``resolve(ref, grant)`` →
 ``ResolvedCredential(version, staged_env, receipt)``), the default
@@ -10,20 +12,44 @@ Covered here: the protocol shape (``resolve(ref, grant)`` →
 canary (the credential VALUE never appears in any receipt, proof or
 document), the unbound-subject opt-out, and the in-flight snapshot
 semantics (a staged generation is never re-read mid-flight).
+
+R38-02 adds the delivery-plan matrix (:func:`delivery_plan`): the mode
+selection per profile × declared route, the typed
+``delivery_route_unsupported`` refusal (undeclared/unsupported for a
+BOUND subject — never an ambient fallback), the transport references
+(the secret NAME, never the value), the dispatch/template conformance
+against the ACTUAL shipped templates, and the unbound ambient-legacy
+opt-out.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from forge.adaptive.credential_broker import (
     BROKER_RECEIPT_SCHEMA,
+    CREDENTIAL_POLICY_COMPAT,
+    DELIVERY_MODE_AZURE_GROUP,
+    DELIVERY_MODE_GITHUB_NATIVE,
+    DELIVERY_MODE_GITLAB_PROTECTED,
+    DELIVERY_MODE_RUNNER_REDEMPTION,
+    DELIVERY_PLAN_SCHEMA,
+    DELIVERY_ROUTE_ENV,
+    DELIVERY_TEMPLATE_DIR_ENV,
+    VERSION_KIND_FIXTURE,
+    VERSION_KIND_PRESENCE,
     BrokerCredentialRefusal,
     CredentialBroker,
+    CredentialDeliveryPlan,
     EnvBroker,
     StagedBroker,
+    credential_secret_name,
+    credential_secret_segment,
+    delivery_plan,
+    delivery_template_conformance,
     stage_dispatch_credential,
 )
 from forge.adaptive.operator_snapshot import CanonicalSubject
@@ -44,6 +70,9 @@ OTHER_SUBJECT = CanonicalSubject(
 CANARY_VALUE = "sk-canary-0123456789abcdef"
 
 ENV_REF = "env:ANTHROPIC_AUTH_TOKEN"
+
+#: The repo's ci/templates directory (the conformance surface).
+TEMPLATES_DIR = Path(__file__).parents[1] / "ci" / "templates"
 
 
 def _bound_registry() -> ProjectCredentialRegistry:
@@ -274,3 +303,357 @@ class TestInFlightSnapshot:
         assert restaged is not None
         assert restaged.staged_env == {"ANTHROPIC_AUTH_TOKEN": "generation-two"}
         assert restaged.resolved_version == staged.resolved_version  # presence stamp
+
+
+# ----------------------------------------------------------------------
+# R38-02 (#303) — the delivery plan: mode selection, refusal matrix,
+# transport references, dispatch/template conformance.
+# ----------------------------------------------------------------------
+
+
+def _delivery_env(*routes: str) -> dict[str, str]:
+    """Env declaring *routes* plus the shipped-templates dir (the
+    conformance reads the ACTUAL repo templates)."""
+    return {
+        DELIVERY_ROUTE_ENV: ",".join(routes),
+        DELIVERY_TEMPLATE_DIR_ENV: str(TEMPLATES_DIR),
+    }
+
+
+class TestSecretNameDerivation:
+    def test_the_segment_is_uppercase_alnum_underscore(self):
+        assert credential_secret_segment("env:ANTHROPIC_AUTH_TOKEN") == ("ENV_ANTHROPIC_AUTH_TOKEN")
+        assert credential_secret_segment("vault:kv/eng#42") == "VAULT_KV_ENG_42"
+        assert credential_secret_segment("anthropic-main") == "ANTHROPIC_MAIN"
+        assert credential_secret_name("env:ANTHROPIC_AUTH_TOKEN") == (
+            "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
+        )
+
+
+class TestDeliveryPlanModeSelection:
+    async def test_github_native_selects_the_ref_derived_secret(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="github",
+            environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+        )
+        assert plan is not None
+        assert plan.mode == DELIVERY_MODE_GITHUB_NATIVE
+        assert plan.transport_ref == "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
+        assert plan.dispatch_ref == "ENV_ANTHROPIC_AUTH_TOKEN"
+        assert plan.redemption is False
+        assert plan.expected_identity["binding_revision"] == 1
+        assert plan.expected_identity["resolver"] == DELIVERY_MODE_GITHUB_NATIVE
+
+    async def test_gitlab_native_selects_the_protected_variable(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="gitlab",
+            environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+        )
+        assert plan is not None
+        assert plan.mode == DELIVERY_MODE_GITLAB_PROTECTED
+        assert plan.transport_ref == "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
+
+    async def test_azure_native_selects_the_group_and_env_slot_secret(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="azure",
+            environ=_delivery_env(DELIVERY_MODE_AZURE_GROUP),
+        )
+        assert plan is not None
+        assert plan.mode == DELIVERY_MODE_AZURE_GROUP
+        assert plan.transport_ref == "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN"
+        assert plan.expected_identity["resolver"] == DELIVERY_MODE_AZURE_GROUP
+
+    async def test_runner_redemption_selects_the_lane_control_route_and_raw_ref(self):
+        broker = StagedBroker()
+        plan = await delivery_plan(
+            _bound_registry(),
+            broker,
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="github",
+            environ=_delivery_env(DELIVERY_MODE_RUNNER_REDEMPTION),
+        )
+        assert plan is not None
+        assert plan.mode == DELIVERY_MODE_RUNNER_REDEMPTION
+        assert plan.transport_ref == "/lane/credentials/redeem"
+        # The RAW ref rides the payload under redemption (the endpoint
+        # re-checks it against the live binding).
+        assert plan.dispatch_ref == ENV_REF
+        assert plan.redemption is True
+        assert plan.expected_identity["resolver"] == broker.resolver_identity
+
+    async def test_redemption_is_uniform_across_all_three_profiles(self):
+        for profile in ("github", "azure", "gitlab"):
+            plan = await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile=profile,
+                environ=_delivery_env(DELIVERY_MODE_RUNNER_REDEMPTION),
+            )
+            assert plan is not None and plan.mode == DELIVERY_MODE_RUNNER_REDEMPTION
+
+
+class TestDeliveryPlanRefusals:
+    async def test_a_bound_subject_with_no_declared_route_refuses_typed(self):
+        with pytest.raises(CredentialRefusal, match="delivery_route_unsupported") as caught:
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                environ={DELIVERY_TEMPLATE_DIR_ENV: str(TEMPLATES_DIR)},
+            )
+        assert caught.value.detail["env"] == DELIVERY_ROUTE_ENV
+        assert caught.value.detail["supported"] == [
+            DELIVERY_MODE_GITHUB_NATIVE,
+            DELIVERY_MODE_RUNNER_REDEMPTION,
+        ]
+
+    async def test_a_route_supported_by_another_profile_refuses_typed(self):
+        with pytest.raises(CredentialRefusal, match="delivery_route_unsupported"):
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),  # gitlab's mode
+            )
+
+    async def test_two_supported_routes_for_one_profile_refuse_ambiguous(self):
+        with pytest.raises(CredentialRefusal, match="delivery_route_ambiguous"):
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE, DELIVERY_MODE_RUNNER_REDEMPTION),
+            )
+
+    async def test_a_revoked_binding_refuses_before_any_delivery_decision(self):
+        registry = _bound_registry()
+        registry.revoke(SUBJECT, "anthropic-gateway", revoked_by="ops@a")
+        with pytest.raises(CredentialRefusal, match="revoked"):
+            await delivery_plan(
+                registry,
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+            )
+
+    async def test_a_rotated_presented_ref_refuses_typed(self):
+        registry = _bound_registry()
+        registry.bind(SUBJECT, "anthropic-gateway", "vault:kv/eng#2", bound_by="ops@a")
+        with pytest.raises(CredentialRefusal, match="rotated"):
+            await delivery_plan(
+                registry,
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="gitlab",
+                presented_ref=ENV_REF,
+                environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+            )
+
+    async def test_an_unreadable_shipped_template_refuses_pre_paid(self, tmp_path):
+        with pytest.raises(CredentialRefusal, match="delivery_template_unavailable"):
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                environ={
+                    DELIVERY_ROUTE_ENV: DELIVERY_MODE_GITHUB_NATIVE,
+                    DELIVERY_TEMPLATE_DIR_ENV: str(tmp_path / "no-such-dir"),
+                },
+            )
+
+
+class TestDeliveryPlanOptOuts:
+    async def test_an_unbound_subject_plans_nothing_ambient_legacy(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=OTHER_SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="gitlab",
+            environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+        )
+        assert plan is None  # ambient-legacy: separable from strict BYOK
+
+    async def test_an_unknown_provider_route_plans_nothing(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="",
+            profile="gitlab",
+            environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+        )
+        assert plan is None
+
+    async def test_an_unknown_profile_plans_nothing(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="gitea",
+            environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+        )
+        assert plan is None
+
+
+class TestDeliveryPlanDocument:
+    async def test_the_plan_document_is_refs_only_no_value_slot(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="github",
+            environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+        )
+        assert plan is not None
+        document = plan.as_document()
+        assert document["schema"] == DELIVERY_PLAN_SCHEMA
+        assert document["attribution"] == "bound-delivery"
+        assert document["mode"] == DELIVERY_MODE_GITHUB_NATIVE
+        assert document["credential_ref"] == ENV_REF
+        # The canary value has nowhere to appear — there is no value slot.
+        assert CANARY_VALUE not in json.dumps(document)
+        assert "value" not in json.dumps(document)
+
+
+class TestDeliveryTemplateConformance:
+    """The ACTUAL shipped templates satisfy each profile's transport —
+    and an older delivery schema is refused with the instruction."""
+
+    @staticmethod
+    def _plan(mode: str) -> CredentialDeliveryPlan:
+        return CredentialDeliveryPlan(
+            subject="gitlab/gitlab.example/90210",
+            provider="anthropic-gateway",
+            profile={"github-native-secret": "github"}.get(mode, "gitlab"),
+            credential_ref=ENV_REF,
+            env_var="ANTHROPIC_AUTH_TOKEN",
+            binding_revision=1,
+            mode=mode,
+            transport_ref={
+                DELIVERY_MODE_GITHUB_NATIVE: "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+                DELIVERY_MODE_GITLAB_PROTECTED: "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+                DELIVERY_MODE_AZURE_GROUP: "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN",
+                DELIVERY_MODE_RUNNER_REDEMPTION: "/lane/credentials/redeem",
+            }[mode],
+            dispatch_ref="ENV_ANTHROPIC_AUTH_TOKEN",
+            redemption=mode == DELIVERY_MODE_RUNNER_REDEMPTION,
+        )
+
+    def _template(self, name: str) -> str:
+        return (TEMPLATES_DIR / name).read_text()
+
+    def test_the_shipped_github_workflow_conforms(self):
+        delivery_template_conformance(
+            self._plan(DELIVERY_MODE_GITHUB_NATIVE),
+            self._template("forge-harness.github.yml"),
+        )
+
+    def test_the_shipped_gitlab_batch_lane_conforms(self):
+        delivery_template_conformance(
+            self._plan(DELIVERY_MODE_GITLAB_PROTECTED),
+            self._template("claude-code.gitlab-ci.yml"),
+        )
+
+    def test_the_shipped_azure_pipeline_conforms(self):
+        delivery_template_conformance(
+            self._plan(DELIVERY_MODE_AZURE_GROUP),
+            self._template("forge-lane.azure-pipelines.yml"),
+        )
+
+    @pytest.mark.parametrize(
+        ("mode", "name"),
+        [
+            (DELIVERY_MODE_GITHUB_NATIVE, "forge-harness.github.yml"),
+            (DELIVERY_MODE_GITLAB_PROTECTED, "claude-code.gitlab-ci.yml"),
+            (DELIVERY_MODE_AZURE_GROUP, "forge-lane.azure-pipelines.yml"),
+        ],
+    )
+    def test_an_older_delivery_schema_is_refused_with_the_instruction(self, mode, name):
+        plan = self._plan(mode)
+        with pytest.raises(CredentialRefusal, match="delivery_template_mismatch") as caught:
+            delivery_template_conformance(
+                plan, "name: forge-harness\non: workflow_dispatch\ninputs: {}\n"
+            )
+        assert caught.value.detail["missing_markers"]
+        instruction = str(caught.value.detail["instruction"])
+        assert instruction
+        # The instruction names the transport (the whole reference, or its
+        # group and secret halves for the Azure variable-group transport).
+        assert plan.transport_ref in instruction or all(
+            part in instruction for part in plan.transport_ref.split("/") if part
+        )
+
+    def test_the_shipped_templates_consume_the_redemption_flag(self):
+        for name in (
+            "forge-harness.github.yml",
+            "claude-code.gitlab-ci.yml",
+            "forge-lane.azure-pipelines.yml",
+            "claude-sdk-lane.gitlab-ci.yml",
+        ):
+            delivery_template_conformance(
+                self._plan(DELIVERY_MODE_RUNNER_REDEMPTION), self._template(name)
+            )
+
+
+# ----------------------------------------------------------------------
+# R38-04 (#305) — the receipt correlation fields: every broker receipt
+# carries its own id, the resolved version's KIND (a presence stamp is
+# never a unique-secret-version proof) and the policy in force.
+# ----------------------------------------------------------------------
+
+
+class TestReceiptCorrelationFields:
+    async def test_the_env_broker_receipt_declares_a_presence_version(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", CANARY_VALUE)
+        resolved = await EnvBroker().resolve(ENV_REF)
+        receipt = resolved.receipt
+        assert receipt["receipt_id"]  # the id the consumer receipt joins on
+        assert receipt["resolved_version_kind"] == VERSION_KIND_PRESENCE
+        assert receipt["credential_policy"] == CREDENTIAL_POLICY_COMPAT
+
+    async def test_the_staged_broker_receipt_declares_a_fixture_version(self):
+        broker = StagedBroker()
+        broker.stage(ENV_REF, CANARY_VALUE, env_var="ANTHROPIC_AUTH_TOKEN", version="v1")
+        receipt = (await broker.resolve(ENV_REF)).receipt
+        assert receipt["receipt_id"]
+        assert receipt["resolved_version_kind"] == VERSION_KIND_FIXTURE
+
+    async def test_the_dispatch_proof_carries_the_kind_and_the_policy(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", CANARY_VALUE)
+        staged = await stage_dispatch_credential(
+            _bound_registry(), EnvBroker(), subject=SUBJECT, provider="anthropic-gateway"
+        )
+        assert staged is not None
+        assert staged.proof["resolved_version_kind"] == VERSION_KIND_PRESENCE
+        assert staged.proof["credential_policy"] == CREDENTIAL_POLICY_COMPAT
+        assert staged.proof["receipt"]["receipt_id"]
+        assert CANARY_VALUE not in json.dumps(staged.proof)

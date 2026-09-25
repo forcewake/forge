@@ -63,7 +63,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -85,7 +87,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -122,7 +126,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -159,7 +165,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -196,7 +204,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -218,7 +228,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -255,7 +267,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -277,7 +291,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -314,7 +330,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -351,7 +369,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -388,7 +408,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -425,7 +447,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -447,7 +471,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -484,7 +510,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -506,7 +534,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -543,7 +573,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -565,7 +597,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -602,7 +636,9 @@
               "estimate_usd": null,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": null,
-              "output_tokens": null
+              "output_tokens": null,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         },
@@ -624,7 +660,9 @@
               "estimate_usd": 0.003605,
               "rate_card_version": "lab-estimate-v1",
               "input_tokens_inclusive": 518,
-              "output_tokens": 231
+              "output_tokens": 231,
+              "cost_basis": "",
+              "segment": ""
             }
           ]
         }
@@ -642,6 +680,7 @@
       "billed_usd": null,
       "billed_exact": false,
       "billed_known_lower_bound_usd": 0.0,
+      "provider_reported_usd": null,
       "estimate_usd": 0.04326,
       "estimate_basis": "estimate",
       "estimate_rate_card_version": "lab-estimate-v1",
@@ -655,6 +694,7 @@
       "billed_usd": null,
       "billed_exact": false,
       "billed_known_lower_bound_usd": 0.0,
+      "provider_reported_usd": null,
       "estimate_usd": 0.04326,
       "estimate_basis": "estimate",
       "estimate_rate_card_version": "lab-estimate-v1",
@@ -794,6 +834,125 @@
         ]
       }
     },
+    "successful_attempt_costs": {
+      "t-01-repair": {
+        "t-01-repair/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-02-cold": {
+        "t-02-cold/a1": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-03-adaptive": {
+        "t-03-adaptive/a1": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-04-ambiguous": {
+        "t-04-ambiguous/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-05-missing": {
+        "t-05-missing/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-06-neighbor-schema": {
+        "t-06-neighbor-schema/a1": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-07-neighbor-changelog": {
+        "t-07-neighbor-changelog/a1": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-08-steer": {
+        "t-08-steer/a1": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-09-pause-resume": {
+        "t-09-pause-resume/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-10-runner-loss": {
+        "t-10-runner-loss/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-11-revoked-blob": {
+        "t-11-revoked-blob/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      },
+      "t-12-cross-runner": {
+        "t-12-cross-runner/a2": {
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "receipts": 1,
+          "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+        }
+      }
+    },
+    "cost_basis_census": {
+      "bases": {
+        "estimated": {
+          "receipts": 19,
+          "usd": 0.04326
+        }
+      },
+      "note": "cost figures are separated by origin: provider-reported (the SDK's own meter), estimated (a versioned rate card), billing-reconciliation (a billing export) \u2014 never summed into one column (R38-09)"
+    },
+    "attribution_segments": [
+      {
+        "segment": "route:lab-lane/vendor-wire",
+        "route": "lab-lane/vendor-wire",
+        "rate_card_versions": [
+          "lab-estimate-v1"
+        ],
+        "receipts": 19,
+        "cost_usd": 0.04326,
+        "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+      }
+    ],
     "coverage": {
       "accepted_items": {
         "attempts": 19,
@@ -897,6 +1056,9 @@
     "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
     "discovery-live estimates are priced from the same versioned card (which carries the capture's own recorded cap-enforcement prices) \u2014 never billing",
     "discovery-live: 4 captured attempts joined as their OWN population under populations.discovery_live \u2014 the captures carry mechanical grades, not acceptance decisions, so no accepted items are claimed and their spend never enters the pilot's aggregates",
+    "live-single-writer keeps qualification runs programme-side: no acceptance decisions exist, so no accepted items are claimed and the lane spend never enters the pilot's aggregates; the successful lane attempt's own cost is 0.217954 usd \u2014 a DIFFERENT measure from an accepted-item all-attempt total and from programme spend per accepted item",
+    "live-single-writer planning counters stay separate: the run_budgets consumed_calls/consumed_tokens figures are recorded beside the population, not ingested as spend rows (their per-dimension split and cost are unknown \u2014 never zero, never estimated as spend)",
+    "live-single-writer: the 2026-09-24 qualification run's SDK lane receipts joined under populations.live_single_writer \u2014 the durable usage_receipts table was EMPTY at capture (0 rows); the captured artifacts now ingest idempotently and the provider-reported lane spend is 0.803749 usd (lower bound \u2014 the killed job730's spend is unknown, never zero)",
     "setup_minutes and completion_latency_minutes are whole-task windows over mixed populations \u2014 excluded from stage_seconds by construction, never re-typed",
     "the vendor is scripted: token counters are real wire observations, spend is unknown by construction and every cost figure here is a labelled estimate or an honest unknown",
     "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend"
@@ -1067,7 +1229,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1129,7 +1293,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1248,7 +1414,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1367,7 +1535,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1486,7 +1656,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1548,7 +1720,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1667,7 +1841,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1729,7 +1905,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1848,7 +2026,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -1967,7 +2147,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2086,7 +2268,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2205,7 +2389,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2267,7 +2453,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2386,7 +2574,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2448,7 +2638,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2567,7 +2759,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2629,7 +2823,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2748,7 +2944,9 @@
                 "output_tokens": null,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "unknown"
+                "completeness": "unknown",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2810,7 +3008,9 @@
                 "output_tokens": 231,
                 "reasoning_tokens": null,
                 "cost_usd": null,
-                "completeness": "aggregate"
+                "completeness": "aggregate",
+                "cost_basis": "",
+                "segment": ""
               }
             ],
             "call_ids": [],
@@ -2965,7 +3165,9 @@
                   "estimate_usd": 0.113852,
                   "rate_card_version": "lab-estimate-v1",
                   "input_tokens_inclusive": 12154,
-                  "output_tokens": 11193
+                  "output_tokens": 11193,
+                  "cost_basis": "",
+                  "segment": ""
                 }
               ]
             },
@@ -2987,7 +3189,9 @@
                   "estimate_usd": 0.070568,
                   "rate_card_version": "lab-estimate-v1",
                   "input_tokens_inclusive": 6148,
-                  "output_tokens": 7284
+                  "output_tokens": 7284,
+                  "cost_basis": "",
+                  "segment": ""
                 }
               ]
             },
@@ -3009,7 +3213,9 @@
                   "estimate_usd": 0.13192,
                   "rate_card_version": "lab-estimate-v1",
                   "input_tokens_inclusive": 11376,
-                  "output_tokens": 13646
+                  "output_tokens": 13646,
+                  "cost_basis": "",
+                  "segment": ""
                 }
               ]
             }
@@ -3046,7 +3252,9 @@
                   "estimate_usd": null,
                   "rate_card_version": "lab-estimate-v1",
                   "input_tokens_inclusive": 6200,
-                  "output_tokens": 560
+                  "output_tokens": 560,
+                  "cost_basis": "",
+                  "segment": ""
                 }
               ]
             }
@@ -3064,6 +3272,7 @@
           "billed_usd": null,
           "billed_exact": false,
           "billed_known_lower_bound_usd": 0.0,
+          "provider_reported_usd": null,
           "estimate_usd": 0.31634,
           "estimate_basis": "estimate",
           "estimate_rate_card_version": "lab-estimate-v1",
@@ -3077,6 +3286,7 @@
           "billed_usd": null,
           "billed_exact": false,
           "billed_known_lower_bound_usd": 0.0,
+          "provider_reported_usd": null,
           "estimate_usd": null,
           "estimate_basis": "estimate",
           "estimate_rate_card_version": "lab-estimate-v1",
@@ -3088,6 +3298,38 @@
           "programme_estimate_per_accepted_usd": null
         },
         "accepted_item_totals": {},
+        "successful_attempt_costs": {},
+        "cost_basis_census": {
+          "bases": {
+            "estimated": {
+              "receipts": 4,
+              "usd": 0.31634
+            }
+          },
+          "note": "cost figures are separated by origin: provider-reported (the SDK's own meter), estimated (a versioned rate card), billing-reconciliation (a billing export) \u2014 never summed into one column (R38-09)"
+        },
+        "attribution_segments": [
+          {
+            "segment": "route:discovery-live/live/live:fast",
+            "route": "discovery-live/live/live:fast",
+            "rate_card_versions": [
+              "lab-estimate-v1"
+            ],
+            "receipts": 3,
+            "cost_usd": 0.31634,
+            "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+          },
+          {
+            "segment": "route:discovery-live/scripted/scripted:reactive-investigation/v1",
+            "route": "discovery-live/scripted/scripted:reactive-investigation/v1",
+            "rate_card_versions": [
+              "lab-estimate-v1"
+            ],
+            "receipts": 1,
+            "cost_usd": 0.0,
+            "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+          }
+        ],
         "coverage": {
           "accepted_items": {
             "attempts": 0,
@@ -3267,7 +3509,9 @@
                     "output_tokens": 11193,
                     "reasoning_tokens": null,
                     "cost_usd": null,
-                    "completeness": "aggregate"
+                    "completeness": "aggregate",
+                    "cost_basis": "",
+                    "segment": ""
                   }
                 ],
                 "call_ids": [],
@@ -3320,7 +3564,9 @@
                     "output_tokens": 7284,
                     "reasoning_tokens": null,
                     "cost_usd": null,
-                    "completeness": "aggregate"
+                    "completeness": "aggregate",
+                    "cost_basis": "",
+                    "segment": ""
                   }
                 ],
                 "call_ids": [],
@@ -3373,7 +3619,9 @@
                     "output_tokens": 13646,
                     "reasoning_tokens": null,
                     "cost_usd": null,
-                    "completeness": "aggregate"
+                    "completeness": "aggregate",
+                    "cost_basis": "",
+                    "segment": ""
                   }
                 ],
                 "call_ids": [],
@@ -3477,7 +3725,9 @@
                     "output_tokens": 560,
                     "reasoning_tokens": null,
                     "cost_usd": null,
-                    "completeness": "aggregate"
+                    "completeness": "aggregate",
+                    "cost_basis": "",
+                    "segment": ""
                   }
                 ],
                 "call_ids": [],
@@ -3553,6 +3803,881 @@
         "duplicate_calls": [],
         "counter_resets": [],
         "notes": []
+      }
+    },
+    "live_single_writer": {
+      "schema": "forge.delivery.economics/1",
+      "pilot": {
+        "durable_usage_receipts_rows_at_capture": 0,
+        "issue": "R38-09 / #310 (the recorded usage-ingestion gap, closed by ingest)",
+        "population": "live_single_writer",
+        "recorded_cap_usd": 2.0
+      },
+      "rate_card": null,
+      "works": [
+        {
+          "work_id": "60b9de7f",
+          "outcome": "",
+          "ledger_outcome": "",
+          "accepted": null,
+          "decided_by": "",
+          "decided_at": "",
+          "acceptance_contract": "",
+          "profile_version": "glm-5.3-flash",
+          "harness_version": "claude-sdk-lane@2.1.273",
+          "attempts": [
+            {
+              "attempt_id": "job726",
+              "work_id": "60b9de7f",
+              "outcome": "accepted",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "60b9de7f",
+                  "attempt_id": "job726",
+                  "receipt_id": "live-evidence:job726",
+                  "source": "live-evidence/sdk-receipt",
+                  "route": "claude-sdk-lane/glm-5.3-flash",
+                  "evidence_class": "live-model",
+                  "basis": "billing",
+                  "billed_usd": 0.217954,
+                  "estimate_usd": null,
+                  "rate_card_version": "",
+                  "input_tokens_inclusive": null,
+                  "output_tokens": null,
+                  "cost_basis": "provider-reported",
+                  "segment": "segment:884c8f4215a88e07"
+                }
+              ]
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "joined_to_acceptance": false
+        },
+        {
+          "work_id": "905194f0",
+          "outcome": "",
+          "ledger_outcome": "",
+          "accepted": null,
+          "decided_by": "",
+          "decided_at": "",
+          "acceptance_contract": "",
+          "profile_version": "glm-5.3-flash",
+          "harness_version": "claude-sdk-lane@2.1.273",
+          "attempts": [
+            {
+              "attempt_id": "job730",
+              "work_id": "905194f0",
+              "outcome": "cancelled",
+              "joined_to_acceptance": false,
+              "receipts": []
+            },
+            {
+              "attempt_id": "job731",
+              "work_id": "905194f0",
+              "outcome": "rejected",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "905194f0",
+                  "attempt_id": "job731",
+                  "receipt_id": "live-evidence:job731",
+                  "source": "live-evidence/sdk-receipt",
+                  "route": "claude-sdk-lane/glm-5.3-flash",
+                  "evidence_class": "live-model",
+                  "basis": "billing",
+                  "billed_usd": 0.200525,
+                  "estimate_usd": null,
+                  "rate_card_version": "",
+                  "input_tokens_inclusive": 172888,
+                  "output_tokens": null,
+                  "cost_basis": "provider-reported",
+                  "segment": "segment:884c8f4215a88e07"
+                }
+              ]
+            },
+            {
+              "attempt_id": "job732",
+              "work_id": "905194f0",
+              "outcome": "rejected",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "905194f0",
+                  "attempt_id": "job732",
+                  "receipt_id": "live-evidence:job732",
+                  "source": "live-evidence/sdk-receipt",
+                  "route": "claude-sdk-lane/glm-5.3-flash",
+                  "evidence_class": "live-model",
+                  "basis": "billing",
+                  "billed_usd": 0.149899,
+                  "estimate_usd": null,
+                  "rate_card_version": "",
+                  "input_tokens_inclusive": 139099,
+                  "output_tokens": 2463,
+                  "cost_basis": "provider-reported",
+                  "segment": "segment:884c8f4215a88e07"
+                }
+              ]
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "joined_to_acceptance": false
+        },
+        {
+          "work_id": "ca78cda2",
+          "outcome": "",
+          "ledger_outcome": "",
+          "accepted": null,
+          "decided_by": "",
+          "decided_at": "",
+          "acceptance_contract": "",
+          "profile_version": "glm-5.3-flash",
+          "harness_version": "claude-sdk-lane@2.1.273",
+          "attempts": [
+            {
+              "attempt_id": "job723",
+              "work_id": "ca78cda2",
+              "outcome": "rejected",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "ca78cda2",
+                  "attempt_id": "job723",
+                  "receipt_id": "live-evidence:job723",
+                  "source": "live-evidence/sdk-receipt",
+                  "route": "claude-sdk-lane/glm-5.3-flash",
+                  "evidence_class": "live-model",
+                  "basis": "billing",
+                  "billed_usd": 0.235371,
+                  "estimate_usd": null,
+                  "rate_card_version": "",
+                  "input_tokens_inclusive": null,
+                  "output_tokens": null,
+                  "cost_basis": "provider-reported",
+                  "segment": "segment:884c8f4215a88e07"
+                }
+              ]
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "joined_to_acceptance": false
+        }
+      ],
+      "costs": {
+        "programme": {
+          "works": 3,
+          "attempts": 5,
+          "unobserved_attempts": 0,
+          "receipts": 4,
+          "billed_usd": null,
+          "billed_exact": false,
+          "billed_known_lower_bound_usd": 0.803749,
+          "provider_reported_usd": 0.803749,
+          "estimate_usd": null,
+          "estimate_basis": "estimate",
+          "estimate_rate_card_version": "",
+          "receipt_coverage": 0.8
+        },
+        "accepted_items": {
+          "works": 0,
+          "attempts": 0,
+          "unobserved_attempts": 0,
+          "receipts": 0,
+          "billed_usd": null,
+          "billed_exact": false,
+          "billed_known_lower_bound_usd": 0.0,
+          "provider_reported_usd": null,
+          "estimate_usd": null,
+          "estimate_basis": "estimate",
+          "estimate_rate_card_version": "",
+          "receipt_coverage": null
+        },
+        "programme_per_accepted_item": {
+          "programme_billed_per_accepted_usd": null,
+          "programme_billed_lower_bound_per_accepted_usd": null,
+          "programme_estimate_per_accepted_usd": null
+        },
+        "accepted_item_totals": {},
+        "successful_attempt_costs": {
+          "60b9de7f": {
+            "job726": {
+              "cost_usd": 0.217954,
+              "known_cost_lower_bound_usd": 0.217954,
+              "receipts": 1,
+              "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+            }
+          }
+        },
+        "cost_basis_census": {
+          "bases": {
+            "provider-reported": {
+              "receipts": 4,
+              "usd": 0.803749
+            }
+          },
+          "note": "cost figures are separated by origin: provider-reported (the SDK's own meter), estimated (a versioned rate card), billing-reconciliation (a billing export) \u2014 never summed into one column (R38-09)"
+        },
+        "attribution_segments": [
+          {
+            "segment": "segment:884c8f4215a88e07",
+            "route": "claude-sdk-lane/glm-5.3-flash",
+            "rate_card_versions": [],
+            "receipts": 4,
+            "cost_usd": 0.803749,
+            "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+          }
+        ],
+        "coverage": {
+          "accepted_items": {
+            "attempts": 0,
+            "receipts_expected": 0,
+            "receipts_received": 0,
+            "measured_receipts": 0,
+            "cost_known_receipts": 0,
+            "unknown_cost_receipts": 0,
+            "receipt_coverage": null,
+            "cost_coverage": null,
+            "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+          },
+          "programme": {
+            "attempts": 5,
+            "receipts_expected": 5,
+            "receipts_received": 4,
+            "measured_receipts": 2,
+            "cost_known_receipts": 4,
+            "unknown_cost_receipts": 0,
+            "receipt_coverage": 0.8,
+            "cost_coverage": 0.8,
+            "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+          }
+        }
+      },
+      "evidence": {
+        "classes": {
+          "live-model": 4
+        },
+        "synthetic_counters_labelled": 0,
+        "synthetic_excluded_from": [
+          "throughput comparisons",
+          "decode rate labels"
+        ],
+        "note": "scripted-vendor counters are wire observations, not measured inference \u2014 labelled synthetic-vendor-counter and excluded from every throughput comparison (R37-13)"
+      },
+      "latency": {
+        "stage_seconds": {
+          "human_wait": {
+            "measured": true,
+            "populations": {
+              "human_wait:operator": {
+                "spans": 1,
+                "unknown_spans": 1,
+                "total_seconds": null,
+                "lower_bound_seconds": 0.0
+              }
+            },
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": 0.0,
+            "note": "unknown windows present \u2014 lower bound only"
+          },
+          "model": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "queue": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "restore_collection": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "tool": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "verification": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          }
+        },
+        "decode_label_guard": "no decode label rides a request-latency population: decode throughput requires live-model receipts over a model-span population (RATE_LABEL_SPACE, extended by R37-13)"
+      },
+      "cross_joins": [],
+      "conflicts": [],
+      "notes": [
+        "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
+        "no accepted items \u2014 per-accepted economics are undefined, never zero",
+        "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend",
+        "work 60b9de7f: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+        "work 905194f0: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+        "work ca78cda2: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit"
+      ],
+      "observability": {
+        "usage.receipt_coverage": 0.8,
+        "cost.lower_bound": 0.803749,
+        "cost.accepted_item_total": {},
+        "cost.programme_per_accepted_item": null,
+        "latency.stage_seconds": {
+          "human_wait": 0.0,
+          "model": null,
+          "queue": null,
+          "restore_collection": null,
+          "tool": null,
+          "verification": null
+        }
+      },
+      "measurement_ledger": {
+        "schema": "forge.delivery.measurement/1",
+        "works": [
+          {
+            "work_id": "60b9de7f",
+            "outcome": "",
+            "attempts": [
+              {
+                "attempt_id": "job726",
+                "work_id": "60b9de7f",
+                "outcome": "accepted",
+                "sources": [
+                  "live-evidence/sdk-receipt"
+                ],
+                "routes": [
+                  {
+                    "provider": "claude-sdk-lane",
+                    "model": "glm-5.3-flash"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "live-evidence:job726",
+                    "work_id": "60b9de7f",
+                    "attempt_id": "job726",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": {
+                      "provider": "claude-sdk-lane",
+                      "model": "glm-5.3-flash"
+                    },
+                    "input_tokens": null,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": null,
+                    "reasoning_tokens": null,
+                    "cost_usd": 0.2179536,
+                    "completeness": "aggregate",
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [
+                  {
+                    "span_id": "live-evidence:job726:review",
+                    "work_id": "60b9de7f",
+                    "attempt_id": "job726",
+                    "span_type": "human_wait",
+                    "origin": "operator",
+                    "seconds": null
+                  }
+                ],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": 0.2179536,
+                  "known_cost_lower_bound_usd": 0.2179536,
+                  "input_tokens_inclusive": null,
+                  "input_tokens_inclusive_lower_bound": 0,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": null,
+                  "output_tokens_lower_bound": 0,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              }
+            ],
+            "planner_call_ids": [],
+            "planner_usage": {
+              "receipts_received": 0,
+              "receipts_expected": 0,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "unknown",
+              "call_derived": false,
+              "coverage": null,
+              "notes": []
+            },
+            "own_usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.2179536,
+              "known_cost_lower_bound_usd": 0.2179536,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            },
+            "model_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "acceptance_contract": "",
+            "orphan_receipt_ids": [],
+            "fully_linked": false,
+            "notes": [
+              "outcome unknown \u2014 programme spend yes, accepted unit no"
+            ]
+          },
+          {
+            "work_id": "905194f0",
+            "outcome": "",
+            "attempts": [
+              {
+                "attempt_id": "job730",
+                "work_id": "905194f0",
+                "outcome": "cancelled",
+                "sources": [],
+                "routes": [],
+                "receipts": [],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 0,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": null,
+                  "known_cost_lower_bound_usd": 0.0,
+                  "input_tokens_inclusive": null,
+                  "input_tokens_inclusive_lower_bound": 0,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": null,
+                  "output_tokens_lower_bound": 0,
+                  "reasoning_tokens": null,
+                  "completeness": "unknown",
+                  "call_derived": false,
+                  "coverage": 0.0,
+                  "notes": [
+                    "905194f0:job730: no usage receipt and no call telemetry \u2014 usage unknown, never zero"
+                  ]
+                }
+              },
+              {
+                "attempt_id": "job731",
+                "work_id": "905194f0",
+                "outcome": "rejected",
+                "sources": [
+                  "live-evidence/sdk-receipt"
+                ],
+                "routes": [
+                  {
+                    "provider": "claude-sdk-lane",
+                    "model": "glm-5.3-flash"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "live-evidence:job731",
+                    "work_id": "905194f0",
+                    "attempt_id": "job731",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": {
+                      "provider": "claude-sdk-lane",
+                      "model": "glm-5.3-flash"
+                    },
+                    "input_tokens": 32344,
+                    "cached_input_tokens": 140544,
+                    "cache_write_tokens": null,
+                    "output_tokens": null,
+                    "reasoning_tokens": null,
+                    "cost_usd": 0.2005248,
+                    "completeness": "aggregate",
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": 0.2005248,
+                  "known_cost_lower_bound_usd": 0.2005248,
+                  "input_tokens_inclusive": 172888,
+                  "input_tokens_inclusive_lower_bound": 172888,
+                  "cached_input_tokens": 140544,
+                  "cache_write_tokens": null,
+                  "output_tokens": null,
+                  "output_tokens_lower_bound": 0,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              },
+              {
+                "attempt_id": "job732",
+                "work_id": "905194f0",
+                "outcome": "rejected",
+                "sources": [
+                  "live-evidence/sdk-receipt"
+                ],
+                "routes": [
+                  {
+                    "provider": "claude-sdk-lane",
+                    "model": "glm-5.3-flash"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "live-evidence:job732",
+                    "work_id": "905194f0",
+                    "attempt_id": "job732",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": {
+                      "provider": "claude-sdk-lane",
+                      "model": "glm-5.3-flash"
+                    },
+                    "input_tokens": 19163,
+                    "cached_input_tokens": 119936,
+                    "cache_write_tokens": null,
+                    "output_tokens": 2463,
+                    "reasoning_tokens": null,
+                    "cost_usd": 0.1498992,
+                    "completeness": "aggregate",
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": 0.1498992,
+                  "known_cost_lower_bound_usd": 0.1498992,
+                  "input_tokens_inclusive": 139099,
+                  "input_tokens_inclusive_lower_bound": 139099,
+                  "cached_input_tokens": 119936,
+                  "cache_write_tokens": null,
+                  "output_tokens": 2463,
+                  "output_tokens_lower_bound": 2463,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              }
+            ],
+            "planner_call_ids": [],
+            "planner_usage": {
+              "receipts_received": 0,
+              "receipts_expected": 0,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "unknown",
+              "call_derived": false,
+              "coverage": null,
+              "notes": []
+            },
+            "own_usage": {
+              "receipts_received": 2,
+              "receipts_expected": 3,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.350424,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 311987,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 2463,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 0.6666666666666666,
+              "notes": [
+                "905194f0:job730: no usage receipt and no call telemetry \u2014 usage unknown, never zero"
+              ]
+            },
+            "model_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "acceptance_contract": "",
+            "orphan_receipt_ids": [],
+            "fully_linked": false,
+            "notes": [
+              "outcome unknown \u2014 programme spend yes, accepted unit no"
+            ]
+          },
+          {
+            "work_id": "ca78cda2",
+            "outcome": "",
+            "attempts": [
+              {
+                "attempt_id": "job723",
+                "work_id": "ca78cda2",
+                "outcome": "rejected",
+                "sources": [
+                  "live-evidence/sdk-receipt"
+                ],
+                "routes": [
+                  {
+                    "provider": "claude-sdk-lane",
+                    "model": "glm-5.3-flash"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "live-evidence:job723",
+                    "work_id": "ca78cda2",
+                    "attempt_id": "job723",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": {
+                      "provider": "claude-sdk-lane",
+                      "model": "glm-5.3-flash"
+                    },
+                    "input_tokens": null,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": null,
+                    "reasoning_tokens": null,
+                    "cost_usd": 0.2353712,
+                    "completeness": "aggregate",
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": 0.2353712,
+                  "known_cost_lower_bound_usd": 0.2353712,
+                  "input_tokens_inclusive": null,
+                  "input_tokens_inclusive_lower_bound": 0,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": null,
+                  "output_tokens_lower_bound": 0,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              }
+            ],
+            "planner_call_ids": [],
+            "planner_usage": {
+              "receipts_received": 0,
+              "receipts_expected": 0,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "unknown",
+              "call_derived": false,
+              "coverage": null,
+              "notes": []
+            },
+            "own_usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.2353712,
+              "known_cost_lower_bound_usd": 0.2353712,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            },
+            "model_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "acceptance_contract": "",
+            "orphan_receipt_ids": [],
+            "fully_linked": false,
+            "notes": [
+              "outcome unknown \u2014 programme spend yes, accepted unit no"
+            ]
+          }
+        ],
+        "conflicts": [],
+        "duplicate_calls": [],
+        "counter_resets": [],
+        "notes": []
+      },
+      "planning_counters": {
+        "run_budgets_durable": {
+          "60b9de7f": {
+            "calls": 3,
+            "tokens": 179494
+          },
+          "905194f0": {
+            "calls": 1,
+            "tokens": 1451
+          },
+          "ca78cda2": {
+            "calls": 1,
+            "tokens": 1107
+          }
+        },
+        "coverage_gap_at_capture": "usage_receipts rows are EMPTY for these runs (0 rows) \u2014 the durable usage-receipt write did not land for harness-lane runs; the SDK lane meta usage blocks and run_budgets consumed_* counters are the actual coverage. cost.coverage honest: partial.",
+        "note": "planning-side durable counters, recorded separately from the lane receipts \u2014 consumed_calls/consumed_tokens are run totals whose input/output split and cost are unknown; 905194f0's row is STALE (updated 12:34, before the resumed turns whose receipts never reconciled) \u2014 the ingestion join, not the budget counter, is the spend truth here"
+      },
+      "trace_green_task": {
+        "schema": "forge.delivery.measurement/1",
+        "work_id": "60b9de7f",
+        "outcome": "",
+        "model_version": "glm-5.3-flash",
+        "harness_version": "claude-sdk-lane@2.1.273",
+        "acceptance_contract": "",
+        "programme_inclusion": "spend stays in the programme total and in the per-accepted denominator regardless of outcome",
+        "cost_total_usd": 0.217954,
+        "known_cost_lower_bound_usd": 0.217954,
+        "included_receipts": [
+          {
+            "receipt_id": "live-evidence:job726",
+            "attempt": "60b9de7f:job726",
+            "source": "live-evidence/sdk-receipt",
+            "route": "claude-sdk-lane/glm-5.3-flash",
+            "cost_usd": 0.217954,
+            "input_tokens_inclusive": null,
+            "cached_input_tokens": null,
+            "cache_write_tokens": null,
+            "output_tokens": null,
+            "reasoning_tokens": null
+          }
+        ],
+        "included_receipts_sum_usd": 0.217954,
+        "total_is_complete": true,
+        "excluded_or_unknown": [
+          {
+            "record": "span live-evidence:job726:review (human_wait:operator)",
+            "reason": "window not measurable \u2014 unknown, never zero"
+          }
+        ],
+        "notes": [
+          "outcome unknown \u2014 programme spend yes, accepted unit no"
+        ]
+      },
+      "ingestion": {
+        "ingested_receipt_ids": [
+          "live-evidence:job723",
+          "live-evidence:job726",
+          "live-evidence:job731",
+          "live-evidence:job732"
+        ],
+        "replayed_or_reconciled": 0,
+        "spend_cap_check": {
+          "schema": "forge.usage.ingestion/1",
+          "allowed": true,
+          "cap_usd": 2.0,
+          "reserved_usd": 0.8037488,
+          "known_cost_usd": 0.8037488,
+          "unknown_intervals": 0,
+          "unknown_reserved_lower_bound_usd": 0.0,
+          "projection_usd": 0.0,
+          "headroom_usd": 1.1962511999999998,
+          "notes": [
+            "reserved = known costs + lower bounds of unknown intervals (conservative reservation: the cap may over-stop, never under-stop)"
+          ]
+        },
+        "note": "the captured SDK receipt artifacts ingested idempotently by (work, attempt, receipt, source) \u2014 re-running this report over the same evidence writes nothing new; the killed job730 kept its attempt with NO receipt: spend unknown, never zero"
+      },
+      "budget_reconciliation": {
+        "schema": "forge.delivery.economics/1",
+        "currency": "usd",
+        "cap_usd": 2.0,
+        "lines": [
+          {
+            "scope": "programme.billed",
+            "basis": "billing",
+            "cap_usd": 2.0,
+            "reported_usd": null,
+            "delta_usd": null,
+            "status": "unreconcilable",
+            "reason": "billed spend unknown (receipt coverage 0.8) \u2014 unknown spend cannot certify the cap, never zero"
+          },
+          {
+            "scope": "programme.lower_bound",
+            "basis": "billing",
+            "cap_usd": 2.0,
+            "reported_usd": 0.803749,
+            "delta_usd": 1.196251,
+            "status": "unreconcilable",
+            "reason": "lower bounds bound from below only \u2014 stated beside the cap, never reconciled against it"
+          },
+          {
+            "scope": "programme.estimate",
+            "basis": "estimate",
+            "cap_usd": 2.0,
+            "reported_usd": null,
+            "delta_usd": null,
+            "status": "unreconcilable",
+            "reason": "estimate from rate card unversioned \u2014 an assumption, not spend; can inform, never certify"
+          }
+        ],
+        "unreconcilable": 3,
+        "note": "the customer reconciles totals with the agreed budget through this shape \u2014 ids, numbers and reasons only; no code, prompts or secrets"
       }
     }
   }

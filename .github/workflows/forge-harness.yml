@@ -103,6 +103,29 @@ on:
         required: false
         default: ""
         type: string
+      # R38-02 (#303): the credential DELIVERY reference — the broker's
+      # ref, secret-name-safe (FORGE_MODEL_<credential_ref> is the repo
+      # secret the driver step maps the lane credential from; the VALUE
+      # never rides a dispatch input — inputs are visible run metadata).
+      # Empty on an unbound (ambient-legacy) dispatch.
+      credential_ref:
+        description: >-
+          credential delivery ref: the repo secret FORGE_MODEL_<ref> holds
+          the lane credential (never a value; create the secret once per
+          ref with `gh secret set`)
+        required: false
+        default: ""
+        type: string
+      # R38-02 profile (b): non-secret flag — the SDK lanes redeem the
+      # bound credential at startup through the lane-control channel
+      # (FORGE_LANE_CONTROL_URL/TOKEN) instead of reading a repo secret.
+      credential_redeem:
+        description: >-
+          runner-time redemption flag: "1" = the lane redeems the
+          credential from the forge control plane at startup
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: forge-${{ inputs.run_id }}
@@ -597,7 +620,27 @@ jobs:
           # normal). Never a repo variable: the resume behavior is the
           # dispatch's product decision, not lane-local setup.
           FORGE_LANE_RESUME: ${{ (inputs.lane_resume_mode == 'required' && '1') || (inputs.lane_resume_mode == 'restart' && 'restart') || '' }}
+          # R38-02 (#303): the credential DELIVERY channel (ref only —
+          # the repo secret FORGE_MODEL_<credential_ref> maps runner-side;
+          # see the shipped template's resolution script).
+          FORGE_CREDENTIAL_REF: ${{ inputs.credential_ref }}
+          FORGE_CREDENTIAL_REDEEM: ${{ inputs.credential_redeem }}
+          FORGE_MODEL_CREDENTIAL: ${{ secrets[format('FORGE_MODEL_{0}', inputs.credential_ref)] }}
         run: |
+          # R38-02 (#303): resolve the lane's model credential BEFORE any
+          # vendor process starts — a BOUND dispatch with an empty
+          # FORGE_MODEL_<ref> secret fails CLOSED (no ambient fallback);
+          # exactly ONE credential variable is exported, the family's
+          # other credential variables are unset. Under the redemption
+          # profile the driver redeems at startup itself.
+          if [ -n "${FORGE_CREDENTIAL_REF:-}" ] && [ "${FORGE_CREDENTIAL_REDEEM:-}" != "1" ]; then
+            if [ -z "${FORGE_MODEL_CREDENTIAL:-}" ]; then
+              echo "FORGE_BOOTSTRAP_FAILED: the bound credential secret FORGE_MODEL_${FORGE_CREDENTIAL_REF} is empty or missing — create it once (gh secret set FORGE_MODEL_${FORGE_CREDENTIAL_REF}) or dispatch with the runner-redemption profile (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            export ANTHROPIC_AUTH_TOKEN="$FORGE_MODEL_CREDENTIAL"
+            unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true
+          fi
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):
           #   - installs the pinned CLI (retry, platform binary check)

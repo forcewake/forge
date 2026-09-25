@@ -6,10 +6,12 @@ decision; this suite makes the ownership VISIBLE and MECHANICAL — no
 new framework, no extraction wave:
 
 - **the registry** (``forge.adaptive.boundary_registry``) declares the
-  six owning boundaries, their owners and their REGISTERED production
-  callers. A module that imports an owner without registration fails
-  the boundary check with an instruction to register or route through
-  the owner — the intentional-legacy-call trap proves detection;
+  owning boundaries (the six of ADR-0030 plus the execution/delivery
+  spec contract of R38-17/#318), their owners and their REGISTERED
+  production callers. A module that imports an owner without
+  registration fails the boundary check with an instruction to
+  register or route through the owner — the intentional-legacy-call
+  trap proves detection;
 - **the legacy escape hatch is confined**: ``revival._legacy_http_
   lookup``, ``CheckpointStore._load_index`` and direct ``CheckpointStore``
   construction are reachable ONLY from the enumerated allow-set, and
@@ -731,7 +733,7 @@ class TestAuthorityBoundaryRules:
         violations = check(_src_modules())
         assert not violations, f"{name} violations:\n" + "\n".join(violations)
 
-    def test_the_registry_six_boundaries_are_the_adr_thirty_set(self) -> None:
+    def test_the_registry_seven_boundaries_are_the_declared_set(self) -> None:
         assert [boundary.name for boundary in boundary_registry.BOUNDARIES] == [
             "repository_identity_checkpoint_lifecycle",
             "continuation_authorization",
@@ -739,6 +741,9 @@ class TestAuthorityBoundaryRules:
             "candidate_publication",
             "verification_applicability",
             "operator_projection",
+            # R38-17 (#318, ADR-0032): the versioned execution/delivery
+            # spec the lane templates consume as pins.
+            "execution_delivery_spec",
         ]
 
     def test_every_boundary_declares_owners_callers_and_negative_contract(self) -> None:

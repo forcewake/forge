@@ -73,10 +73,12 @@ from forge.adaptive.admission import (
     try_acquire_lease,
 )
 from forge.adaptive.credential_broker import (
+    CREDENTIAL_DELIVERY_REF_VARIABLE,
+    CREDENTIAL_DELIVERY_REDEEM_VARIABLE,
     CredentialBroker,
+    CredentialDeliveryPlan,
     EnvBroker,
-    StagedDispatchCredential,
-    stage_dispatch_credential,
+    delivery_plan,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
 from forge.adaptive.project_credentials import (
@@ -3345,26 +3347,28 @@ class RunService:
         issue_title = spec.task_title
         if driver is None:
             driver = spec.harness_driver
-        # NEXT-19 (#207): broker resolution under the active execution
-        # lease — BEFORE the provider call, beside the reserved capacity
-        # this leg opened at the top. A subject the deployment never
-        # bound stages nothing (today's ambient behavior, attribution
-        # unknown); a bound subject resolves through the registry's
-        # fail-closed checks and the broker, and the lane's env gains
-        # ONLY the broker's staged slot. Any typed refusal parks the run
-        # with ZERO provider dispatches (fail closed, exactly like the
-        # continuation fence above).
+        # NEXT-19 (#207) / R38-02 (#303): the credential DELIVERY plan —
+        # BEFORE the provider call, beside the reserved capacity this leg
+        # opened at the top. A subject the deployment never bound plans
+        # nothing (today's ambient behavior, attribution ambient-legacy);
+        # a bound subject resolves through the registry's fail-closed
+        # checks into a provider-safe transport (a protected+masked
+        # project CI/CD variable — trigger variables are documented as
+        # visible on job pages AND precedence-trumping, so the VALUE
+        # never rides the trigger payload — or runner-time redemption).
+        # Any typed refusal parks the run with ZERO provider dispatches.
         credential_subject = binding_subject_of_run(run)
-        staged_credential: StagedDispatchCredential | None = None
+        credential_delivery: CredentialDeliveryPlan | None = None
         if credential_subject is not None:
             try:
-                staged_credential = await stage_dispatch_credential(
+                credential_delivery = await delivery_plan(
                     self._credential_registry,
                     self._credential_broker,
                     subject=credential_subject,
-                    provider=provider_route_for_driver(driver),
+                    provider_route=provider_route_for_driver(driver),
+                    profile="gitlab",
                     presented_ref=prior_credential_ref,
-                    grant={"run_id": run_id, "attempt_generation": generation},
+                    environ=os.environ,
                 )
             except CredentialRefusal as exc:
                 logger.warning(
@@ -3375,16 +3379,16 @@ class RunService:
                 )
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, f"credential_refused: {exc}")
                 return
-            if staged_credential is not None:
+            if credential_delivery is not None:
                 logger.info(
                     "credential.binding_subject: run %s subject %s provider %s revision %d — "
-                    "credential.resolved_version %s, credential.resolver_identity %s",
+                    "credential.delivery mode %s transport %s (attribution bound-delivery)",
                     run_id[:8],
-                    staged_credential.subject,
-                    staged_credential.provider,
-                    staged_credential.binding_revision,
-                    staged_credential.resolved_version,
-                    staged_credential.resolver_identity,
+                    credential_delivery.subject,
+                    credential_delivery.provider,
+                    credential_delivery.binding_revision,
+                    credential_delivery.mode,
+                    credential_delivery.transport_ref,
                 )
         # R37-07 (#288): the dispatch ENVELOPE — the lane-resume/continuity
         # contract plus the attempt-scoped lane-control credentials, riding
@@ -3415,14 +3419,22 @@ class RunService:
             {"key": LANE_CONTROL_URL_VARIABLE, "value": control_url},
             {"key": LANE_CONTROL_TOKEN_VARIABLE, "value": lane_token},
         ]
-        if staged_credential is not None:
-            # NEXT-19 (#207): the lane env gains ONLY the broker's staged
-            # slot for the credential route — a masked CI variable, one
-            # key, the binding's exact env var (the slot check upstream
-            # already refused anything else).
-            envelope_variables.extend(
-                {"key": name, "value": value}
-                for name, value in staged_credential.staged_env.items()
+        if credential_delivery is not None:
+            # R38-02 (#303): the lane envelope gains ONLY the credential
+            # delivery REFERENCE — the non-secret ref variable (the
+            # protected+masked project variable FORGE_MODEL_<ref> is
+            # consumed runner-side by the lane template; the VALUE never
+            # rides a trigger variable — trigger variables display on
+            # job pages and OUTRANK project variables) plus the
+            # non-secret redemption flag for the SDK lanes' startup hook.
+            envelope_variables.append(
+                {"key": CREDENTIAL_DELIVERY_REF_VARIABLE, "value": credential_delivery.dispatch_ref}
+            )
+            envelope_variables.append(
+                {
+                    "key": CREDENTIAL_DELIVERY_REDEEM_VARIABLE,
+                    "value": "1" if credential_delivery.redemption else "",
+                }
             )
         # `gitlab.dispatch_envelope_digest` — a stable fingerprint over the
         # identity fields (the token only enters as a boolean: digests are
@@ -3438,6 +3450,11 @@ class RunService:
                     "driver": driver or "",
                     "control_url": control_url,
                     "token_dispatched": bool(lane_token),
+                    # R38-02: the delivery mode only — the credential rides
+                    # by REFERENCE, and digests are journaled.
+                    "credential_delivery": (
+                        credential_delivery.mode if credential_delivery is not None else ""
+                    ),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -3562,35 +3579,43 @@ class RunService:
                             "attempt_generation": generation,
                             "control_url": control_url,
                             "token_dispatched": bool(lane_token),
-                            # NEXT-19 (#207): the broker receipt riding
-                            # the envelope proof — WHICH ref/revision/
-                            # version/resolver the lane's credential slot
-                            # resolved, never the value.
+                            # R38-02 (#303): the delivery plan riding the
+                            # envelope proof — WHICH ref/mode/transport/
+                            # revision the lane's credential arrives
+                            # through, never the value.
                             "credential_ref": (
-                                staged_credential.credential_ref if staged_credential else ""
+                                credential_delivery.credential_ref
+                                if credential_delivery is not None
+                                else ""
                             ),
-                            "credential_resolved_version": (
-                                staged_credential.resolved_version if staged_credential else ""
+                            "credential_delivery_mode": (
+                                credential_delivery.mode if credential_delivery is not None else ""
                             ),
-                            "credential_resolver": (
-                                staged_credential.resolver_identity if staged_credential else ""
+                            "credential_binding_revision": (
+                                credential_delivery.binding_revision
+                                if credential_delivery is not None
+                                else 0
                             ),
                             "variable_keys": [entry["key"] for entry in envelope_variables],
                             "digest": dispatch_envelope_digest,
                         },
-                        # NEXT-19 (#207): the extended dispatch-credential
-                        # proof (/2) beside the envelope — binding subject,
-                        # ref, revision, resolver identity, resolved
-                        # version, grant refs and the broker receipt.
-                        # Refs and metadata only, never the value.
+                        # R38-02 (#303): the credential delivery plan
+                        # (/1) beside the envelope — binding subject, ref,
+                        # revision, delivery mode, transport reference and
+                        # expected identity. Refs and metadata only, never
+                        # the value.
                         **(
                             {
                                 "dispatch_credential": {
-                                    **staged_credential.proof,
+                                    **credential_delivery.as_document(),
                                     "attempt_generation": generation,
+                                    "grant": {
+                                        "run_id": run_id,
+                                        "attempt_generation": str(generation),
+                                    },
                                 }
                             }
-                            if staged_credential is not None
+                            if credential_delivery is not None
                             else {}
                         ),
                     },

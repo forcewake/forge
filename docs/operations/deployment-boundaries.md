@@ -1,13 +1,49 @@
-# Deployment boundaries — the supported topology, its limits and the operator runbook (R37-20)
+# Deployment boundaries — the supported topology, its limits and the operator runbook (R37-20, R38-18)
 
-Issue #301 (external review `4af6b33`, item R37-20). The lab drills
-([ops-drills.md](ops-drills.md), R36-21/#280) prove the invariants on
-disposable fixtures; this document declares what the ACTUAL deployment
-supports, with the executed evidence in
-`qualification/deployment-ops-2026-09-24.json` (produced by
-`scripts/run_deployment_ops.py` — read-only probes plus explicitly
-disposable resources; no lab container is ever started, stopped or
-recreated by the run).
+Issue #301 (external review `4af6b33`, item R37-20) declared what the
+ACTUAL deployment supports; issue #319 (review `59ba869`, item R38-18)
+bound every measurement to the FROZEN supported profile (#307) and added
+the deployment-only failure arms. The executed evidence:
+
+- `qualification/deployment-ops-2026-09-24.json` — the R37-20 run (the
+  full report of that era, still public history);
+- `qualification/deployment-ops-2026-09-25.json` — the R38-18 run: the
+  **sanitized published summary** (schema `forge.deployment.ops.sanitized/1`).
+  The full diagnostics report of that run (identifiers, per-cycle
+  details, host paths) is retained OUTSIDE the repository
+  (`~/.forge-private/deployment-ops/`, access-controlled) per the #304
+  discipline — the public tree carries receipts, never operational
+  payloads.
+
+Both reports are produced by `scripts/run_deployment_ops.py` — read-only
+probes plus explicitly disposable resources; no lab container is ever
+started, stopped or recreated by a run.
+
+## 0. The frozen-profile binding (R38-18 — what a measurement is evidence FOR)
+
+The supported profile is FROZEN:
+`qualification/profiles/supported-gitlab-ce-v1.json`, manifest digest
+`7c292dd89bb9a1f8…` (self-vouching sha256 — a drifted file does not
+vouch for itself and refuses the bind). Every drill in the 2026-09-25
+run records that digest, and the runner OBSERVED the deployment
+read-only against the manifest's `control_plane.executed_lab` bind
+before any measurement:
+
+| Bind axis | Manifest (executed-lab) | Observed at run time |
+| --- | --- | --- |
+| image name | `localhost/forge:dev` | `localhost/forge:dev` |
+| image id | `58e0bd3e…b296` | `58e0bd3e…b296` |
+| image digest | `sha256:20e9cdcd…bbce1` | `sha256:20e9cdcd…bbce1` |
+| deployed schema head | `027` | `027` (read-only `alembic_version`) |
+| reported version | `0.37.0` | `0.37.0` (`GET /health`) |
+
+**A mismatch on ANY axis (or an axis the probes could not observe)
+renders the whole run `unqualified-for-profile`** — the report names
+every difference, the profile-bound arms FAIL with that violation, and
+the runner exits non-zero. A measurement is evidence only for the
+deployment the profile's executed-lab bind names; it never silently
+passes against a different deployment. The 2026-09-25 run bound
+**matched** → `qualified-for-profile`.
 
 ## 1. The supported topology (declared, and demonstrated — not inferred)
 
@@ -16,11 +52,11 @@ recreated by the run).
 | API replicas | **1** (`forge-app`) | 1 container, image `localhost/forge:dev`, `/health` ok |
 | Worker replicas | **1** (`forge-worker`) | 1 container, same image |
 | CAS storage | **one shared volume** bind-mounted at `/app/data` into BOTH consumers | both containers carry the mount (the run's topology section) |
-| Database | one PostgreSQL (`forge-postgres`, host port 5433, database `forge`) | schema head `027`, version `0.36.0` |
+| Database | one PostgreSQL (`forge-postgres`, host port 5433, database `forge`) | schema head `027`, version `0.37.0` |
 | Queue | one Redis (`forge-redis`) | `/health` redis ok |
 | Model route | one LiteLLM proxy (`forge-litellm`, host port 4000) | `/health` litellm ok |
 | Runner | the lab's own runner (id 4, `unraid`, instance-type) — no public runner fleet | runner inventory recorded read-only |
-| Admission bound | `FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT` (default 3 — no override observed) | see §2 |
+| Admission bound | `FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT` (default 3 — no override observed) | limit 3 held under the controlled failures (§2) |
 
 ### CAS semantics — the boundary, stated rather than assumed
 
@@ -37,7 +73,7 @@ shared database:
   content-addressed blobs. Scaling beyond one volume requires a
   shared/networked CAS root (or per-replica stores with an explicit
   replication contract) — neither is demonstrated by this deployment,
-  and the topology section of the executed report lists any consumer
+  and the topology section of the private report lists any consumer
   found without the mount as a DISCREPANCY, never a silent assumption.
 
 ### Model/provider quotas (budget uncertainty is never free capacity)
@@ -49,55 +85,87 @@ Numerical budgets are configured on both consumers:
 never converts to "free capacity" or "zero spend" — refusals and
 reconciliation are the only outs.
 
-## 2. Capacity against real remote occupancy (executed)
+## 2. Capacity against real remote occupancy (executed, profile-bound)
 
 Driven through the app's OWN dispatch entry (issue → `/implement` →
-`/go`) on a disposable GitLab project, with REAL lane jobs on runner 4,
+`/go`) on disposable GitLab projects, with REAL lane jobs on runner 4,
 cancelled job-level immediately after the observation:
 
 - **Open leases never exceeded the observed per-project bound** (peak
-  occupancy vs limit is in the report's
-  `execution.occupied_vs_limit` signal — sampled for the whole load
-  window, including across the cancel legs).
+  3/3 — sampled for the whole load window, including across the cancel
+  legs).
 - **Overload is a typed park, never oversubscription**: the cycles
-  beyond the bound park `blocked(execution_capacity)` with the capacity
-  snapshot in the run evidence and an issue note quoting the reason.
-- **Queue wait is measured separately from execution**: every cycle
-  carries a queue-wait measurement (request → lease acquired, or
-  request → the typed park verdict); execution is measured only over
-  the slot's own window. The two are reported per cycle, never blended.
-- **Lost native responses never release capacity early**: the drill's
-  lost-response leg cancels a native job and DROPS the answer at the
-  client seam — the lease stays accounted (`draining` /
-  `dispatched_unknown` visible in the sampler) until the deployment's
-  own reconciler observes the native job terminal.
+  beyond the bound park `blocked(execution_capacity)`.
+- **Queue wait is measured separately from execution** (worst cycle
+  3.277s in this run; per-cycle values in the private report).
+- **Lost native responses never release capacity early**: the
+  lost-cancel leg drops the answer at the client seam — the lease stays
+  accounted until the deployment's own reconciler observes the native
+  job terminal (drained 10.2s after job-level cancels in this run).
 - **A failed cancel moves nothing**: cancelling an already-completed
-  job is refused by the provider and releases no capacity.
+  job is refused (or idempotently no-ops) by the provider and releases
+  no capacity.
+
+### The lost-response-at-the-cap arm (R38-18 negative test 1)
+
+The 2026-09-25 run exercises the review's exact shape on the REAL
+control plane, on the arm's OWN disposable project (the app's fair-use
+gate counts a user's runs per project per hour — 6 — so the arm does
+not share the occupancy section's budget):
+
+1. every cycle is **planned first** (a plan is a model call and holds
+   no lease — the probe window contains no model latency);
+2. one `/go` **drops its native dispatch response at the client seam**
+   (the pipeline/job identity is never read by the drill) while the
+   fill `/go` cycles bring the project to the cap;
+3. the dropped run's occupancy is proven **from the durable lease row
+   alone** — still accounted (`dispatched_unknown` observed by the
+   sampler in the dispatch window, `native_running` once the app's own
+   dispatch completed) — never from the answer that was dropped;
+4. the cycle immediately after the cap parks with the **typed verdict**
+   (`parked_execution_capacity`) — the cap was held 3/3 with the
+   dropped run's slot inside it;
+5. after job-level cancels the reconciler resolved the occupancy **by
+   observation** and drained the project to zero open leases (20.4s in
+   this run).
 
 ## 3. Backup/restore across the deployment (executed)
 
-The report's `checkpoint.reachability` signal is the contract:
+The `checkpoint.reachability` signal is the contract:
 
 - `backup_store` snapshots the REAL `/app/data` CAS root read-only (no
-  container stop; locks are transient coordination, never state), the
-  metadata half is exported with it, and a read-only `pg_dump` of
-  `checkpoint_metadata` lands beside the report.
+  container stop), the metadata half is exported with it, and a
+  read-only `pg_dump` of `checkpoint_metadata` lands in the private
+  report directory.
 - The restore goes into a DISPOSABLE target (a temp root plus a
-  disposable `forge_ops_restore` database, dropped afterwards).
+  disposable `forge_ops_restore` database, dropped afterwards). This
+  run: 12/12 works verified, 6/6 pins resolved, restore 0.162s (the
+  store's CURRENT size — remeasure as it grows).
 - **Fidelity, not repair**: every checkpoint whose verified read works
   in the source also resolves after the restore; a checkpoint already
-  unavailable in the source stays exactly that (preserved and reported
-  as `source_unavailable` — the restore never silently "resolves"
-  missing bytes). A zero-file checkpoint is a legal verified read.
-- **Mismatched halves are refused typed**: metadata naming a
-  checkpoint the blob half lacks is detected by
-  `verify_backup_consistency` BEFORE any restore; the restore refuses
-  with `BackupMismatchError` listing the affected works and writes
-  nothing.
+  unavailable in the source stays exactly that (reported as
+  `source_unavailable` — never silently "resolved").
+- **Mismatched halves are refused typed**: `verify_backup_consistency`
+  detects metadata naming checkpoints the blob half lacks BEFORE any
+  restore; `restore_store` refuses with `BackupMismatchError` listing
+  the affected works and writes nothing.
 
-Recovery-time objective: the measured `restore_seconds` for the
-deployment's current store size is in the report (small today — remeasure
-after the store grows; the number does not extrapolate).
+### The mismatched-restore preflight arm (R38-18 negative test 3)
+
+Restoring mismatched snapshots into a disposable installation refuses
+at PREFLIGHT, before any new model turn. The arm runs three
+installations in order, counting model turns (the resume dispatch that
+would spend the first NEW model turn sits behind the gate):
+
+- **mismatched halves** (t2 metadata + t1 blobs) → typed
+  `RestorePreflightRefused("backup-halves")`, nothing written;
+- **wrong schema head** (an installation declaring `026` against the
+  frozen profile's `027`) → typed
+  `RestorePreflightRefused("schema-head")` BEFORE any restore ran,
+  nothing written;
+- only the consistent snapshot at the profile's head restores — and
+  only then did the model-turn gate open (0 turns through both
+  refusals, 1 after the verified restore).
 
 ## 4. Credential isolation and egress (executed)
 
@@ -107,9 +175,8 @@ after the store grows; the number does not extrapolate).
   `FORGE_CONTINUATION_DECISION_ID`, `FORGE_LANE_CONTROL_URL`,
   `FORGE_LANE_CONTROL_TOKEN`) — asserted from the RECORDED dispatch
   envelope of the live run: no control-plane root credential name
-  (`FORGE_LANE_CONTROL_SECRET`, `FORGE_MCP_KEY`, `GITLAB_TOKEN`,
-  `DATABASE_URL`, …) appears, and nothing credential-shaped beyond the
-  work-scoped lane token.
+  appears, and nothing credential-shaped beyond the work-scoped lane
+  token and the non-secret delivery refs.
 - **Deny probes observe actual denial** on the live surfaces: the
   lane-control endpoint refuses the MCP master key, the root model
   broker key and the GitLab root token; the operator surface refuses a
@@ -122,11 +189,29 @@ after the store grows; the number does not extrapolate).
 | --- | --- |
 | Storage pressure | an over-quota upload is refused `StorageQuotaExceededError` and leaves the store byte-identical (`storage.quota_refusal`) |
 | Provider throttling (429) | classified transient by the app's own classifier; the revival budget bounds retries (`FORGE_RUN_AUTO_REVIVE_LIMIT`, default 2; backoff 60s → … capped at 900s) — an exhausted budget parks `blocked` with the reason, never an infinite retry |
-| Slow control ACK | tolerated and MEASURED: `control.received_to_applied` (command received → applied) through the app's real lane-control endpoints; the objective is in the report's service-objectives table |
+| Slow control ACK | tolerated and MEASURED: `control.received_to_applied` 8.504s in this run, through the app's real lane-control endpoints (objective ≤ 60s) |
 | Provider outage / lost dispatch | occupancy holds `dispatched_unknown`/`draining` and stays visible until the reconciler's probe decides |
+| Fair-use exhaustion | a user past `FORGE_ADMISSION_USER_RUNS_PER_HOUR` (6, per project) parks the new run `blocked(fair_use_denied)` — a typed verdict, never a silent drop |
 
 The publication and cancellation fences are never disabled by any
 degraded mode; the app's health is asserted around every leg.
+
+### The volume-fill-during-pause arm (R38-18 negative test 2)
+
+The checkpoint volume filled to the configured safety threshold
+(4096B in this run's quota-tmp-dir shape — **a real disk is never
+filled; the typed-refusal path is what is measured**) while a run is
+PAUSED with a pinned checkpoint (the pause-fence shape: a checkpoint
+pinned by the persisted continuation decision):
+
+- the pinned WIP **survived**: its verified read still resolves at the
+  threshold (0.0002s), its bytes never deleted;
+- new writes at the threshold refused **typed**
+  (`StorageQuotaExceededError`; 5 refusals at 3241B on disk, 0 silent
+  writes) — storage growth stopped at the configured boundary;
+- **admission stops predictably**: every further write refused at the
+  same typed boundary — the operator parks admission on a typed
+  signal, never a silent queue.
 
 ## 6. Token rotation (the runbook)
 
@@ -155,7 +240,33 @@ Production procedure (`credential.rotation_generation`):
 4. Verify: the deny probes in the executed report's credential section
    all answer denied; a v1 token anywhere is a 403.
 
-## 7. One incident, recovered from the runbook (no DB patching)
+## 7. The measured-limits table (R38-18 — the runbook's numbers, bound to the frozen profile)
+
+Every number below is the 2026-09-25 run's measurement against the
+profile whose digest opens this document. The scope sentence travels
+with each — these are stated shapes, not extrapolations.
+
+| Limit | Measured value | Scope / guarantee |
+| --- | --- | --- |
+| Concurrency (per project) | limit 3; peak occupied 3; cap held 3/3 under the dropped-dispatch failure; occupancy mix at the cap `{native_running: 3}` (with `dispatched_unknown` visible in the dispatch window); cycle after the cap → `parked_execution_capacity` | **guaranteed** (durable lease CAS; lost responses hold; overload parks typed) |
+| Pause/cancel responsiveness | control commands received→applied: p50 0.0193s / p95 0.0258s / max 0.0258s (n=12); cancel-under-slow-provider: p50 0.0521s / p95 0.0521s (n=12, 0.05s provider latency) | n=12 pause/resume cycles through the REAL lane-control endpoints over a disposable database, contended by 3×8 checkpoint uploads; objective ≤ 60s — **best-effort, stated percentiles + scope, never one best-case latency, not a fleet claim** |
+| Command latency under contention | slow-control-ACK received→applied 8.504s (with an 8s deliberately slow lane) | through the app's real lane-control endpoints during the occupancy load — **best-effort** |
+| Restore time | 0.162s | the deployment's CURRENT store size — **measured, not extrapolated**; remeasure as the store grows |
+| Queue wait (request → lease) | worst cycle 3.277s | reported per cycle, separately from execution — **best-effort** |
+
+## 8. Human review capacity (a STATED POLICY FIELD — never a throughput claim)
+
+Model throughput and human review capacity are never conflated: the
+report carries a reviewer-WIP bound as **policy**, not measurement —
+`reviewer_wip_bound: 5` concurrent reviewable WIP per reviewer (the
+run's `--reviewer-wip-bound`, default 5), against the deployment's
+admission bound of 3 active runs per project. Admission staying within
+the reviewable volume is a **coherence check** (`coherent: true` in
+this run): an admission bound BEYOND the stated reviewer-WIP bound is
+recorded as a policy finding and fails the run — lower the admission
+bound or grow review capacity BEFORE increasing load.
+
+## 9. One incident, recovered from the runbook (no DB patching)
 
 **Incident shape**: a lane job died mid-run (runner loss / job
 cancelled) and the run sits `blocked` with the honest classification.
@@ -178,14 +289,23 @@ cancelled) and the run sits `blocked` with the honest classification.
 4. Confirm recovery: capacity drains to zero open leases for the
    project, and the incident's diagnostics redact credentials by the
    evidence policy (`FORGE_EVIDENCE_DENY_PATTERNS`).
+5. **Know when to escalate rather than retry**: a `fair_use_denied` or
+   `execution_capacity` park is TYPED and self-healing once work drains
+   — retry after the window; a `StorageQuotaExceededError` on the
+   checkpoint volume needs an operator (raise the quota or clean
+   superseded checkpoints — never delete PINNED WIP); a lease wedged
+   past the reconciler's probe with the provider down needs the AUDITED
+   override (step 3), not repeated cancels.
 
-## 8. What is guaranteed vs best-effort
+## 10. What is guaranteed vs best-effort
 
 | Boundary | Class |
 | --- | --- |
-| Open leases ≤ the admission bound; overload parks typed | **guaranteed** (durable lease CAS; lost responses hold) |
-| Mismatched backup halves refused; restore fidelity | **guaranteed** (verify-before-restore) |
+| Open leases ≤ the admission bound; overload parks typed; a dropped dispatch response holds its slot until reconciled | **guaranteed** (durable lease CAS; lost responses hold) |
+| Mismatched backup halves / wrong schema head refused at preflight before any model turn; restore fidelity | **guaranteed** (verify-before-restore + the schema-head bind) |
+| Quota exhaustion stops storage growth typed, never deleting pinned WIP | **guaranteed** (typed store refusal; pins defended) |
 | Root credentials outside the model-facing set | **guaranteed by construction** (asserted from the recorded envelope; deny-probed on the live surfaces) |
-| Queue wait / received→applied latencies | **best-effort** — measured and reported per run; objectives in the report's table |
+| Queue wait / received→applied / pause-cancel percentiles | **best-effort** — measured and reported per run with stated percentiles and scope; objectives in the report's table |
 | Restore time | **measured, not extrapolated** — remeasure as the store grows |
 | Scaling beyond one CAS volume | **not supported** — outside the demonstrated topology (§1) |
+| Measurements on a deployment differing from the frozen profile | **not evidence** — `unqualified-for-profile` (§0) |

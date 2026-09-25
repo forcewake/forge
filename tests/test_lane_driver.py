@@ -1429,10 +1429,16 @@ class TestLaneTemplate:
         doc = doc[lane_key]
 
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
-        assert (
-            'git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" '
-            "> .forge/candidate.diff" in text
-        )
+        # R38-01 (#302): collection runs the PACKAGED generation-aware
+        # collector — no inline staging in the original checkout (a
+        # resumed agent's work sits in the sibling generation; the inline
+        # commands diffed the untouched base and shipped an empty diff).
+        # The upload paths and the when:always posture stay byte-equal to
+        # the batch lane's contract (what the backend downloads).
+        assert '"$FORGE_LANE_PYTHON" -m forge.harness_entry --collect-candidate' in text
+        assert '--attempt-base-oid "$FORGE_ATTEMPT_BASE"' in text
+        assert "git add -A" not in text
+        assert "git diff --cached" not in text
         assert "git remote set-url --push origin FORBIDDEN" in text
         assert 'IS_SANDBOX: "1"' in text
         assert set(doc["artifacts"]["paths"]) == {
@@ -1444,11 +1450,17 @@ class TestLaneTemplate:
     def test_a_driver_failure_fails_the_job_but_uploads_artifacts(self):
         # USER-directed 2026-09-22: a nonzero driver rc FAILS the job
         # (batch pipefail parity); artifacts still upload via when:always.
+        # R38-01 (#302): the failure now rides the final-status ladder —
+        # the driver rc wins and the job exits exactly once, at the END
+        # of the driver/collection/final-status phases (the old early
+        # driver exit killed SUCCESSFUL jobs before collection ran).
         text = TEMPLATE.read_text()
 
         assert "python -m forge.lane_driver" in text
         assert '|| FORGE_DRIVER_EXIT="failed"' not in text
-        assert 'exit "$_driver_rc"' in text
+        assert 'exit "$_driver_rc"' not in text
+        assert '_job_rc="$_driver_rc"' in text
+        assert 'exit "$_job_rc"' in text
 
 
 # ---------------------------------------------------------------------------
@@ -1531,10 +1543,13 @@ class TestSdkLaneTemplates:
         doc = parsed[next(k for k in parsed if k.startswith("forge-agent"))]
 
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
-        assert (
-            'git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" '
-            "> .forge/candidate.diff" in text
-        )
+        # R38-01 (#302): the PACKAGED collector, never inline staging (see
+        # the claude twin above); the upload paths stay byte-equal to the
+        # batch lane's contract.
+        assert '"$FORGE_LANE_PYTHON" -m forge.harness_entry --collect-candidate' in text
+        assert '--attempt-base-oid "$FORGE_ATTEMPT_BASE"' in text
+        assert "git add -A" not in text
+        assert "git diff --cached" not in text
         assert "git remote set-url --push origin FORBIDDEN" in text
         assert 'echo ".forge/" >> .git/info/exclude' in text
         assert set(doc["artifacts"]["paths"]) == {
@@ -1550,8 +1565,12 @@ class TestSdkLaneTemplates:
         text = self._text(template)
         driver_id, _key = SDK_LANE_TEMPLATES[template]
 
+        # R38-01 (#302): the driver rc rides the final-status ladder; the
+        # job exits exactly once, at the end (never the old early exit).
         assert '|| FORGE_DRIVER_EXIT="failed"' not in text
-        assert 'exit "$_driver_rc"' in text
+        assert 'exit "$_driver_rc"' not in text
+        assert '_job_rc="$_driver_rc"' in text
+        assert 'exit "$_job_rc"' in text
         # The defensive meta floor names THIS lane's driver id.
         assert f'\\"driver\\": \\"{driver_id}\\"' in text
 

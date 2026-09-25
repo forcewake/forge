@@ -1,5 +1,90 @@
 {
   "already_aligned_at_start": false,
+  "backup_receipts": {
+    "generated_at": "2026-09-24T00:00:00+00:00",
+    "note": "R38-03 (#304): the six pre-alignment pg_dump binaries were removed from the public tree and classified; these sanitized receipts reference them. Bytes: maintainer-private storage (see docs/evaluation/2026-09-24-live-single-writer/backups/README.md and qualification/backups/README.md). The historical run receipts below are unchanged \u2014 they record what was executed, including the (now removed) public backup destination.",
+    "receipts": [
+      {
+        "alignment_receipt": "r3708-0c76a2e9ab46",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T11:45:20Z",
+        "filename": "pre-r3708-alignment-20260924T114520Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-01",
+        "restore_test": "ok",
+        "schema_version": "alembic-026",
+        "sha256": "b384e96a5b1d7e925ea83740dc1527e23fc95090e51085199871d3662230b0eb",
+        "size_bytes": 204769
+      },
+      {
+        "alignment_receipt": "r3708-b5671fcb3b7f",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T11:48:00Z",
+        "filename": "pre-r3708-alignment-20260924T114800Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-02",
+        "restore_test": "ok",
+        "schema_version": "alembic-027",
+        "sha256": "79427305093be85c2dd7ba7f026985769d1b0b3130ba2270db20147474841f00",
+        "size_bytes": 205305
+      },
+      {
+        "alignment_receipt": "r3708-6561cad5149f",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T11:59:21Z",
+        "filename": "pre-r3708-alignment-20260924T115921Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-03",
+        "restore_test": "ok",
+        "schema_version": "alembic-027",
+        "sha256": "ec013688384d1d3f60227fdfb5190d559bce4447feda2aaeb3a6f85eaa9970a1",
+        "size_bytes": 205305
+      },
+      {
+        "alignment_receipt": "r3708-d30bbc7dc159",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T12:05:48Z",
+        "filename": "pre-r3708-alignment-20260924T120548Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-04",
+        "restore_test": "ok",
+        "schema_version": "alembic-027",
+        "sha256": "89e5afe79b646633658c462e8c599fa84e6c8d86b242bad7d473ab3c3395ae2b",
+        "size_bytes": 205745
+      },
+      {
+        "alignment_receipt": "r3708-98d23543f75d",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T12:24:29Z",
+        "filename": "pre-r3708-alignment-20260924T122429Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-05",
+        "restore_test": "ok",
+        "schema_version": "alembic-027",
+        "sha256": "8a5cc200466010098e898e522aae43b490860016453f8506adf673983ba57a96",
+        "size_bytes": 212540
+      },
+      {
+        "alignment_receipt": "r3708-8ebbd2497fe3",
+        "classification": "sensitive_content",
+        "classification_basis": "credential scan negative; internal operational text present",
+        "created_utc": "2026-09-24T12:57:53Z",
+        "filename": "pre-r3708-alignment-20260924T125753Z.dump",
+        "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
+        "private_reference": "forge-private-2026-09-24-06",
+        "restore_test": "ok",
+        "schema_version": "alembic-027",
+        "sha256": "fbc59541131f1b62e6f368a5d75109d691ab9f40b912338f66f5c6dc3db7c3d1",
+        "size_bytes": 221969
+      }
+    ],
+    "stamp": "forge.lab.alignment-backup-receipts/1"
+  },
   "generated_at": "2026-09-24T12:58:24.335505+00:00",
   "observations": {
     "caps": {

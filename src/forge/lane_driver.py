@@ -149,12 +149,14 @@ import argparse
 import asyncio
 import contextlib
 import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import asdict, dataclass, replace
 import json
 import os
 import re
+import socket
 import sys
+import uuid
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -189,27 +191,40 @@ from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "CODEX_LANE_DRIVER_ID",
+    "CONSUMPTION_STATUS_CONSUMED",
+    "CONSUMPTION_STATUS_UNRESOLVED",
     "COPILOT_LANE_DRIVER_ID",
+    "CREDENTIAL_REF_ENV",
     "EPISODE_PHASE_KEYS",
+    "LANE_CREDENTIAL_REDEEM_ROUTE",
     "LANE_DRIVER_ID",
     "LANE_DRIVER_IDS",
     "NO_COMMIT_ADDENDUM",
     "OPENCODE_LANE_DRIVER_ID",
+    "REDEEM_FLAG_ENV",
     "RESUME_ENV",
     "STEERING_ENV",
+    "LaneCredentialRedemptionError",
     "LaneOutcome",
+    "apply_redeemed_credential",
     "build_task",
     "classify_codex_turn",
     "classify_copilot_turn",
     "classify_opencode_events",
     "classify_result",
     "codex_usage_receipt",
+    "consumer_identity",
+    "consumption_status_for",
     "copilot_usage_receipt",
+    "credential_consumption_record",
     "drive_codex_lane",
     "drive_copilot_lane",
     "drive_lane",
     "main",
+    "native_delivery_requested",
     "opencode_usage_receipt",
+    "redeem_lane_credential",
+    "redemption_requested",
     "resume_requested",
     "run_opencode_lane",
     "steering_enabled",
@@ -331,6 +346,341 @@ _RESUME_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 #: WIP was discarded (a distinct, documented outcome — never a silent
 #: "latest fallback" and never a required-restore halt).
 _RESUME_RESTART = "restart"
+
+
+# ---------------------------------------------------------------------------
+# R38-02 (#303) — runner-time model-credential redemption (profile b):
+# the lane exchanges its EXISTING attempt-scoped lane-control token for
+# the bound model credential at startup and sets EXACTLY ONE env var.
+# ---------------------------------------------------------------------------
+
+#: The dispatch's redemption-mode flag (``FORGE_CREDENTIAL_REDEEM=1`` —
+#: the non-secret flag the delivery plan put on the envelope/inputs).
+REDEEM_FLAG_ENV = "FORGE_CREDENTIAL_REDEEM"
+
+#: The dispatched credential REF (non-secret; the ref the binding
+#: resolved — the redemption endpoint re-checks it against the work's
+#: own live binding).
+CREDENTIAL_REF_ENV = "FORGE_CREDENTIAL_REF"
+
+#: The redemption route on the lane-control router (mirror of
+#: :data:`forge.api_lane_control.LANE_CREDENTIAL_REDEEM_ROUTE` — mirrored
+#: locally because the lane package never imports the control plane).
+LANE_CREDENTIAL_REDEEM_ROUTE = "/lane/credentials/redeem"
+
+#: One bounded wait for the redemption call (the same bound the
+#: resume-spec read uses — a slow control plane delays the lane, never
+#: selects an ambient credential).
+_REDEEM_TIMEOUT_S = 10.0
+
+#: Delivered credential var → the closed scrub set: the SAME provider
+#: family's other credential variables, whose documented precedence
+#: (cloud → ANTHROPIC_AUTH_TOKEN → ANTHROPIC_API_KEY → apiKeyHelper →
+#: OAuth → federation, research doc 05 §2) would otherwise let a stray
+#: runner-image variable silently outrank the deliberately delivered
+#: credential. Exactly ONE variable is set; the strays are unset.
+CREDENTIAL_SCRUB_VARS: dict[str, tuple[str, ...]] = {
+    "ANTHROPIC_AUTH_TOKEN": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+    "ANTHROPIC_API_KEY": ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+}
+
+
+class LaneCredentialRedemptionError(RuntimeError):
+    """Startup redemption failed — the lane fails CLOSED: no ambient
+    fallback credential, zero model turns. The message carries the HTTP
+    status or transport class ONLY — never a response body (a refusal
+    body could echo credential material into the job log)."""
+
+
+def redemption_requested(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``FORGE_CREDENTIAL_REDEEM`` is truthy in *env* (default off)."""
+    source = os.environ if env is None else env
+    return source.get(REDEEM_FLAG_ENV, "").strip().lower() in _STEERING_TRUTHY
+
+
+def _lane_provider_route(env: Mapping[str, str]) -> str:
+    """The provider route THIS lane's driver consumes (for the redemption
+    registry check) — the same table the dispatch used."""
+    from forge.adaptive.project_credentials import provider_route_for_driver
+
+    raw = (env.get("FORGE_LANE_DRIVER") or env.get("FORGE_HARNESS_DRIVER") or "").strip().lower()
+    # The lane's short driver key (claude | codex | opencode | copilot)
+    # resolves through the registered harness ids first.
+    return provider_route_for_driver(LANE_DRIVER_IDS.get(raw, raw) or "claude")
+
+
+def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[str, Any]:
+    """Redeem the attempt's model credential over the lane-control channel.
+
+    Reads the SAME dial-out pair the steering/checkpoint channels use
+    (``FORGE_LANE_CONTROL_URL`` + ``FORGE_LANE_CONTROL_TOKEN`` — the
+    attempt-scoped HMAC the dispatch minted) plus the dispatched
+    ``FORGE_CREDENTIAL_REF``, and exchanges them at
+    :data:`LANE_CREDENTIAL_REDEEM_ROUTE` for the bound credential,
+    TTL-bounded to the attempt. On success the credential is APPLIED
+    (:func:`apply_redeemed_credential` — exactly one env var, strays
+    scrubbed) and the VALUE-FREE redemption record is returned for the
+    lane's evidence. Any failure raises :class:`LaneCredentialRedemptionError`
+    — the caller halts the lane; an ambient credential is NEVER used.
+    """
+    import httpx
+
+    source = os.environ if env is None else env
+    work_id = (source.get("FORGE_WORK_ID") or source.get("FORGE_RUN_ID") or "").strip()
+    url = (source.get("FORGE_LANE_CONTROL_URL") or "").strip()
+    token = (source.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
+    credential_ref = (source.get(CREDENTIAL_REF_ENV) or "").strip()
+    provider = _lane_provider_route(source)
+    missing = [
+        name
+        for name, value in (
+            ("FORGE_CREDENTIAL_REF", credential_ref),
+            ("FORGE_LANE_CONTROL_URL", url),
+            ("FORGE_LANE_CONTROL_TOKEN", token),
+            ("FORGE_WORK_ID", work_id),
+            ("provider-route", provider),
+        )
+        if not value
+    ]
+    if missing:
+        raise LaneCredentialRedemptionError(
+            "the redemption channel is not configured (" + ", ".join(missing) + ")"
+            " — FORGE_CREDENTIAL_REDEEM=1 demands the ref, the lane-control"
+            " dial-out pair and the work id; an ambient credential is never used"
+        )
+    try:
+        response = httpx.get(
+            url.rstrip("/") + LANE_CREDENTIAL_REDEEM_ROUTE,
+            params={
+                "work_id": work_id,
+                "credential_ref": credential_ref,
+                "provider": provider,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_REDEEM_TIMEOUT_S,
+        )
+    except httpx.HTTPError as exc:
+        # Transport failure — the outcome is undecidable but the posture is
+        # not: fail closed. The error names the transport class only.
+        raise LaneCredentialRedemptionError(
+            f"the redemption endpoint was unreachable ({exc.__class__.__name__}) —"
+            " the lane fails closed rather than fall back to another credential"
+        ) from exc
+    if response.status_code != 200:
+        # NEVER surface the response body (it may echo credential material).
+        raise LaneCredentialRedemptionError(
+            f"the redemption endpoint refused the attempt (HTTP {response.status_code})"
+            " — no credential was redeemed and none is substituted"
+        )
+    try:
+        document = response.json()
+    except ValueError as exc:
+        raise LaneCredentialRedemptionError(
+            "the redemption response was not a JSON document — no credential was applied"
+        ) from exc
+    for field in ("value", "env_var", "expires_at", "redemption_id"):
+        if not str(document.get(field) or "").strip():
+            raise LaneCredentialRedemptionError(
+                f"the redemption response is missing the {field!r} field — no credential was applied"
+            )
+    return apply_redeemed_credential(document, env=source)
+
+
+def apply_redeemed_credential(
+    document: Mapping[str, Any],
+    *,
+    env: MutableMapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Apply one redeemed credential: set EXACTLY ONE env var (the
+    binding's slot — e.g. ``ANTHROPIC_AUTH_TOKEN``, doc 05's bearer
+    surface), unset the closed scrub set's strays, and return the
+    VALUE-FREE redemption record (the receipt the lane's evidence and
+    the consumer proof cite).
+
+    R38-04: the record also carries the redemption's CORRELATION fields
+    (``broker_receipt_id``, ``resolved_version``/``_kind``,
+    ``attempt_generation``, ``credential_policy``) — absent on pre-#305
+    documents, echoed empty — so the consumer receipt can join broker
+    id ↔ redemption id ↔ attempt ↔ consumer without another call."""
+    target = os.environ if env is None else env
+    env_var = str(document["env_var"])
+    value = str(document["value"])
+    scrubbed = [stray for stray in CREDENTIAL_SCRUB_VARS.get(env_var, ()) if target.get(stray)]
+    for stray in scrubbed:
+        target.pop(stray, None)
+    target[env_var] = value
+    return {
+        "env_var": env_var,
+        "credential_ref": str(document.get("credential_ref") or ""),
+        "provider": str(document.get("provider") or ""),
+        "redemption_id": str(document.get("redemption_id") or ""),
+        "expires_at": str(document.get("expires_at") or ""),
+        "binding_revision": document.get("binding_revision"),
+        "resolver_identity": str(document.get("resolver_identity") or ""),
+        "scrubbed_env_vars": scrubbed,
+        # The R38-04 correlation join (refs/metadata only, as ever).
+        "broker_receipt_id": str(document.get("broker_receipt_id") or ""),
+        "resolved_version": str(document.get("resolved_version") or ""),
+        "resolved_version_kind": str(document.get("resolved_version_kind") or ""),
+        "attempt_generation": document.get("attempt_generation"),
+        "credential_policy": str(document.get("credential_policy") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R38-04 (#305) — the CONSUMER receipt: the trusted runner bootstrap's
+# value-free proof that the delivered credential was staged for THIS
+# attempt, joined with the broker/redemption receipts. Emitted after
+# `apply_redeemed_credential` (redemption mode) or after the template's
+# native-secret resolution step (native mode — where the lane process is
+# the first forge-owned code that runs). Rides the candidate meta AND
+# `.forge/steering.json` (the lane's two durable journals — both upload
+# `when: always`), with an honest `consumer_status`: ``consumed`` only
+# when the driven turn completed, ``staged-unresolved`` otherwise — NO
+# model-usage claim merely because the broker returned.
+# ---------------------------------------------------------------------------
+
+#: The consumption status while no completed turn backs the delivery.
+CONSUMPTION_STATUS_UNRESOLVED = "staged-unresolved"
+#: The consumption status when the driven turn completed on this credential.
+CONSUMPTION_STATUS_CONSUMED = "consumed"
+
+
+def consumer_identity(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """WHO consumed — the runner/job id where the CI provider exposes
+    one (GitLab ``CI_JOB_ID``, GitHub ``GITHUB_RUN_ID``, Azure
+    ``BUILD_BUILDID``), else the host#pid of the lane process."""
+    source = os.environ if env is None else env
+    for var, kind in (
+        ("CI_JOB_ID", "ci-job"),
+        ("GITHUB_RUN_ID", "github-run"),
+        ("BUILD_BUILDID", "azure-build"),
+    ):
+        value = (source.get(var) or "").strip()
+        if value:
+            return {"kind": kind, "id": value, "via": var}
+    return {"kind": "process", "id": f"{socket.gethostname()}#{os.getpid()}"}
+
+
+def native_delivery_requested(env: Mapping[str, str] | None = None) -> bool:
+    """Whether the lane was dispatched under a NATIVE delivery mode: the
+    envelope carries the credential ref and the redemption flag is OFF —
+    the template's resolution step (the shipped snippet) already mapped
+    the provider-held secret into the env slot before this process ran."""
+    source = os.environ if env is None else env
+    ref = (source.get(CREDENTIAL_REF_ENV) or "").strip()
+    return bool(ref) and not redemption_requested(source)
+
+
+def _native_delivery_transport(env: Mapping[str, str]) -> str:
+    """Which native transport's runner this lane runs on (best-effort
+    detection from the CI provider's own marker variables; an
+    undetectable runner names ``native-unknown`` honestly)."""
+    if (env.get("GITHUB_RUN_ID") or "").strip():
+        return "github-native-secret"
+    if (env.get("CI_JOB_ID") or "").strip() and (env.get("GITLAB_CI") or "").strip():
+        return "gitlab-protected-variable"
+    if (env.get("TF_BUILD") or "").strip():
+        return "azure-variable-group"
+    return "native-unknown"
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def credential_consumption_record(
+    *,
+    redemption_record: Mapping[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Build the lane's CONSUMER receipt (schema
+    ``forge.credential.consumer-receipt/1``) — refs/metadata ONLY.
+
+    Redemption mode (a *redemption_record* from
+    :func:`apply_redeemed_credential`): the full join — binding
+    revision, resolver identity, route, work, attempt generation,
+    consumer identity, the delivered env-slot NAME, the redemption id
+    and the broker receipt id. Native mode (no record, ref on the
+    envelope, redemption flag off): the runner-side bootstrap CANNOT see
+    the control plane's binding revision — the receipt records it as
+    unknown (``binding_revision`` null, ``binding_revision_known``
+    false) rather than guessing; the join rides the transport and the
+    dispatched ref. Returns None when no delivery applies to this lane.
+    The record starts ``staged-unresolved`` — ``main`` promotes it to
+    ``consumed`` only for a completed driven turn."""
+    from forge.adaptive.credential_broker import (
+        consumer_receipt_document,
+        credential_policy,
+    )
+
+    source = os.environ if env is None else env
+    work_id = (source.get("FORGE_WORK_ID") or source.get("FORGE_RUN_ID") or "").strip()
+    identity = consumer_identity(source)
+    if redemption_record is not None:
+        return {
+            **consumer_receipt_document(
+                consumer_receipt_id=uuid.uuid4().hex,
+                env_var=str(redemption_record.get("env_var") or ""),
+                consumer_identity=identity,
+                delivery_route=LANE_CREDENTIAL_REDEEM_ROUTE,
+                resolver_identity=str(redemption_record.get("resolver_identity") or ""),
+                credential_policy=str(
+                    redemption_record.get("credential_policy") or credential_policy(source)
+                ),
+                binding_revision=_optional_int(redemption_record.get("binding_revision")),
+                provider_route=str(redemption_record.get("provider") or ""),
+                credential_ref=str(redemption_record.get("credential_ref") or ""),
+                work_id=work_id,
+                attempt_generation=_optional_int(redemption_record.get("attempt_generation")),
+                redemption_id=str(redemption_record.get("redemption_id") or ""),
+                broker_receipt_id=str(redemption_record.get("broker_receipt_id") or ""),
+                resolved_version=str(redemption_record.get("resolved_version") or ""),
+                resolved_version_kind=str(redemption_record.get("resolved_version_kind") or ""),
+            ),
+            "binding_revision_known": True,
+            "consumer_status": CONSUMPTION_STATUS_UNRESOLVED,
+        }
+    if native_delivery_requested(source):
+        credential_ref = (source.get(CREDENTIAL_REF_ENV) or "").strip()
+        route = _lane_provider_route(source)
+        from forge.adaptive.project_credentials import PROVIDER_ENV_VARS
+
+        transport = _native_delivery_transport(source)
+        return {
+            **consumer_receipt_document(
+                consumer_receipt_id=uuid.uuid4().hex,
+                env_var=PROVIDER_ENV_VARS.get(route, ""),
+                consumer_identity=identity,
+                delivery_route=transport,
+                resolver_identity=transport,
+                credential_policy=credential_policy(source),
+                binding_revision=None,
+                provider_route=route,
+                credential_ref=credential_ref,
+                work_id=work_id,
+                attempt_generation=None,
+            ),
+            "binding_revision_known": False,
+            "consumer_status": CONSUMPTION_STATUS_UNRESOLVED,
+        }
+    return None
+
+
+def consumption_status_for(exit_status: str) -> str:
+    """The consumption status a lane outcome earns: ``consumed`` only
+    for a cleanly completed turn — every other exit keeps the honest
+    ``staged-unresolved`` (the credential was staged, no model usage is
+    claimed merely because the broker returned)."""
+    if exit_status == "completed":
+        return CONSUMPTION_STATUS_CONSUMED
+    return CONSUMPTION_STATUS_UNRESOLVED
+
 
 #: driver key -> the adapter that wraps the SAME client object the lane
 #: drives (the pairing rule the bridge checks at construction).
@@ -1875,6 +2225,7 @@ def write_artifacts(
     usage_path: str = _USAGE_PATH,
     driver_id: str = LANE_DRIVER_ID,
     workspace_generation: str = "",
+    credential_consumption: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the batch lane's meta + usage contract for *outcome*.
 
@@ -1889,7 +2240,11 @@ def write_artifacts(
     collector step resolves (also named by the checkout's
     ``.forge/workspace-generation`` pointer); the meta paths stay
     anchored at the STABLE checkout, never inside a generation the
-    promotion may retire.
+    promotion may retire. *credential_consumption* (R38-04) is the
+    value-free consumer receipt — it rides BOTH durable journals (the
+    meta the collector consumes and the ``.forge/steering.json``
+    sidecar), on every post-staging exit path, so a failed bootstrap
+    still preserves its UNRESOLVED delivery record.
     """
     meta: dict[str, Any] = {
         "attempt_base": str(attempt_base or ""),
@@ -1915,6 +2270,8 @@ def write_artifacts(
         # was driven (any exit classification); absent only for failures
         # that preceded the episode itself (brief_missing, sdk_missing...).
         meta["episode"] = outcome.episode
+    if credential_consumption is not None:
+        meta["credential_consumption"] = credential_consumption
     meta_file = Path(meta_path)
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     meta_file.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
@@ -1925,6 +2282,8 @@ def write_artifacts(
         extras["steering_journal"] = outcome.steering_journal
     if outcome.episode is not None:
         extras["episode"] = outcome.episode
+    if credential_consumption is not None:
+        extras["credential_consumption"] = credential_consumption
     if extras:
         meta_file.parent.joinpath("steering.json").write_text(
             json.dumps(extras, indent=2, sort_keys=True) + "\n"
@@ -2036,9 +2395,21 @@ def main(
     attempt_base = os.environ.get("FORGE_ATTEMPT_BASE", "")
     model = _lane_model(driver_key)
 
+    # R38-04 (#305) — the lane's CONSUMER receipt, carried on EVERY
+    # post-staging exit path (a failed consumer bootstrap still preserves
+    # its UNRESOLVED delivery record; no model-usage claim merely because
+    # the broker returned). None until a delivery actually staged.
+    consumption: dict[str, Any] | None = None
+
     def _fail(reason: str, detail: str = "") -> int:
         outcome = LaneOutcome(exit_status="failed", terminal_reason=reason, error=detail)
-        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+        write_artifacts(
+            outcome,
+            attempt_base=attempt_base,
+            model=model,
+            driver_id=driver_id,
+            credential_consumption=consumption,
+        )
         print(f"lane_driver: {reason}" + (f" ({detail})" if detail else ""), file=sys.stderr)
         return 1
 
@@ -2099,6 +2470,30 @@ def main(
                 }
             )
             return _fail("wip_restore_failed", detail)
+
+    # R38-02 (#303) — the runner-time credential redemption (profile b):
+    # BEFORE any vendor client or session exists. The lane exchanges its
+    # EXISTING attempt-scoped lane token for the bound model credential
+    # and sets EXACTLY ONE env var (scrubbing the closed precedence-stray
+    # set). A refused/unreachable redemption halts the lane with ZERO
+    # model turns — there is NO ambient fallback credential, ever.
+    redemption_record: dict[str, Any] | None = None
+    if redemption_requested():
+        try:
+            redemption_record = redeem_lane_credential()
+        except LaneCredentialRedemptionError as exc:
+            return _fail("credential_redemption_failed", str(exc))
+        # R38-04 (#305) — the consumer receipt AFTER secret staging: the
+        # join (broker id ↔ redemption id ↔ attempt ↔ consumer) is built
+        # while the durable audit row already exists; it starts honestly
+        # UNRESOLVED and is promoted only by a completed turn below.
+        consumption = credential_consumption_record(redemption_record=redemption_record)
+    elif native_delivery_requested():
+        # Native mode: the template's resolution step (the shipped
+        # snippet) staged the provider-held secret BEFORE this process;
+        # the runner-side receipt records what the runner can honestly
+        # know (binding revision unknowable here — recorded unknown).
+        consumption = credential_consumption_record()
 
     # R32-01: a successful restore landed a STABLE GENERATION beside the
     # checkout (the checkout itself was never renamed or removed — the
@@ -2195,6 +2590,10 @@ def main(
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
+    # R38-04 — the consumption status a completed turn earns; every
+    # other outcome keeps the honest staged-unresolved record.
+    if consumption is not None:
+        consumption["consumer_status"] = consumption_status_for(outcome.exit_status)
     write_artifacts(
         outcome,
         attempt_base=attempt_base,
@@ -2203,9 +2602,21 @@ def main(
         meta_path=str(original_cwd / _META_PATH),
         usage_path=str(original_cwd / _USAGE_PATH),
         workspace_generation=workspace_generation,
+        credential_consumption=consumption,
     )
     if resume_report is not None:
         _write_wip_restore_sidecar(resume_report, root=original_cwd)
+    if redemption_record is not None:
+        # The VALUE-FREE redemption receipt rides the sidecar (never the
+        # value — the sidecar uploads with the candidate).
+        sidecar = original_cwd / ".forge/steering.json"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing_sidecar = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        except ValueError:
+            existing_sidecar = {}
+        existing_sidecar["credential_redemption"] = redemption_record
+        sidecar.write_text(json.dumps(existing_sidecar, indent=2, sort_keys=True) + "\n")
     print(
         f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,

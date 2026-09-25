@@ -882,6 +882,77 @@ async def test_the_reader_never_mutates_durable_rows(session_factory):
 
 
 # ---------------------------------------------------------------------------
+# R38-15: the lane-outcome slice on the run row (the #302 finalization
+# markers where the harness evidence journals them)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_run_row_maps_the_recorded_lane_outcome_markers(session_factory):
+    """The #302 markers (driver_exit / collector_exit / candidate_state)
+    land in the harness evidence fragment — the run row carries them as
+    the documented ``lane_outcome`` slice the recovery surface derives
+    from; a run without markers carries no slice, never an invented one."""
+    await _seed(
+        session_factory,
+        _run(
+            RUN_A,
+            REPO_A,
+            evidence={
+                "harness": {
+                    "driver_exit": "completed",
+                    "collector_exit": 0,
+                    "candidate_state": "zero_change",
+                }
+            },
+        ),
+        _run(RUN_B, REPO_B, evidence={"driver_exit": "failed"}),  # top-level spelling
+    )
+    reader = _reader(session_factory)
+
+    alpha = await reader.snapshot(RUN_A, [SUBJECT_A])
+    beta = await reader.snapshot(RUN_B, [SUBJECT_B])
+    assert alpha is not None and beta is not None
+
+    assert alpha.rows["run"]["lane_outcome"] == {
+        "driver_exit": "completed",
+        "collector_exit": 0,
+        "candidate_state": "zero_change",
+    }
+    assert beta.rows["run"]["lane_outcome"] == {"driver_exit": "failed"}
+
+    from forge.adaptive.operator_snapshot import OperatorSnapshot
+
+    bare = OperatorSnapshot(
+        run_id=RUN_A,
+        subject=REPO_A,
+        rows={"run": {"id": RUN_A, "status": "planning", "candidate_shas": []}},
+        source_coverage={"run": "present"},
+        computed_at=NOW.isoformat(),
+    )
+    assert "lane_outcome" not in bare.rows["run"]
+
+
+async def test_the_snapshot_stays_write_free_with_the_lane_outcome_present(session_factory):
+    """The recovery fields are READ mappings only — markers on the evidence
+    change nothing about the read-only charter."""
+    repository = RecordingRepository(entry=_checkpoint_entry())
+    await _seed(
+        session_factory,
+        _run(
+            RUN_A,
+            REPO_A,
+            evidence={"harness": {"candidate_state": "candidate", "driver_exit": "completed"}},
+        ),
+    )
+
+    snapshot = await _reader(session_factory, repository=repository).snapshot(RUN_A, [SUBJECT_A])
+
+    assert snapshot is not None
+    assert snapshot.rows["run"]["lane_outcome"]["candidate_state"] == "candidate"
+    assert repository.calls == [("entry", RUN_A)]
+
+
+# ---------------------------------------------------------------------------
 # R37-16: bounded drill-down — windows, totals, section selection
 # ---------------------------------------------------------------------------
 

@@ -45,6 +45,7 @@ from forge.adaptive.delivery_measurement import (
     billing_comparison,
     build_report,
     ledger_records_from_delivery_metrics,
+    ledger_records_from_ingested_usage,
     measured_rate,
     replay_report,
     trace_accepted_task,
@@ -976,3 +977,113 @@ class TestCommittedFixture:
         assert "fixture" in readme.lower()
         assert "authored" in readme.lower()
         assert "not" in readme.lower() and "measured" in readme.lower()
+
+
+# ----------------------------------------------------------------------
+# R38-09 — ingested usage rows as a receipt SOURCE beside the evidence
+# ----------------------------------------------------------------------
+
+
+def _ingested_row(work_id: str, attempt_id: str, **overrides) -> dict:
+    row: dict = {
+        "work_id": work_id,
+        "attempt_id": attempt_id,
+        "receipt_id": f"ing:{work_id}:{attempt_id}",
+        "source": "lane/.forge/usage.json",
+        "provider": "claude-sdk-lane",
+        "model": "glm-5.3-flash",
+        "counters": {
+            "input_tokens": 19163,
+            "cached_input_tokens": 119936,
+            "output_tokens": 2463,
+            "anthropic_shaped": True,
+        },
+        "cost_usd": 0.1498992,
+        "cost_basis": "provider-reported",
+        "segment": "segment:live1",
+        "completeness": "aggregate",
+        "final": True,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestIngestedUsageJoin:
+    def test_ingested_rows_join_beside_evidence_receipts(self):
+        records = ledger_records_from_ingested_usage(
+            [
+                _ingested_row("w-acc", "w-acc/a2"),
+                # the planner ledger row: work-level, its OWN population
+                {
+                    "work_id": "w-acc",
+                    "attempt_id": "",
+                    "receipt_id": "w-acc:planner:1",
+                    "source": "planner/llm_calls",
+                    "provider": "zai",
+                    "counters": {"input_tokens": 900, "output_tokens": 90},
+                    "completeness": "aggregate",
+                },
+            ],
+            works=[{"work_id": "w-acc", "outcome": "accepted"}],
+            attempts=[{"work_id": "w-acc", "attempt_id": "w-acc/a2"}],
+        )
+        ledger = MeasurementLinker().link(**records)
+        work = ledger.work_by_id("w-acc")
+        # the lane row landed as the ATTEMPT's receipt with its attribution
+        attempt = work.attempts[0]
+        claim = attempt.receipts[0]
+        assert claim.source == "lane/.forge/usage.json"
+        assert claim.cost_basis == "provider-reported"
+        assert claim.segment == "segment:live1"
+        assert claim.cost_usd == pytest.approx(0.1498992)
+        # the disjoint (Anthropic-shaped) counters sum into the inclusive input
+        assert claim.input_tokens_inclusive == 19163 + 119936
+        # the planner row kept the planner population — never an attempt
+        assert work.planner_call_ids == ("w-acc:planner:1",)
+        assert all(row.attempt_id != "planner" for row in work.attempts)
+
+    def test_ingested_join_is_order_invariant_and_replayable(self):
+        rows = [
+            _ingested_row("w-acc", "w-acc/a1", cost_usd=0.30),
+            _ingested_row("w-acc", "w-acc/a2", cost_usd=0.70),
+        ]
+        works = [{"work_id": "w-acc", "outcome": "accepted"}]
+        attempts = [
+            {"work_id": "w-acc", "attempt_id": "w-acc/a1"},
+            {"work_id": "w-acc", "attempt_id": "w-acc/a2"},
+        ]
+        first = MeasurementLinker().link(
+            **ledger_records_from_ingested_usage(rows, works=works, attempts=attempts)
+        )
+        shuffled = MeasurementLinker().link(
+            **ledger_records_from_ingested_usage(
+                list(reversed(rows)), works=list(reversed(works)), attempts=list(reversed(attempts))
+            )
+        )
+        assert _canonical(first.to_document()) == _canonical(shuffled.to_document())
+        # the stored document replays byte-identically (cost_basis/segment
+        # survive the round trip)
+        replayed = replay_report(first.to_document())
+        assert _canonical(replayed) == _canonical(build_report(first))
+        doc_claim = first.to_document()["works"][0]["attempts"][0]["receipts"][0]
+        assert doc_claim["cost_basis"] == "provider-reported"
+        assert (
+            DeliveryLedger.from_document(first.to_document())
+            .works[0]
+            .attempts[0]
+            .receipts[0]
+            .cost_basis
+            == "provider-reported"
+        )
+
+    def test_a_streamed_partial_keeps_the_attempt_lower_bound_only(self):
+        records = ledger_records_from_ingested_usage(
+            [_ingested_row("w-acc", "w-acc/a1", completeness="partial")],
+            works=[{"work_id": "w-acc", "outcome": ""}],
+            attempts=[{"work_id": "w-acc", "attempt_id": "w-acc/a1"}],
+        )
+        ledger = MeasurementLinker().link(**records)
+        usage = ledger.work_by_id("w-acc").attempts[0].usage
+        assert usage.exact is False
+        assert usage.cost_usd is None
+        assert usage.known_cost_lower_bound_usd == pytest.approx(0.1498992)

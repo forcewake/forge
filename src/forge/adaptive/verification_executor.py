@@ -46,6 +46,53 @@ remaining gaps, closed here:
   journal (deliveries/acks seen on the wire) and the consumer's own
   durable rows.
 
+R38-07 (#308) tightened the ISOLATION CLAIMS to match what is actually
+observable (a dead endpoint never "proves" containment):
+
+- **The five-outcome probe taxonomy.** Every controlled probe lands in
+  exactly one of :data:`PROBE_OUTCOMES` —
+  ``authorized_control_succeeded`` / ``expected_denial_observed`` /
+  ``unavailable`` / ``inconclusive`` / ``violation``. Network
+  exceptions and 5xx answers are ``unavailable`` (the endpoint could
+  not demonstrate anything), timeouts are ``inconclusive``, an
+  auth-shaped denial (401/403/407) counts as
+  ``expected_denial_observed`` ONLY while the class's positive control
+  is green, and a 2xx answer to credential material is a
+  ``violation``. The old ``denied-refused``/``denied-other-status``
+  buckets — which let a dead endpoint masquerade as a successful
+  denial — are GONE.
+- **The positive control.** Each probe class first dials a SECOND
+  route on the same test server that answers 200 WITHOUT credentials
+  (the liveness control); the deny probe runs only when that control
+  is green. A pass therefore requires, per class: the control alive
+  AND one ``expected_denial_observed`` AND zero violations — anything
+  less renders the isolation ``unproven`` with the named blocker, and
+  a 503/DNS failure can NEVER yield a pass.
+- **Clean HOME, narrowed PATH.** The subprocess does NOT inherit the
+  parent HOME: the launcher provisions an isolated empty HOME and a
+  PATH reduced to the system minimum plus the resolved venv tooling.
+  A planted credential file under the parent HOME (``~/.netrc``,
+  ``~/.config/...`` shapes) is unreadable from the verifier, asserted
+  by a probe reading the process's OWN HOME shapes. The launcher
+  records the whole configuration as the enforcement profile
+  (:class:`EnforcementProfile`, ``verification.enforcement_profile_digest``)
+  and the launched process VALIDATES the declaration against what it
+  actually observes.
+- **Three separate verdicts, never one ``isolation: true``.** The
+  authority receipt reports ``environment_hygiene`` /
+  ``credential_non_disclosure`` / ``network_enforcement`` as three
+  DISTINCT fields plus the tri-state ``isolation``
+  (``proven``/``unproven``/``violated``).
+- **No first-surviving-key heuristics.** The deny probes present an
+  explicit SYNTHETIC qualification credential
+  (:data:`SYNTHETIC_PROBE_CREDENTIAL`) — never an ambient key. The
+  environment scan's only job is the ABSENCE assertion: any
+  credential-shaped survivor is a hygiene violation that fails the
+  run closed.
+- **Reference coverage, labeled.** The fixture TCP-broker and sqlite
+  legs are labeled ``reference-coverage`` in the environment profile
+  and the report — they are NOT production RabbitMQ/PostgreSQL proof.
+
 The report keeps every existing discipline: per-edge results with the
 executor receipt (launch env keys, deny-probe outcomes, installed
 wheel digests, command exits, log digests), the
@@ -94,28 +141,55 @@ from forge.adaptive.verification_sets import (
 __all__ = [
     "AUTHORITY_RECEIPT_SCHEMA",
     "CANDIDATE_BUNDLE_SCHEMA",
+    "CREDENTIAL_HOME_SHAPES",
+    "CREDENTIAL_SOURCE_SYNTHETIC",
     "DEFAULT_ENV_ALLOWLIST",
+    "DEFAULT_ENV_ALLOWLIST_VERSION",
+    "ENFORCEMENT_PROFILE_SCHEMA",
     "EXECUTOR_REPORT_SCHEMA",
     "EXECUTOR_RECEIPT_SCHEMA",
+    "HOME_POLICY",
+    "ISOLATION_PROVEN",
+    "ISOLATION_UNPROVEN",
+    "ISOLATION_VIOLATED",
+    "NETWORK_POLICY_CLASS",
+    "OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED",
+    "OUTCOME_EXPECTED_DENIAL_OBSERVED",
+    "OUTCOME_INCONCLUSIVE",
+    "OUTCOME_UNAVAILABLE",
+    "OUTCOME_VIOLATION",
+    "PATH_POLICY",
+    "PROBE_OUTCOMES",
     "REDELIVERY_OUTCOME_SCHEMA",
+    "SYSTEM_PATH_ENTRIES",
+    "SYNTHETIC_PROBE_CREDENTIAL",
     "AuthorityReceipt",
     "CandidateBundle",
     "CommandRun",
-    "DenyProbe",
+    "ControlledDenyProbe",
+    "EnforcementProfile",
     "ExecutorReceipt",
     "ExecutorReport",
     "ExecutorRun",
     "InstalledWheel",
+    "IsolationUnproven",
     "IsolationViolated",
+    "ProbeAttempt",
+    "ProbeTarget",
     "VerificationExecutor",
     "WheelRef",
     "executor_candidate_set",
     "executor_edges",
     "executor_readiness",
+    "introspect_and_probe",
     "main",
+    "narrowed_path_entries",
     "require_isolated",
     "run_deny_probe",
+    "run_positive_control",
+    "run_probe_class",
     "scan_credential_env",
+    "scan_home_credentials",
     "scrubbed_environment",
 ]
 
@@ -137,6 +211,13 @@ REDELIVERY_OUTCOME_SCHEMA = "forge.dependency.redelivery-outcome/1"
 #: hands the subprocess).
 CANDIDATE_BUNDLE_SCHEMA = "forge.executor.candidate-bundle/1"
 
+#: The enforcement profile's discriminator — the isolation
+#: configuration the LAUNCHER used (env allowlist version, HOME/PATH
+#: policy, network policy class). Claims are scoped to exactly this
+#: profile; the launched process validates the declaration against
+#: what it actually observes.
+ENFORCEMENT_PROFILE_SCHEMA = "forge.verification.enforcement-profile/1"
+
 #: The explicit environment ALLOWLIST. The subprocess env is built by
 #: intersecting the parent env with these names ONLY: no model keys,
 #: no provider tokens, no publication credentials, no proxy/egress
@@ -152,21 +233,103 @@ DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
     "UV_PYTHON_INSTALL_DIR",
 )
 
-#: What counts as a credential-shaped environment key for the deny
-#: probes: anything whose NAME looks like a token, key, secret,
-#: password, credential or proxy variable. The probes PRESENT the
-#: first survivor to the endpoint — if the endpoint accepts it, the
-#: scrub leaked a credential and the verification fails closed.
+#: The allowlist's version stamp — the enforcement profile binds the
+#: allowlist CONTENT and this version; changing the allowlist without
+#: changing the version is a profile drift the digest catches anyway.
+DEFAULT_ENV_ALLOWLIST_VERSION = "env-allowlist/1"
+
+#: What counts as a credential-shaped environment key for the ABSENCE
+#: assertion: anything whose NAME looks like a token, key, secret,
+#: password, credential or proxy variable. R38-07 removed the old
+#: first-surviving-key presentation heuristic: the scan's ONLY job now
+#: is to prove absence — any survivor is a hygiene violation that
+#: fails the run closed. The deny probes present the explicit
+#: :data:`SYNTHETIC_PROBE_CREDENTIAL` instead, never an ambient key.
 CREDENTIAL_ENV_PATTERN = re.compile(
     r"(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|PROXY|_PAT\b)", re.IGNORECASE
 )
 
+#: The credential-shaped HOME entries the verifier's own HOME probe
+#: checks: a planted file under the PARENT home in any of these shapes
+#: must be UNREADABLE from the verifier (the clean-HOME guarantee).
+CREDENTIAL_HOME_SHAPES: tuple[str, ...] = (
+    ".netrc",
+    ".git-credentials",
+    ".config/git/credentials",
+    ".aws/credentials",
+    ".docker/config.json",
+    ".kube/config",
+)
+
+#: The PATH policy: the executable search path is reduced to the
+#: system minimum (existence-filtered) plus the resolved venv tooling
+#: — the parent's full PATH never reaches the subprocess.
+SYSTEM_PATH_ENTRIES: tuple[str, ...] = (
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+PATH_POLICY = "system-minimum/1"
+
+#: The clean-HOME policy stamp (an isolated empty HOME provisioned by
+#: the launcher; the layout digest is part of the profile).
+HOME_POLICY = "clean-home/1"
+
+#: The network policy class the probes qualify: egress is deny-by-
+#: default and every enforcement claim is probe-gated by a live
+#: positive control.
+NETWORK_POLICY_CLASS = "probe-gated-deny-default/1"
+
+#: The explicit SYNTHETIC credential the deny probes present — created
+#: for qualification only. It is deliberately NOT a valid credential
+#: for any real surface: an endpoint that answers 2xx to it does not
+#: gate, and that is a ``violation``. The probe NEVER picks an ambient
+#: key to present.
+SYNTHETIC_PROBE_CREDENTIAL = "forge-synthetic-probe-token-not-a-real-credential"
+CREDENTIAL_SOURCE_SYNTHETIC = "synthetic-qualification-sentinel"
+
+#: The five-outcome taxonomy for controlled probes (R38-07): a dead or
+#: unhealthy endpoint is ``unavailable`` — never a successful denial.
+OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED = "authorized_control_succeeded"
+OUTCOME_EXPECTED_DENIAL_OBSERVED = "expected_denial_observed"
+OUTCOME_UNAVAILABLE = "unavailable"
+OUTCOME_INCONCLUSIVE = "inconclusive"
+OUTCOME_VIOLATION = "violation"
+PROBE_OUTCOMES: tuple[str, ...] = (
+    OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED,
+    OUTCOME_EXPECTED_DENIAL_OBSERVED,
+    OUTCOME_UNAVAILABLE,
+    OUTCOME_INCONCLUSIVE,
+    OUTCOME_VIOLATION,
+)
+
+#: The tri-state isolation verdict: ``violated`` (credential material
+#: actually reached something — fail closed, exit 3), ``proven`` (the
+#: positive controls were alive, every probe class observed its
+#: expected denial, zero violations, clean HOME/PATH) or ``unproven``
+#: (a prerequisite could not be demonstrated — exit 5, never a pass).
+ISOLATION_PROVEN = "proven"
+ISOLATION_UNPROVEN = "unproven"
+ISOLATION_VIOLATED = "violated"
+
 #: Exit codes the executor subprocess reports (documented contract):
-#: 0 clean, 2 usage error, 3 isolation violated, 4 verification failed.
+#: 0 clean, 2 usage error, 3 isolation violated, 4 verification
+#: failed, 5 isolation unproven (a probe prerequisite — control
+#: endpoint, HOME, PATH — could not be demonstrated; the verification
+#: is BLOCKED, never turned green).
 EXIT_CLEAN = 0
 EXIT_USAGE = 2
 EXIT_ISOLATION_VIOLATED = 3
 EXIT_VERIFICATION_FAILED = 4
+EXIT_ISOLATION_UNPROVEN = 5
+
+#: Environment keys platform spawn layers may inject into any child
+#: regardless of what the launcher passed (macOS adds
+#: ``__CF_USER_TEXT_ENCODING``) — tolerated by the membership check,
+#: never by the credential-shape scan.
+PLATFORM_ENV_TOLERANCE: frozenset[str] = frozenset({"__CF_USER_TEXT_ENCODING"})
 
 #: The executor world's fixed membership (mirrors the reference twin):
 #: two changed wheel-backed services, one pinned ledger baseline, two
@@ -275,9 +438,10 @@ def scrubbed_environment(
 def scan_credential_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """The credential-shaped variables THIS process can see (by name).
 
-    The deny probes present these to the sentinel/provider endpoints:
-    an empty mapping is the absence proof; a survivor that the
-    endpoint ACCEPTS is the violation.
+    R38-07: this is the ABSENCE assertion only — an empty mapping is
+    the proof; ANY survivor is a hygiene violation that fails the run
+    closed (the probe never presents a survivor; the deny probes
+    present :data:`SYNTHETIC_PROBE_CREDENTIAL` instead).
     """
     source = os.environ if env is None else env
     return {
@@ -285,76 +449,346 @@ def scan_credential_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     }
 
 
-@dataclass(frozen=True)
-class DenyProbe:
-    """One safe deny probe's outcome, observed from the launched process.
+def scan_home_credentials(home: str | None = None) -> dict[str, str]:
+    """The credential-shaped HOME entries THIS process can read.
 
-    ``outcome`` is one of ``denied-unauthorized`` (the endpoint refused
-    the credentialless request — 401/403/407), ``denied-refused`` (the
-    connection itself failed: no egress path without the scrubbed
-    proxy/egress credentials), ``denied-other-status`` (a non-2xx
-    answer that is still not service) or ``violated`` (a 2xx answer —
-    the process reached something only credentials reach, named in
-    ``presented_from_env``).
+    The verifier's own HOME probe: a planted credential file under the
+    PARENT home in any :data:`CREDENTIAL_HOME_SHAPES` shape must be
+    UNREADABLE from the verifier — under the clean-HOME policy this
+    scan finds NOTHING, and any hit is a hygiene violation.
+    """
+    base = Path(home if home is not None else os.environ.get("HOME", ""))
+    if not str(base):
+        return {}
+    return {
+        shape: str(base / shape) for shape in CREDENTIAL_HOME_SHAPES if (base / shape).is_file()
+    }
+
+
+def narrowed_path_entries(*, extra_dirs: Sequence[str] = ()) -> tuple[str, ...]:
+    """The subprocess PATH: the system minimum plus explicit tool dirs.
+
+    The parent's full executable search path NEVER reaches the
+    subprocess: the policy is a fixed system minimum (existence
+    filtered, order preserved) plus the directories the launcher
+    explicitly resolved — typically the venv tooling (``uv``).
+    """
+    entries: list[str] = []
+    for entry in (*SYSTEM_PATH_ENTRIES, *extra_dirs):
+        if entry and entry not in entries and Path(entry).is_dir():
+            entries.append(entry)
+    return tuple(entries)
+
+
+@dataclass(frozen=True)
+class ProbeAttempt:
+    """One HTTP leg of a controlled probe, classified by the taxonomy.
+
+    ``outcome`` is one of :data:`PROBE_OUTCOMES`; ``status_code`` is
+    ``None`` for transport failures (no answer exists to cite).
     """
 
-    name: str
-    url: str
-    header: str
-    presented_from_env: str
     outcome: str
     status_code: int | None
     detail: str
 
-    @property
-    def denied(self) -> bool:
-        return self.outcome.startswith("denied-")
-
     def as_document(self) -> dict[str, Any]:
         return {
-            "name": self.name,
-            "url": self.url,
-            "header": self.header,
-            "presented_from_env": self.presented_from_env,
             "outcome": self.outcome,
             "status_code": self.status_code,
             "detail": self.detail,
         }
 
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> ProbeAttempt:
+        return cls(
+            outcome=str(document.get("outcome", OUTCOME_INCONCLUSIVE)),
+            status_code=document.get("status_code"),
+            detail=str(document.get("detail", "")),
+        )
+
+
+def run_positive_control(name: str, url: str, *, timeout: float = 10.0) -> ProbeAttempt:
+    """Dial the POSITIVE CONTROL: a route that answers 200 WITHOUT
+    credentials, proving the endpoint is alive and reachable.
+
+    A 2xx is ``authorized_control_succeeded`` — and nothing else is: a
+    non-2xx answer is ``unavailable`` (the control did not demonstrate
+    aliveness) and a timeout is ``inconclusive``. The deny probe for
+    the class runs ONLY when this control is green, so a dead or
+    misrouted control can never let a denial claim through.
+    """
+    try:
+        response = httpx.get(url, timeout=timeout, trust_env=True)
+    except httpx.TimeoutException as error:
+        return ProbeAttempt(
+            OUTCOME_INCONCLUSIVE, None, f"the control timed out: {type(error).__name__}: {error}"
+        )
+    except httpx.HTTPError as error:
+        return ProbeAttempt(
+            OUTCOME_UNAVAILABLE,
+            None,
+            f"the control could not be reached: {type(error).__name__}: {error}",
+        )
+    if response.status_code // 100 == 2:
+        return ProbeAttempt(
+            OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED,
+            response.status_code,
+            f"the control answered {response.status_code} without credentials — the endpoint is alive",
+        )
+    return ProbeAttempt(
+        OUTCOME_UNAVAILABLE,
+        response.status_code,
+        f"the control answered {response.status_code} — the endpoint's aliveness is not demonstrated",
+    )
+
 
 def run_deny_probe(
-    name: str, url: str, header: str, *, prefix: str = "", timeout: float = 10.0
-) -> DenyProbe:
+    name: str,
+    url: str,
+    header: str,
+    *,
+    credential: str = SYNTHETIC_PROBE_CREDENTIAL,
+    prefix: str = "",
+    timeout: float = 10.0,
+    control_green: bool = False,
+) -> ProbeAttempt:
     """Attempt ONE credentialed reach from THIS process — expect denial.
 
-    The probe scans the process's OWN environment for credential-shaped
-    keys; if any survived the scrub, its value is presented to the
-    endpoint under *header*. A 2xx response means the credential WORKED
-    (or the endpoint serves anyone — both are the endpoint's verdict
-    that this process is not isolated): ``violated``. Refusals are the
-    denial the receipt records.
+    The probe presents the EXPLICIT synthetic credential (never an
+    ambient key — the first-surviving-key heuristic is gone): the
+    environment scan is a separate ABSENCE assertion. Classification
+    (the five-outcome taxonomy):
+
+    - a 2xx answer → ``violation``: credential material reached
+      something it never should have (an endpoint that serves the
+      synthetic token does not gate);
+    - 401/403/407 with the positive control green →
+      ``expected_denial_observed`` — the only outcome that counts as
+      a denial OBSERVED;
+    - any 5xx, or a transport failure (refused, DNS, reset) →
+      ``unavailable`` — a dead endpoint is NOT a denial (the R38-07
+      fix: these used to masquerade as ``denied-refused`` /
+      ``denied-other-status`` and "prove" isolation);
+    - a timeout → ``inconclusive``;
+    - anything else → ``inconclusive`` (neither service nor an
+      auth-shaped denial).
     """
-    credentials = scan_credential_env()
-    presented = next(iter(credentials), "")
-    headers = {header: f"{prefix}{credentials[presented]}"} if presented else {}
+    headers = {header: f"{prefix}{credential}"} if credential else {}
     try:
         response = httpx.get(url, headers=headers, timeout=timeout, trust_env=True)
-    except httpx.HTTPError as error:
-        detail = f"{type(error).__name__}: {error}"
-        return DenyProbe(name, url, header, presented, "denied-refused", None, detail)
-    if response.status_code // 100 == 2:
-        outcome = "violated"
-        detail = (
-            f"the endpoint answered {response.status_code} — this process reached"
-            " something only egress/provider credentials reach"
+    except httpx.TimeoutException as error:
+        return ProbeAttempt(
+            OUTCOME_INCONCLUSIVE, None, f"the probe timed out: {type(error).__name__}: {error}"
         )
-    elif response.status_code in (401, 403, 407):
-        outcome = "denied-unauthorized"
-        detail = f"the endpoint refused the credentialless request ({response.status_code})"
-    else:
-        outcome = "denied-other-status"
-        detail = f"the endpoint answered {response.status_code} (not service)"
-    return DenyProbe(name, url, header, presented, outcome, response.status_code, detail)
+    except httpx.HTTPError as error:
+        return ProbeAttempt(
+            OUTCOME_UNAVAILABLE,
+            None,
+            f"the endpoint could not be reached ({type(error).__name__}: {error}) —"
+            " unreachability is not a denial",
+        )
+    code = response.status_code
+    if code // 100 == 2:
+        return ProbeAttempt(
+            OUTCOME_VIOLATION,
+            code,
+            "the endpoint served the probe's credential material — the isolation did not hold",
+        )
+    if code >= 500:
+        return ProbeAttempt(
+            OUTCOME_UNAVAILABLE,
+            code,
+            f"the endpoint answered {code} (unhealthy) — a failing service is not a denial",
+        )
+    if code in (401, 403, 407):
+        if control_green:
+            return ProbeAttempt(
+                OUTCOME_EXPECTED_DENIAL_OBSERVED,
+                code,
+                f"the endpoint refused the probe credential ({code}) with the control green",
+            )
+        return ProbeAttempt(
+            OUTCOME_INCONCLUSIVE,
+            code,
+            f"the endpoint refused the probe ({code}) but the positive control was not green"
+            " — the denial is not evidence",
+        )
+    return ProbeAttempt(
+        OUTCOME_INCONCLUSIVE,
+        code,
+        f"the endpoint answered {code} — neither service nor an auth-shaped denial",
+    )
+
+
+@dataclass(frozen=True)
+class ProbeTarget:
+    """One probe class: the gated deny URL plus its positive control."""
+
+    name: str
+    deny_url: str
+    control_url: str
+    header: str
+    prefix: str = ""
+
+
+@dataclass(frozen=True)
+class ControlledDenyProbe:
+    """One probe class's complete outcome, observed from the launched
+    process: the positive-control leg, the deny leg (``None`` when the
+    control was not green — a blocked probe is claimed as NOTHING),
+    the class verdict in the five-outcome taxonomy and the named
+    blocker when the verdict is not ``expected_denial_observed``."""
+
+    name: str
+    deny_url: str
+    control_url: str
+    header: str
+    credential_source: str
+    presented_from_env: str
+    control: ProbeAttempt
+    deny: ProbeAttempt | None
+    outcome: str
+    blocker: str
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "deny_url": self.deny_url,
+            "control_url": self.control_url,
+            "header": self.header,
+            "credential_source": self.credential_source,
+            "presented_from_env": self.presented_from_env,
+            "control": self.control.as_document(),
+            "deny": self.deny.as_document() if self.deny is not None else None,
+            "outcome": self.outcome,
+            "blocker": self.blocker,
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> ControlledDenyProbe:
+        deny = document.get("deny")
+        return cls(
+            name=str(document["name"]),
+            deny_url=str(document.get("deny_url", "")),
+            control_url=str(document.get("control_url", "")),
+            header=str(document.get("header", "")),
+            credential_source=str(document.get("credential_source", CREDENTIAL_SOURCE_SYNTHETIC)),
+            presented_from_env=str(document.get("presented_from_env", "")),
+            control=ProbeAttempt.from_document(document.get("control", {})),
+            deny=None if deny is None else ProbeAttempt.from_document(deny),
+            outcome=str(document.get("outcome", OUTCOME_INCONCLUSIVE)),
+            blocker=str(document.get("blocker", "")),
+        )
+
+
+def run_probe_class(target: ProbeTarget, *, timeout: float = 10.0) -> ControlledDenyProbe:
+    """Run one probe class: the positive control FIRST, the deny probe
+    only when the control is green (a blocked class claims nothing)."""
+    control = run_positive_control(target.name, target.control_url, timeout=timeout)
+    if control.outcome != OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED:
+        return ControlledDenyProbe(
+            name=target.name,
+            deny_url=target.deny_url,
+            control_url=target.control_url,
+            header=target.header,
+            credential_source=CREDENTIAL_SOURCE_SYNTHETIC,
+            presented_from_env="",
+            control=control,
+            deny=None,
+            outcome=control.outcome,
+            blocker=f"the positive control did not succeed: {control.detail}",
+        )
+    deny = run_deny_probe(
+        target.name,
+        target.deny_url,
+        target.header,
+        prefix=target.prefix,
+        timeout=timeout,
+        control_green=True,
+    )
+    blocker = (
+        ""
+        if deny.outcome == OUTCOME_EXPECTED_DENIAL_OBSERVED
+        else f"the deny probe was {deny.outcome}: {deny.detail}"
+    )
+    return ControlledDenyProbe(
+        name=target.name,
+        deny_url=target.deny_url,
+        control_url=target.control_url,
+        header=target.header,
+        credential_source=CREDENTIAL_SOURCE_SYNTHETIC,
+        presented_from_env="",
+        control=control,
+        deny=deny,
+        outcome=deny.outcome,
+        blocker=blocker,
+    )
+
+
+@dataclass(frozen=True)
+class EnforcementProfile:
+    """The isolation configuration the LAUNCHER used, recorded as the
+    claims' scope (``verification.enforcement_profile_digest``).
+
+    The profile binds: the env allowlist (with its version stamp), the
+    clean-HOME policy (the exact path and its layout digest), the
+    narrowed PATH policy (the exact entries), the caller-owned env
+    additions and the network policy class the probes qualify. The
+    launched process VALIDATES the declaration against what it
+    actually observes (HOME value, PATH entries, env-key membership) —
+    a mismatch is a hygiene violation, not a silent pass."""
+
+    schema: str = ENFORCEMENT_PROFILE_SCHEMA
+    env_allowlist: tuple[str, ...] = DEFAULT_ENV_ALLOWLIST
+    env_allowlist_version: str = DEFAULT_ENV_ALLOWLIST_VERSION
+    extra_env_keys: tuple[str, ...] = ()
+    home_policy: str = HOME_POLICY
+    home_path: str = ""
+    home_layout: tuple[str, ...] = ()
+    path_policy: str = PATH_POLICY
+    path_entries: tuple[str, ...] = ()
+    network_policy_class: str = NETWORK_POLICY_CLASS
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "env_allowlist": list(self.env_allowlist),
+            "env_allowlist_version": self.env_allowlist_version,
+            "extra_env_keys": list(self.extra_env_keys),
+            "home_policy": self.home_policy,
+            "home_path": self.home_path,
+            "home_layout": list(self.home_layout),
+            "path_policy": self.path_policy,
+            "path_entries": list(self.path_entries),
+            "network_policy_class": self.network_policy_class,
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> EnforcementProfile:
+        return cls(
+            schema=str(document.get("schema", ENFORCEMENT_PROFILE_SCHEMA)),
+            env_allowlist=tuple(document.get("env_allowlist", DEFAULT_ENV_ALLOWLIST)),
+            env_allowlist_version=str(
+                document.get("env_allowlist_version", DEFAULT_ENV_ALLOWLIST_VERSION)
+            ),
+            extra_env_keys=tuple(document.get("extra_env_keys", ())),
+            home_policy=str(document.get("home_policy", HOME_POLICY)),
+            home_path=str(document.get("home_path", "")),
+            home_layout=tuple(document.get("home_layout", ())),
+            path_policy=str(document.get("path_policy", PATH_POLICY)),
+            path_entries=tuple(document.get("path_entries", ())),
+            network_policy_class=str(document.get("network_policy_class", NETWORK_POLICY_CLASS)),
+        )
+
+    @classmethod
+    def digest_document(cls, document: Mapping[str, Any]) -> str:
+        """The profile's sha256 over its canonical JSON — the value the
+        receipt reports as ``verification.enforcement_profile_digest``."""
+        return _canonical_digest(document)
+
+    def digest(self) -> str:
+        return self.digest_document(self.as_document())
 
 
 @dataclass(frozen=True)
@@ -362,18 +796,39 @@ class AuthorityReceipt:
     """The isolation proof PRODUCED BY THE LAUNCHED PROCESS.
 
     The subprocess self-reports: the env keys it actually sees, the
-    credential-shaped survivors among them (must be empty), the deny
-    probes it ran, and the verdict. The parent's launch receipt
+    credential-shaped survivors among them (must be empty), its OWN
+    HOME and the credential-shaped shapes found there (must be none),
+    its PATH entries, the controlled probes it ran — and THREE
+    SEPARATE verdicts (never one ``isolation: true``):
+    ``environment_hygiene`` (env scrub + clean HOME + PATH scope),
+    ``credential_non_disclosure`` (no credential material worked) and
+    ``network_enforcement`` (live positive control + expected denial
+    per probe class), plus the tri-state ``isolation`` verdict, the
+    fatal ``violations`` and the ``blockers`` that name what prevented
+    a proven verdict. The parent's launch receipt
     (:attr:`ExecutorRun.launch_env_keys`) carries the other half —
-    what the LAUNCHER passed — so absence is proved from BOTH sides.
-    """
+    what the LAUNCHER passed — so absence is proved from BOTH sides."""
 
     env_keys: tuple[str, ...] = ()
     allowlist: tuple[str, ...] = ()
     credential_shaped_keys: tuple[str, ...] = ()
-    deny_probes: tuple[DenyProbe, ...] = ()
-    isolated: bool = False
+    home: str = ""
+    home_shapes_checked: tuple[str, ...] = ()
+    home_shapes_found: tuple[str, ...] = ()
+    path_entries: tuple[str, ...] = ()
+    probes: tuple[ControlledDenyProbe, ...] = ()
+    environment_hygiene: str = ISOLATION_UNPROVEN
+    credential_non_disclosure: str = ISOLATION_UNPROVEN
+    network_enforcement: str = ISOLATION_UNPROVEN
+    isolation: str = ISOLATION_UNPROVEN
     violations: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def isolated(self) -> bool:
+        """Compat view: only a ``proven`` verdict is isolated — an
+        ``unproven`` receipt is NEVER consumable as a pass."""
+        return self.isolation == ISOLATION_PROVEN
 
     def as_document(self) -> dict[str, Any]:
         return {
@@ -381,9 +836,17 @@ class AuthorityReceipt:
             "env_keys": list(self.env_keys),
             "allowlist": list(self.allowlist),
             "credential_shaped_keys": list(self.credential_shaped_keys),
-            "deny_probes": [probe.as_document() for probe in self.deny_probes],
-            "isolated": self.isolated,
+            "home": self.home,
+            "home_shapes_checked": list(self.home_shapes_checked),
+            "home_shapes_found": list(self.home_shapes_found),
+            "path_entries": list(self.path_entries),
+            "probes": [probe.as_document() for probe in self.probes],
+            "environment_hygiene": self.environment_hygiene,
+            "credential_non_disclosure": self.credential_non_disclosure,
+            "network_enforcement": self.network_enforcement,
+            "isolation": self.isolation,
             "violations": list(self.violations),
+            "blockers": list(self.blockers),
         }
 
     @classmethod
@@ -392,47 +855,126 @@ class AuthorityReceipt:
             env_keys=tuple(document.get("env_keys", ())),
             allowlist=tuple(document.get("allowlist", ())),
             credential_shaped_keys=tuple(document.get("credential_shaped_keys", ())),
-            deny_probes=tuple(
-                DenyProbe(
-                    name=str(probe["name"]),
-                    url=str(probe["url"]),
-                    header=str(probe.get("header", "")),
-                    presented_from_env=str(probe.get("presented_from_env", "")),
-                    outcome=str(probe["outcome"]),
-                    status_code=probe.get("status_code"),
-                    detail=str(probe.get("detail", "")),
-                )
-                for probe in document.get("deny_probes", ())
+            home=str(document.get("home", "")),
+            home_shapes_checked=tuple(document.get("home_shapes_checked", ())),
+            home_shapes_found=tuple(document.get("home_shapes_found", ())),
+            path_entries=tuple(document.get("path_entries", ())),
+            probes=tuple(
+                ControlledDenyProbe.from_document(probe) for probe in document.get("probes", ())
             ),
-            isolated=bool(document.get("isolated", False)),
+            environment_hygiene=str(document.get("environment_hygiene", ISOLATION_UNPROVEN)),
+            credential_non_disclosure=str(
+                document.get("credential_non_disclosure", ISOLATION_UNPROVEN)
+            ),
+            network_enforcement=str(document.get("network_enforcement", ISOLATION_UNPROVEN)),
+            isolation=str(document.get("isolation", ISOLATION_UNPROVEN)),
             violations=tuple(document.get("violations", ())),
+            blockers=tuple(document.get("blockers", ())),
         )
 
 
 def introspect_and_probe(
-    allowlist: Sequence[str], sentinel_url: str, provider_url: str
+    allowlist: Sequence[str],
+    targets: Sequence[ProbeTarget],
+    *,
+    timeout: float = 10.0,
+    declared_profile: Mapping[str, Any] | None = None,
 ) -> AuthorityReceipt:
-    """The launched process's own isolation check (fail closed)."""
-    probes = (
-        run_deny_probe("sentinel-egress", sentinel_url, "X-Egress-Token"),
-        run_deny_probe("provider-api", provider_url, "Authorization", prefix="Bearer "),
-    )
-    violations = [
-        f"{probe.name}: {probe.detail} (presented from {probe.presented_from_env or 'nowhere'})"
-        for probe in probes
-        if not probe.denied
-    ]
+    """The launched process's own isolation check (fail closed).
+
+    Three SEPARATE verdicts and a tri-state isolation — an unavailable
+    or inconclusive probe class yields ``unproven`` with the named
+    blocker (never a pass), and any credential-shaped survivor, any
+    readable HOME shape, any PATH/env drift from the declared profile
+    or any 2xx answer to probe credential material is a ``violated``
+    verdict that fails the whole run closed.
+    """
+    hygiene: list[str] = []
     credential_keys = tuple(scan_credential_env())
-    violations.extend(
+    hygiene.extend(
         f"credential-shaped env key survived the scrub: {key}" for key in credential_keys
     )
+    home = os.environ.get("HOME", "")
+    home_found = scan_home_credentials(home)
+    hygiene.extend(
+        f"credential-shaped file readable under the verifier HOME: {shape}"
+        for shape in sorted(home_found)
+    )
+    allowed_names = set(allowlist) | set(PLATFORM_ENV_TOLERANCE)
+    if declared_profile is not None:
+        allowed_names |= set(declared_profile.get("extra_env_keys", ()))
+    hygiene.extend(
+        f"env key outside the enforcement profile allowlist: {name}"
+        for name in sorted(set(os.environ) - allowed_names)
+    )
+    observed_path = tuple(entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry)
+    if declared_profile is not None:
+        declared_home = str(declared_profile.get("home_path", ""))
+        if declared_home and home != declared_home:
+            hygiene.append("the verifier HOME is not the enforcement profile's clean home")
+        declared_path = set(declared_profile.get("path_entries", ()))
+        hygiene.extend(
+            f"PATH entry outside the enforcement profile: {entry}"
+            for entry in sorted(set(observed_path) - declared_path)
+        )
+
+    probes = tuple(run_probe_class(target, timeout=timeout) for target in targets)
+    violations = list(hygiene)
+    violations.extend(
+        f"{probe.name}: {probe.deny.detail if probe.deny else probe.blocker}"
+        " — credential material reached the endpoint"
+        for probe in probes
+        if probe.outcome == OUTCOME_VIOLATION
+    )
+    blockers: list[str] = []
+    if not targets:
+        blockers.append(
+            "no probe classes were declared — the network enforcement cannot be observed"
+        )
+    blockers.extend(
+        f"{probe.name}: {probe.blocker}"
+        for probe in probes
+        if probe.outcome != OUTCOME_EXPECTED_DENIAL_OBSERVED
+    )
+
+    environment_hygiene = "failed" if hygiene else "passed"
+    any_violation = any(probe.outcome == OUTCOME_VIOLATION for probe in probes)
+    all_denied = bool(probes) and all(
+        probe.outcome == OUTCOME_EXPECTED_DENIAL_OBSERVED for probe in probes
+    )
+    if any_violation:
+        credential_non_disclosure = "violated"
+    elif all_denied:
+        credential_non_disclosure = "passed"
+    else:
+        credential_non_disclosure = ISOLATION_UNPROVEN
+    network_enforcement = "demonstrated" if all_denied else ISOLATION_UNPROVEN
+
+    if violations:
+        isolation = ISOLATION_VIOLATED
+    elif (
+        environment_hygiene == "passed"
+        and credential_non_disclosure == "passed"
+        and network_enforcement == "demonstrated"
+    ):
+        isolation = ISOLATION_PROVEN
+    else:
+        isolation = ISOLATION_UNPROVEN
     return AuthorityReceipt(
         env_keys=tuple(sorted(os.environ)),
         allowlist=tuple(sorted(set(allowlist))),
         credential_shaped_keys=credential_keys,
-        deny_probes=probes,
-        isolated=not violations,
+        home=home,
+        home_shapes_checked=CREDENTIAL_HOME_SHAPES,
+        home_shapes_found=tuple(sorted(home_found)),
+        path_entries=observed_path,
+        probes=probes,
+        environment_hygiene=environment_hygiene,
+        credential_non_disclosure=credential_non_disclosure,
+        network_enforcement=network_enforcement,
+        isolation=isolation,
         violations=tuple(violations),
+        blockers=tuple(blockers),
     )
 
 
@@ -457,14 +999,18 @@ class WheelRef:
 class CandidateBundle:
     """Everything the executor needs: the frozen candidate set (the
     wheel digests ARE the members' image digests), the wheel files,
-    the deny-probe endpoints, the baseline pin's served API and the
-    scenario volumes."""
+    the probe-class endpoints (each gated deny URL plus its
+    POSITIVE-CONTROL URL on the same server), the baseline pin's
+    served API and the scenario volumes."""
 
     candidate_set: CandidateSet
     wheels: tuple[WheelRef, ...]
     sentinel_url: str
     provider_url: str
     work_dir: Path
+    sentinel_control_url: str = ""
+    provider_control_url: str = ""
+    probe_timeout: float = 10.0
     contract_document: dict[str, Any] = field(default_factory=dict)
     test_document: dict[str, Any] = field(default_factory=dict)
     environment_document: dict[str, Any] = field(default_factory=dict)
@@ -483,6 +1029,9 @@ class CandidateBundle:
             "sentinel_url": self.sentinel_url,
             "provider_url": self.provider_url,
             "work_dir": str(self.work_dir),
+            "sentinel_control_url": self.sentinel_control_url,
+            "provider_control_url": self.provider_control_url,
+            "probe_timeout": self.probe_timeout,
             "contract_document": dict(self.contract_document),
             "test_document": dict(self.test_document),
             "environment_document": dict(self.environment_document),
@@ -509,6 +1058,9 @@ class CandidateBundle:
             sentinel_url=str(document["sentinel_url"]),
             provider_url=str(document["provider_url"]),
             work_dir=Path(str(document["work_dir"])),
+            sentinel_control_url=str(document.get("sentinel_control_url", "")),
+            provider_control_url=str(document.get("provider_control_url", "")),
+            probe_timeout=float(document.get("probe_timeout", 10.0)),
             contract_document=dict(document.get("contract_document", {})),
             test_document=dict(document.get("test_document", {})),
             environment_document=dict(document.get("environment_document", {})),
@@ -527,6 +1079,27 @@ class CandidateBundle:
     @classmethod
     def read(cls, path: Path) -> CandidateBundle:
         return cls.from_document(_read_json(path))
+
+    def probe_targets(self) -> tuple[ProbeTarget, ...]:
+        """The probe classes this bundle declares: each gated deny URL
+        paired with its positive-control URL (a missing control URL is
+        a class that can never be proven — it will surface as the
+        named blocker, never as a pass)."""
+        return (
+            ProbeTarget(
+                name="sentinel-egress",
+                deny_url=self.sentinel_url,
+                control_url=self.sentinel_control_url,
+                header="X-Egress-Token",
+            ),
+            ProbeTarget(
+                name="provider-api",
+                deny_url=self.provider_url,
+                control_url=self.provider_control_url,
+                header="Authorization",
+                prefix="Bearer ",
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +1141,31 @@ def test_bundle_document(
     }
 
 
+#: The reference-coverage label class: the fixture TCP-broker and
+#: sqlite legs prove MECHANICS against local stand-ins, not production
+#: RabbitMQ/PostgreSQL behavior. An explicit note in the report, never
+#: a removal of the coverage itself.
+REFERENCE_COVERAGE = "reference-coverage"
+
+#: The per-dependency reference-coverage notes (R38-07: the fixture
+#: broker/sqlite tests are labeled so no report can read them as
+#: production-broker/database proof).
+DEPENDENCY_COVERAGE_LABELS: dict[str, str] = {
+    DB_DEPENDENCY: (
+        f"{REFERENCE_COVERAGE}: the sqlite fixture ladder — reference coverage for the"
+        " upgrade mechanics, NOT production PostgreSQL proof"
+    ),
+    BUS_DEPENDENCY: (
+        f"{REFERENCE_COVERAGE}: the local socket fake broker — reference coverage for"
+        " the redelivery mechanics, NOT production RabbitMQ proof"
+    ),
+}
+
+
 def environment_profile_document() -> dict[str, Any]:
     """The declared environment profile: the wheel-backed services, the
-    pinned baseline and the two dependency pins."""
+    pinned baseline, the two dependency pins — each fixture dependency
+    carrying its explicit reference-coverage label."""
     return {
         "schema": _ENVIRONMENT_PROFILE_INPUT_SCHEMA,
         "profile": "python-wheel-executor-v1",
@@ -581,6 +1176,7 @@ def environment_profile_document() -> dict[str, Any]:
             DB_DEPENDENCY,
             BUS_DEPENDENCY,
         ],
+        "coverage_labels": dict(DEPENDENCY_COVERAGE_LABELS),
     }
 
 
@@ -779,11 +1375,6 @@ class ExecutorReceipt:
         )
 
 
-class IsolationViolated(RuntimeError):
-    """A deny probe observed a credential the scrub should have
-    removed — the verification refuses to run (fail closed)."""
-
-
 # ---------------------------------------------------------------------------
 # Evidence record serialization (the report is JSON on disk).
 # ---------------------------------------------------------------------------
@@ -846,15 +1437,25 @@ class ExecutorReport:
     tested_world_digest: str = ""
     applicability_digest: str = ""
     isolation_violated: bool = False
+    isolation_unproven: bool = False
     authority_receipt: AuthorityReceipt = field(default_factory=AuthorityReceipt)
+    enforcement_profile: dict[str, Any] = field(default_factory=dict)
+    enforcement_profile_digest: str = ""
     executor_receipt: ExecutorReceipt = field(default_factory=ExecutorReceipt)
     edge_results: tuple[EdgeResult, ...] = ()
     system_ready: bool = False
     failed_members: tuple[str, ...] = ()
     report_coverage: dict[str, Any] = field(default_factory=dict)
     redelivery_outcome: dict[str, Any] = field(default_factory=dict)
+    dependency_coverage: dict[str, str] = field(default_factory=dict)
     evidence_records: tuple[EvidenceRecord, ...] = ()
     readiness: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def isolation(self) -> str:
+        """The tri-state isolation verdict (never one boolean): mirrors
+        the launched process's authority receipt."""
+        return self.authority_receipt.isolation
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -862,13 +1463,18 @@ class ExecutorReport:
             "tested_world_digest": self.tested_world_digest,
             "applicability_digest": self.applicability_digest,
             "isolation_violated": self.isolation_violated,
+            "isolation_unproven": self.isolation_unproven,
+            "isolation": self.isolation,
             "authority_receipt": self.authority_receipt.as_document(),
+            "enforcement_profile": dict(self.enforcement_profile),
+            "enforcement_profile_digest": self.enforcement_profile_digest,
             "executor_receipt": self.executor_receipt.as_document(),
             "system_ready": self.system_ready,
             "failed_members": list(self.failed_members),
             "edge_results": [result.as_document() for result in self.edge_results],
             "report_coverage": dict(self.report_coverage),
             "redelivery_outcome": dict(self.redelivery_outcome),
+            "dependency_coverage": dict(self.dependency_coverage),
             "evidence": [_evidence_to_document(record) for record in self.evidence_records],
             "readiness": dict(self.readiness),
         }
@@ -880,7 +1486,10 @@ class ExecutorReport:
             tested_world_digest=str(document.get("tested_world_digest", "")),
             applicability_digest=str(document.get("applicability_digest", "")),
             isolation_violated=bool(document.get("isolation_violated", False)),
+            isolation_unproven=bool(document.get("isolation_unproven", False)),
             authority_receipt=AuthorityReceipt.from_document(document.get("authority_receipt", {})),
+            enforcement_profile=dict(document.get("enforcement_profile", {})),
+            enforcement_profile_digest=str(document.get("enforcement_profile_digest", "")),
             executor_receipt=ExecutorReceipt.from_document(document.get("executor_receipt", {})),
             edge_results=tuple(
                 EdgeResult(
@@ -899,6 +1508,7 @@ class ExecutorReport:
             failed_members=tuple(document.get("failed_members", ())),
             report_coverage=dict(document.get("report_coverage", {})),
             redelivery_outcome=dict(document.get("redelivery_outcome", {})),
+            dependency_coverage=dict(document.get("dependency_coverage", {})),
             evidence_records=tuple(
                 _evidence_from_document(record) for record in document.get("evidence", ())
             ),
@@ -928,7 +1538,10 @@ def executor_readiness(
     with the two permission booleans recording EXPLICIT human grants
     (a green verification authorizes neither merge nor deploy)."""
     failed = report.failed_edge_ids()
-    if report.isolation_violated:
+    if report.isolation_violated or report.isolation_unproven:
+        # a violated OR unproven isolation is a security prerequisite
+        # failure: it BLOCKS verification — every edge — and is never
+        # misclassified as a code defect on some member.
         failed = tuple(sorted({*failed, *(edge.edge_id for edge in executor_edges())}))
     return system_readiness(
         report.ledger(),
@@ -958,23 +1571,47 @@ class ExecutorRun:
     stdout_sha256: str
     stderr_sha256: str
     report: ExecutorReport | None
+    enforcement_profile_digest: str = ""
 
     @property
     def clean(self) -> bool:
         return self.exit_code == EXIT_CLEAN and self.report is not None
 
 
+class IsolationViolated(RuntimeError):
+    """A probe observed credential material where none should exist —
+    the verification refuses to run (fail closed)."""
+
+
+class IsolationUnproven(RuntimeError):
+    """A probe prerequisite (positive control, clean HOME, PATH scope)
+    could not be demonstrated — the isolation claim is ``unproven``
+    and the verification is BLOCKED (never consumed as a pass)."""
+
+
 def require_isolated(run: ExecutorRun) -> ExecutorRun:
-    """Fail closed in-process: a run whose launched process observed a
-    credential raises instead of being consumed as evidence."""
+    """Fail closed in-process: a run whose launched process observed
+    credential material raises instead of being consumed as evidence,
+    and a run whose isolation could not be DEMONSTRATED (unavailable
+    or inconclusive probes, dirty HOME/PATH) is refused just as
+    firmly — an unproven receipt is never evidence."""
     if run.report is None:
         raise IsolationViolated(
             "the executor produced no report"
             + (" (it timed out)" if run.timed_out else f" (exit {run.exit_code})")
         )
-    if run.report.isolation_violated:
+    verdict = run.report.authority_receipt.isolation
+    if verdict == ISOLATION_VIOLATED or run.report.isolation_violated:
         violations = "; ".join(run.report.authority_receipt.violations) or "deny probe violation"
         raise IsolationViolated(f"the launched verification process was not isolated: {violations}")
+    if verdict != ISOLATION_PROVEN or run.report.isolation_unproven:
+        blockers = "; ".join(run.report.authority_receipt.blockers) or "isolation prerequisites"
+        raise IsolationUnproven(
+            "the launched verification process's isolation is unproven"
+            f" ({run.report.authority_receipt.environment_hygiene} hygiene,"
+            f" {run.report.authority_receipt.credential_non_disclosure} non-disclosure,"
+            f" {run.report.authority_receipt.network_enforcement} enforcement): {blockers}"
+        )
     return run
 
 
@@ -985,10 +1622,19 @@ class VerificationExecutor:
     The subprocess is the shipped module itself
     (``python -m forge.adaptive.verification_executor``); its env is
     the parent's intersected with *allowlist* plus *extra_env* (both
-    recorded in the launch receipt). The deny probes INSIDE the
-    subprocess are the behavioral backstop: a credential that rides
-    ``extra_env`` or a misconfigured allowlist is caught from the
-    launched process and fails the whole run closed.
+    recorded in the launch receipt), with TWO R38-07 enforcement
+    overrides: the child's HOME is an ISOLATED EMPTY home the launcher
+    provisions (the parent home — and any credential file planted
+    under it — never reaches the verifier) and the child's PATH is
+    reduced to the system minimum plus the resolved venv tooling. The
+    whole configuration is recorded as the :class:`EnforcementProfile`
+    (written to disk, passed as ``--enforcement-profile``, digested in
+    the report as ``verification.enforcement_profile_digest``) and the
+    launched process VALIDATES the declaration against what it
+    observes. The controlled probes INSIDE the subprocess remain the
+    behavioral backstop: an ungated endpoint or a misconfigured
+    allowlist is caught from the launched process and fails the whole
+    run closed.
     """
 
     def __init__(
@@ -1004,8 +1650,38 @@ class VerificationExecutor:
         self._extra_env = dict(extra_env or {})
         self._timeout = timeout
 
+    def _tool_dirs(self) -> tuple[str, ...]:
+        """The resolved venv tooling directories the narrowed PATH
+        keeps (the executor's children dial ``uv`` by name)."""
+        uv = shutil.which("uv")
+        return (str(Path(uv).parent),) if uv else ()
+
+    def _provision_clean_home(self, home: Path) -> Path:
+        """An ISOLATED EMPTY home: recreated on every launch so only
+        the allowlisted layout ever exists under it."""
+        if home.exists():
+            shutil.rmtree(home)
+        home.mkdir(parents=True)
+        return home
+
+    def enforcement_profile(self, home: Path, path_entries: Sequence[str]) -> EnforcementProfile:
+        """The isolation configuration this launcher uses — the scope
+        every isolation claim in the report is bound to."""
+        return EnforcementProfile(
+            env_allowlist=self._allowlist,
+            extra_env_keys=tuple(sorted(self._extra_env)),
+            home_path=str(home),
+            home_layout=(),
+            path_entries=tuple(path_entries),
+        )
+
     def build_argv(
-        self, bundle_path: Path, out_path: Path, *, probes_only: bool = False
+        self,
+        bundle_path: Path,
+        out_path: Path,
+        *,
+        probes_only: bool = False,
+        enforcement_profile_path: Path | None = None,
     ) -> tuple[str, ...]:
         argv = [
             self._python,
@@ -1016,14 +1692,37 @@ class VerificationExecutor:
             "--out",
             str(out_path),
         ]
+        if enforcement_profile_path is not None:
+            argv.extend(("--enforcement-profile", str(enforcement_profile_path)))
         if probes_only:
             argv.append("--probes-only")
         return tuple(argv)
 
-    def run(self, bundle_path: Path, *, out_path: Path, probes_only: bool = False) -> ExecutorRun:
+    def run(
+        self,
+        bundle_path: Path,
+        *,
+        out_path: Path,
+        probes_only: bool = False,
+        home_dir: Path | None = None,
+    ) -> ExecutorRun:
         """Launch and wait; the report file is the artifact of record."""
-        argv = self.build_argv(bundle_path, out_path, probes_only=probes_only)
+        home = self._provision_clean_home(
+            home_dir if home_dir is not None else out_path.parent / "executor-home"
+        )
+        path_entries = narrowed_path_entries(extra_dirs=self._tool_dirs())
+        profile = self.enforcement_profile(home, path_entries)
+        profile_path = out_path.parent / "enforcement-profile.json"
+        _write_json(profile_path, profile.as_document())
+        argv = self.build_argv(
+            bundle_path,
+            out_path,
+            probes_only=probes_only,
+            enforcement_profile_path=profile_path,
+        )
         env = scrubbed_environment(os.environ, self._allowlist, self._extra_env)
+        env["HOME"] = str(home)  # the clean HOME override (R38-07)
+        env["PATH"] = os.pathsep.join(path_entries)  # the narrowed PATH override
         out_path.parent.mkdir(parents=True, exist_ok=True)
         timed_out = False
         completed: subprocess.CompletedProcess[str] | None = None
@@ -1052,6 +1751,7 @@ class VerificationExecutor:
                 (completed.stderr if completed else "").encode("utf-8")
             ).hexdigest(),
             report=report,
+            enforcement_profile_digest=profile.digest(),
         )
 
 
@@ -1455,6 +2155,7 @@ def _broker_arm(
     )
     return {
         "schema": REDELIVERY_OUTCOME_SCHEMA,
+        "coverage": REFERENCE_COVERAGE,
         "broker_socket": f"127.0.0.1:{port}",
         "duplicates_injected_at_socket": int(journal.get("duplicates", DUPLICATE_DELIVERIES)),
         "messages": len(messages),
@@ -1504,27 +2205,82 @@ def _verify_bundle_documents(bundle: CandidateBundle) -> None:
         raise ValueError("the bundle's environment document is not the frozen profile")
 
 
-def _execute_candidate_verification(bundle: CandidateBundle, out_path: Path) -> int:
+def _blocked_report(
+    bundle: CandidateBundle,
+    authority: AuthorityReceipt,
+    edges: tuple[SystemEdge, ...],
+    profile_document: Mapping[str, Any] | None,
+    *,
+    isolation_violated: bool,
+    isolation_unproven: bool,
+) -> ExecutorReport:
+    """The report for a run whose isolation gated everything: no edge
+    ran, no evidence exists — only the authority receipt, the
+    enforcement profile the claims would have been scoped to, and the
+    reference-coverage labels."""
+    return ExecutorReport(
+        tested_world_digest=bundle.candidate_set.tested_world_digest or "",
+        applicability_digest=bundle.candidate_set.applicability_digest or "",
+        isolation_violated=isolation_violated,
+        isolation_unproven=isolation_unproven,
+        authority_receipt=authority,
+        enforcement_profile=dict(profile_document or {}),
+        enforcement_profile_digest=(
+            EnforcementProfile.digest_document(profile_document) if profile_document else ""
+        ),
+        report_coverage=_report_coverage(edges, ()),
+        dependency_coverage=dict(bundle.environment_document.get("coverage_labels", {})),
+    )
+
+
+def _execute_candidate_verification(
+    bundle: CandidateBundle, out_path: Path, profile_document: Mapping[str, Any] | None = None
+) -> int:
     """The subprocess driver: probes first (fail closed), then the
     built artifacts, then the edges, then the report. Any unexpected
     executor failure still writes a report — never a bare crash."""
     workspace = bundle.work_dir / "executor"
     workspace.mkdir(parents=True, exist_ok=True)
     logs = workspace / "logs"
-    authority = introspect_and_probe(bundle.allowlist, bundle.sentinel_url, bundle.provider_url)
+    authority = introspect_and_probe(
+        bundle.allowlist,
+        bundle.probe_targets(),
+        timeout=bundle.probe_timeout,
+        declared_profile=profile_document,
+    )
     edges = executor_edges()
     contract_edge, baseline_edge, environment_edge = edges
-    if not authority.isolated:
-        report = ExecutorReport(
-            tested_world_digest=bundle.candidate_set.tested_world_digest or "",
-            applicability_digest=bundle.candidate_set.applicability_digest or "",
+    if authority.isolation == ISOLATION_VIOLATED:
+        report = _blocked_report(
+            bundle,
+            authority,
+            edges,
+            profile_document,
             isolation_violated=True,
-            authority_receipt=authority,
-            report_coverage=_report_coverage(edges, ()),
+            isolation_unproven=False,
         )
         _write_json(out_path, report.to_document())
         print("isolation violated: " + "; ".join(authority.violations), file=sys.stderr)
         return EXIT_ISOLATION_VIOLATED
+    if authority.isolation == ISOLATION_UNPROVEN:
+        # A prerequisite could not be demonstrated (dead control,
+        # unavailable/inconclusive probes, missing HOME/PATH profile).
+        # The verification is BLOCKED — never green, and never
+        # misreported as a code defect on some member.
+        report = _blocked_report(
+            bundle,
+            authority,
+            edges,
+            profile_document,
+            isolation_violated=False,
+            isolation_unproven=True,
+        )
+        _write_json(out_path, report.to_document())
+        print(
+            "isolation unproven: " + "; ".join(authority.blockers),
+            file=sys.stderr,
+        )
+        return EXIT_ISOLATION_UNPROVEN
 
     commands: list[CommandRun] = []
     installed: list[InstalledWheel] = []
@@ -1875,6 +2631,7 @@ def _execute_candidate_verification(bundle: CandidateBundle, out_path: Path) -> 
         {
             "check": "db-upgrade",
             "status": "passed" if upgrade_ok else "failed",
+            "coverage": REFERENCE_COVERAGE,
             **{
                 key: upgrade.get(key)
                 for key in (
@@ -1968,12 +2725,17 @@ def _execute_candidate_verification(bundle: CandidateBundle, out_path: Path) -> 
         tested_world_digest=bundle.candidate_set.tested_world_digest or "",
         applicability_digest=bundle.candidate_set.applicability_digest or "",
         authority_receipt=authority,
+        enforcement_profile=dict(profile_document or {}),
+        enforcement_profile_digest=(
+            EnforcementProfile.digest_document(profile_document) if profile_document else ""
+        ),
         executor_receipt=receipt,
         edge_results=tuple(results),
         system_ready=system_ready,
         failed_members=failed_members,
         report_coverage=_report_coverage(edges, results),
         redelivery_outcome=redelivery,
+        dependency_coverage=dict(bundle.environment_document.get("coverage_labels", {})),
         evidence_records=records,
         readiness=readiness,
     )
@@ -1998,9 +2760,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-set", type=Path, help="the candidate bundle document")
     parser.add_argument("--out", type=Path, help="where the report JSON is written")
     parser.add_argument(
+        "--enforcement-profile",
+        type=Path,
+        help=(
+            "the launcher's enforcement profile document (clean HOME/PATH policy, env"
+            " allowlist version, network policy class) — the scope the isolation claims"
+            " are bound to; the launched process validates it against what it observes"
+        ),
+    )
+    parser.add_argument(
         "--probes-only",
         action="store_true",
-        help="run ONLY the isolation introspection + deny probes (a preflight)",
+        help="run ONLY the isolation introspection + controlled probes (a preflight)",
     )
     parser.add_argument("--serve-broker", action="store_true", help="serve the fake broker")
     parser.add_argument("--port", type=int, default=0, help="broker port (0 = ephemeral)")
@@ -2021,18 +2792,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("--candidate-set and --out are required", file=sys.stderr)
         return EXIT_USAGE
     bundle = CandidateBundle.read(args.candidate_set)
+    profile_document = (
+        _read_json(args.enforcement_profile)
+        if args.enforcement_profile is not None and args.enforcement_profile.is_file()
+        else None
+    )
     if args.probes_only:
-        authority = introspect_and_probe(bundle.allowlist, bundle.sentinel_url, bundle.provider_url)
-        report = ExecutorReport(
-            tested_world_digest=bundle.candidate_set.tested_world_digest or "",
-            applicability_digest=bundle.candidate_set.applicability_digest or "",
-            isolation_violated=not authority.isolated,
-            authority_receipt=authority,
-            report_coverage=_report_coverage(executor_edges(), ()),
+        authority = introspect_and_probe(
+            bundle.allowlist,
+            bundle.probe_targets(),
+            timeout=bundle.probe_timeout,
+            declared_profile=profile_document,
+        )
+        report = _blocked_report(
+            bundle,
+            authority,
+            executor_edges(),
+            profile_document,
+            isolation_violated=authority.isolation == ISOLATION_VIOLATED,
+            isolation_unproven=authority.isolation == ISOLATION_UNPROVEN,
         )
         _write_json(args.out, report.to_document())
-        return EXIT_CLEAN if authority.isolated else EXIT_ISOLATION_VIOLATED
-    return _execute_candidate_verification(bundle, args.out)
+        if authority.isolation == ISOLATION_VIOLATED:
+            return EXIT_ISOLATION_VIOLATED
+        if authority.isolation == ISOLATION_UNPROVEN:
+            return EXIT_ISOLATION_UNPROVEN
+        return EXIT_CLEAN
+    return _execute_candidate_verification(bundle, args.out, profile_document)
 
 
 if __name__ == "__main__":

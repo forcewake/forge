@@ -57,7 +57,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclasses_field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -103,14 +103,27 @@ _MOVED_SCENARIO_SYMBOLS = frozenset(
 __all__ = [
     "CausalityArm",
     "CausalityGrade",
+    "CheckpointEvidence",
+    "CombinedGrade",
+    "CombinedTrace",
+    "COMBINED_RECORD_CHAIN_FIELDS",
+    "COMBINED_RECORD_SPEND_FIELDS",
     "EditSet",
+    "LiveTarget",
+    "ResumeDispatchEvidence",
+    "RevisionEvidence",
     "SteeringCommandEvidence",
+    "SteerApplicationEvidence",
     "SteeringRun",
     "VendorEvent",
+    "combined_record_valid",
     "command_evidence_of_row",
     "edits_differ",
     "edit_set_of",
     "grade_causality",
+    "grade_combined_trace",
+    "live_target_applied",
+    "parse_live_target",
     "read_vendor_events",
 ] + sorted(_MOVED_SCENARIO_SYMBOLS)
 
@@ -562,6 +575,508 @@ def grade_causality(run: SteeringRun) -> CausalityGrade:
         )
 
     return CausalityGrade(arms=tuple(arms), provenance=run.provenance)
+
+
+# ---------------------------------------------------------------------------
+# R38-12 / #313 — the COMBINED-TRACE grader (AT-10's composed half)
+# ---------------------------------------------------------------------------
+#
+# The R37-10 grader above proves the steer→edit causal pair on ONE vendor
+# process. The combined qualification (#313) composes the SAME question
+# with the REAL running SDK lane and the material-revision lifecycle, so
+# the evidence is no longer one vendor event log: it is the durable
+# control row's own audit journal (one database clock), the lane's
+# steering journal (the vendor application the lane OBSERVED), the
+# checkpoint transaction, and the revision activation's durable records.
+# Everything below stays PURE over captured documents — the live driver
+# (``scripts/run_combined_steering.py``) captures, this grader judges,
+# and no arm is ever a judgment call.
+
+
+#: The live instruction grammar the combined trace grades (arm 3): ::
+#:
+#:     entrypoint <new> (not <old>) in <path>
+#:
+#: e.g. ``entrypoint validate_email (not check) in src/validators/email.py``
+#: — an independently checkable transformation: the final artifact must
+#: carry ``<new>``'s symbol and no longer carry ``<old>``'s, in exactly
+#: that path. One grammar, shared by the driver's task fixture and this
+#: grader's arm — the same one-decision rule arm 3 above follows.
+_LIVE_TARGET_RE = re.compile(
+    r"entrypoint\s+(?P<new>[A-Za-z_][A-Za-z0-9_]*)\s+"
+    r"\(\s*not\s+(?P<old>[A-Za-z_][A-Za-z0-9_]*)\s*\)\s+in\s+"
+    r"(?P<path>[A-Za-z0-9_./\\-]+)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class LiveTarget:
+    """The checkable transformation a live steer names (arm 3's live form)."""
+
+    path: str
+    old: str
+    new: str
+
+
+def parse_live_target(text: str) -> LiveTarget | None:
+    """Parse the live steer grammar; ``None`` when the text names nothing
+    independently checkable (an unparseable instruction can never pass arm 3)."""
+    match = _LIVE_TARGET_RE.search(str(text or ""))
+    if match is None:
+        return None
+    target = LiveTarget(
+        # Sentence punctuation is not path material — a trailing ``.`` of
+        # the sentence around the grammar never enters the path.
+        path=match.group("path").rstrip(".,;:)"),
+        old=match.group("old"),
+        new=match.group("new"),
+    )
+    if target.old == target.new:
+        return None
+    return target
+
+
+def live_target_applied(target: LiveTarget, edits: EditSet) -> bool:
+    """Whether the edit set shows exactly the entrypoint swap the target names.
+
+    Same word-boundary discipline as :func:`_target_applied`: the final
+    bytes carry ``<new>``'s def line and no longer carry ``<old>``'s, in
+    exactly the named path, and the base actually carried ``<old>`` (a
+    rename that renamed nothing is not a transformation).
+    """
+    base_content = edits.base.get(target.path)
+    final_content = edits.files.get(target.path)
+    if base_content is None or final_content is None:
+        return False
+    return (
+        re.search(rf"def\s+{re.escape(target.old)}\s*\(", base_content) is not None
+        and re.search(rf"def\s+{re.escape(target.new)}\s*\(", final_content) is not None
+        and re.search(rf"def\s+{re.escape(target.old)}\s*\(", final_content) is None
+    )
+
+
+@dataclass(frozen=True)
+class SteerApplicationEvidence:
+    """The steer's VENDOR application as the lane observed it (live).
+
+    ``applied_at`` is the durable row's ``applied`` rung (the lane's CAS
+    gate, one database clock); ``application_observed_at`` is the lane's
+    steering-journal moment the vendor call returned. ``delivery_mode``
+    records WHICH steering shape the driver actually delivered — the
+    honest per-driver label the issue demands: ``mid-turn`` (the input
+    entered the running turn), ``next-turn`` (the driver's continuous
+    interaction queued it for the turn that followed), or
+    ``queued-for-resume`` (the turn was already suspended; the resume
+    turn carries it). Empty means the application was never observed.
+    """
+
+    command_id: str
+    applied_at: str
+    application_observed_at: str
+    delivery_mode: str
+    journal_entry: dict[str, Any] = dataclasses_field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CheckpointEvidence:
+    """One WIP checkpoint the control plane durably holds."""
+
+    checkpoint_id: str
+    files: int
+    uploaded_at: str
+
+
+@dataclass(frozen=True)
+class RevisionEvidence:
+    """The material revision's journey, from captured durable records."""
+
+    decision_id: str
+    staged_at: str = ""
+    approved_at: str = ""
+    #: The digest recomputed from the staged revision CONTENT (the third
+    #: leg of the three-way equality — never a copy of the stored one).
+    recomputed_digest: str = ""
+    staged_digest: str = ""
+    active_plan_digest_before: str = ""
+    active_plan_digest_after: str = ""
+    run_plan_digest_before: str = ""
+    run_plan_digest_after: str = ""
+    reuse_route: str = ""
+    preserved_checkpoint_id: str = ""
+
+
+@dataclass(frozen=True)
+class ResumeDispatchEvidence:
+    """The post-revision dispatch's identity (the next executor input)."""
+
+    envelope_digest: str
+    dispatched_checkpoint_id: str
+    decision_id: str
+    resume_mode: str
+
+
+@dataclass(frozen=True)
+class CombinedTrace:
+    """One captured combined live run: native steer → real SDK lane →
+    checkpoint → material revision → the resumed dispatch."""
+
+    command: SteeringCommandEvidence
+    application: SteerApplicationEvidence | None
+    edits: EditSet
+    counterfactual_edits: EditSet
+    checkpoints: tuple[CheckpointEvidence, ...] = ()
+    revision: RevisionEvidence | None = None
+    resume_dispatch: ResumeDispatchEvidence | None = None
+    provenance: str = ""
+
+
+@dataclass(frozen=True)
+class CombinedGrade:
+    """The combined-trace verdict; ``causal`` only when every arm holds."""
+
+    arms: tuple[CausalityArm, ...]
+    provenance: str = ""
+
+    @property
+    def causal(self) -> bool:
+        return bool(self.arms) and all(arm.ok for arm in self.arms)
+
+    def arm(self, name: str) -> CausalityArm:
+        for candidate in self.arms:
+            if candidate.name == name:
+                return candidate
+        raise KeyError(name)
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "causal": self.causal,
+            "provenance": self.provenance,
+            "arms": [arm.as_document() for arm in self.arms],
+        }
+
+
+def grade_combined_trace(trace: CombinedTrace) -> CombinedGrade:
+    """Grade the COMPOSED chain over one captured combined run.
+
+    The five arms (each names its durable reason on failure):
+
+    1. ``ack_precedes_edit`` — the steer command's durable ACK
+       (``received``) precedes the lane's CAS ``applied`` rung, which
+       precedes the lane-observed vendor application, which precedes at
+       least one checkpoint that landed AFTER the application — the
+       subsequent-work observation. Every timestamp is evidence the run
+       captured, never an inference from final success.
+    2. ``counterfactual_differs`` — the captured unsteered arm's edit set
+       is not byte-identical (reused :func:`edits_differ`).
+    3. ``target_matched`` — the instruction parses to the live grammar;
+       the steered edits show exactly the entrypoint swap; the
+       counterfactual did NOT perform it on its own.
+    4. ``revision_identity_switched`` — the revision's recomputed digest,
+       its staged digest, the post-activation ``active_plan`` digest and
+       the durable row's post-activation ``plan_digest`` all AGREE
+       (three-way + the row), the row's digest BEFORE activation equals
+       the pre-activation active plan (the switch happened AT the
+       approval, not before), and the pre/post digests differ (an
+       activation that changed nothing proves nothing).
+    5. ``wip_preserved_and_redispatched`` — the activation routed the
+       checkpoint ``preserve``; the preserved checkpoint is one the run
+       durably holds; the post-revision dispatch is a ``required`` resume
+       whose dispatched checkpoint id IS the preserved one.
+    """
+    arms: list[CausalityArm] = []
+
+    # -- arm 1: the ordered causal chain -------------------------------------
+    application = trace.application
+    if application is None:
+        arms.append(
+            _arm(
+                "ack_precedes_edit",
+                False,
+                "no vendor-application evidence captured — the steer's delivery "
+                "to the real SDK session is unproven",
+            )
+        )
+    else:
+        ack_at = trace.command.received_at
+        ordered = _iso_le(ack_at, application.applied_at) and _iso_le(
+            application.applied_at, application.application_observed_at
+        )
+        later_work = [
+            checkpoint
+            for checkpoint in trace.checkpoints
+            if _iso_le(application.application_observed_at, checkpoint.uploaded_at)
+        ]
+        if not ordered:
+            arms.append(
+                _arm(
+                    "ack_precedes_edit",
+                    False,
+                    f"the causal chain is out of order: ack {ack_at} → applied "
+                    f"{application.applied_at} → vendor application "
+                    f"{application.application_observed_at}",
+                )
+            )
+        elif not later_work:
+            arms.append(
+                _arm(
+                    "ack_precedes_edit",
+                    False,
+                    "no checkpoint landed after the observed vendor application — "
+                    "there is no subsequent-work observation to order against",
+                )
+            )
+        else:
+            arms.append(
+                _arm(
+                    "ack_precedes_edit",
+                    True,
+                    f"ack {ack_at} → durable applied {application.applied_at} → vendor "
+                    f"application {application.application_observed_at} "
+                    f"({application.delivery_mode or 'unlabelled'}), then "
+                    f"{len(later_work)} later checkpoint(s)",
+                )
+            )
+
+    # -- arm 2: the counterfactual (the same rule as the R37-10 grader) ------
+    if trace.counterfactual_edits is None:
+        arms.append(
+            _arm(
+                "counterfactual_differs",
+                False,
+                "no captured counterfactual arm — a guessed counterfactual is not evidence",
+            )
+        )
+    elif not edits_differ(trace.edits, trace.counterfactual_edits):
+        arms.append(
+            _arm(
+                "counterfactual_differs",
+                False,
+                "the steered and unsteered arms produced IDENTICAL edits — the steer "
+                "changed nothing",
+            )
+        )
+    else:
+        arms.append(
+            _arm(
+                "counterfactual_differs",
+                True,
+                "the same task without the steer produced a different edit set",
+            )
+        )
+
+    # -- arm 3: the live semantic target --------------------------------------
+    target = parse_live_target(trace.command.text)
+    if target is None:
+        arms.append(
+            _arm(
+                "target_matched",
+                False,
+                f"the instruction is not a checkable live transformation: {trace.command.text!r}",
+            )
+        )
+    elif not live_target_applied(target, trace.edits):
+        arms.append(
+            _arm(
+                "target_matched",
+                False,
+                f"the steered edits do not show the entrypoint '{target.old}' swapped to "
+                f"'{target.new}' in {target.path}",
+            )
+        )
+    elif trace.counterfactual_edits is not None and live_target_applied(
+        target, trace.counterfactual_edits
+    ):
+        arms.append(
+            _arm(
+                "target_matched",
+                False,
+                "the UNSTEERED arm performed the same swap — the edit is the task's "
+                "default, not the steer's effect",
+            )
+        )
+    else:
+        arms.append(
+            _arm(
+                "target_matched",
+                True,
+                f"the final artifact shows the entrypoint '{target.old}' swapped to "
+                f"'{target.new}' in {target.path}, and the unsteered arm did not do it",
+            )
+        )
+
+    # -- arm 4: the revision's identity switch --------------------------------
+    revision = trace.revision
+    if revision is None:
+        arms.append(
+            _arm(
+                "revision_identity_switched",
+                False,
+                "no material-revision evidence captured — the revision leg is unproven",
+            )
+        )
+    else:
+        agree = (
+            revision.recomputed_digest
+            and revision.recomputed_digest == revision.staged_digest
+            and revision.recomputed_digest == revision.active_plan_digest_after
+            and revision.recomputed_digest == revision.run_plan_digest_after
+        )
+        switched_at_approval = (
+            revision.run_plan_digest_before == revision.active_plan_digest_before
+            and revision.run_plan_digest_before != revision.run_plan_digest_after
+        )
+        if not agree:
+            arms.append(
+                _arm(
+                    "revision_identity_switched",
+                    False,
+                    "the revision digests disagree: recomputed "
+                    f"{revision.recomputed_digest[:12]}… staged "
+                    f"{revision.staged_digest[:12]}… active_plan "
+                    f"{revision.active_plan_digest_after[:12]}… run row "
+                    f"{revision.run_plan_digest_after[:12]}…",
+                )
+            )
+        elif not switched_at_approval:
+            arms.append(
+                _arm(
+                    "revision_identity_switched",
+                    False,
+                    "the durable row's plan digest did not switch exactly at the "
+                    f"approval: before {revision.run_plan_digest_before[:12]}… after "
+                    f"{revision.run_plan_digest_after[:12]}…",
+                )
+            )
+        else:
+            arms.append(
+                _arm(
+                    "revision_identity_switched",
+                    True,
+                    f"decision {revision.decision_id}: the recomputed, staged, "
+                    "active-plan and durable-row digests agree on "
+                    f"{revision.recomputed_digest[:12]}… and the row switched "
+                    "exactly at the approval",
+                )
+            )
+
+    # -- arm 5: the preserved WIP and the post-revision dispatch --------------
+    revision = trace.revision
+    dispatch = trace.resume_dispatch
+    if revision is None or dispatch is None:
+        arms.append(
+            _arm(
+                "wip_preserved_and_redispatched",
+                False,
+                "no reuse-decision/dispatch evidence captured — the WIP-preservation "
+                "leg is unproven",
+            )
+        )
+    else:
+        held = {checkpoint.checkpoint_id for checkpoint in trace.checkpoints}
+        # LIVE-found: the worker journal spells the dispatched checkpoint
+        # as a 12-char PREFIX of the full content address — the identity
+        # accepts the journal's prefix spelling, never a shorter guess.
+        dispatched = dispatch.dispatched_checkpoint_id
+        same_checkpoint = dispatched == revision.preserved_checkpoint_id or (
+            len(dispatched) >= 8 and revision.preserved_checkpoint_id.startswith(dispatched)
+        )
+        preserved = (
+            revision.reuse_route == "preserve"
+            and revision.preserved_checkpoint_id in held
+            and same_checkpoint
+            and dispatch.resume_mode == "required"
+        )
+        if not preserved:
+            arms.append(
+                _arm(
+                    "wip_preserved_and_redispatched",
+                    False,
+                    f"the WIP was not preserved-and-redispatched: route "
+                    f"{revision.reuse_route!r}, preserved "
+                    f"{revision.preserved_checkpoint_id[:12]}…, dispatched "
+                    f"{dispatch.dispatched_checkpoint_id[:12]}… "
+                    f"({dispatch.resume_mode})",
+                )
+            )
+        else:
+            arms.append(
+                _arm(
+                    "wip_preserved_and_redispatched",
+                    True,
+                    f"the activation routed the checkpoint {revision.preserved_checkpoint_id[:12]}… "
+                    f"to preserve and the post-revision dispatch is a required resume "
+                    f"over exactly it (envelope {dispatch.envelope_digest[:12]}…)",
+                )
+            )
+
+    return CombinedGrade(arms=tuple(arms), provenance=trace.provenance)
+
+
+#: The causal identity fields a COMPLETED combined record must carry, in
+#: chain order (issue #313's "receipt/authorization/vendor-application/
+#: edit/checkpoint as separate causal milestones" — the record says which
+#: artifact holds each, and the validation refuses a chain with a hole).
+COMBINED_RECORD_CHAIN_FIELDS: tuple[tuple[str, str], ...] = (
+    ("milestones.command.command_id", "the durable steer command id"),
+    ("milestones.command.received_at", "the operator ACK (the mailbox's first rung)"),
+    ("milestones.command.applied_at", "the lane's CAS-applied rung"),
+    ("milestones.application.application_observed_at", "the lane-observed vendor application"),
+    ("milestones.application.delivery_mode", "WHICH steering shape the driver delivered"),
+    ("milestones.edit.checkpoint_id", "the subsequent-work checkpoint"),
+    ("milestones.pause.command_id", "the native pause command id"),
+    ("milestones.pause.checkpointed_at", "the pause's verified checkpoint moment"),
+    ("milestones.revision.decision_id", "the material revision decision id"),
+    ("milestones.revision.activated_digest", "the activated plan digest"),
+    ("milestones.resume_dispatch.envelope_digest", "the post-revision dispatch envelope"),
+)
+
+#: The spend fields the record's accounting must carry (the $2 cap binds
+#: the WHOLE trace, per leg, never hidden).
+COMBINED_RECORD_SPEND_FIELDS: tuple[str, ...] = (
+    "spend.cap_usd",
+    "spend.total_usd",
+    "spend.cost_basis",
+    "spend.jobs",
+)
+
+
+def _dig(document: Mapping[str, Any], dotted: str) -> Any:
+    node: Any = document
+    for part in dotted.split("."):
+        if not isinstance(node, Mapping) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def combined_record_valid(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Whether a captured combined record carries its causal chain intact.
+
+    Returns ``(ok, missing)`` — every missing field is named with its
+    meaning, so an incomplete trace is a LIST of holes, never a silent
+    pass. A record whose spend block is absent or over cap is invalid the
+    same way (the accounting is part of the trace, not an appendix).
+    """
+    missing: list[str] = []
+    for field, meaning in COMBINED_RECORD_CHAIN_FIELDS:
+        value = _dig(record, field)
+        if value in (None, "", [], {}):
+            missing.append(f"{field} ({meaning})")
+    for field in COMBINED_RECORD_SPEND_FIELDS:
+        if _dig(record, field) in (None, "", [], {}):
+            missing.append(f"{field} (the spend accounting)")
+    if not missing:
+        spend = dict(record["spend"])
+        try:
+            over = float(spend["total_usd"]) > float(spend["cap_usd"])
+        except (TypeError, ValueError):
+            over, missing = True, missing + ["spend.total_usd (not a number)"]
+        if over:
+            missing.append(
+                f"spend.total_usd {spend['total_usd']} exceeds the cap {spend['cap_usd']}"
+            )
+    return (not missing), missing
 
 
 if __name__ == "__main__":  # the lane spawns this file as CODEX_BINARY

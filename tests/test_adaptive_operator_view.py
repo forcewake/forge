@@ -21,14 +21,18 @@ from forge.adaptive.operator_view import (
     BLOCKED_CODES,
     NON_RETRYABLE_CODES,
     OPERATOR_STATES,
+    RECOVERY_MILESTONES,
     OperatorAction,
     OperatorProjection,
     RecoveryActions,
     StaleProjectionRejected,
     apply_update,
+    delivery_outcome_of,
     derive_state,
     explain_blocked,
     initial_projection,
+    recovery_document,
+    recovery_ladder,
     render,
     status_note_lines,
 )
@@ -1232,3 +1236,101 @@ class TestExplainBlocked:
             "retryable",
         }
         assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in json.dumps(document)
+
+
+class TestRecoverySurface:
+    """The R38-15 recovery surface (pure arms): the delivery outcome's
+    derivation priority, the never-a-successful-resume display rule and
+    the five-milestone ladder's independence on hand-built rows."""
+
+    def test_the_recorded_candidate_state_outranks_every_fallback(self):
+        # the marker wins even when the driver exit and older candidates
+        # could suggest a different story
+        rows = _rows(
+            run=_run(
+                candidate_shas=["c" * 40],
+                blocked_reason="waiting on the CI lane",
+                evidence={
+                    "harness": {"driver_exit": "completed", "candidate_state": "zero_change"}
+                },
+            )
+        )
+
+        delivery = delivery_outcome_of(rows)
+
+        assert delivery.outcome == "empty_diff_no_effect"
+        assert delivery.failed is True
+        assert delivery.reason == "harness candidate_state=zero_change"
+        assert delivery.evidence["of"] == "run"
+
+    def test_a_failed_driver_exit_derives_a_driver_failed_delivery(self):
+        rows = _rows(run=_run(evidence={"harness": {"driver_exit": "failed"}}))
+
+        assert delivery_outcome_of(rows).outcome == "driver_failed"
+
+    def test_the_blocked_reason_wordings_derive_the_typed_outcomes(self):
+        cases = {
+            "repair_no_effect: empty diff": "empty_diff_no_effect",
+            "harness_no_changes": "empty_diff_no_effect",
+            "harness_artifact_missing": "collection_failed",
+            "harness_candidate_invalid: bad diff": "collection_failed",
+            "harness_driver_failed (exit=failed)": "driver_failed",
+            "waiting on the CI lane": "not_collected_yet",  # no delivery wording
+        }
+        for reason, expected in cases.items():
+            rows = _rows(run=_run(blocked_reason=reason))
+            assert delivery_outcome_of(rows).outcome == expected, reason
+
+    def test_collected_candidates_derive_delivered_and_nothing_else(self):
+        rows = _rows(run=_run(candidate_shas=["c" * 40]))
+
+        delivery = delivery_outcome_of(rows)
+
+        assert delivery.outcome == "delivered"
+        assert delivery.failed is False
+
+    def test_a_failed_delivery_never_renders_as_a_successful_resume(self):
+        rows = _rows(
+            run=_run(status="proposing", evidence={"harness": {"candidate_state": "zero_change"}}),
+            commands=[_cmd(1, "pause", "checkpointed"), _cmd(2, "resume", "applied")],
+            checkpoints=[
+                _checkpoint(
+                    activated_at="2026-09-23T11:50:00+00:00",
+                    activation="matched",
+                    fence="cleared",
+                )
+            ],
+        )
+        projection = initial_projection(rows, NOW)
+        assert projection.state == "resumed"  # the state ladder is honest
+
+        document = recovery_document(rows, state=projection.state, now=NOW)
+
+        assert document["schema"] == "forge.operator.recovery/1"
+        assert document["delivery"]["outcome"] == "empty_diff_no_effect"
+        assert document["delivery"]["failed"] is True
+        assert "FAILED/no-effect delivery" in document["delivery"]["headline"]
+        assert document["hint"]["advisory"], "a failed delivery always carries guidance"
+
+    def test_the_ladder_is_five_independent_milestones(self):
+        ladder = recovery_ladder(
+            _rows(
+                commands=[_cmd(1, "pause", "checkpointed")],
+                checkpoints=[_checkpoint()],
+            ),
+            coverage={"commands": "present", "checkpoints": "present", "occupancy": "present"},
+            occupancy=[{"lease_id": "lease-1", "released_at": ""}],  # still open
+        )
+
+        assert set(ladder) == set(RECOVERY_MILESTONES)
+        assert ladder["pause_requested"]["status"] == "present"
+        assert ladder["checkpoint_committed"]["status"] == "present"
+        assert ladder["runner_stopped"]["status"] == "absent"
+        assert ladder["resume_authorized"]["status"] == "absent"
+        assert ladder["exact_resume_applied"]["status"] == "absent"
+
+    def test_an_inconsistent_fence_renders_explicit_uncertainty(self):
+        document = recovery_document(_rows(), projection_inconsistent=True)
+
+        assert document["consistency"] == "inconsistent"
+        assert "re-read before acting" in document["uncertainty"]

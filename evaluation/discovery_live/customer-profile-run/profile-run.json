@@ -1,0 +1,856 @@
+{
+  "schema": "forge.discovery.profile.run/1",
+  "run_id": "DP-01-customer-refund-graph-scripted",
+  "task_id": "DP-01-customer-refund-graph",
+  "mode": "scripted",
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "scripted:customer-profile-investigation/v1",
+    "route": "offline-scripted-over-real-tool-loop",
+    "live_provider": false,
+    "captured_at": "2026-09-25T00:00:00+00:00",
+    "harness": "run_research_pass + cached observation mint + plan synthesis",
+    "issue": "R38-11 / #312"
+  },
+  "manifest": {
+    "digest": "06f1b32261861d229bb0e0ecb28193122c8ae9accfb1588bcb5bf2da58194f85",
+    "authorized_repo_set_digest": "56c821e98a2fed38c0c9590ae81e3c7b4f10700e34d42c0fe9eae55ff84bf337",
+    "repos": 9
+  },
+  "repos": [
+    {
+      "key": "gitlab:orders-api",
+      "role": "writable",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-orders.internal.example",
+        "connection_id": 21
+      },
+      "numeric_id": 2101,
+      "repository_id": "orders-api",
+      "source_oid": "b652860236be7530dbd5af67829953103ef0e9d1",
+      "fixture": "fixtures-customer-v1/orders-api",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:billing-policy",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-billing.internal.example",
+        "connection_id": 22
+      },
+      "numeric_id": 2102,
+      "repository_id": "billing-policy",
+      "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+      "fixture": "fixtures-customer-v1/billing-policy",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/policy/refunds.py",
+        "marker": "REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS",
+        "min_line": 200,
+        "depth": "line-200+",
+        "note": "the manual-approval threshold lives at line 200+ of the neighbor",
+        "marker_line": 218
+      }
+    },
+    {
+      "key": "gitlab:audit-events",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-audit.internal.example",
+        "connection_id": 23
+      },
+      "numeric_id": 2103,
+      "repository_id": "audit-events",
+      "source_oid": "ca387c35b44e0ae45b89d4a9e3fe41a36051252e",
+      "fixture": "fixtures-customer-v1/audit-events",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/audit/pipeline.py",
+        "marker": "AUDIT_EMISSION_REQUIRED_AFTER_DAYS",
+        "page_chars": 2000,
+        "depth": "second-page-window",
+        "note": "the emission window lives beyond the first observation page",
+        "marker_char": 3473,
+        "marker_line": 97
+      }
+    },
+    {
+      "key": "gitlab:shipping-policy",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-shipping.internal.example",
+        "connection_id": 24
+      },
+      "numeric_id": 2104,
+      "repository_id": "shipping-policy",
+      "source_oid": "2d2d8efefa8f93ca8068abf8b1098a85bcd0ac95",
+      "fixture": "fixtures-customer-v1/shipping-policy",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/shipping/confirmation.py",
+        "grep": "SHIP_CONFIRMATION_RECIPIENT",
+        "current_marker": "SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"",
+        "obsolete_marker": "SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"",
+        "revision_current": "S-2026-03",
+        "revision_obsolete": "S-2024-08",
+        "depth": "conflicting-current-vs-obsolete",
+        "note": "current and obsolete recipient policies coexist; the plan must ask",
+        "current_line": 39,
+        "obsolete_line": 71
+      }
+    },
+    {
+      "key": "gitlab:platform-docs",
+      "role": "budget_sink",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-docs.internal.example",
+        "connection_id": 25
+      },
+      "numeric_id": 2105,
+      "repository_id": "platform-docs",
+      "source_oid": "b64a44d65f5c43ccc5c8043640d726d46a60b4b6",
+      "fixture": "fixtures-customer-v1/platform-docs",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:marketing-site",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-marketing.internal.example",
+        "connection_id": 26
+      },
+      "numeric_id": 2106,
+      "repository_id": "marketing-site",
+      "source_oid": "8d876b7c76a2c94f043769321780eeddfdf6f57b",
+      "fixture": "fixtures-customer-v1/marketing-site",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:infra-terraform",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-infra.internal.example",
+        "connection_id": 27
+      },
+      "numeric_id": 2107,
+      "repository_id": "infra-terraform",
+      "source_oid": "9a323a67a0d032c8949a7c0fadc7ce7d9d1641f5",
+      "fixture": "fixtures-customer-v1/infra-terraform",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:mobile-checkout",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-mobile.internal.example",
+        "connection_id": 28
+      },
+      "numeric_id": 2108,
+      "repository_id": "mobile-checkout",
+      "source_oid": "ecd98386f9909680044d944336879a82fcaeeb52",
+      "fixture": "fixtures-customer-v1/mobile-checkout",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:search-index",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-search.internal.example",
+        "connection_id": 29
+      },
+      "numeric_id": 2109,
+      "repository_id": "search-index",
+      "source_oid": "5e3ec41afc419d4577438574b3a9dbeb0b989cce",
+      "fixture": "fixtures-customer-v1/search-index",
+      "allowed_globs": [
+        "**"
+      ]
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 5,
+    "calls_proposed": 8,
+    "calls_executed": 8,
+    "observations": {
+      "count": 8,
+      "truncated": 1,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0
+    },
+    "wall_seconds_used": 2.75,
+    "tokens": {
+      "input": 10500,
+      "output": 1140,
+      "input_lower_bound": 10500,
+      "output_lower_bound": 1140,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "gitlab:audit-events",
+      "gitlab:billing-policy",
+      "gitlab:orders-api",
+      "gitlab:shipping-policy"
+    ],
+    "repos_authorized": [
+      "gitlab:audit-events",
+      "gitlab:billing-policy",
+      "gitlab:infra-terraform",
+      "gitlab:marketing-site",
+      "gitlab:mobile-checkout",
+      "gitlab:orders-api",
+      "gitlab:platform-docs",
+      "gitlab:search-index",
+      "gitlab:shipping-policy"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line": 32,
+        "kind": "research_match",
+        "detail": "request_refund"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "gitlab:orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "line": 16,
+        "kind": "research_match",
+        "detail": "request_refund"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 218,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL"
+      },
+      {
+        "evidence_id": "ev-4",
+        "repo_key": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 230,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL"
+      },
+      {
+        "evidence_id": "ev-5",
+        "repo_key": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 261,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL"
+      },
+      {
+        "evidence_id": "ev-6",
+        "repo_key": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line": 97,
+        "kind": "research_match",
+        "detail": "AUDIT_EMISSION"
+      },
+      {
+        "evidence_id": "ev-7",
+        "repo_key": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line": 110,
+        "kind": "research_match",
+        "detail": "AUDIT_EMISSION"
+      },
+      {
+        "evidence_id": "ev-8",
+        "repo_key": "gitlab:shipping-policy",
+        "path": "src/shipping/confirmation.py",
+        "line": 11,
+        "kind": "research_match",
+        "detail": "SHIP_CONFIRMATION_RECIPIENT"
+      },
+      {
+        "evidence_id": "ev-9",
+        "repo_key": "gitlab:shipping-policy",
+        "path": "src/shipping/confirmation.py",
+        "line": 39,
+        "kind": "research_match",
+        "detail": "SHIP_CONFIRMATION_RECIPIENT"
+      },
+      {
+        "evidence_id": "ev-10",
+        "repo_key": "gitlab:shipping-policy",
+        "path": "src/shipping/confirmation.py",
+        "line": 52,
+        "kind": "research_match",
+        "detail": "SHIP_CONFIRMATION_RECIPIENT"
+      },
+      {
+        "evidence_id": "ev-11",
+        "repo_key": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 4349 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-12",
+        "repo_key": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 8358,
+        "kind": "research_read",
+        "detail": "read 648 chars from offset 8357"
+      },
+      {
+        "evidence_id": "ev-13",
+        "repo_key": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line": 2001,
+        "kind": "research_read",
+        "detail": "read 2000 chars from offset 2000"
+      },
+      {
+        "evidence_id": "ev-14",
+        "repo_key": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 8358,
+        "kind": "research_read",
+        "detail": "read 648 chars from offset 8357"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Orders' checkout gates refund requests by age only and routes money decisions to Billing's policy client; the approval rules are NOT decided in Orders. The CURRENT approval policy is Billing's revision F-2024-11 in src/policy/refunds.py: refunds at or above 5000 cents require a manual approval step before capture. The audit service's CURRENT rule A-2026-02 in src/audit/pipeline.py requires a refund event while the request is within 21 days of the ORDER's expiry. Shipping carries CONFLICTING confirmation recipients for refund shipments \u2014 the S-2026-03 value and the superseded S-2024-08 value both sit in src/shipping/confirmation.py, so which recipient is current is a question, not a pick. The issue also leaves undecided who performs the approval step for orders-api \u2014 which approvals queue or owner handles refunds above the threshold?",
+    "assumptions": [],
+    "contradictions": [
+      "shipping confirmation recipient: current S-2026-03 vs superseded S-2024-08 \u2014 unresolved"
+    ],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "grep",
+      "repo_key": "gitlab:orders-api",
+      "call": "pattern request_refund",
+      "content": "src/checkout.py:32:     def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\nsrc/orders/handlers/refunds.py:16:         request: RefundRequest = checkout.request_refund(",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "gitlab:billing-policy",
+      "call": "pattern MANUAL_APPROVAL",
+      "content": "src/policy/refunds.py:218: REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\nsrc/policy/refunds.py:230:     return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\nsrc/policy/refunds.py:261:         threshold_cents=REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS,\nsrc/policy/refunds.py:274:     \"REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\",",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "gitlab:audit-events",
+      "call": "pattern AUDIT_EMISSION",
+      "content": "src/audit/pipeline.py:97: AUDIT_EMISSION_REQUIRED_AFTER_DAYS = 21\nsrc/audit/pipeline.py:110:     return age_days <= AUDIT_EMISSION_REQUIRED_AFTER_DAYS",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "gitlab:shipping-policy",
+      "call": "pattern SHIP_CONFIRMATION_RECIPIENT",
+      "content": "src/shipping/confirmation.py:11: of the file. Both name SHIP_CONFIRMATION_RECIPIENT in their constant\nsrc/shipping/confirmation.py:39: SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"\nsrc/shipping/confirmation.py:52:         return SHIP_CONFIRMATION_RECIPIENT_CURRENT\nsrc/shipping/confirmation.py:69: #: SHIP_CONFIRMATION_RECIPIENT_CURRENT above \u2014 do not use for new\nsrc/shipping/confirmation.py:71: SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"\nsrc/shipping/confirmation.py:83:         return SHIP_CONFIRMATION_RECIPIENT_OBSOLETE",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "gitlab:audit-events",
+      "call": "src/audit/pipeline.py offset 0",
+      "content": "\"\"\"Audit-event pipeline primitives (audit-events service).\n\nThis module is the single owner of the event pipeline plumbing and of\nthe retention/emission RULES every emitting service must consult. The\nrules live in the RETENTION AND EMISSION POLICY block below \u2014 readers\npaging only the first screen of this file will see plumbing, not rules;\nthe policy block sits past it on purpose (the file is read in pages,\nand the operative constants belong to the policy block, not to the\ntransport headers above it).\n\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\nimport hashlib\nimport json\nfrom dataclasses import dataclass, field\n\n#: The audit clock and the stream naming convention (UTC; a stream is\n#: per emitting service and per calendar day).\nAUDIT_CLOCK = \"UTC\"\nSTREAM_NAME_TEMPLATE = \"audit.{service}.{day:%Y%m%d}\"\n\n#: The canonical event envelope version this pipeline accepts.\nENVELOPE_VERSION = 2\n\n#: Event kinds the pipeline currently distinguishes. Anything else is\n#: rejected at ingestion (an unknown kind is a producer bug).\nEVENT_KINDS = (\n    \"refund_requested\",\n    \"refund_captured\",\n    \"refund_rejected\",\n    \"order_expired\",\n    \"checkout_completed\",\n)\n\n#: Maximum envelope size the ingester accepts in one put (bytes). The\n#: pipeline never truncates an audit record silently \u2014 it refuses it.\nMAX_ENVELOPE_BYTES = 32768\n\n\ndef stream_name(service: str, day: dt.date) -> str:\n    \"\"\"The stream an event lands in for *service* on *day*.\"\"\"\n    return STREAM_NAME_TEMPLATE.format(service=service.strip().lower(), day=day)\n\n\ndef envelope_digest(service: str, kind: str, payload: dict) -> str:\n    \"\"\"The content digest binding one event to its exact payload bytes.\"\"\"\n    canonical = json.dumps(\n        {\"service\": service, \"kind\": kind, \"payload\": payload},\n        sort_keys=True,\n        separators=(\",\", \":\"),\n    )\n    return hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()\n\n\n@dataclass(frozen=True)\nclass AuditEvent:\n    \"\"\"One accepted audit event, envelope an",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "gitlab:billing-policy",
+      "call": "src/policy/refunds.py offset 8357 length 648",
+      "content": "\n\n#: The CURRENT manual-approval threshold (F-2024-11): refunds at or\n#: above this amount require a human approval step before capture.\nREFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\n\n#: The CURRENT refund policy revision identifier.\nREFUND_POLICY_VERSION = \"F-2024-11\"\n\n#: Who owns approval routing for manual-review refunds (the approvals\n#: service, not this module and not any consuming service).\nAPPROVALS_OWNERSHIP = \"approvals-service\"\n\n\ndef requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "gitlab:audit-events",
+      "call": "src/audit/pipeline.py offset 2000 length 2000",
+      "content": "d all.\"\"\"\n\n    service: str\n    kind: str\n    occurred_at: dt.datetime\n    payload: dict = field(default_factory=dict)\n\n    def __post_init__(self) -> None:\n        if self.kind not in EVENT_KINDS:\n            raise ValueError(f\"unknown audit event kind {self.kind!r}\")\n        if self.occurred_at.tzinfo is None:\n            raise ValueError(\"audit events must carry an aware timestamp\")\n\n    def envelope(self) -> dict:\n        \"\"\"The wire envelope the ingester expects.\"\"\"\n        return {\n            \"version\": ENVELOPE_VERSION,\n            \"service\": self.service,\n            \"kind\": self.kind,\n            \"occurred_at\": self.occurred_at.isoformat(),\n            \"payload\": self.payload,\n            \"digest\": envelope_digest(self.service, self.kind, self.payload),\n        }\n\n\n# ---------------------------------------------------------------------------\n# RETENTION AND EMISSION POLICY (audit revision A-2026-02).\n#\n# The rules every EMITTING service must consult before it decides an\n# event is optional. In particular refund flows: a refund request on an\n# order that expired recently still owes an emission, and the window is\n# measured in DAYS since order expiry, not since the request.\n# ---------------------------------------------------------------------------\n\n\n#: The CURRENT emission rule (A-2026-02): a refund event MUST be\n#: emitted while the refund request is within this many days of the\n#: ORDER's expiry; after that the trail is statement-only.\nAUDIT_EMISSION_REQUIRED_AFTER_DAYS = 21\n\n#: The current audit policy revision identifier.\nAUDIT_POLICY_VERSION = \"A-2026-02\"\n\n#: Whether late emissions (outside the required window) are accepted at\n#: all \u2014 they are, flagged, because a late honest record beats none.\nLATE_EMISSION_ACCEPTED = True\n\n\ndef emission_required(order_expired_at: dt.datetime, requested_at: dt.datetime) -> bool:\n    \"\"\"True while a refund event is inside the REQUIRED emission window.\"\"\"\n    age_days = (requested_at - order_expired_at).days\n    retur",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "gitlab:billing-policy",
+      "call": "src/policy/refunds.py offset 8357 length 648",
+      "content": "\n\n#: The CURRENT manual-approval threshold (F-2024-11): refunds at or\n#: above this amount require a human approval step before capture.\nREFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\n\n#: The CURRENT refund policy revision identifier.\nREFUND_POLICY_VERSION = \"F-2024-11\"\n\n#: Who owns approval routing for manual-review refunds (the approvals\n#: service, not this module and not any consuming service).\nAPPROVALS_OWNERSHIP = \"approvals-service\"\n\n\ndef requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "authority": {
+    "authorized_repo_set_digest": "56c821e98a2fed38c0c9590ae81e3c7b4f10700e34d42c0fe9eae55ff84bf337",
+    "read_keys": [
+      "own",
+      "gitlab:billing-policy",
+      "gitlab:audit-events",
+      "gitlab:shipping-policy",
+      "gitlab:platform-docs",
+      "gitlab:marketing-site",
+      "gitlab:infra-terraform",
+      "gitlab:mobile-checkout",
+      "gitlab:search-index"
+    ],
+    "model_refusals": []
+  },
+  "recovery_ledger": [
+    {
+      "phase": "after the truncated first-page read",
+      "verdict": {
+        "classification": "truncated_output",
+        "recovery": {
+          "kind": "continuation_read",
+          "detail": "1 observation(s) were cut \u2014 ONE bounded continuation read of the exact window",
+          "max_extra_reads": 1,
+          "max_extra_syntheses": 0,
+          "question": "",
+          "citations": [],
+          "continuation": {
+            "note": "continue reading the truncated window where it was cut",
+            "reads": 1
+          }
+        },
+        "detail": "1 truncated observation(s) pending a continuation",
+        "retained_findings_visible": true,
+        "complete_understanding_claimed": false,
+        "honest_summary": "investigation partial (truncated_output); retained findings visible"
+      },
+      "spent": true
+    }
+  ],
+  "conflict": {
+    "repository": "gitlab:shipping-policy",
+    "source_oid": "2d2d8efefa8f93ca8068abf8b1098a85bcd0ac95",
+    "path": "src/shipping/confirmation.py",
+    "current": {
+      "revision": "S-2026-03",
+      "line": 39,
+      "content": "SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\""
+    },
+    "obsolete": {
+      "revision": "S-2024-08",
+      "line": 71,
+      "content": "SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\""
+    }
+  },
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address gitlab:orders-api/src/checkout.py",
+        "repo": "gitlab:orders-api",
+        "evidence_ids": [
+          "c1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address gitlab:billing-policy/src/policy/refunds.py",
+        "repo": "gitlab:billing-policy",
+        "evidence_ids": [
+          "c2"
+        ]
+      },
+      {
+        "step_id": "s3",
+        "objective": "address gitlab:audit-events/src/audit/pipeline.py",
+        "repo": "gitlab:audit-events",
+        "evidence_ids": [
+          "c3"
+        ]
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "self._policy = policy or policy_client.default()",
+        "repo": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line_start": 30,
+        "line_end": 34,
+        "asserted_content": "        self._policy = policy or policy_client.default()\n\n    def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\n        \"\"\"Accept a refund request for an expired order.\n",
+        "source_oid": "b652860236be7530dbd5af67829953103ef0e9d1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "#: The CURRENT manual-approval threshold (F-2024-11): refunds at or",
+        "repo": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line_start": 214,
+        "line_end": 228,
+        "asserted_content": "\n\n#: The CURRENT manual-approval threshold (F-2024-11): refunds at or\n#: above this amount require a human approval step before capture.\nREFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\n\n#: The CURRENT refund policy revision identifier.\nREFUND_POLICY_VERSION = \"F-2024-11\"\n\n#: Who owns approval routing for manual-review refunds (the approvals\n#: service, not this module and not any consuming service).\nAPPROVALS_OWNERSHIP = \"approvals-service\"\n\n\ndef requires_manual_approval(amount_cents: int) -> bool:",
+        "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7"
+      },
+      {
+        "claim_id": "c3",
+        "text": "# ---------------------------------------------------------------------------",
+        "repo": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line_start": 91,
+        "line_end": 107,
+        "asserted_content": "# ---------------------------------------------------------------------------\n\n\n#: The CURRENT emission rule (A-2026-02): a refund event MUST be\n#: emitted while the refund request is within this many days of the\n#: ORDER's expiry; after that the trail is statement-only.\nAUDIT_EMISSION_REQUIRED_AFTER_DAYS = 21\n\n#: The current audit policy revision identifier.\nAUDIT_POLICY_VERSION = \"A-2026-02\"\n\n#: Whether late emissions (outside the required window) are accepted at\n#: all \u2014 they are, flagged, because a late honest record beats none.\nLATE_EMISSION_ACCEPTED = True\n\n\ndef emission_required(order_expired_at: dt.datetime, requested_at: dt.datetime) -> bool:",
+        "source_oid": "ca387c35b44e0ae45b89d4a9e3fe41a36051252e"
+      }
+    ],
+    "questions": [
+      "Which policy is current for gitlab:shipping-policy/src/shipping/confirmation.py: the S-2026-03 value at line 39 ('SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"') or the S-2024-08 value at line 71 ('SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"')? Both are present in the neighbor; the plan does not pick silently.",
+      "The issue also leaves undecided who performs the approval step for orders-api \u2014 which approvals queue or owner handles refunds above the threshold?"
+    ],
+    "assumptions": [],
+    "write_targets": [
+      "gitlab:orders-api"
+    ],
+    "synthesis": "deterministic-customer-profile/v1"
+  },
+  "synthesis": {
+    "schema": "forge.discovery.plan-synthesis/1",
+    "ok": true,
+    "errors": [],
+    "recovery": {
+      "kind": "none",
+      "detail": "no recovery needed",
+      "max_extra_reads": 0,
+      "max_extra_syntheses": 0,
+      "question": "",
+      "citations": [],
+      "continuation": null
+    },
+    "raw_kept_unmodified": true
+  },
+  "synthesis_probe": {
+    "invalid_ok": false,
+    "invalid_errors": [
+      "claim 1 needs integer line_start <= line_end (>= 1)"
+    ],
+    "invalid_recovery_kind": "re_synthesis",
+    "raw_unchanged": true
+  },
+  "final_verdict": {
+    "classification": "confused_policy",
+    "recovery": {
+      "kind": "explicit_question",
+      "detail": "conflicting current/obsolete policies found \u2014 ask with BOTH citations; never pick a side silently",
+      "max_extra_reads": 0,
+      "max_extra_syntheses": 0,
+      "question": "Which policy is current for gitlab:shipping-policy/src/shipping/confirmation.py: the S-2026-03 value at line 39 ('SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"') or the S-2024-08 value at line 71 ('SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"')? Both are present in the neighbor; the plan does not pick silently.",
+      "citations": [
+        {
+          "repository": "gitlab:shipping-policy",
+          "path": "src/shipping/confirmation.py",
+          "revision": "S-2026-03",
+          "line": 39,
+          "content": "SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\""
+        },
+        {
+          "repository": "gitlab:shipping-policy",
+          "path": "src/shipping/confirmation.py",
+          "revision": "S-2024-08",
+          "line": 71,
+          "content": "SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\""
+        }
+      ],
+      "continuation": null
+    },
+    "detail": "1 unresolved policy conflict(s), first in gitlab:shipping-policy/src/shipping/confirmation.py",
+    "retained_findings_visible": true,
+    "complete_understanding_claimed": false,
+    "honest_summary": "investigation partial (confused_policy); retained findings visible"
+  },
+  "budget_sink": {
+    "budget": 4,
+    "calls_proposed": 4,
+    "stopped_reason": "max_calls",
+    "complete": false,
+    "retained_findings": 3,
+    "repos_consulted": [
+      "gitlab:platform-docs"
+    ],
+    "verdict": {
+      "classification": "exhausted_budget",
+      "recovery": {
+        "kind": "surface_and_ask",
+        "detail": "the budget stopped the research \u2014 surface the exhaustion and the RETAINED findings to the approver and ask; no further reads are authorized by this recovery",
+        "max_extra_reads": 0,
+        "max_extra_syntheses": 0,
+        "question": "research stopped early (max_calls) \u2014 approve another budget, narrow the task, or proceed on the retained findings; the plan will not claim complete understanding",
+        "citations": [],
+        "continuation": null
+      },
+      "detail": "stopped_reason=max_calls",
+      "retained_findings_visible": true,
+      "complete_understanding_claimed": false,
+      "honest_summary": "investigation partial (exhausted_budget); retained findings visible"
+    },
+    "observations": [
+      {
+        "tool": "list_paths",
+        "repo_key": "gitlab:platform-docs",
+        "call": "prefix handbook/",
+        "content": "handbook/ch-001.md\nhandbook/ch-002.md\nhandbook/ch-003.md\nhandbook/ch-004.md\nhandbook/ch-005.md\nhandbook/ch-006.md\nhandbook/ch-007.md\nhandbook/ch-008.md\nhandbook/ch-009.md\nhandbook/ch-010.md\nhandbook/ch-011.md\nhandbook/ch-012.md\nhandbook/ch-013.md\nhandbook/ch-014.md\nhandbook/ch-015.md\nhandbook/ch-016.md\nhandbook/ch-017.md\nhandbook/ch-018.md\nhandbook/ch-019.md\nhandbook/ch-020.md\nhandbook/ch-021.md\nh",
+        "error": "",
+        "truncated": true
+      },
+      {
+        "tool": "read_file",
+        "repo_key": "gitlab:platform-docs",
+        "call": "handbook/ch-001.md offset 0",
+        "content": "# Handbook \u2014 onboarding-01 (chapter 001)\n\n## Overview\n\nThis chapter of the platform handbook covers onboarding-01 at the level the\nwhole company needs. It is LONG on purpose: the handbook is the one\nplace where prose is allowed to be thorough, and every section below\nexists because someone asked for it in a review at some point.\n\n## Section 001.1 \u2014 What this chapter is\n\nThe chapter describes how w",
+        "error": "",
+        "truncated": false
+      },
+      {
+        "tool": "read_file",
+        "repo_key": "gitlab:platform-docs",
+        "call": "handbook/ch-002.md offset 0",
+        "content": "# Handbook \u2014 values-01 (chapter 002)\n\n## Overview\n\nThis chapter of the platform handbook covers values-01 at the level the\nwhole company needs. It is LONG on purpose: the handbook is the one\nplace where prose is allowed to be thorough, and every section below\nexists because someone asked for it in a review at some point.\n\n## Section 002.1 \u2014 What this chapter is\n\nThe chapter describes how we work, ",
+        "error": "",
+        "truncated": false
+      },
+      {
+        "tool": "read_file",
+        "repo_key": "gitlab:platform-docs",
+        "call": "handbook/ch-003.md offset 0",
+        "content": "# Handbook \u2014 tooling-01 (chapter 003)\n\n## Overview\n\nThis chapter of the platform handbook covers tooling-01 at the level the\nwhole company needs. It is LONG on purpose: the handbook is the one\nplace where prose is allowed to be thorough, and every section below\nexists because someone asked for it in a review at some point.\n\n## Section 003.1 \u2014 What this chapter is\n\nThe chapter describes how we work",
+        "error": "",
+        "truncated": false
+      },
+      {
+        "tool": "read_file",
+        "repo_key": "gitlab:platform-docs",
+        "call": "handbook/ch-004.md offset 0",
+        "content": "# Handbook \u2014 reviews-01 (chapter 004)\n\n## Overview\n\nThis chapter of the platform handbook covers reviews-01 at the level the\nwhole company needs. It is LONG on purpose: the handbook is the one\nplace where prose is allowed to be thorough, and every section below\nexists because someone asked for it in a review at some point.\n\n## Section 004.1 \u2014 What this chapter is\n\nThe chapter describes how we work",
+        "error": "",
+        "truncated": false
+      },
+      {
+        "tool": "read_file",
+        "repo_key": "gitlab:platform-docs",
+        "call": "handbook/ch-005.md offset 0",
+        "content": "# Handbook \u2014 testing-01 (chapter 005)\n\n## Overview\n\nThis chapter of the platform handbook covers testing-01 at the level the\nwhole company needs. It is LONG on purpose: the handbook is the one\nplace where prose is allowed to be thorough, and every section below\nexists because someone asked for it in a review at some point.\n\n## Section 005.1 \u2014 What this chapter is\n\nThe chapter describes how we work",
+        "error": "",
+        "truncated": false
+      }
+    ]
+  },
+  "observation_cache": {
+    "schema": "forge.discovery.observation-cache/1",
+    "stats": {
+      "entries": 3,
+      "hits": 2,
+      "misses": 3,
+      "underlying_reads": 3
+    },
+    "entries": [
+      {
+        "repository": "gitlab:audit-events",
+        "source_oid": "ca387c35b44e0ae45b89d4a9e3fe41a36051252e",
+        "path": "src/audit/pipeline.py",
+        "policy_scope": "planning:56c821e98a2f",
+        "content": "\"\"\"Audit-event pipeline primitives (audit-events service).\n\nThis module is the single owner of the event pipeline plumbing and of\nthe retention/emission RULES every emitting service must consult. The\nrules live in the RETENTION AND EMISSION POLICY block below \u2014 readers\npaging only the first screen of this file will see plumbing, not rules;\nthe policy block sits past it on purpose (the file is read in pages,\nand the operative constants belong to the policy block, not to the\ntransport headers above it).\n\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\nimport hashlib\nimport json\nfrom dataclasses import dataclass, field\n\n#: The audit clock and the stream naming convention (UTC; a stream is\n#: per emitting service and per calendar day).\nAUDIT_CLOCK = \"UTC\"\nSTREAM_NAME_TEMPLATE = \"audit.{service}.{day:%Y%m%d}\"\n\n#: The canonical event envelope version this pipeline accepts.\nENVELOPE_VERSION = 2\n\n#: Event kinds the pipeline currently distinguishes. Anything else is\n#: rejected at ingestion (an unknown kind is a producer bug).\nEVENT_KINDS = (\n    \"refund_requested\",\n    \"refund_captured\",\n    \"refund_rejected\",\n    \"order_expired\",\n    \"checkout_completed\",\n)\n\n#: Maximum envelope size the ingester accepts in one put (bytes). The\n#: pipeline never truncates an audit record silently \u2014 it refuses it.\nMAX_ENVELOPE_BYTES = 32768\n\n\ndef stream_name(service: str, day: dt.date) -> str:\n    \"\"\"The stream an event lands in for *service* on *day*.\"\"\"\n    return STREAM_NAME_TEMPLATE.format(service=service.strip().lower(), day=day)\n\n\ndef envelope_digest(service: str, kind: str, payload: dict) -> str:\n    \"\"\"The content digest binding one event to its exact payload bytes.\"\"\"\n    canonical = json.dumps(\n        {\"service\": service, \"kind\": kind, \"payload\": payload},\n        sort_keys=True,\n        separators=(\",\", \":\"),\n    )\n    return hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()\n\n\n@dataclass(frozen=True)\nclass AuditEvent:\n    \"\"\"One accepted audit event, envelope and all.\"\"\"\n\n    service: str\n    kind: str\n    occurred_at: dt.datetime\n    payload: dict = field(default_factory=dict)\n\n    def __post_init__(self) -> None:\n        if self.kind not in EVENT_KINDS:\n            raise ValueError(f\"unknown audit event kind {self.kind!r}\")\n        if self.occurred_at.tzinfo is None:\n            raise ValueError(\"audit events must carry an aware timestamp\")\n\n    def envelope(self) -> dict:\n        \"\"\"The wire envelope the ingester expects.\"\"\"\n        return {\n            \"version\": ENVELOPE_VERSION,\n            \"service\": self.service,\n            \"kind\": self.kind,\n            \"occurred_at\": self.occurred_at.isoformat(),\n            \"payload\": self.payload,\n            \"digest\": envelope_digest(self.service, self.kind, self.payload),\n        }\n\n\n# ---------------------------------------------------------------------------\n# RETENTION AND EMISSION POLICY (audit revision A-2026-02).\n#\n# The rules every EMITTING service must consult before it decides an\n# event is optional. In particular refund flows: a refund request on an\n# order that expired recently still owes an emission, and the window is\n# measured in DAYS since order expiry, not since the request.\n# ---------------------------------------------------------------------------\n\n\n#: The CURRENT emission rule (A-2026-02): a refund event MUST be\n#: emitted while the refund request is within this many days of the\n#: ORDER's expiry; after that the trail is statement-only.\nAUDIT_EMISSION_REQUIRED_AFTER_DAYS = 21\n\n#: The current audit policy revision identifier.\nAUDIT_POLICY_VERSION = \"A-2026-02\"\n\n#: Whether late emissions (outside the required window) are accepted at\n#: all \u2014 they are, flagged, because a late honest record beats none.\nLATE_EMISSION_ACCEPTED = True\n\n\ndef emission_required(order_expired_at: dt.datetime, requested_at: dt.datetime) -> bool:\n    \"\"\"True while a refund event is inside the REQUIRED emission window.\"\"\"\n    age_days = (requested_at - order_expired_at).days\n    return age_days <= AUDIT_EMISSION_REQUIRED_AFTER_DAYS\n\n\ndef emission_flag(order_expired_at: dt.datetime, requested_at: dt.datetime) -> str:\n    \"\"\"The required/late/optional marker an emitted event carries.\"\"\"\n    if emission_required(order_expired_at, requested_at):\n        return \"required\"\n    return \"late\" if LATE_EMISSION_ACCEPTED else \"rejected\"\n"
+      },
+      {
+        "repository": "gitlab:billing-policy",
+        "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+        "path": "src/policy/refunds.py",
+        "policy_scope": "planning:56c821e98a2f",
+        "content": "\"\"\"Billing-owned refund policy primitives (finance policy F-series).\n\nThis module is the SINGLE source of truth for refund policy decisions\nthat Orders' checkout and other services consume over the policy client.\nServices must IMPORT these decisions and must never re-decide them\nlocally: a local copy of a threshold is a policy fork, and policy forks\ndrift.\n\nLayout note: the CURRENT manual-approval policy lives near the END of\nthis file (the F-2024-11 revision block). Everything above it is either\nmachinery or the SUPERSEDED history it replaced; readers paging only the\nfirst window of this file will not find the current thresholds.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport calendar\nimport datetime as dt\nfrom dataclasses import dataclass\n\n\n#: The policy clock policy decisions are expressed against (UTC, and the\n#: accounting day boundary is the calendar day \u2014 not the billing period).\nPOLICY_CLOCK = \"UTC\"\nPOLICY_DAY_BOUNDARY = \"calendar-day\"\n\n\ndef policy_now() -> dt.datetime:\n    \"\"\"The current instant on the policy clock.\"\"\"\n    return dt.datetime.now(tz=dt.timezone.utc)\n\n\ndef policy_day(moment: dt.datetime) -> dt.date:\n    \"\"\"The accounting day a moment falls into.\"\"\"\n    return moment.astimezone(dt.timezone.utc).date()\n\n\n# ---------------------------------------------------------------------------\n# Currency plumbing \u2014 everything is integer cents, always.\n# ---------------------------------------------------------------------------\n\n\ndef to_cents(amount: str | float) -> int:\n    \"\"\"Parse a decimal amount into integer cents (no float rounding).\"\"\"\n    text = str(amount).strip().lstrip(\"$\").replace(\",\", \"\")\n    if \".\" not in text:\n        return int(text) * 100\n    whole, _, fraction = text.partition(\".\")\n    fraction = (fraction + \"00\")[:2]\n    return int(whole) * 100 + int(fraction)\n\n\ndef format_cents(amount_cents: int) -> str:\n    \"\"\"Render integer cents as a decimal string for statements.\"\"\"\n    sign = \"-\" if amount_cents < 0 else \"\"\n    magnitude = abs(int(amount_cents))\n    return f\"{sign}${magnitude // 100}.{magnitude % 100:02d}\"\n\n\ndef is_positive_refund_amount(amount_cents: int) -> bool:\n    \"\"\"A refund of zero or negative cents is a no-op, not a refund.\"\"\"\n    return int(amount_cents) > 0\n\n\n# ---------------------------------------------------------------------------\n# Request-age windows \u2014 how long after an order a customer may still ask.\n# ---------------------------------------------------------------------------\n\n\n#: The default window during which a refund REQUEST is accepted after the\n#: order's expiry. Individual contracts may tighten this; they may never\n#: widen it beyond the finance ceiling.\nREFUND_REQUEST_WINDOW_DAYS = 30\nREFUND_REQUEST_WINDOW_CEILING_DAYS = 90\n\n\ndef request_window_for(contract_tier: str) -> int:\n    \"\"\"The accepted request window (days) for a contract tier.\"\"\"\n    tightened = {\"starter\": 14, \"business\": 30, \"enterprise\": 45}.get(\n        str(contract_tier).lower(), REFUND_REQUEST_WINDOW_DAYS\n    )\n    return min(tightened, REFUND_REQUEST_WINDOW_CEILING_DAYS)\n\n\ndef request_expired(order_expired_at: dt.datetime, requested_at: dt.datetime) -> bool:\n    \"\"\"True when the request arrived after the accepted window closed.\"\"\"\n    window_days = REFUND_REQUEST_WINDOW_DAYS\n    deadline = order_expired_at + dt.timedelta(days=window_days)\n    return requested_at > deadline\n\n\ndef last_acceptable_day(order_expired_at: dt.datetime) -> dt.date:\n    \"\"\"The last calendar day a request is still inside the window.\"\"\"\n    deadline = order_expired_at + dt.timedelta(days=REFUND_REQUEST_WINDOW_DAYS)\n    return policy_day(deadline)\n\n\n# ---------------------------------------------------------------------------\n# Fee and surcharge tables used when a refund is captured.\n# ---------------------------------------------------------------------------\n\n\n#: Interchange-plus style fee components billed against a captured refund,\n#: in basis points. These are accounting inputs, not approval rules.\nFEE_COMPONENTS_BPS = {\n    \"interchange\": 110,\n    \"scheme\": 20,\n    \"processor\": 15,\n}\n\n\ndef fee_cents_on_refund(amount_cents: int) -> int:\n    \"\"\"The fee components charged when a refund of this size is captured.\"\"\"\n    total_bps = sum(FEE_COMPONENTS_BPS.values())\n    return int(round(amount_cents * total_bps / 10_000))\n\n\ndef surcharge_cents(amount_cents: int, method: str) -> int:\n    \"\"\"Method-specific surcharge (cross-border, instant rails).\"\"\"\n    table = {\"card\": 0, \"bank\": 30, \"instant\": 145}\n    return int(table.get(str(method).lower(), 0))\n\n\ndef net_settlement_cents(amount_cents: int, method: str = \"card\") -> int:\n    \"\"\"What the customer actually receives after fees and surcharges.\"\"\"\n    return (\n        int(amount_cents)\n        - fee_cents_on_refund(amount_cents)\n        - surcharge_cents(amount_cents, method)\n    )\n\n\n# ---------------------------------------------------------------------------\n# SUPERSEDED history \u2014 F-2023-04 and older approval rules.\n#\n# The thresholds below are KEPT ONLY for statement reconciliation of\n# already-captured refunds. They MUST NOT be used for NEW decisions:\n# every F-2023 rule was replaced by the F-2024-11 revision block at the\n# end of this file. A service reading an approval threshold from this\n# section is reading dead policy.\n# ---------------------------------------------------------------------------\n\n\n#: DEPRECATED (F-2023-04): the old auto-approve ceiling. Superseded \u2014 do\n#: not use for new decisions; see the F-2024-11 block at the end.\nDEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS = 2000\n\n#: DEPRECATED (F-2023-04): the old second-level review trigger.\nDEPRECATED_F2023_REVIEW_TRIGGER_CENTS = 10000\n\n\ndef deprecated_f2023_decision(amount_cents: int) -> str:\n    \"\"\"DEPRECATED decision helper \u2014 statement reconciliation only.\"\"\"\n    if amount_cents >= DEPRECATED_F2023_REVIEW_TRIGGER_CENTS:\n        return \"manual_review\"\n    if amount_cents >= DEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS:\n        return \"auto_approve\"\n    return \"capture\"\n\n\ndef deprecated_f2023_documented(month: dt.date) -> str:\n    \"\"\"The month an F-2023 statement used this policy shape.\"\"\"\n    _, days = calendar.monthrange(month.year, month.month)\n    return f\"F-2023-04 policy applied for {days} days of {month.isoformat()}\"\n\n\n# ---------------------------------------------------------------------------\n# SUPERSEDED interim \u2014 F-2024-02 (the two-month bridge before F-2024-11).\n#\n# F-2024-02 temporarily routed approvals through the finance duty roster\n# with per-region ceilings. It was retired when the approvals service\n# took over routing; nothing may consult these values for new refunds.\n# ---------------------------------------------------------------------------\n\n\n#: DEPRECATED (F-2024-02): regional interim ceilings, superseded by the\n#: single global threshold of the F-2024-11 revision below.\nDEPRECATED_F2024_REGION_CEILINGS_CENTS = {\n    \"emea\": 4000,\n    \"amer\": 4500,\n    \"apac\": 3500,\n}\n\n#: DEPRECATED (F-2024-02): the interim duty roster that approvals were\n#: routed to before the approvals service existed.\nDEPRECATED_F2024_DUTY_ROSTER = \"finance-duty@billing.example\"\n\n\ndef deprecated_f2024_region_ceiling(region: str) -> int:\n    \"\"\"DEPRECATED (F-2024-02): regional ceiling lookup \u2014 dead policy.\"\"\"\n    return int(DEPRECATED_F2024_REGION_CEILINGS_CENTS.get(str(region).lower(), 3500))\n\n\ndef deprecated_f2024_needs_duty_review(amount_cents: int, region: str) -> bool:\n    \"\"\"DEPRECATED (F-2024-02): the interim regional review rule.\"\"\"\n    return int(amount_cents) >= deprecated_f2024_region_ceiling(region)\n\n\ndef deprecated_f2024_route(region: str) -> str:\n    \"\"\"DEPRECATED (F-2024-02): where interim approvals were routed.\"\"\"\n    return f\"{DEPRECATED_F2024_DUTY_ROSTER} [{region.lower()}]\"\n\n\n# ---------------------------------------------------------------------------\n# CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).\n#\n# Any refund at or above the manual-approval threshold MUST pause for a\n# billing lead's approval BEFORE capture. Automated approval at or above\n# the threshold is FORBIDDEN. Below the threshold, automated capture is\n# allowed. The approver identity and routing live in the approvals\n# service (see APPROVALS_OWNERSHIP); this module owns ONLY the threshold\n# and the decision rule.\n# ---------------------------------------------------------------------------\n\n\n#: The CURRENT manual-approval threshold (F-2024-11): refunds at or\n#: above this amount require a human approval step before capture.\nREFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\n\n#: The CURRENT refund policy revision identifier.\nREFUND_POLICY_VERSION = \"F-2024-11\"\n\n#: Who owns approval routing for manual-review refunds (the approvals\n#: service, not this module and not any consuming service).\nAPPROVALS_OWNERSHIP = \"approvals-service\"\n\n\ndef requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\n\n\ndef decision_for(amount_cents: int) -> str:\n    \"\"\"The CURRENT decision rule: capture freely below the threshold,\n    pause for approval at or above it \u2014 never auto-approve above it.\"\"\"\n    if not is_positive_refund_amount(amount_cents):\n        return \"no_op\"\n    return \"manual_approval\" if requires_manual_approval(amount_cents) else \"auto_capture\"\n\n\n@dataclass(frozen=True)\nclass RefundDecision:\n    \"\"\"One evaluated decision over a refund request.\"\"\"\n\n    amount_cents: int\n    decision: str\n    policy_version: str\n    threshold_cents: int\n\n    @property\n    def needs_human(self) -> bool:\n        return self.decision == \"manual_approval\"\n\n\ndef decide(amount_cents: int) -> RefundDecision:\n    \"\"\"Evaluate a refund amount under the CURRENT policy revision.\"\"\"\n    return RefundDecision(\n        amount_cents=int(amount_cents),\n        decision=decision_for(amount_cents),\n        policy_version=REFUND_POLICY_VERSION,\n        threshold_cents=REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS,\n    )\n\n\n__all__ = [\n    \"APPROVALS_OWNERSHIP\",\n    \"DEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS\",\n    \"DEPRECATED_F2023_REVIEW_TRIGGER_CENTS\",\n    \"DEPRECATED_F2024_DUTY_ROSTER\",\n    \"DEPRECATED_F2024_REGION_CEILINGS_CENTS\",\n    \"FEE_COMPONENTS_BPS\",\n    \"POLICY_CLOCK\",\n    \"POLICY_DAY_BOUNDARY\",\n    \"REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\",\n    \"REFUND_POLICY_VERSION\",\n    \"REFUND_REQUEST_WINDOW_CEILING_DAYS\",\n    \"REFUND_REQUEST_WINDOW_DAYS\",\n    \"RefundDecision\",\n    \"decide\",\n    \"decision_for\",\n    \"deprecated_f2023_decision\",\n    \"deprecated_f2023_documented\",\n    \"deprecated_f2024_needs_duty_review\",\n    \"deprecated_f2024_region_ceiling\",\n    \"deprecated_f2024_route\",\n    \"fee_cents_on_refund\",\n    \"format_cents\",\n    \"is_positive_refund_amount\",\n    \"last_acceptable_day\",\n    \"net_settlement_cents\",\n    \"policy_day\",\n    \"policy_now\",\n    \"request_expired\",\n    \"request_window_for\",\n    \"requires_manual_approval\",\n    \"surcharge_cents\",\n    \"to_cents\",\n]\n"
+      },
+      {
+        "repository": "gitlab:billing-policy",
+        "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+        "path": "src/policy/refunds.py",
+        "policy_scope": "review:56c821e98a2f",
+        "content": "\"\"\"Billing-owned refund policy primitives (finance policy F-series).\n\nThis module is the SINGLE source of truth for refund policy decisions\nthat Orders' checkout and other services consume over the policy client.\nServices must IMPORT these decisions and must never re-decide them\nlocally: a local copy of a threshold is a policy fork, and policy forks\ndrift.\n\nLayout note: the CURRENT manual-approval policy lives near the END of\nthis file (the F-2024-11 revision block). Everything above it is either\nmachinery or the SUPERSEDED history it replaced; readers paging only the\nfirst window of this file will not find the current thresholds.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport calendar\nimport datetime as dt\nfrom dataclasses import dataclass\n\n\n#: The policy clock policy decisions are expressed against (UTC, and the\n#: accounting day boundary is the calendar day \u2014 not the billing period).\nPOLICY_CLOCK = \"UTC\"\nPOLICY_DAY_BOUNDARY = \"calendar-day\"\n\n\ndef policy_now() -> dt.datetime:\n    \"\"\"The current instant on the policy clock.\"\"\"\n    return dt.datetime.now(tz=dt.timezone.utc)\n\n\ndef policy_day(moment: dt.datetime) -> dt.date:\n    \"\"\"The accounting day a moment falls into.\"\"\"\n    return moment.astimezone(dt.timezone.utc).date()\n\n\n# ---------------------------------------------------------------------------\n# Currency plumbing \u2014 everything is integer cents, always.\n# ---------------------------------------------------------------------------\n\n\ndef to_cents(amount: str | float) -> int:\n    \"\"\"Parse a decimal amount into integer cents (no float rounding).\"\"\"\n    text = str(amount).strip().lstrip(\"$\").replace(\",\", \"\")\n    if \".\" not in text:\n        return int(text) * 100\n    whole, _, fraction = text.partition(\".\")\n    fraction = (fraction + \"00\")[:2]\n    return int(whole) * 100 + int(fraction)\n\n\ndef format_cents(amount_cents: int) -> str:\n    \"\"\"Render integer cents as a decimal string for statements.\"\"\"\n    sign = \"-\" if amount_cents < 0 else \"\"\n    magnitude = abs(int(amount_cents))\n    return f\"{sign}${magnitude // 100}.{magnitude % 100:02d}\"\n\n\ndef is_positive_refund_amount(amount_cents: int) -> bool:\n    \"\"\"A refund of zero or negative cents is a no-op, not a refund.\"\"\"\n    return int(amount_cents) > 0\n\n\n# ---------------------------------------------------------------------------\n# Request-age windows \u2014 how long after an order a customer may still ask.\n# ---------------------------------------------------------------------------\n\n\n#: The default window during which a refund REQUEST is accepted after the\n#: order's expiry. Individual contracts may tighten this; they may never\n#: widen it beyond the finance ceiling.\nREFUND_REQUEST_WINDOW_DAYS = 30\nREFUND_REQUEST_WINDOW_CEILING_DAYS = 90\n\n\ndef request_window_for(contract_tier: str) -> int:\n    \"\"\"The accepted request window (days) for a contract tier.\"\"\"\n    tightened = {\"starter\": 14, \"business\": 30, \"enterprise\": 45}.get(\n        str(contract_tier).lower(), REFUND_REQUEST_WINDOW_DAYS\n    )\n    return min(tightened, REFUND_REQUEST_WINDOW_CEILING_DAYS)\n\n\ndef request_expired(order_expired_at: dt.datetime, requested_at: dt.datetime) -> bool:\n    \"\"\"True when the request arrived after the accepted window closed.\"\"\"\n    window_days = REFUND_REQUEST_WINDOW_DAYS\n    deadline = order_expired_at + dt.timedelta(days=window_days)\n    return requested_at > deadline\n\n\ndef last_acceptable_day(order_expired_at: dt.datetime) -> dt.date:\n    \"\"\"The last calendar day a request is still inside the window.\"\"\"\n    deadline = order_expired_at + dt.timedelta(days=REFUND_REQUEST_WINDOW_DAYS)\n    return policy_day(deadline)\n\n\n# ---------------------------------------------------------------------------\n# Fee and surcharge tables used when a refund is captured.\n# ---------------------------------------------------------------------------\n\n\n#: Interchange-plus style fee components billed against a captured refund,\n#: in basis points. These are accounting inputs, not approval rules.\nFEE_COMPONENTS_BPS = {\n    \"interchange\": 110,\n    \"scheme\": 20,\n    \"processor\": 15,\n}\n\n\ndef fee_cents_on_refund(amount_cents: int) -> int:\n    \"\"\"The fee components charged when a refund of this size is captured.\"\"\"\n    total_bps = sum(FEE_COMPONENTS_BPS.values())\n    return int(round(amount_cents * total_bps / 10_000))\n\n\ndef surcharge_cents(amount_cents: int, method: str) -> int:\n    \"\"\"Method-specific surcharge (cross-border, instant rails).\"\"\"\n    table = {\"card\": 0, \"bank\": 30, \"instant\": 145}\n    return int(table.get(str(method).lower(), 0))\n\n\ndef net_settlement_cents(amount_cents: int, method: str = \"card\") -> int:\n    \"\"\"What the customer actually receives after fees and surcharges.\"\"\"\n    return (\n        int(amount_cents)\n        - fee_cents_on_refund(amount_cents)\n        - surcharge_cents(amount_cents, method)\n    )\n\n\n# ---------------------------------------------------------------------------\n# SUPERSEDED history \u2014 F-2023-04 and older approval rules.\n#\n# The thresholds below are KEPT ONLY for statement reconciliation of\n# already-captured refunds. They MUST NOT be used for NEW decisions:\n# every F-2023 rule was replaced by the F-2024-11 revision block at the\n# end of this file. A service reading an approval threshold from this\n# section is reading dead policy.\n# ---------------------------------------------------------------------------\n\n\n#: DEPRECATED (F-2023-04): the old auto-approve ceiling. Superseded \u2014 do\n#: not use for new decisions; see the F-2024-11 block at the end.\nDEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS = 2000\n\n#: DEPRECATED (F-2023-04): the old second-level review trigger.\nDEPRECATED_F2023_REVIEW_TRIGGER_CENTS = 10000\n\n\ndef deprecated_f2023_decision(amount_cents: int) -> str:\n    \"\"\"DEPRECATED decision helper \u2014 statement reconciliation only.\"\"\"\n    if amount_cents >= DEPRECATED_F2023_REVIEW_TRIGGER_CENTS:\n        return \"manual_review\"\n    if amount_cents >= DEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS:\n        return \"auto_approve\"\n    return \"capture\"\n\n\ndef deprecated_f2023_documented(month: dt.date) -> str:\n    \"\"\"The month an F-2023 statement used this policy shape.\"\"\"\n    _, days = calendar.monthrange(month.year, month.month)\n    return f\"F-2023-04 policy applied for {days} days of {month.isoformat()}\"\n\n\n# ---------------------------------------------------------------------------\n# SUPERSEDED interim \u2014 F-2024-02 (the two-month bridge before F-2024-11).\n#\n# F-2024-02 temporarily routed approvals through the finance duty roster\n# with per-region ceilings. It was retired when the approvals service\n# took over routing; nothing may consult these values for new refunds.\n# ---------------------------------------------------------------------------\n\n\n#: DEPRECATED (F-2024-02): regional interim ceilings, superseded by the\n#: single global threshold of the F-2024-11 revision below.\nDEPRECATED_F2024_REGION_CEILINGS_CENTS = {\n    \"emea\": 4000,\n    \"amer\": 4500,\n    \"apac\": 3500,\n}\n\n#: DEPRECATED (F-2024-02): the interim duty roster that approvals were\n#: routed to before the approvals service existed.\nDEPRECATED_F2024_DUTY_ROSTER = \"finance-duty@billing.example\"\n\n\ndef deprecated_f2024_region_ceiling(region: str) -> int:\n    \"\"\"DEPRECATED (F-2024-02): regional ceiling lookup \u2014 dead policy.\"\"\"\n    return int(DEPRECATED_F2024_REGION_CEILINGS_CENTS.get(str(region).lower(), 3500))\n\n\ndef deprecated_f2024_needs_duty_review(amount_cents: int, region: str) -> bool:\n    \"\"\"DEPRECATED (F-2024-02): the interim regional review rule.\"\"\"\n    return int(amount_cents) >= deprecated_f2024_region_ceiling(region)\n\n\ndef deprecated_f2024_route(region: str) -> str:\n    \"\"\"DEPRECATED (F-2024-02): where interim approvals were routed.\"\"\"\n    return f\"{DEPRECATED_F2024_DUTY_ROSTER} [{region.lower()}]\"\n\n\n# ---------------------------------------------------------------------------\n# CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).\n#\n# Any refund at or above the manual-approval threshold MUST pause for a\n# billing lead's approval BEFORE capture. Automated approval at or above\n# the threshold is FORBIDDEN. Below the threshold, automated capture is\n# allowed. The approver identity and routing live in the approvals\n# service (see APPROVALS_OWNERSHIP); this module owns ONLY the threshold\n# and the decision rule.\n# ---------------------------------------------------------------------------\n\n\n#: The CURRENT manual-approval threshold (F-2024-11): refunds at or\n#: above this amount require a human approval step before capture.\nREFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\n\n#: The CURRENT refund policy revision identifier.\nREFUND_POLICY_VERSION = \"F-2024-11\"\n\n#: Who owns approval routing for manual-review refunds (the approvals\n#: service, not this module and not any consuming service).\nAPPROVALS_OWNERSHIP = \"approvals-service\"\n\n\ndef requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\n\n\ndef decision_for(amount_cents: int) -> str:\n    \"\"\"The CURRENT decision rule: capture freely below the threshold,\n    pause for approval at or above it \u2014 never auto-approve above it.\"\"\"\n    if not is_positive_refund_amount(amount_cents):\n        return \"no_op\"\n    return \"manual_approval\" if requires_manual_approval(amount_cents) else \"auto_capture\"\n\n\n@dataclass(frozen=True)\nclass RefundDecision:\n    \"\"\"One evaluated decision over a refund request.\"\"\"\n\n    amount_cents: int\n    decision: str\n    policy_version: str\n    threshold_cents: int\n\n    @property\n    def needs_human(self) -> bool:\n        return self.decision == \"manual_approval\"\n\n\ndef decide(amount_cents: int) -> RefundDecision:\n    \"\"\"Evaluate a refund amount under the CURRENT policy revision.\"\"\"\n    return RefundDecision(\n        amount_cents=int(amount_cents),\n        decision=decision_for(amount_cents),\n        policy_version=REFUND_POLICY_VERSION,\n        threshold_cents=REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS,\n    )\n\n\n__all__ = [\n    \"APPROVALS_OWNERSHIP\",\n    \"DEPRECATED_F2023_AUTO_APPROVE_CEILING_CENTS\",\n    \"DEPRECATED_F2023_REVIEW_TRIGGER_CENTS\",\n    \"DEPRECATED_F2024_DUTY_ROSTER\",\n    \"DEPRECATED_F2024_REGION_CEILINGS_CENTS\",\n    \"FEE_COMPONENTS_BPS\",\n    \"POLICY_CLOCK\",\n    \"POLICY_DAY_BOUNDARY\",\n    \"REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\",\n    \"REFUND_POLICY_VERSION\",\n    \"REFUND_REQUEST_WINDOW_CEILING_DAYS\",\n    \"REFUND_REQUEST_WINDOW_DAYS\",\n    \"RefundDecision\",\n    \"decide\",\n    \"decision_for\",\n    \"deprecated_f2023_decision\",\n    \"deprecated_f2023_documented\",\n    \"deprecated_f2024_needs_duty_review\",\n    \"deprecated_f2024_region_ceiling\",\n    \"deprecated_f2024_route\",\n    \"fee_cents_on_refund\",\n    \"format_cents\",\n    \"is_positive_refund_amount\",\n    \"last_acceptable_day\",\n    \"net_settlement_cents\",\n    \"policy_day\",\n    \"policy_now\",\n    \"request_expired\",\n    \"request_window_for\",\n    \"requires_manual_approval\",\n    \"surcharge_cents\",\n    \"to_cents\",\n]\n"
+      }
+    ],
+    "repeat_hit": true,
+    "cross_scope_isolated": true,
+    "scope_probe": {
+      "source": "gitlab:billing-policy:src/policy/refunds.py",
+      "planning_entry": true,
+      "review_entry_served_fresh": true,
+      "isolated_scope_missed": true,
+      "scopes_of_source": [
+        "planning:56c821e98a2f",
+        "review:56c821e98a2f"
+      ]
+    },
+    "restart_resumed": true,
+    "restart_hits": 1
+  },
+  "budget_profile": {
+    "mode": "reasoning-heavy",
+    "plan_max_tokens": 12000,
+    "reasoning_reserve_tokens": 4000,
+    "plan_content_tokens": 8000,
+    "research_max_tokens_per_call": 3000
+  },
+  "carry_forward": {
+    "schema": "forge.discovery.carry-forward/1",
+    "discovery_id": "DP-01-customer-refund-graph-scripted",
+    "snapshot_digest": "56c821e98a2fed38c0c9590ae81e3c7b4f10700e34d42c0fe9eae55ff84bf337",
+    "counts": {
+      "facts": 3,
+      "assumptions": 0,
+      "questions": 2
+    },
+    "entries": [
+      {
+        "evidence_id": "c1",
+        "kind": "fact",
+        "text": "self._policy = policy or policy_client.default()",
+        "repository": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line_start": 30,
+        "line_end": 34,
+        "source_oid": "b652860236be7530dbd5af67829953103ef0e9d1"
+      },
+      {
+        "evidence_id": "c2",
+        "kind": "fact",
+        "text": "#: The CURRENT manual-approval threshold (F-2024-11): refunds at or",
+        "repository": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line_start": 214,
+        "line_end": 228,
+        "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7"
+      },
+      {
+        "evidence_id": "c3",
+        "kind": "fact",
+        "text": "# ---------------------------------------------------------------------------",
+        "repository": "gitlab:audit-events",
+        "path": "src/audit/pipeline.py",
+        "line_start": 91,
+        "line_end": 107,
+        "source_oid": "ca387c35b44e0ae45b89d4a9e3fe41a36051252e"
+      },
+      {
+        "evidence_id": "q1",
+        "kind": "question",
+        "text": "Which policy is current for gitlab:shipping-policy/src/shipping/confirmation.py: the S-2026-03 value at line 39 ('SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"') or the S-2024-08 value at line 71 ('SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"')? Both are present in the neighbor; the plan does not pick silently."
+      },
+      {
+        "evidence_id": "q2",
+        "kind": "question",
+        "text": "The issue also leaves undecided who performs the approval step for orders-api \u2014 which approvals queue or owner handles refunds above the threshold?"
+      }
+    ],
+    "verified_in_plan": true
+  },
+  "carry_forward_seam": {
+    "verified": true,
+    "envelope_digest": "b4a4150735073c7a95b67dfb018b2d4a9dfbe1845a56be5aa4a34c3bee6f1b02",
+    "plan_text_digest": "c8ed8603361d6a20f6bacc4bd5df7def13f60dba5f7d4e23176508c137a80be5",
+    "lane_extraction": "plan bytes carry the carry-forward section",
+    "reason": ""
+  },
+  "write_scope": {
+    "schema": "forge.write_scope.expansion/1",
+    "write_scope.target": "gitlab:orders-api",
+    "publication_targets": [
+      "gitlab:orders-api"
+    ],
+    "widened": false,
+    "write_scope.expansion_requests": [],
+    "verdicts": [
+      {
+        "requested": "gitlab:orders-api",
+        "allowed": true,
+        "code": "writable_target"
+      }
+    ]
+  },
+  "stopped_reason": "",
+  "grade": {
+    "plan_present": true,
+    "decisive_line_depth_found": true,
+    "decisive_line_depth_evidence": [
+      {
+        "claim_id": "c2",
+        "line_start": 214,
+        "line_end": 228,
+        "non_initial_window": true,
+        "min_line": 200
+      }
+    ],
+    "decisive_second_page_found": true,
+    "decisive_second_page_evidence": [
+      {
+        "observation_offset": 2000,
+        "page_chars": 2000,
+        "marker_line": 97,
+        "cited_the_marker": true
+      }
+    ],
+    "second_page_continuation_used": true,
+    "conflict_became_question": true,
+    "conflict_silent_pick": false,
+    "conflict_question": "Which policy is current for gitlab:shipping-policy/src/shipping/confirmation.py: the S-2026-03 value at line 39 ('SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"') or the S-2024-08 value at line 71 ('SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"')? Both are present in the neighbor; the plan does not pick silently.",
+    "budget_sink_signalled": true,
+    "budget_sink_evidence": {
+      "stopped_reason": "max_calls",
+      "docs_observations": 6,
+      "classification": "exhausted_budget",
+      "recovery": "surface_and_ask",
+      "retained_findings": 3,
+      "complete_understanding_claimed": false
+    },
+    "cache_reuse_on_repeat": true,
+    "no_cross_scope_leak": true,
+    "restart_resumption": true,
+    "budget_profile_reserved": true,
+    "synthesis_validated": true,
+    "synthesis_invalid_routes_to_recovery": true,
+    "carry_forward_populated": true,
+    "carry_forward_seam_verified": true,
+    "write_scope_single_target": true,
+    "passed": true,
+    "failed_checks": []
+  }
+}

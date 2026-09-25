@@ -38,7 +38,10 @@ app (which received checkpoint uploads) and the worker (which looks them
 up) used different stores — `/retry` found "no checkpoint" and parked.
 Restored with `--worker-mount` (the compose file's intended wiring).
 Rollback: the pre-alignment image stays tagged
-`localhost/forge:pre-r3708-*`; a pg_dump backup sits in `backups/`.
+`localhost/forge:pre-r3708-*`; the pg_dump backups were moved (R38-03,
+issue #304) out of the public tree into private storage — `backups/README.md`
+holds the sanitized receipt per dump (sha256, classification,
+restore-test outcome, private reference).
 Preflight (the app's own doctor, on the new project) green before any
 paid run — with the honest note that the litellm `/health` probe rides
 its 5 s timeout boundary (observed 1.6–2.2 s typical, occasional spikes;

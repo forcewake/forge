@@ -1,0 +1,5 @@
+{
+  "stamp": "forge.gate.public-artifacts-allowlist/1",
+  "note": "R38-03 (#304): the ONLY way a database-archive-shaped file may be tracked. Entries are synthetic test fixtures reviewed by a human: a real lab backup NEVER goes here. Admission requires path + sha256 + a non-empty review reason; a stale digest refuses.",
+  "entries": []
+}

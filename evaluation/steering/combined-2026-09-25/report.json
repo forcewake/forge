@@ -1,0 +1,137 @@
+{
+  "counterfactual": {
+    "candidate": {
+      "validator_content": "\"\"\"Syntactic e-mail address validation (issue #3).\n\nThe single-address entrypoint :func:`check` answers one question per\nstring: does it satisfy the project's stated syntactic rules?  The rules\nare deliberately LITERAL \u2014 this is a syntactic gate, not an RFC 5322\nparser:\n\n* exactly one ``@`` separating the local part from the domain;\n* a non-empty local part before the ``@``;\n* a non-empty domain after the ``@`` containing at least one ``.``;\n* no whitespace characters anywhere in the address.\n\nEverything else \u2014 including non-string input \u2014 is simply not a valid\naddress and yields ``False``; :func:`check` never raises on malformed\ninput.  :func:`validate_many` applies :func:`check` element-wise,\npreserving order and length.\n\"\"\"\n\nfrom __future__ import annotations\n\n__all__ = [\"check\", \"validate_many\"]\n\n\ndef check(email: str) -> bool:\n    \"\"\"Return True only when *email* satisfies the stated syntactic rules.\n\n    Non-string input (or any other malformed value) returns False rather\n    than raising.\n    \"\"\"\n    # Guard: anything that is not a string (None, bytes, an int, ...) is\n    # not a valid address \u2014 reject it instead of letting the str\n    # operations below raise.\n    if not isinstance(email, str):\n        return False\n\n    # Rule: no whitespace anywhere in the address.\n    if any(character.isspace() for character in email):\n        return False\n\n    # Rule: exactly one '@'.\n    if email.count(\"@\") != 1:\n        return False\n\n    local, _, domain = email.partition(\"@\")\n\n    # Rule: non-empty local part; non-empty domain holding >= 1 '.'.\n    return bool(local) and \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Apply :func:`check` to each element, preserving order and length.\"\"\"\n    return [check(email) for email in emails]\n",
+      "validator_content_sha256": "932d6d09e0b8780b52a31f3d623256dd7ce2da39668f30b1e947a95c9a633189",
+      "validator_path": "src/validators/email.py",
+      "x_entrypoint_present": true,
+      "y_entrypoint_present": false
+    },
+    "mr": {
+      "candidate_sha": "acaaddeceadee3f9258ccd762214eef3ae0d5edf",
+      "changed_paths": [
+        "src/validators/email.py"
+      ],
+      "diff_digest": "a701973fd186fdbc106be1b91b283a226f4f9d9f186bb5f6708ffe4fc0257f6f",
+      "draft": true,
+      "merged": false,
+      "mr_iid": 3,
+      "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/3",
+      "oracle_pipeline_id": 459,
+      "oracle_tampering": [],
+      "title": "Draft: Add email validation with the check() entrypoint"
+    }
+  },
+  "generated_at": "2026-09-25T00:53:08.070016+00:00",
+  "grade": {
+    "arms": [
+      {
+        "arm": "ack_precedes_edit",
+        "ok": true,
+        "reason": "ack 2026-09-25T00:39:45.307753+00:00 \u2192 durable applied 2026-09-25T00:39:45.754666+00:00 \u2192 vendor application 2026-09-25T00:39:48.825342+00:00 (mid-turn), then 1 later checkpoint(s)"
+      },
+      {
+        "arm": "counterfactual_differs",
+        "ok": true,
+        "reason": "the same task without the steer produced a different edit set"
+      },
+      {
+        "arm": "target_matched",
+        "ok": true,
+        "reason": "the final artifact shows the entrypoint 'check' swapped to 'validate_email' in src/validators/email.py, and the unsteered arm did not do it"
+      },
+      {
+        "arm": "revision_identity_switched",
+        "ok": true,
+        "reason": "decision dec-combined-c3236a3e9314: the recomputed, staged, active-plan and durable-row digests agree on 19a92667bb5f\u2026 and the row switched exactly at the approval"
+      },
+      {
+        "arm": "wip_preserved_and_redispatched",
+        "ok": true,
+        "reason": "the activation routed the checkpoint 8c8fafe4e8e6\u2026 to preserve and the post-revision dispatch is a required resume over exactly it (envelope 61fe471ea856\u2026)"
+      }
+    ],
+    "causal": true,
+    "provenance": "live-lane:claude-sdk-lane/glm-5.3-flash"
+  },
+  "honesty": {
+    "brief_freeze": "the GitLab lane's brief is spec-frozen at /go: the material revision switches the durable plan identity (row digest + active plan + gate rebind) and the MR carries the revised digest, but the revised plan TEXT does not re-enter the lane brief on this driver \u2014 the PE-7 brief-rebind leg is the GitHub path; the revision's extension bytes therefore reach the model only if the frozen brief already carried the underlying scope",
+    "counterfactual": "ONE unsteered lane, model nondeterminism acknowledged, narrow task scope \u2014 the arm compares captured edits, never a guess",
+    "cycle1_revert_finding": "cycle 1's resumed lane REVERTED the steered naming: the final candidate carried `def check(` again because the GitLab lane's brief is spec-frozen at /go (it still names approach X) and the resumed model obeyed the brief over the restored WIP \u2014 the checkpoint itself carried the Y rename (proven by its blob), so the steer's causal effect on the turn's work stood; the continuation semantics, not the steering, lost it. The remedy this driver natively offers \u2014 the operator's standing direction as a PENDING durable steer the resumed lane drains mid-turn \u2014 is what cycle 2 composes.",
+    "delivery_mode": "mid-turn",
+    "staging_leg": "revision 1 (active) and revision 2 (pending) were staged through the REAL revisions module inside the forge-app container \u2014 the proposal-emitter leg the live GitLab planner has not grown yet; the APPROVAL and the ACTIVATION are fully native"
+  },
+  "issue": "R38-12 / #313",
+  "mr": {
+    "candidate_sha": "2d21d6159719a032f613d104db411a1bc87dab10",
+    "changed_paths": [
+      "src/validators/email.py"
+    ],
+    "diff_digest": "744869c5eba5d3b5557e62eeabc2e2bfcb2831bb295406b70e1ab9ed66189108",
+    "draft": true,
+    "merged": false,
+    "mr_iid": 2,
+    "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/2",
+    "oracle_pipeline_id": 440,
+    "oracle_tampering": [],
+    "title": "Draft: Add email validation with the check() entrypoint"
+  },
+  "record_valid": {
+    "missing": [],
+    "ok": true
+  },
+  "schema": "forge.steering.combined/1",
+  "spend": {
+    "cap_usd": 2.0,
+    "cost_basis": "sdk-total_cost_usd",
+    "jobs": {
+      "775": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.2467
+      },
+      "779": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.292
+      },
+      "782": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.25
+      },
+      "784": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.1961
+      },
+      "798": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.1803
+      }
+    },
+    "total_usd": 1.1651
+  },
+  "trace_file": "combined-trace.json"
+}

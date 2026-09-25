@@ -54,6 +54,28 @@ effect when the marker-carrying commit is established; when the surface
 cannot prove anything the effect STAYS ``outcome_unknown`` (fail closed —
 ``saga.unknown_effects`` visible), and a head the saga cannot account for
 is a HUMAN edit: parked, preserved, never force-overwritten.
+
+R38-13 (#314) adds three durable disciplines on the same entry:
+
+- **no blind redispatch** (:class:`_NoBlindRedispatchRemote`, the durable
+  half of ADR-0005's reconcile-before-retry): a repository whose
+  PERSISTED status is ``outcome_unknown`` has a mutation whose outcome
+  was never established — a negative probe does not prove a delayed
+  apply absent, so ``commit`` re-entry for it is refused fail-closed
+  until a content-verified probe adopts (or an explicit new attempt
+  carries a new saga). The in-process half lives on the native adapters
+  (``_refuse_unresolved_redispatch``); this one survives the process.
+- **typed-conflict observability**: a repository booking ``failed`` with
+  the native adapters' ``content conflict`` / ``writer exclusivity``
+  note tags emits ``saga.content_conflict`` / ``saga.writer_exclusivity``
+  outbox rows — the conflicts are tracked, not folded into generic
+  refusals.
+- **payload preconditions durably journaled**: the entry harvests the
+  adapters' ``create_commit`` journal entries (payload base +
+  affected-file versions, recorded beside the expected head) into the
+  parent run's evidence under ``publication_preconditions`` — the
+  additive record a recovering process or an audit rechecks the landed
+  content against.
 """
 
 from __future__ import annotations
@@ -99,6 +121,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SAGA_RECORD_KEY",
     "SAGA_STATE_SCHEMA",
+    "SAGA_PRECONDITIONS_KEY",
     "OUTCOME_OF_PUBLICATION_STATUS",
     "AdmissionGuard",
     "CommitObserver",
@@ -166,6 +189,14 @@ OUTCOME_OF_PUBLICATION_STATUS: Mapping[str, str] = {
 #: Repos whose reviewable outcome is established — the complement is the
 #: OUTSTANDING half of a ``partially_published`` report.
 _REVIEW_ESTABLISHED = frozenset({"ready_for_review", "human_merged"})
+
+#: The note tags the native adapters' typed refusals book under (R38-13).
+#: Literals ON PURPOSE — ``saga_native`` imports this module's
+#: ``NativeCommit`` at runtime, so the tags cannot be imported back; the
+#: values are pinned to ``saga_native.CONTENT_CONFLICT_TAG`` /
+#: ``WRITER_EXCLUSIVITY_TAG`` by ``tests/test_saga_native.py``.
+_CONTENT_CONFLICT_NOTE = "content conflict"
+_WRITER_EXCLUSIVITY_NOTE = "writer exclusivity"
 
 #: Anything that yields sessions — ``async_sessionmaker`` duck-types here
 #: (the same alias shape the coordinator and the runs services use).
@@ -323,7 +354,11 @@ def _observability_events(
     (``saga.unknown_effects`` — the honest unproven surface), a first
     ``adopted`` (``recovery.native_adoption`` — the crash window closed
     by NATIVE correlation, not by a duplicate create), into
-    ``parked_human`` (``human_edit.conflicts`` — a decision is owed).
+    ``parked_human`` (``human_edit.conflicts`` — a decision is owed),
+    and — R38-13 — into ``failed`` with one of the native adapters'
+    TYPED refusal tags in the note (``saga.content_conflict`` /
+    ``saga.writer_exclusivity``: the conflicts are tracked, never folded
+    into generic refusals).
     Saga-level: ``workpackage.partial_publication`` whenever effects
     STAND while others remain OUTSTANDING and that partial shape is new
     (each outstanding effect identified with status and note).
@@ -371,6 +406,32 @@ def _observability_events(
                     },
                 )
             )
+        # R38-13: the typed conflicts are tracked, never folded into a
+        # generic refusal — a ``failed`` booking whose note carries the
+        # native adapters' tag emits its own event.
+        if repo.status == "failed" and before_status != "failed":
+            if _CONTENT_CONFLICT_NOTE in repo.note:
+                events.append(
+                    (
+                        "saga.content_conflict",
+                        {
+                            "saga_id": saga.saga_id,
+                            "repository_id": repo.repository_id,
+                            "conflict": repo.note,
+                        },
+                    )
+                )
+            elif _WRITER_EXCLUSIVITY_NOTE in repo.note:
+                events.append(
+                    (
+                        "saga.writer_exclusivity",
+                        {
+                            "saga_id": saga.saga_id,
+                            "repository_id": repo.repository_id,
+                            "refusal": repo.note,
+                        },
+                    )
+                )
 
     def _outstanding(document_repos: Mapping[str, Mapping[str, Any]] | None) -> list[str]:
         if document_repos is None:
@@ -514,6 +575,63 @@ class NativeCommit(NamedTuple):
     parent: str
     message: str
     author: str
+
+
+#: The additive evidence key the entry's precondition harvest writes:
+#: per-repository payload preconditions (payload base + affected-file
+#: versions, beside the expected head and the landed sha) harvested from
+#: the effect surface's journal — the durable record R38-13 asks to keep
+#: beside the expected head.
+SAGA_PRECONDITIONS_KEY = "publication_preconditions"
+
+
+class _NoBlindRedispatchRemote:
+    """The durable half of ADR-0005's reconcile-before-retry (R38-13).
+
+    Wraps the entry's effect surface for one publication pass: a
+    repository whose PERSISTED saga status is ``outcome_unknown`` has a
+    mutation whose provider outcome was never established (the response
+    died), and a correlation probe that comes back negative does NOT
+    prove a delayed apply absent — so ``commit`` re-entry for that
+    repository is refused fail-closed instead of blindly redispatching
+    the same mutation. Resolution is by evidence only: a content-
+    verified probe adopts the effect, and an explicit new attempt rides
+    a new saga (a new marker). The in-process half of the guard lives on
+    the native adapters themselves (``_refuse_unresolved_redispatch``);
+    this one survives the process, which is what the delayed-apply
+    schedule across two recovering processes exercises.
+    """
+
+    def __init__(
+        self,
+        inner: SagaEffectSurface | NativeShapedRemote,
+        unresolved_repositories: frozenset[str],
+    ) -> None:
+        self._inner = inner
+        self._unresolved = unresolved_repositories
+
+    async def remote_head(self, repository_id: str, branch: str) -> str:
+        return await self._inner.remote_head(repository_id, branch)
+
+    async def head_carries_marker(self, repository_id: str, branch: str, marker: str) -> bool:
+        return await self._inner.head_carries_marker(repository_id, branch, marker)
+
+    async def open_review(self, repository_id: str, branch: str, marker: str) -> str:
+        return await self._inner.open_review(repository_id, branch, marker)
+
+    def pin_expected_head(self, repository_id: str, branch: str, expected_head: str) -> None:
+        self._inner.pin_expected_head(repository_id, branch, expected_head)
+
+    async def commit(self, repository_id: str, branch: str, marker: str) -> str:
+        if repository_id in self._unresolved:
+            raise ProviderUnavailableError(
+                f"{repository_id}: the persisted saga books this repository at"
+                " outcome_unknown — an earlier mutation for this marker never"
+                " resolved, and a negative probe does not prove it absent;"
+                " refusing to blindly redispatch the same mutation (ADR-0005)."
+                " Resolve by correlation or an explicit new attempt"
+            )
+        return await self._inner.commit(repository_id, branch, marker)
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +785,11 @@ class DurablePublicationEntry:
         blind; a phase-gate refusal (:class:`PhaseAdmissionRefused`) is
         the normal stop at a phase boundary. Both return the PERSISTED
         saga — the caller's view never runs ahead of the store.
+
+        R38-13: the surface the coordinator drives is wrapped in the
+        no-blind-redispatch guard — repositories whose PERSISTED status
+        is ``outcome_unknown`` cannot re-enter ``commit`` this pass
+        (a negative probe does not prove a delayed apply absent).
         """
         admitted = await self._admitted_repositories()
 
@@ -685,7 +808,12 @@ class DurablePublicationEntry:
             await store.save(saga)
         for repo in saga.repos:
             self._remote.pin_expected_head(repo.repository_id, repo.branch, repo.expected_base_oid)
-        coordinator: SagaCoordinator = SagaCoordinator(store, self._remote)
+        unresolved = frozenset(
+            repo.repository_id for repo in saga.repos if repo.status == "outcome_unknown"
+        )
+        coordinator: SagaCoordinator = SagaCoordinator(
+            store, _NoBlindRedispatchRemote(self._remote, unresolved)
+        )
         try:
             return await coordinator.run(
                 saga, current_publication_epoch=self._scenario.publication_epoch
@@ -693,6 +821,8 @@ class DurablePublicationEntry:
         except (PhaseAdmissionRefused, ProviderUnavailableError):
             persisted = await self._saga_state()
             return persisted if persisted is not None else saga
+        finally:
+            await self._record_preconditions()
 
     async def record_decided_outcomes(self) -> tuple[OutcomeApplication, ...]:
         """Record child outcomes FROM THE PERSISTED SAGA STATE ONLY.
@@ -837,6 +967,48 @@ class DurablePublicationEntry:
         return staging
 
     # -- internals ----------------------------------------------------------------
+
+    async def _record_preconditions(self) -> None:
+        """Harvest the effect surface's ``create_commit`` journal entries
+        into the parent run's evidence under :data:`SAGA_PRECONDITIONS_KEY`
+        (R38-13, additive): per repository, the LATEST effect's payload
+        base and affected-file versions beside the expected head (the
+        journaled parent) and the landed sha — the durable record a
+        recovery or an audit rechecks the landed content against.
+
+        Best-effort by design: a surface without a journal (or with
+        entries that carry no preconditions) records nothing — the
+        evidence key is additive, never load-bearing for correctness."""
+        journal = getattr(self._remote, "journal", None)
+        if not journal:
+            return
+        latest: dict[str, dict[str, Any]] = {}
+        for entry in journal:
+            if entry.get("op") != "create_commit":
+                continue
+            repository_id = str(entry.get("repository_id") or "")
+            if not repository_id or "payload_base" not in entry:
+                continue
+            latest[repository_id] = {
+                "expected_head": str(entry.get("expected_head") or entry.get("parent") or ""),
+                "sha": str(entry.get("sha") or ""),
+                "payload_base": str(entry.get("payload_base") or ""),
+                "file_versions": dict(entry.get("file_versions") or {}),
+                "provider": str(entry.get("provider") or ""),
+                "conflicted": bool(entry.get("content_conflict") or False),
+            }
+        if not latest:
+            return
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, self._parent_run_id)
+            if run is None:
+                return
+            merged = dict(run.evidence or {})
+            recorded = dict(merged.get(SAGA_PRECONDITIONS_KEY) or {})
+            recorded.update(latest)
+            merged[SAGA_PRECONDITIONS_KEY] = recorded
+            run.evidence = merged
+            await session.commit()
 
     def _begin_saga(self) -> PublicationSaga:
         saga = begin_saga(

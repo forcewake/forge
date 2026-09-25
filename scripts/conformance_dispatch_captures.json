@@ -1,0 +1,145 @@
+{
+  "captured_utc": "2026-09-24T22:08:43+00:00",
+  "provenance": "fresh captures: the REAL GitHubRunService/RunService/AzureRunService driven through the production-entry fakes (fake native server subprocess; in-memory fake Azure DevOps), fronted by the declaring wrapper clients in tests/test_gate_conformance.py \u2014 keys only, never values",
+  "providers": {
+    "azure": {
+      "shapes": {
+        "bound_native": [
+          "attempt_base",
+          "credential_redeem",
+          "credential_ref",
+          "driver",
+          "envelope_digest",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest",
+          "work_item_id"
+        ],
+        "bound_redemption": [
+          "attempt_base",
+          "credential_redeem",
+          "credential_ref",
+          "driver",
+          "envelope_digest",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest",
+          "work_item_id"
+        ],
+        "unbound": [
+          "attempt_base",
+          "driver",
+          "envelope_digest",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest",
+          "work_item_id"
+        ]
+      }
+    },
+    "github": {
+      "shapes": {
+        "bound_native": [
+          "attempt_base_oid",
+          "credential_redeem",
+          "credential_ref",
+          "driver",
+          "envelope_digest",
+          "issue_number",
+          "lane_control_token",
+          "lane_resume_mode",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest"
+        ],
+        "bound_redemption": [
+          "attempt_base_oid",
+          "credential_redeem",
+          "credential_ref",
+          "driver",
+          "envelope_digest",
+          "issue_number",
+          "lane_control_token",
+          "lane_resume_mode",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest"
+        ],
+        "unbound": [
+          "attempt_base_oid",
+          "driver",
+          "envelope_digest",
+          "issue_number",
+          "lane_control_token",
+          "lane_resume_mode",
+          "model",
+          "plan_note_id",
+          "run_id",
+          "spec_digest"
+        ]
+      }
+    },
+    "gitlab": {
+      "shapes": {
+        "bound_native": [
+          "FORGE_ATTEMPT_BASE",
+          "FORGE_ATTEMPT_GENERATION",
+          "FORGE_CONTINUATION_DECISION_ID",
+          "FORGE_CREDENTIAL_REDEEM",
+          "FORGE_CREDENTIAL_REF",
+          "FORGE_HARNESS_DRIVER",
+          "FORGE_HARNESS_MODEL",
+          "FORGE_ISSUE_IID",
+          "FORGE_ISSUE_TITLE",
+          "FORGE_LANE_CONTROL_TOKEN",
+          "FORGE_LANE_CONTROL_URL",
+          "FORGE_LANE_RESUME",
+          "FORGE_LANE_RESUME_MODE",
+          "FORGE_PLAN",
+          "FORGE_RESUME_CHECKPOINT",
+          "FORGE_RUN_ID"
+        ],
+        "bound_redemption": [
+          "FORGE_ATTEMPT_BASE",
+          "FORGE_ATTEMPT_GENERATION",
+          "FORGE_CONTINUATION_DECISION_ID",
+          "FORGE_CREDENTIAL_REDEEM",
+          "FORGE_CREDENTIAL_REF",
+          "FORGE_HARNESS_DRIVER",
+          "FORGE_HARNESS_MODEL",
+          "FORGE_ISSUE_IID",
+          "FORGE_ISSUE_TITLE",
+          "FORGE_LANE_CONTROL_TOKEN",
+          "FORGE_LANE_CONTROL_URL",
+          "FORGE_LANE_RESUME",
+          "FORGE_LANE_RESUME_MODE",
+          "FORGE_PLAN",
+          "FORGE_RESUME_CHECKPOINT",
+          "FORGE_RUN_ID"
+        ],
+        "unbound": [
+          "FORGE_ATTEMPT_BASE",
+          "FORGE_ATTEMPT_GENERATION",
+          "FORGE_CONTINUATION_DECISION_ID",
+          "FORGE_HARNESS_DRIVER",
+          "FORGE_HARNESS_MODEL",
+          "FORGE_ISSUE_IID",
+          "FORGE_ISSUE_TITLE",
+          "FORGE_LANE_CONTROL_TOKEN",
+          "FORGE_LANE_CONTROL_URL",
+          "FORGE_LANE_RESUME",
+          "FORGE_LANE_RESUME_MODE",
+          "FORGE_PLAN",
+          "FORGE_RESUME_CHECKPOINT",
+          "FORGE_RUN_ID"
+        ]
+      }
+    }
+  },
+  "schema": "forge.conformance-dispatch-captures/1"
+}

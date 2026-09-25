@@ -1,0 +1,492 @@
+{
+  "cycle": 2,
+  "failures": [
+    {
+      "at": "2026-09-25T00:18:45.669441+00:00",
+      "reason": "control plane not aligned onto the repo version 0.37.0: {'status': 'degraded', 'version': '0.37.0', 'database': 'ok', 'litellm': 'unreachable', 'redis': 'ok', 'queue_depth': 0, 'dlq_depth': 3}"
+    },
+    {
+      "at": "2026-09-25T00:24:26.950908+00:00",
+      "reason": "revision staging failed: Traceback (most recent call last):\n  File \"<string>\", line 7, in <module>\n    from forge.adaptive.models import PlanRevision, PlanStep, RevisionDecision\nImportError: cannot import name 'RevisionDecision' from 'forge.adaptive.models' (/app/src/forge/adaptive/models.py)\n"
+    },
+    {
+      "at": "2026-09-25T00:27:58.881567+00:00",
+      "reason": "the post-revision dispatch envelope names checkpoint 6b7653313a54\u2026 not the preserved 6b7653313a54\u2026"
+    }
+  ],
+  "generated_at": "2026-09-25T00:53:08.069569+00:00",
+  "grade": {
+    "arms": [
+      {
+        "arm": "ack_precedes_edit",
+        "ok": true,
+        "reason": "ack 2026-09-25T00:39:45.307753+00:00 \u2192 durable applied 2026-09-25T00:39:45.754666+00:00 \u2192 vendor application 2026-09-25T00:39:48.825342+00:00 (mid-turn), then 1 later checkpoint(s)"
+      },
+      {
+        "arm": "counterfactual_differs",
+        "ok": true,
+        "reason": "the same task without the steer produced a different edit set"
+      },
+      {
+        "arm": "target_matched",
+        "ok": true,
+        "reason": "the final artifact shows the entrypoint 'check' swapped to 'validate_email' in src/validators/email.py, and the unsteered arm did not do it"
+      },
+      {
+        "arm": "revision_identity_switched",
+        "ok": true,
+        "reason": "decision dec-combined-c3236a3e9314: the recomputed, staged, active-plan and durable-row digests agree on 19a92667bb5f\u2026 and the row switched exactly at the approval"
+      },
+      {
+        "arm": "wip_preserved_and_redispatched",
+        "ok": true,
+        "reason": "the activation routed the checkpoint 8c8fafe4e8e6\u2026 to preserve and the post-revision dispatch is a required resume over exactly it (envelope 61fe471ea856\u2026)"
+      }
+    ],
+    "causal": true,
+    "provenance": "live-lane:claude-sdk-lane/glm-5.3-flash"
+  },
+  "honesty": {
+    "brief_freeze": "the GitLab lane's brief is spec-frozen at /go: the material revision switches the durable plan identity (row digest + active plan + gate rebind) and the MR carries the revised digest, but the revised plan TEXT does not re-enter the lane brief on this driver \u2014 the PE-7 brief-rebind leg is the GitHub path; the revision's extension bytes therefore reach the model only if the frozen brief already carried the underlying scope",
+    "counterfactual": "ONE unsteered lane, model nondeterminism acknowledged, narrow task scope \u2014 the arm compares captured edits, never a guess",
+    "cycle1_revert_finding": "cycle 1's resumed lane REVERTED the steered naming: the final candidate carried `def check(` again because the GitLab lane's brief is spec-frozen at /go (it still names approach X) and the resumed model obeyed the brief over the restored WIP \u2014 the checkpoint itself carried the Y rename (proven by its blob), so the steer's causal effect on the turn's work stood; the continuation semantics, not the steering, lost it. The remedy this driver natively offers \u2014 the operator's standing direction as a PENDING durable steer the resumed lane drains mid-turn \u2014 is what cycle 2 composes.",
+    "delivery_mode": "mid-turn",
+    "staging_leg": "revision 1 (active) and revision 2 (pending) were staged through the REAL revisions module inside the forge-app container \u2014 the proposal-emitter leg the live GitLab planner has not grown yet; the APPROVAL and the ACTIVATION are fully native"
+  },
+  "milestones": {
+    "application": {
+      "application_observed_at": "2026-09-25T00:39:48.825342+00:00",
+      "delivery_mode": "mid-turn"
+    },
+    "blocked_classification": {
+      "status": "blocked",
+      "status_reason": "harness_code: harness job forge-agent-claude-sdk failed (script_failure)"
+    },
+    "command": {
+      "applied_at": "2026-09-25T00:39:45.754666+00:00",
+      "authorized_at": "2026-09-25T00:39:45.684513+00:00",
+      "command_id": "cmd-04d388ce4c96",
+      "dedup_key": "adaptive:steer:c3236a3e9314452e934a60e6c6db668c:549",
+      "note_id": 549,
+      "posted_at": "2026-09-25T00:39:44.917230+00:00",
+      "received_at": "2026-09-25T00:39:45.307753+00:00",
+      "rungs": [
+        "received",
+        "authorized",
+        "dispatching",
+        "vendor_accepted",
+        "applied",
+        "checkpointed"
+      ],
+      "status": "checkpointed"
+    },
+    "counterfactual": {
+      "validator_content": "\"\"\"Syntactic e-mail address validation (issue #3).\n\nThe single-address entrypoint :func:`check` answers one question per\nstring: does it satisfy the project's stated syntactic rules?  The rules\nare deliberately LITERAL \u2014 this is a syntactic gate, not an RFC 5322\nparser:\n\n* exactly one ``@`` separating the local part from the domain;\n* a non-empty local part before the ``@``;\n* a non-empty domain after the ``@`` containing at least one ``.``;\n* no whitespace characters anywhere in the address.\n\nEverything else \u2014 including non-string input \u2014 is simply not a valid\naddress and yields ``False``; :func:`check` never raises on malformed\ninput.  :func:`validate_many` applies :func:`check` element-wise,\npreserving order and length.\n\"\"\"\n\nfrom __future__ import annotations\n\n__all__ = [\"check\", \"validate_many\"]\n\n\ndef check(email: str) -> bool:\n    \"\"\"Return True only when *email* satisfies the stated syntactic rules.\n\n    Non-string input (or any other malformed value) returns False rather\n    than raising.\n    \"\"\"\n    # Guard: anything that is not a string (None, bytes, an int, ...) is\n    # not a valid address \u2014 reject it instead of letting the str\n    # operations below raise.\n    if not isinstance(email, str):\n        return False\n\n    # Rule: no whitespace anywhere in the address.\n    if any(character.isspace() for character in email):\n        return False\n\n    # Rule: exactly one '@'.\n    if email.count(\"@\") != 1:\n        return False\n\n    local, _, domain = email.partition(\"@\")\n\n    # Rule: non-empty local part; non-empty domain holding >= 1 '.'.\n    return bool(local) and \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Apply :func:`check` to each element, preserving order and length.\"\"\"\n    return [check(email) for email in emails]\n",
+      "validator_content_sha256": "932d6d09e0b8780b52a31f3d623256dd7ce2da39668f30b1e947a95c9a633189",
+      "validator_path": "src/validators/email.py",
+      "x_entrypoint_present": true,
+      "y_entrypoint_present": false
+    },
+    "counterfactual_mr": {
+      "candidate_sha": "acaaddeceadee3f9258ccd762214eef3ae0d5edf",
+      "changed_paths": [
+        "src/validators/email.py"
+      ],
+      "diff_digest": "a701973fd186fdbc106be1b91b283a226f4f9d9f186bb5f6708ffe4fc0257f6f",
+      "draft": true,
+      "merged": false,
+      "mr_iid": 3,
+      "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/3",
+      "oracle_pipeline_id": 459,
+      "oracle_tampering": [],
+      "title": "Draft: Add email validation with the check() entrypoint"
+    },
+    "edit": {
+      "checkpoint_id": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+      "files": 1,
+      "final_candidate": {
+        "bulk_entrypoint_present": true,
+        "validator_content": "\"\"\"Email validation \u2014 a syntactic single-address verdict plus a bulk wrapper.\n\nThe contract (also asserted by the precommitted ``smoke`` CI job):\n``validate_email(email)`` is True only when the address\n\n* contains exactly one ``@``,\n* has a non-empty local part before the ``@``,\n* has a domain after the ``@`` holding at least one ``.``,\n* carries no whitespace character anywhere.\n\nEvery other input \u2014 including degenerate ones (empty string, no ``@``,\nseveral ``@``, a dotless domain, whitespace anywhere) \u2014 is False, never\nan exception. ``validate_many`` maps that same verdict over a sequence\nof addresses, one result per input, in order.\n\"\"\"\n\n\ndef validate_email(email: str) -> bool:\n    \"\"\"Return True iff *email* satisfies the stated syntactic rules.\"\"\"\n    if not isinstance(email, str):\n        return False\n    if email.count(\"@\") != 1:\n        # Covers the empty string, a missing '@' and multiple '@' alike.\n        return False\n    if any(char.isspace() for char in email):\n        # \"Whitespace\" in the broad sense: spaces, tabs, newlines, ...\n        return False\n    local, _, domain = email.partition(\"@\")\n    return bool(local) and \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Return one verdict per address in *emails*, in the same order.\"\"\"\n    return [validate_email(email) for email in emails]\n",
+        "validator_content_sha256": "6f98782fa5a188a5c3862be539a2c3437e2bed41b09aef1c1287bfe3b356224e",
+        "validator_path": "src/validators/email.py",
+        "x_entrypoint_present": false,
+        "y_entrypoint_present": true
+      },
+      "uploaded_at": "2026-09-25T00:40:36+00:00"
+    },
+    "interleaving": {
+      "pause": {
+        "command_id": "cmd-3a25c458e5b1",
+        "journal": [
+          {
+            "at": "2026-09-25T00:40:35.409712+00:00",
+            "to": "received"
+          },
+          {
+            "at": "2026-09-25T00:40:36.537785+00:00",
+            "from": "received",
+            "to": "authorized"
+          },
+          {
+            "at": "2026-09-25T00:40:36.540730+00:00",
+            "lane_ack": "authorized",
+            "row": {
+              "at": "2026-09-25T00:40:36.473562+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "authorized",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:40:36.601625+00:00",
+            "epoch": 1,
+            "from": "authorized",
+            "to": "dispatching",
+            "vendor_correlation_id": "9949a034-e87a-4029-931c-61e52764a833"
+          },
+          {
+            "at": "2026-09-25T00:40:36.603673+00:00",
+            "lane_ack": "dispatching",
+            "row": {
+              "at": "2026-09-25T00:40:36.552043+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "dispatching",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:40:36.764053+00:00",
+            "from": "dispatching",
+            "to": "vendor_accepted"
+          },
+          {
+            "at": "2026-09-25T00:40:36.768473+00:00",
+            "from": "vendor_accepted",
+            "to": "applied"
+          },
+          {
+            "at": "2026-09-25T00:40:36.772335+00:00",
+            "from": "applied",
+            "to": "checkpointed"
+          },
+          {
+            "at": "2026-09-25T00:40:36.774121+00:00",
+            "lane_ack": "checkpointed",
+            "row": {
+              "at": "2026-09-25T00:40:36.711553+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "checkpointed",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          }
+        ],
+        "rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "status": "checkpointed"
+      },
+      "sequence_order": {
+        "pause": 3,
+        "steer2": 2
+      },
+      "steer2": {
+        "command_id": "cmd-0d8660b50d56",
+        "journal": [
+          {
+            "at": "2026-09-25T00:40:35.151388+00:00",
+            "to": "received"
+          },
+          {
+            "at": "2026-09-25T00:40:36.837193+00:00",
+            "from": "received",
+            "to": "authorized"
+          },
+          {
+            "at": "2026-09-25T00:40:36.839329+00:00",
+            "lane_ack": "authorized",
+            "row": {
+              "at": "2026-09-25T00:40:36.788634+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "authorized",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:40:36.901396+00:00",
+            "epoch": 1,
+            "from": "authorized",
+            "to": "dispatching",
+            "vendor_correlation_id": "9949a034-e87a-4029-931c-61e52764a833"
+          },
+          {
+            "at": "2026-09-25T00:40:36.903866+00:00",
+            "lane_ack": "dispatching",
+            "row": {
+              "at": "2026-09-25T00:40:36.849505+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "dispatching",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:40:36.960854+00:00",
+            "from": "dispatching",
+            "to": "vendor_accepted"
+          },
+          {
+            "at": "2026-09-25T00:40:36.964531+00:00",
+            "from": "vendor_accepted",
+            "to": "applied"
+          },
+          {
+            "at": "2026-09-25T00:40:36.967831+00:00",
+            "from": "applied",
+            "to": "checkpointed"
+          },
+          {
+            "at": "2026-09-25T00:40:36.969465+00:00",
+            "lane_ack": "checkpointed",
+            "row": {
+              "at": "2026-09-25T00:40:36.914069+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "checkpointed",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          }
+        ],
+        "moments": {
+          "application_observed_at": "2026-09-25T00:40:36.967831+00:00",
+          "applied_at": "2026-09-25T00:40:36.901396+00:00",
+          "authorized_at": "2026-09-25T00:40:36.837193+00:00",
+          "received_at": "2026-09-25T00:40:35.151388+00:00"
+        },
+        "rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "status": "checkpointed"
+      }
+    },
+    "mr": {
+      "candidate_sha": "2d21d6159719a032f613d104db411a1bc87dab10",
+      "changed_paths": [
+        "src/validators/email.py"
+      ],
+      "diff_digest": "744869c5eba5d3b5557e62eeabc2e2bfcb2831bb295406b70e1ab9ed66189108",
+      "draft": true,
+      "merged": false,
+      "mr_iid": 2,
+      "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/2",
+      "oracle_pipeline_id": 440,
+      "oracle_tampering": [],
+      "title": "Draft: Add email validation with the check() entrypoint"
+    },
+    "pause": {
+      "checkpointed_at": "2026-09-25T00:40:36.772335+00:00",
+      "command_id": "cmd-3a25c458e5b1",
+      "posted_at": "2026-09-25T00:40:34.938506+00:00",
+      "rungs": [
+        "received",
+        "authorized",
+        "dispatching",
+        "vendor_accepted",
+        "applied",
+        "checkpointed"
+      ]
+    },
+    "resume_dispatch": {
+      "checkpoint": "8c8fafe4e8e6",
+      "decision_id": "4f986bd31d06",
+      "envelope_digest": "61fe471ea856",
+      "resume_mode": "required",
+      "retry_note": "2026-09-25T00:41:55.150357+00:00"
+    },
+    "revision": {
+      "activated_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+      "approved_at": "2026-09-25T00:41:42.313532+00:00",
+      "decision_id": "dec-combined-c3236a3e9314",
+      "preserved_checkpoint_id": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+      "reuse_route": "preserve",
+      "reuse_route_reason": "compatible revision: 8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61 \u2014 the checkpoint stands under the new plan",
+      "revision1_digest": "4dbe110470aa1b9ca8251931d6d34130bb036c902df89cc6035098d0c176756d",
+      "revision2_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+      "staged_at": "2026-09-25T00:41:42.302675+00:00"
+    },
+    "standing_direction": {
+      "fate": {
+        "command_id": "cmd-b2ff9c86b04f",
+        "final_rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "final_status": "checkpointed",
+        "lane_journal_entry": {
+          "at": "2026-09-25T00:42:30.087482+00:00",
+          "command_id": "cmd-b2ff9c86b04f",
+          "delivery": "application_observed",
+          "detail": {
+            "delivered": "mid-turn",
+            "mailbox_status": "checkpointed"
+          },
+          "kind": "steer",
+          "outcome": "applied",
+          "reason": "",
+          "sequence": 4
+        },
+        "moments": {
+          "application_observed_at": "2026-09-25T00:42:30.075015+00:00",
+          "applied_at": "2026-09-25T00:42:26.981682+00:00",
+          "authorized_at": "2026-09-25T00:42:26.902341+00:00",
+          "received_at": "2026-09-25T00:41:52.100243+00:00"
+        }
+      },
+      "note_id": 557,
+      "posted_at": "2026-09-25T00:41:51.695585+00:00"
+    }
+  },
+  "prior_cycles": [
+    {
+      "cycle": 1,
+      "final_x_entrypoint_present": true,
+      "final_y_entrypoint_present": false,
+      "grade": {
+        "arms": [
+          {
+            "arm": "ack_precedes_edit",
+            "ok": true,
+            "reason": "ack 2026-09-25T00:20:43.377408+00:00 \u2192 durable applied 2026-09-25T00:20:44.980536+00:00 \u2192 vendor application 2026-09-25T00:20:48.076499+00:00 (mid-turn), then 1 later checkpoint(s)"
+          },
+          {
+            "arm": "counterfactual_differs",
+            "ok": true,
+            "reason": "the same task without the steer produced a different edit set"
+          },
+          {
+            "arm": "target_matched",
+            "ok": false,
+            "reason": "the steered edits do not show the entrypoint 'check' swapped to 'validate_email' in src/validators/email.py"
+          },
+          {
+            "arm": "revision_identity_switched",
+            "ok": true,
+            "reason": "decision dec-combined-e18fb44246b1: the recomputed, staged, active-plan and durable-row digests agree on 677fddf14145\u2026 and the row switched exactly at the approval"
+          },
+          {
+            "arm": "wip_preserved_and_redispatched",
+            "ok": true,
+            "reason": "the activation routed the checkpoint 6b7653313a54\u2026 to preserve and the post-revision dispatch is a required resume over exactly it (envelope 20d6944ac002\u2026)"
+          }
+        ],
+        "causal": false,
+        "provenance": "live-lane:claude-sdk-lane/glm-5.3-flash"
+      },
+      "run_id": "e18fb44246b14d5c8ef918f78f6bc01a"
+    }
+  ],
+  "provenance": "live-lane:claude-sdk-lane/glm-5.3-flash",
+  "record_valid": {
+    "missing": [],
+    "ok": true
+  },
+  "schema": "forge.steering.combined-trace/1",
+  "spend": {
+    "cap_usd": 2.0,
+    "cost_basis": "sdk-total_cost_usd",
+    "jobs": {
+      "775": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.2467
+      },
+      "779": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.292
+      },
+      "782": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.25
+      },
+      "784": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.1961
+      },
+      "798": {
+        "cost_basis": "sdk-total_cost_usd",
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.1803
+      }
+    },
+    "total_usd": 1.1651
+  },
+  "task": {
+    "approach_x_entrypoint": "check",
+    "bulk_entrypoint": "validate_many",
+    "lane_ref": "59ba869a312e9c13c120b82034b90f669a894ce6",
+    "seed_commit_sha": "af2ee5f34e0b3ded01677ce1810d1e96f31107e7",
+    "steer_text": "Operator steer, mid-work direction change: rename the validator's public entrypoint \u2014 entrypoint validate_email (not check) in src/validators/email.py. Define `validate_email(email: str) -> bool` as the public API and remove the `check` definition; keep the validation semantics, the bulk entrypoint and every other requirement of the plan unchanged.",
+    "steer_y_entrypoint": "validate_email",
+    "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+    "validator_path": "src/validators/email.py"
+  },
+  "timings": {
+    "command_to_ack": {
+      "clocks": "note=driver-host, rungs=lab-postgres",
+      "note_posted_at": "2026-09-25T00:39:44.917230+00:00",
+      "received_at": "2026-09-25T00:39:45.307753+00:00"
+    },
+    "command_to_applied": {
+      "applied_at": "2026-09-25T00:39:45.754666+00:00",
+      "received_at": "2026-09-25T00:39:45.307753+00:00"
+    },
+    "command_to_vendor_application": {
+      "application_observed_at": "2026-09-25T00:39:48.825342+00:00",
+      "applied_at": "2026-09-25T00:39:45.754666+00:00"
+    },
+    "pause_to_checkpoint": {
+      "checkpoint_uploaded_at": "2026-09-25T00:40:36+00:00",
+      "pause_posted_at": "2026-09-25T00:40:34.938506+00:00"
+    }
+  }
+}

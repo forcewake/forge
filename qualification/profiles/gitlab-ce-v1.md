@@ -7,7 +7,7 @@ the setup — WITHOUT reading implementation files. The qualification
 driver is `scripts/qualify_gitlab_ce.py`; its evidence bundle lands in
 `qualification/profiles/gitlab-ce-v1-evidence.json`.
 
-> **Status (2026-09-24): PARTIALLY QUALIFIED — see "Known limitation".**
+> **Status (2026-09-25): PARTIALLY QUALIFIED — see "Known limitation".**
 > The cold install, native entry arc (issue → plan → `/go` → harness
 > dispatch → candidate → Draft MR → independent verification) and every
 > negative arm are qualified live and offline. The dispatch-parity wave
@@ -19,8 +19,8 @@ driver is `scripts/qualify_gitlab_ce.py`; its evidence bundle lands in
 > **R37-08 (#289) has now executed the LIVE trace** on the aligned lab
 > (`qualification/records/gitlab-ce-v1@live.json` +
 > `qualification/profiles/live-single-writer-v1.md`): the uninterrupted
-> flow is live-qualified end to end (real model glm-5.3-flash through the
-> gateway, claude-code 2.1.273 on the `unraid` runner, six-case oracle
+> flow is live-qualified end to end (real model glm-5.3-flash through
+> the gateway, claude-code 2.1.273 on the `unraid` runner, six-case oracle
 > green on the exact candidate sha, Draft MR left for human review), and
 > the interruption drill's MECHANICS ran live (mid-turn `/pause` →
 > verified checkpoint → honest `blocked` → `/retry` → the exact-resume
@@ -35,6 +35,29 @@ driver is `scripts/qualify_gitlab_ce.py`; its evidence bundle lands in
 > guarded-exit patch, root-caused in the record). Nothing here claims
 > fleetwide or enterprise readiness, and merge/deploy stay human
 > decisions.
+>
+> **R38-06 (#307), 2026-09-25 — the composition is now FROZEN and
+> cold-installable.** The exact supported composition lives in
+> `qualification/profiles/supported-gitlab-ce-v1.json` (stamp
+> `forge.supported.profile/1`, written by
+> `scripts/freeze_supported_profile.py` from actual receipts — the #306
+> alignment receipts, the live evidence, the v0.37.0 promotion record):
+> promoted wheel/image/source identities, the executed-lab build, the
+> target template bytes frozen INTO the manifest (the wheel ships no
+> `ci/templates/`), the runner profile, harness claude-code 2.1.273, the
+> model route, the #303 credential modes and the smoke verification
+> contract. `scripts/cold_install_check.py` proves the three installs —
+> fresh (clean venv + disposable project, wheel by sha256, template from
+> the manifest, preflight green, the smoke job green with ZERO model
+> calls), upgrade (a disposable Postgres seeded at 026, the ACTUAL
+> 026→027 transition with counts+digest preservation) and verify
+> (read-only identity check of the live lab, every mismatch named).
+> The second engineer's path is
+> `docs/operations/supported-profile-runbook.md`. The useful-WIP
+> cross-runner delivery arm that stayed open above was DELIVERED green
+> by the R38-05 trace (`docs/evaluation/2026-09-25-useful-wip-resume/`)
+> on the #302-finalized template; the human support decision stays
+> `pending` (§12).
 
 ## 1. The frozen combination (identity card)
 
@@ -317,3 +340,29 @@ verify, supply-chain binding to the promotion record, the egress/
 filesystem/credential boundary statement and who enforces what (the
 runner platform enforces; forge verifies and probes) — is
 `docs/operations/lane-closure.md`.
+
+## 12. The frozen supported composition and the evidence separation (R38-06 / #307 — additive)
+
+`qualification/profiles/supported-gitlab-ce-v1.json` (stamp
+`forge.supported.profile/1`) is this profile's FROZEN composition — a
+manifest-of-manifests whose every value traces to an actual receipt
+(promotion record, alignment receipts, live evidence, the lane closure
+manifest, the inventory). Its `manifest_digest` (sha256 over the
+canonical document) vouches for the file; `scripts/freeze_supported_
+profile.py --check` re-verifies it, and
+`python -m forge.profile_qualification binding` cross-references it
+against this profile's records (named matches/divergences, never a
+verdict). The cold-install proofs live in
+`scripts/cold_install_check.py --mode fresh|upgrade|verify` and the
+second engineer's path is
+`docs/operations/supported-profile-runbook.md`.
+
+The FOUR evidence records stay DISTINCT in the manifest's
+`evidence_records` block — they never merge into one blob:
+
+| Record | Status | Receipt |
+| --- | --- | --- |
+| Source review | conditional (the cancelled CI run stays on record) | `docs/releases/evidence/v0.37.0/promotion.json#decision.checks` |
+| Release canary | pass (upgrade stage was 027→027 same-head, honestly NOT a schema transition) | `docs/releases/evidence/v0.37.0/promotion.json#canary` |
+| Native workflow qualification | green live (useful-WIP continued, zero validation findings) | `docs/evaluation/2026-09-25-useful-wip-resume/useful-wip-resume-2026-09-25.json` |
+| Human support approval | **pending** — the freeze approves nothing; approvals live in `qualification/profile-approvals.json` | the human gate in `forge.profile_qualification.build_supported_profiles` |

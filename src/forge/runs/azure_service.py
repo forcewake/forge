@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -161,9 +162,9 @@ from forge.adaptive.admission import (
 )
 from forge.adaptive.credential_broker import (
     CredentialBroker,
+    CredentialDeliveryPlan,
     EnvBroker,
-    StagedDispatchCredential,
-    stage_dispatch_credential,
+    delivery_plan,
 )
 from forge.adaptive.project_credentials import (
     CredentialRefusal,
@@ -2893,25 +2894,28 @@ class AzureRunService:
             )
         if driver is None:
             driver = spec.harness_driver
-        # NEXT-19 (#207): broker resolution under the active execution
-        # lease — BEFORE the Pipelines run request. A subject the
-        # deployment never bound stages nothing (today's ambient
-        # behavior, attribution unknown); a bound subject resolves
-        # through the registry's fail-closed checks and the broker, and
-        # the template parameters gain ONLY the broker's staged slot for
-        # the credential route. Any typed refusal parks the run with
-        # ZERO provider dispatches.
+        # NEXT-19 (#207) / R38-02 (#303): the credential DELIVERY plan
+        # under the active execution lease — BEFORE the Pipelines run
+        # request. A subject the deployment never bound plans nothing
+        # (today's ambient behavior, attribution ambient-legacy); a bound
+        # subject resolves through the registry's fail-closed checks into
+        # a provider-safe transport (a secret variable in an authorized
+        # variable group — runtime parameters are documented "No support
+        # for secret values" — or runner-time redemption), and the
+        # template parameters gain ONLY the credential REF. Any typed
+        # refusal parks the run with ZERO provider dispatches.
         credential_subject = binding_subject_of_run(run)
-        staged_credential: StagedDispatchCredential | None = None
+        credential_delivery: CredentialDeliveryPlan | None = None
         if credential_subject is not None:
             try:
-                staged_credential = await stage_dispatch_credential(
+                credential_delivery = await delivery_plan(
                     self._credential_registry,
                     self._credential_broker,
                     subject=credential_subject,
-                    provider=provider_route_for_driver(driver),
+                    provider_route=provider_route_for_driver(driver),
+                    profile="azure",
                     presented_ref=prior_credential_ref,
-                    grant={"run_id": run_id, "attempt_generation": generation},
+                    environ=os.environ,
                 )
             except CredentialRefusal as exc:
                 logger.warning(
@@ -2922,16 +2926,16 @@ class AzureRunService:
                 )
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, f"credential_refused: {exc}")
                 return
-            if staged_credential is not None:
+            if credential_delivery is not None:
                 logger.info(
                     "credential.binding_subject: run %s subject %s provider %s revision %d — "
-                    "credential.resolved_version %s, credential.resolver_identity %s",
+                    "credential.delivery mode %s transport %s (attribution bound-delivery)",
                     run_id[:8],
-                    staged_credential.subject,
-                    staged_credential.provider,
-                    staged_credential.binding_revision,
-                    staged_credential.resolved_version,
-                    staged_credential.resolver_identity,
+                    credential_delivery.subject,
+                    credential_delivery.provider,
+                    credential_delivery.binding_revision,
+                    credential_delivery.mode,
+                    credential_delivery.transport_ref,
                 )
         # B04: the envelope binding dispatched to the lane — the plan
         # comment's journaled id + the frozen envelope digest (both from
@@ -3027,11 +3031,21 @@ class AzureRunService:
                     # Bounded verification-failure context on a repair
                     # re-dispatch; empty on cycle 1.
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
-                    # NEXT-19 (#207): the broker's staged credential slot
-                    # (the binding's env var name as the parameter key —
-                    # a lane template without the declared parameter
-                    # drops it, harmlessly).
-                    **(dict(staged_credential.staged_env) if staged_credential is not None else {}),
+                    # R38-02 (#303): the credential delivery REFERENCE —
+                    # the declared `credential_ref` parameter (plus the
+                    # non-secret redemption flag). Sent ONLY on a bound
+                    # dispatch; NEVER a value (template parameters are
+                    # documented "No support for secret values" — the
+                    # value rides the authorized variable group the lane
+                    # template reads, or the redemption channel).
+                    **(
+                        {
+                            "credential_ref": credential_delivery.dispatch_ref,
+                            "credential_redeem": "1" if credential_delivery.redemption else "",
+                        }
+                        if credential_delivery is not None
+                        else {}
+                    ),
                 },
             )
         except AzureDevOpsError as exc:
@@ -3108,19 +3122,23 @@ class AzureRunService:
                         "attempt_base": attempt_base,
                         "driver": correlated.driver,
                         "started_at": correlated.started_at,
-                        # NEXT-19 (#207): the extended dispatch-credential
-                        # proof (/2) beside the dispatch evidence —
-                        # binding subject, ref, revision, resolver
-                        # identity, resolved version, grant refs and the
-                        # broker receipt. Refs/metadata only, no value.
+                        # R38-02 (#303): the credential delivery plan
+                        # (/1) beside the dispatch evidence — binding
+                        # subject, ref, revision, delivery mode, the
+                        # transport reference and the expected identity.
+                        # Refs/metadata only, no value.
                         **(
                             {
                                 "dispatch_credential": {
-                                    **staged_credential.proof,
+                                    **credential_delivery.as_document(),
                                     "attempt_generation": generation,
+                                    "grant": {
+                                        "run_id": run_id,
+                                        "attempt_generation": str(generation),
+                                    },
                                 }
                             }
-                            if staged_credential is not None
+                            if credential_delivery is not None
                             else {}
                         ),
                     },

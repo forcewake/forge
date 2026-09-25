@@ -20,7 +20,15 @@ all read-only by construction:
   the native occupancy summary (``occupied_vs_limit`` and the ages of
   the uncertain leases) and the TYPED blocked reasons
   (:func:`~forge.adaptive.operator_view.explain_blocked` — each with its
-  evidence link and the safe, non-generic next action);
+  evidence link and the safe, non-generic next action) — plus the R38-15
+  RECOVERY section (:func:`~forge.adaptive.operator_view.
+  recovery_document`): the delivery outcome (a failed/no-effect delivery
+  displays AS a failure — an empty resumed diff is never a successful
+  resume), the five-milestone pause/resume ladder (each
+  present/absent/unknown independently) and the advisory recovery hint
+  naming the guarded route that executes it. Action hints rendered from a
+  snapshot whose consistency fence MOVED carry ``stale: true`` plus the
+  current state's safe alternative;
 - ``GET /operator/runs/{run_id}/support-bundle?subject=<canonical>
   &max_bytes=&sections=`` — the exportable
   :class:`~forge.adaptive.support_bundle.SupportBundle` document
@@ -28,7 +36,10 @@ all read-only by construction:
   on, its EXPORT SCOPE AND SIZE stated in the ``export`` block, refused
   with a typed ``operator.bundle_too_large`` (413) when the serialized
   document exceeds the requested ``max_bytes`` (default 1 MiB, hard cap
-  8 MiB) — narrow with ``?sections=`` instead of truncating evidence.
+  8 MiB) — narrow with ``?sections=`` instead of truncating evidence —
+  and carrying the R38-15 bounded DIAGNOSTICS slice (allowlisted fields
+  per section, entry caps, raw operational backup names excluded — the
+  #304 receipts referenced at most).
 
 Every response carries the R37-16 time-to-diagnose observability as
 headers: ``operator.query_duration`` (seconds) and
@@ -109,7 +120,13 @@ from forge.adaptive.operator_snapshot import (
     OperatorSnapshotReader,
     subject_from_ref,
 )
-from forge.adaptive.operator_view import RecoveryActions, explain_blocked, render
+from forge.adaptive.operator_view import (
+    action_hint_block,
+    explain_blocked,
+    export_diagnostics,
+    recovery_document,
+    render,
+)
 from forge.adaptive.support_bundle import COVERAGE_SECTIONS as _SUPPORT_COVERAGE_SECTIONS
 from forge.adaptive.support_bundle import SupportBundle
 from forge.api_lane_control import _bearer, _secret, lane_control_token, verify_lane_token
@@ -578,7 +595,10 @@ async def get_operator_run(
 ) -> Any:
     """One run's full projection render — plus coverage, age, occupancy,
     the source-version fence and the ADVISORY action hints (the observer
-    role: probe only).
+    role: probe only), and the R38-15 RECOVERY section: the delivery
+    outcome (failed deliveries display AS failures), the five-milestone
+    pause/resume ladder (each independent) and the advisory recovery hint
+    naming the guarded route that executes it.
 
     R37-16 bounded drill-down: ``?limit=`` windows every history section
     to its LAST N rows (default 20, max 100) with the authority totals
@@ -623,22 +643,25 @@ async def get_operator_run(
             checkpoints=snapshot.rows.get("checkpoints"),
         )
     ]
-    document["actions"] = [
-        {
-            "action": action.action,
-            "via": action.via,
-            "digest": action.digest,
-            "expected_version": action.expected_version,
-            "at": action.at,
-            "linkage": action.linkage,
-        }
-        for action in RecoveryActions.plan(projection, actor="operator:read", actor_role="observer")
-    ]
-    document["actions_advisory"] = (
-        "action hints only — execution goes through the guarded command routes, "
-        "which revalidate authority and the current world; this render is an "
-        "ephemeral projection, not a durable CAS ticket"
+    # The R38-15 recovery surface: the delivery outcome (a failed/no-effect
+    # delivery displays AS a failure — an empty resumed diff is never a
+    # successful resume), the five-milestone pause/resume ladder (each
+    # present/absent/unknown independently) and the ADVISORY recovery hint
+    # naming the guarded route that executes it. A snapshot whose
+    # consistency fence moved renders explicit uncertainty here too.
+    document["recovery"] = recovery_document(
+        snapshot.rows,
+        state=projection.state,
+        coverage=snapshot.source_coverage,
+        occupancy=snapshot.occupancy,
+        projection_inconsistent=snapshot.projection_inconsistent,
     )
+    hints = action_hint_block(projection, snapshot_inconsistent=snapshot.projection_inconsistent)
+    document["actions"] = hints["actions"]
+    document["actions_advisory"] = hints["actions_advisory"]
+    document["actions_stale"] = hints["actions_stale"]
+    if "actions_stale_reason" in hints:
+        document["actions_stale_reason"] = hints["actions_stale_reason"]
     return _finish(document, started, route="detail")
 
 
@@ -684,6 +707,18 @@ async def get_operator_support_bundle(
     document["subject_id"] = snapshot.subject_id
     document["source_version"] = snapshot.source_version
     document["projection_inconsistent"] = snapshot.projection_inconsistent
+    # The R38-15 diagnostics slice — bounded (max entries per section, and
+    # the whole document still under the export's byte cap), ALLOWLISTED
+    # per section (the audit_export pattern) and free of raw operational
+    # backup names (the R38-03/#304 receipts referenced at most). It rides
+    # the SAME rows the bundle read — no second collector.
+    document["diagnostics"] = export_diagnostics(
+        snapshot.rows,
+        coverage=snapshot.source_coverage,
+        occupancy=snapshot.occupancy,
+        projection=snapshot.projection(),
+        projection_inconsistent=snapshot.projection_inconsistent,
+    )
     export: dict[str, Any] = {
         "scope": list(selected) if selected is not None else list(BUNDLE_SECTIONS),
         "sections_selected": selected is not None,

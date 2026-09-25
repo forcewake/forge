@@ -28,6 +28,20 @@ HARNESS_TEMPLATES = (
     "copilot-sdk-lane.gitlab-ci.yml",
 )
 
+#: The INTERACTIVE SDK lanes (R38-01/#302): the driver runs as
+#: ``forge.lane_driver`` and the candidate is collected by the PACKAGED
+#: generation-aware collector (``forge.harness_entry
+#: --collect-candidate``) in a driver/collection/final-status phased
+#: script. The remaining BATCH templates keep their inline staging — see
+#: tests/test_gitlab_sdk_lane_finalization.py for the executed contract.
+SDK_LANE_TEMPLATES = (
+    "claude-sdk-lane.gitlab-ci.yml",
+    "codex-sdk-lane.gitlab-ci.yml",
+    "opencode-sdk-lane.gitlab-ci.yml",
+    "copilot-sdk-lane.gitlab-ci.yml",
+)
+BATCH_TEMPLATES = tuple(name for name in HARNESS_TEMPLATES if name not in SDK_LANE_TEMPLATES)
+
 # A write token must never appear, but FORGE_BOT_READ_TOKEN (the read-only
 # convention) must: the negative regex below excludes it via the READ_
 # infix.
@@ -74,6 +88,13 @@ def template_doc(request) -> dict:
     return body
 
 
+@pytest.fixture(params=BATCH_TEMPLATES)
+def batch_template_text(request) -> str:
+    """The BATCH templates only — they keep the inline staging contract
+    (the SDK lanes' collector contract is pinned separately below)."""
+    return (TEMPLATES_DIR / request.param).read_text()
+
+
 class TestNoWriteCapability:
     def test_no_git_push_anywhere(self, template_text):
         assert _invocations_of(template_text, "git push") == []
@@ -96,10 +117,12 @@ class TestCandidateContract:
     def test_detached_checkout_of_frozen_attempt_base(self, template_text):
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in template_text
 
-    def test_candidate_diff_against_attempt_base(self, template_text):
+    def test_candidate_diff_against_attempt_base(self, batch_template_text):
+        # The BATCH lanes stage inline; the SDK lanes collect through the
+        # packaged collector (TestSdkLaneFinalizationContract below).
         assert (
             'git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" '
-            "> .forge/candidate.diff" in template_text
+            "> .forge/candidate.diff" in batch_template_text
         )
 
     def test_meta_json_is_written(self, template_text):
@@ -131,6 +154,122 @@ class TestCandidateContract:
 
     def test_control_dir_excluded_from_the_index(self, template_text):
         assert 'echo ".forge/" >> .git/info/exclude' in template_text
+
+
+class TestSdkLaneFinalizationContract:
+    """R38-01 (#302): the SDK lanes FINISH the job — driver / collection /
+    final-status phases in ONE shell, the PACKAGED generation-aware
+    collector, and exactly one exit at the end.
+
+    The shipped defect: the script block ended with an unconditional
+    ``exit "$_driver_rc"`` — a SUCCESSFUL driver exited the job before the
+    meta floor, the collection and the markers ever ran (GitLab
+    concatenates before_script + script into a single shell; the live
+    single-writer run hit ``harness_artifact_missing`` and needed a manual
+    guarded-exit patch that never landed in the template). This class pins
+    the shipped SHAPE; the EXECUTED contract (real Bash, real Git, a stub
+    driver leg, the real packaged collector) is
+    tests/test_gitlab_sdk_lane_finalization.py.
+    """
+
+    @pytest.fixture(params=SDK_LANE_TEMPLATES)
+    def sdk_text(self, request) -> str:
+        return (TEMPLATES_DIR / request.param).read_text()
+
+    @pytest.fixture(params=SDK_LANE_TEMPLATES)
+    def sdk_doc(self, request) -> dict:
+        parsed = yaml.safe_load((TEMPLATES_DIR / request.param).read_text())
+        _, body = _lane_job(parsed)
+        return body
+
+    def _finalization_block(self, doc: dict) -> str:
+        blocks = [
+            item for item in doc["script"] if isinstance(item, str) and "forge.lane_driver" in item
+        ]
+        assert len(blocks) == 1, "the finalization must be ONE script block"
+        return blocks[0]
+
+    def test_the_unconditional_driver_exit_is_gone(self, sdk_text):
+        assert 'exit "$_driver_rc"' not in sdk_text
+
+    def test_the_job_exits_exactly_once_at_the_end(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        assert block.count('exit "') == 1
+        assert block.rstrip().endswith('exit "$_job_rc"')
+
+    def test_collection_runs_through_the_packaged_collector(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        assert '"$FORGE_LANE_PYTHON" -m forge.harness_entry --collect-candidate' in block
+        assert '--forge-run-id "$FORGE_RUN_ID"' in block
+        assert '--attempt-base-oid "$FORGE_ATTEMPT_BASE"' in block
+        assert '--expected-checkpoint-id "${FORGE_RESUME_CHECKPOINT:-}"' in block
+        assert "--output-root forge-output" in block
+        # A required-resume dispatch demands the generation pointer —
+        # never a silent fallback to the untouched checkout.
+        assert '_collector_flags="--require-generation"' in block
+        assert '[ "${FORGE_LANE_RESUME:-}" = "1" ]' in block
+
+    def test_no_duplicated_git_staging_in_the_yaml(self, sdk_text):
+        # The collector's own job (git -C on the VALIDATED tree); inline
+        # staging in the ORIGINAL checkout is exactly the resumed-lane
+        # defect (an empty diff beside a full generation).
+        assert "git add -A" not in sdk_text
+        assert "git diff --cached" not in sdk_text
+
+    def test_the_meta_floor_precedes_collection(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        assert block.index("candidate.meta.json") < block.index("--collect-candidate")
+
+    def test_stale_candidate_bytes_are_removed_before_collection(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        assert "rm -f .forge/candidate.diff" in block
+        assert block.index("rm -f .forge/candidate.diff") < block.index("--collect-candidate")
+
+    def test_the_marker_is_advertised_only_on_collector_success(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        guard = 'if [ "$_collector_rc" -eq 0 ]; then'
+        assert guard in block
+        assert block.index(guard) < block.index("FORGE_CANDIDATE:")
+
+    def test_the_final_status_ladder_preserves_the_first_failure(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        assert '_job_rc="$_driver_rc"' in block  # the driver rc wins
+        assert '_job_rc="$_collector_rc"' in block  # a green turn without its artifact fails
+        assert block.index('_job_rc="$_driver_rc"') < block.index('_job_rc="$_collector_rc"')
+
+    def test_the_outcome_marker_carries_separate_phase_fields(self, sdk_doc):
+        block = self._finalization_block(sdk_doc)
+        line = next(ln for ln in block.splitlines() if ln.startswith('echo "FORGE_LANE_OUTCOME:'))
+        for field in ("driver_exit", "collector_exit", "candidate_state"):
+            assert field in line
+        # The separate fields never collapse into job_success.
+        assert "job_success" not in block
+
+    def test_the_interpreter_variable_declares_the_lane_venv(self, sdk_doc):
+        assert sdk_doc["variables"]["FORGE_LANE_PYTHON"] == "/tmp/forge-lane-venv/bin/python"
+
+    def test_the_artifacts_still_declare_the_contract_paths(self, sdk_doc):
+        artifacts = sdk_doc["artifacts"]
+        assert set(artifacts["paths"]) == {".forge/candidate.diff", ".forge/candidate.meta.json"}
+        assert artifacts["when"] == "always"
+
+    def test_batch_templates_document_no_interactive_restore(self):
+        # The batch recipes are one-shot `-p` lanes: no checkpoint
+        # restore, no workspace generation — the driver never runs, and
+        # the limitation is SAID in every header so a required-resume
+        # dispatch is never pointed at one (claude-code carries the full
+        # refusal gate, #288).
+        for name in BATCH_TEMPLATES:
+            text = (TEMPLATES_DIR / name).read_text()
+            doc = yaml.safe_load(text)
+            _, body = _lane_job(doc)
+            script = "\n".join(str(item) for item in body["script"])
+            # the interactive driver and the packaged collector are SDK-
+            # lane surfaces only (claude-code's refusal gate NAMES the
+            # lane driver in its message — naming is not invoking)
+            assert "-m forge.lane_driver" not in script, name
+            assert "--collect-candidate" not in script, name
+            assert "checkpoint" in text and "restore" in text, name
 
 
 class TestDriverPrompts:
@@ -556,3 +695,61 @@ class TestDotnetTrxAggregation:
         )
         for verification in (template_block, script_block):
             assert verification["total_failed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# R38-17 (issue #318, ADR-0032) — the versioned execution spec's MODEL pin
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionSpecModelPin:
+    """The lane templates consume the execution spec's pinned model
+    route (the dispatched FORGE_HARNESS_MODEL — the approved RunSpec's
+    frozen choice) instead of re-deriving it from their own ambient
+    defaults: the pin outranks every ambient spelling, and the ambient
+    value that remains is the DOCUMENTED legacy fallback only."""
+
+    def _text(self, name: str) -> str:
+        return (TEMPLATES_DIR / name).read_text()
+
+    def test_the_claude_code_batch_lane_consumes_the_dispatched_pin(self):
+        """The consolidation defect itself: the batch lane ran its
+        hard-coded ANTHROPIC_MODEL default and never consumed the
+        dispatched pin — the approved route and the executed route were
+        two different decisions."""
+        text = self._text("claude-code.gitlab-ci.yml")
+        assert 'export ANTHROPIC_MODEL="${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}"' in text
+        # The resolution happens BEFORE the vendor call consumes it.
+        assert text.index("export ANTHROPIC_MODEL=") < text.index('--model "$ANTHROPIC_MODEL"')
+        # The ambient default stays, as the documented fallback only.
+        assert "DOCUMENTED ambient fallback only" in text
+
+    def test_the_dotnet_lane_consumes_the_dispatched_pin(self):
+        text = self._text("dotnet-lane.gitlab-ci.yml")
+        assert 'export ANTHROPIC_MODEL="${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}"' in text
+        assert text.index("export ANTHROPIC_MODEL=") < text.index('--model "$ANTHROPIC_MODEL"')
+
+    def test_the_copilot_batch_lane_consumes_the_dispatched_pin(self):
+        text = self._text("copilot.gitlab-ci.yml")
+        assert 'export COPILOT_MODEL="${FORGE_HARNESS_MODEL:-${COPILOT_MODEL:-}}"' in text
+        assert text.index("export COPILOT_MODEL=") < text.index("${COPILOT_MODEL:+--model")
+
+    def test_the_opencode_sdk_lane_pin_outranks_the_ambient_project_variable(self):
+        """The SDK chain's ordering: the dispatched pin must come
+        BEFORE the ambient OPENCODE_MODEL_ID project variable (the
+        pre-#318 order let ambient outrank the approved route)."""
+        text = self._text("opencode-sdk-lane.gitlab-ci.yml")
+        chain = next(line for line in text.splitlines() if "export FORGE_OPENCODE_MODEL=" in line)
+        assert chain.index("FORGE_HARNESS_MODEL") < chain.index("OPENCODE_MODEL_ID")
+
+    def test_the_claude_sdk_lane_keeps_the_dispatched_pin_first(self):
+        text = self._text("claude-sdk-lane.gitlab-ci.yml")
+        chain = next(line for line in text.splitlines() if "export FORGE_CLAUDE_MODEL=" in line)
+        assert chain.index("FORGE_HARNESS_MODEL") < chain.index("ANTHROPIC_MODEL")
+        assert "DOCUMENTED ambient fallback" in text
+
+    def test_the_batch_opencode_lane_consumes_the_dispatched_pin(self):
+        """The one batch template that already consumed the pin — pinned
+        so the consolidation cannot regress it."""
+        text = self._text("opencode.gitlab-ci.yml")
+        assert "s/__MODEL__/${FORGE_HARNESS_MODEL}/g" in text

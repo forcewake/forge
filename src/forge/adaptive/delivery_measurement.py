@@ -89,6 +89,7 @@ __all__ = [
     "billing_comparison",
     "build_report",
     "ledger_records_from_delivery_metrics",
+    "ledger_records_from_ingested_usage",
     "measured_rate",
     "replay_report",
     "trace_accepted_task",
@@ -258,7 +259,12 @@ class ReceiptClaim:
     evidence attempts carry. Identity is the receipt id when the record
     brings one (the sha256 :func:`usage_receipt_id` computes) and a content
     digest otherwise, so a re-delivered identical receipt collapses no
-    matter how it arrived.
+    matter how it arrived. R38-09 adds two additive fields ingested lane
+    receipts carry: ``cost_basis`` (``provider-reported`` /
+    ``estimated`` / ``billing-reconciliation`` — the SDK's own meter vs a
+    versioned card vs a billing export) and ``segment`` (the attribution
+    segment over route + route version + rate card; a change writes NEW
+    rows, history is never rewritten).
     """
 
     receipt_id: str
@@ -273,13 +279,16 @@ class ReceiptClaim:
     reasoning_tokens: int | None = None
     cost_usd: float | None = None
     completeness: str = "unknown"
+    cost_basis: str = ""
+    segment: str = ""
 
     @property
     def anthropic_shaped(self) -> bool:
         """Disjoint counters (the R23 research-table tells: the cache-write
-        column only an Anthropic-compatible endpoint exposes, or the
-        claude-code driver that always talks to one)."""
-        return self.cache_write_tokens is not None or self.route.provider == "claude-code"
+        column only an Anthropic-compatible endpoint exposes, or a claude
+        driver — the scripted ``claude-code`` batch lane AND the
+        ``claude-sdk-lane`` interactive lane both always talk to one)."""
+        return self.cache_write_tokens is not None or "claude" in self.route.provider.lower()
 
     @property
     def input_tokens_inclusive(self) -> int | None:
@@ -316,6 +325,8 @@ class ReceiptClaim:
             "reasoning_tokens": self.reasoning_tokens,
             "cost_usd": self.cost_usd,
             "completeness": self.completeness,
+            "cost_basis": self.cost_basis,
+            "segment": self.segment,
         }
 
 
@@ -646,6 +657,8 @@ class DeliveryLedger:
                 reasoning_tokens=_nn_int(block.get("reasoning_tokens")),
                 cost_usd=_nn_float(block.get("cost_usd")),
                 completeness=_text(block.get("completeness")) or "unknown",
+                cost_basis=_text(block.get("cost_basis")),
+                segment=_text(block.get("segment")),
             )
 
         def _span(block: Mapping[str, Any]) -> LatencySpan:
@@ -779,6 +792,10 @@ def _fold_receipts(
     the lower bound keeping the honest MINIMUM cost (a bound, never an
     average and never a silent pick). Policy expects ONE receipt per
     attempt, so ``receipts_received`` is 1 the moment any claim arrived.
+    A claim that arrived ``partial`` (a streamed artifact the lane wrote
+    before its turn ended — R38-09) keeps its counters and cost as a
+    LOWER BOUND only: the exact total stays unknown until the final
+    receipt reconciles it, never zero.
     """
     conflicts: list[ReceiptConflict] = []
     resets: list[CounterReset] = []
@@ -842,6 +859,18 @@ def _fold_receipts(
                     )
 
     exact = not resets
+    # A streamed partial never certifies an exact total: its counters are
+    # a lower bound until the final receipt reconciles the identity (the
+    # R38-09 streaming contract — partials recover, remainders never
+    # become zero).
+    partials = [claim for claim in winners if claim.completeness == "partial"]
+    if partials:
+        exact = False
+        notes.append(
+            f"attempt {attempt_key}: {len(partials)} streamed partial receipt(s)"
+            " — counters and cost are a lower bound, the exact total stays"
+            " unknown until the final state reconciles it (R38-09)"
+        )
     for index, left in enumerate(winners):
         for right in winners[index + 1 :]:
             disagreed = [
@@ -1113,7 +1142,7 @@ class MeasurementLinker:
                 )
                 receipt_id = f"receipt:{_digest(receipt_material)}"
             completeness = _text(record.get("completeness"))
-            if completeness not in ("exact", "aggregate"):
+            if completeness not in ("exact", "aggregate", "partial"):
                 completeness = (
                     "aggregate"
                     if any(
@@ -1142,6 +1171,8 @@ class MeasurementLinker:
                 reasoning_tokens=reasoning_tokens,
                 cost_usd=cost_usd,
                 completeness=completeness,
+                cost_basis=_text(record.get("cost_basis")),
+                segment=_text(record.get("segment")),
             )
             if (work_id, attempt_id) in attempt_records:
                 receipt_claims.setdefault((work_id, attempt_id), []).append(claim)
@@ -1990,4 +2021,87 @@ def ledger_records_from_delivery_metrics(
         "receipts": receipts,
         "calls": [dict(row) for row in calls],
         "spans": spans,
+    }
+
+
+def ledger_records_from_ingested_usage(
+    ingested: Sequence[Mapping[str, Any]],
+    *,
+    works: Sequence[Mapping[str, Any]] = (),
+    attempts: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, list[dict[str, Any]]]:
+    """Ingested usage rows (R38-09) → linker records — the ingestion join.
+
+    The durable-ingested receipt rows
+    (:class:`forge.adaptive.usage_ingestion.IngestedUsageRow` documents,
+    the ``to_json()`` shape) become a receipt SOURCE beside the existing
+    evidence inputs: every row with an ATTEMPT identity becomes a receipt
+    record for that attempt (its source attribution, route, cost basis and
+    attribution segment carried verbatim — the ``total_cost_usd`` the SDK
+    reported rides as the cost claim); every row WITHOUT one (the
+    planner/LLM-call ledger rows, work-level by construction) becomes a
+    ``calls`` record so planning spend folds into the ledger's planner
+    population and never mixes with lane-attempt usage. Populations stay
+    distinct by construction, and a model-call id delivered under two
+    attempts keeps BOTH rows — the linker's duplicate/cross-join guards
+    surface it, one identity is never summed twice.
+    """
+    receipts: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    for row in ingested:
+        work_id = _text(row.get("work_id"))
+        attempt_id = _text(row.get("attempt_id"))
+        counters = row.get("counters") if isinstance(row.get("counters"), Mapping) else {}
+        base = {
+            "work_id": work_id,
+            "source": _text(row.get("source")),
+            "provider": _text(row.get("provider")),
+            "model": _text(row.get("model")),
+            "completeness": _text(row.get("completeness")) or "unknown",
+        }
+        tokens = {
+            name: _nn_int(counters.get(name))
+            for name in (
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+            )
+        }
+        cost = _nn_float(row.get("cost_usd"))
+        basis = _text(row.get("cost_basis"))
+        segment = _text(row.get("segment"))
+        if attempt_id:
+            record: dict[str, Any] = {
+                **base,
+                "attempt_id": attempt_id,
+                "receipt_id": _text(row.get("receipt_id")),
+                **{name: value for name, value in tokens.items() if value is not None},
+                "cost_basis": basis,
+                "segment": segment,
+            }
+            if cost is not None:
+                record["total_cost_usd"] = cost
+            receipts.append(record)
+        else:
+            # Work-level (planner/LLM-call) rows: the ledger's planner
+            # population is CALL-shaped — the call id is the identity and
+            # unknown counters stay absent, never zero-filled.
+            call: dict[str, Any] = {
+                "call_id": _text(row.get("receipt_id")),
+                "work_id": work_id,
+                "provider": base["provider"],
+                "model": base["model"],
+                **{name: value for name, value in tokens.items() if value is not None},
+            }
+            if cost is not None:
+                call["total_cost_usd"] = cost
+            calls.append(call)
+    return {
+        "works": [dict(work) for work in works],
+        "attempts": [dict(attempt) for attempt in attempts],
+        "receipts": receipts,
+        "calls": calls,
+        "spans": [],
     }

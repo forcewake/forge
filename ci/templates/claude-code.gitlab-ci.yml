@@ -28,10 +28,23 @@
 #   FORGE_LANE_CONTROL_URL / FORGE_LANE_CONTROL_TOKEN — the lane-control
 #     dial-out pair. Inert in this batch lane (no steering consumer);
 #     carried for envelope parity and never a control-plane root secret.
+#   FORGE_CREDENTIAL_REF / FORGE_CREDENTIAL_REDEEM (R38-02 / #303) — the
+#     credential DELIVERY reference (non-secret): the ref the control
+#     plane's broker bound. Native profile (a): the protected + masked
+#     project CI/CD variable named FORGE_MODEL_<ref> holds the VALUE
+#     (create it once per ref under Settings → CI/CD → Variables,
+#     Protected + Masked — a trigger variable is NEVER the carrier: it
+#     displays on job pages and outranks project variables). Profile (b):
+#     FORGE_CREDENTIAL_REDEEM=1 — the SDK lane templates redeem the
+#     credential from the control plane at startup instead.
 #
 # Required project CI variables (masked/protected per policy; forge stores
 # none of them — ADR-0015 §4):
-#   ANTHROPIC_AUTH_TOKEN   harness API key (never forge's)
+#   ANTHROPIC_AUTH_TOKEN   harness API key (never forge's) — the AMBIENT
+#                          (unbound) lane's carrier; a BOUND dispatch
+#                          (FORGE_CREDENTIAL_REF set) instead requires the
+#                          FORGE_MODEL_<ref> variable above and refuses
+#                          closed when it is absent (no ambient fallback)
 #   ANTHROPIC_BASE_URL     harness API base URL (self-hosted gateway/proxy)
 #   FORGE_BOT_READ_TOKEN   OPTIONAL read-only PAT (repo read only). The
 #                          proposal-only lane (ADR-0016) must NEVER receive
@@ -62,6 +75,10 @@ forge-agent:
     # the dispatch leg). Unset/empty keeps single-driver repos as before.
     - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "claude-code")'
   variables:
+    # The model route — the DOCUMENTED ambient fallback only (R38-17 /
+    # #318, ADR-0032): a dispatch carrying the execution spec's
+    # FORGE_HARNESS_MODEL pin OVERRIDES it in the script below (the
+    # approved RunSpec's frozen route, never the template's default).
     ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
     API_TIMEOUT_MS: "300000"
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
@@ -95,6 +112,29 @@ forge-agent:
     - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
     - git checkout --detach "$FORGE_ATTEMPT_BASE"
   script:
+    # R38-02 (#303): resolve the lane's model credential BEFORE any vendor
+    # call. A BOUND dispatch (FORGE_CREDENTIAL_REF set, redemption off)
+    # reads the protected + masked project CI/CD variable named
+    # FORGE_MODEL_<ref> — runner-side only, NEVER a trigger variable
+    # (trigger variables display on job pages and outrank project
+    # variables). An empty/missing variable is a missing onboarding step:
+    # the lane fails closed (infrastructure/config, zero model calls) —
+    # never an ambient fallback to another credential. Exactly ONE
+    # credential variable is exported; the same family's other credential
+    # variables are unset (the CLI's documented precedence would otherwise
+    # let a stray outrank the delivered credential). An UNBOUND dispatch
+    # (no ref) keeps the ambient project-variable behavior.
+    - |
+      if [ -n "${FORGE_CREDENTIAL_REF:-}" ] && [ "${FORGE_CREDENTIAL_REDEEM:-}" != "1" ]; then
+        _CRED_VAR="FORGE_MODEL_${FORGE_CREDENTIAL_REF}"
+        _CRED_VALUE="${!_CRED_VAR-}"
+        if [ -z "$_CRED_VALUE" ]; then
+          echo "FORGE_BOOTSTRAP_FAILED: the bound credential variable ${_CRED_VAR} is empty or missing — create it once as a protected + masked project CI/CD variable (Settings → CI/CD → Variables) or dispatch with the runner-redemption profile (infrastructure/config, never code repair)"
+          exit 1
+        fi
+        export ANTHROPIC_AUTH_TOKEN="$_CRED_VALUE"
+        unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true
+      fi
     # R37-07 (#288): the WIP-continuity contract gate. A `required` resume
     # (FORGE_LANE_RESUME=1) names a held checkpoint this batch lane has NO
     # mechanism to restore — running anyway would silently discard the
@@ -106,6 +146,13 @@ forge-agent:
         echo "FORGE_BOOTSTRAP_FAILED: this batch lane (claude-code) cannot restore WIP — the dispatch demanded a REQUIRED resume (FORGE_LANE_RESUME=1, mode ${FORGE_LANE_RESUME_MODE:-required}) but only the SDK lane templates run forge.lane_driver's checkpoint restore. Re-dispatch with an SDK lane driver (claude-sdk-lane) or restart explicitly (infrastructure/config, never code repair)"
         exit 1
       fi
+    # R38-17 (#318, ADR-0032): the model route is the versioned
+    # execution spec's PIN — the dispatched FORGE_HARNESS_MODEL (the
+    # approved RunSpec's frozen route) outranks the template's ambient
+    # ANTHROPIC_MODEL default, which stays ONLY as the documented
+    # legacy fallback for a dispatch that carries no pin. The lane
+    # never re-derives the model choice from its own defaults.
+    - export ANTHROPIC_MODEL="${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}"
     # Live visibility: the compacted agent-event stream (tool calls,
     # thinking, API errors, retries, final result) flows into the job trace
     # while the harness works — GitLab tails job traces live. The full

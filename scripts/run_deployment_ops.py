@@ -1,42 +1,64 @@
 #!/usr/bin/env python3
-"""R37-20 (issue #301) — qualify the deployment's operating boundaries.
+"""R38-18 (issue #319) — measure the deployment's operating limits BOUND
+to the frozen supported profile.
 
-The R36-21 drills (#280) proved the invariants on disposable fixtures.
-This runner executes the DEPLOYMENT drills from
-:mod:`forge.adaptive.ops_drills` against the ACTUAL aligned lab
-(control plane 0.36.0 @ schema 027, numerical budget caps — see
-``docs/evaluation/2026-09-24-live-single-writer/alignment-receipts.json``):
+The R37-20 drills (#301) qualified the deployment as it stood. The
+supported profile is now FROZEN
+(``qualification/profiles/supported-gitlab-ce-v1.json``, #307 — manifest
+digest 7c292dd8…, the executed-lab bind), so every measurement this
+runner takes is evidence ONLY for the deployment that matches that
+bind: the runner observes the deployment read-only (image identity,
+schema head, reported version), records the manifest digest on EVERY
+drill row, and renders ``unqualified-for-profile`` on any mismatch —
+never a silent pass against a different deployment.
 
-- ``topology``      — the deployment DECLARED from read-only ``podman
-  inspect`` + ``GET /health`` + the runner inventory: containers, the
-  shared /app/data CAS volume, postgres/redis/litellm, runner isolation,
-  the observed admission bound. The CAS-semantics statement is explicit:
-  the shared VOLUME (not the shared database) is what makes one node's
-  bytes visible to both consumers; a replica without the mount is stated
-  as OUTSIDE the supported topology, never silently assumed.
+The R37-20 sections (green at the 2026-09-24 run) stay:
+
+- ``topology``      — the deployment DECLARED from read-only probes.
 - ``occupancy``     — N concurrent dispatch cycles through the app's OWN
   entry (issue → /implement → /go on a DISPOSABLE GitLab project): REAL
-  native jobs on the lab runner (id 4, ``unraid``), cancelled job-level
-  immediately after the observation; a lost cancel response simulated at
-  the client seam; a failed cancel on an already-completed job. Capacity
-  never exceeded; queue wait measured SEPARATELY from execution.
-- ``backup_restore``— ``backup_store`` over the app's REAL /app/data CAS
-  root (read-only snapshot — no container stop) + a read-only
-  ``pg_dump`` of the checkpoint metadata; restore into a DISPOSABLE
-  target root + a disposable ``forge_ops_restore`` database; pinned
-  checkpoints resolve; mismatched halves refuse.
-- ``credentials``   — the recorded dispatch envelope of the live run
-  (read-only evidence) asserts no control-plane root credential entered
-  the model-facing variable set; deny probes observe ACTUAL denial on
-  the app's real surfaces.
-- ``degraded``      — storage pressure (typed quota refusal), provider
-  throttling (a fake 429 lane through the app's own bounded revival
-  budget) and the slow control ACK (measured received→applied through
-  the app's real lane-control endpoints) — fences never disabled.
+  native jobs, cancelled job-level immediately after the observation.
+- ``backup_restore``— ``backup_store`` over the REAL CAS root (read-only)
+  + restore into DISPOSABLE targets; mismatched halves refuse.
+- ``credentials``   — the recorded dispatch envelope + live deny probes.
+- ``degraded``      — typed quota refusal, the bounded 429 revival
+  budget, the slow control ACK — fences never disabled.
 - ``rotation``      — the lane-control secret rotated on a DISPOSABLE
-  configuration: v2 credentials minted, the old generation refused by
-  the real generation-scoped auth path; the production procedure is the
-  runbook (docs/operations/deployment-boundaries.md).
+  configuration.
+
+The R38-18 arms (the review's named deployment-only failures, every one
+profile-bound):
+
+- ``cap_arm``           — a native dispatch response DROPPED at the
+  client seam + the concurrency cap reached immediately: the dropped
+  run's unknown occupancy keeps consuming capacity (proven from the
+  durable lease row) until the reconciler resolves it by observation;
+  the cycle after the cap parks typed (#241 semantics AT the cap).
+- ``volume_fill``       — the checkpoint volume filled to the configured
+  safety threshold while a run is PAUSED with a pinned checkpoint: the
+  pinned WIP survives, new writes refuse typed, admission stops
+  predictably (a quota-tmp-dir store shape — a real disk is never
+  filled; the typed-refusal path is what is measured).
+- ``mismatched_restore``— mismatched metadata/blob snapshots restored
+  into DISPOSABLE installations: the preflight refuses BEFORE any new
+  model turn (schema-head bind against the frozen profile's 027, and
+  the halves consistency the backup contract already enforces).
+- ``percentiles``       — pause/cancel responsiveness with STATED
+  percentiles and scope under upload + slow-provider load, through the
+  REAL lane-control endpoints over a disposable database.
+
+The report also carries the measured-limits table (concurrency under
+the controlled failures, pause/cancel percentiles, command latency,
+restore time — the runbook's numbers, updated to the frozen profile)
+and the reviewer-WIP bound (a STATED POLICY field: admission vs the
+reviewable volume, never a throughput claim).
+
+PUBLICATION (the #304 discipline): ``--out`` receives the SANITIZED
+summary (``forge.deployment.ops.sanitized/1``); the full diagnostics
+report (``forge.deployment.ops/1`` — identifiers, per-cycle details,
+host paths) is written OUTSIDE the repository to a private directory
+and only its retention is referenced. Raw operational diagnostics never
+enter the public tree.
 
 READ-ONLY + DISPOSABLE only: no lab container is started, stopped or
 recreated; the only writes are (a) the DISPOSABLE GitLab project + its
@@ -46,10 +68,12 @@ are cancelled immediately after the observation (bounded spend).
 
 Usage:
 
-    uv run python scripts/run_deployment_ops.py --out qualification/deployment-ops-2026-09-24.json
+    uv run python scripts/run_deployment_ops.py --out qualification/deployment-ops-2026-09-25.json
 
-Exit codes: 0 every executed drill passed · 1 a drill failed or a
-section refused (the report is still written — a refusal is evidence).
+Exit codes: 0 every executed drill passed and the profile bind matched ·
+1 a drill failed, a section refused, the profile bind mismatched or the
+reviewer-WIP policy is incoherent (the report is still written — a
+refusal is evidence).
 """
 
 from __future__ import annotations
@@ -77,14 +101,22 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from forge.adaptive.ops_drills import (  # noqa: E402
     DEPLOYMENT_DRILL_SCOPE,
+    PROFILE_QUALIFIED,
+    CapBoundaryLane,
     RemoteCycleRecord,
-    RemoteDispatchLane,
     build_topology_document,
     drill_credential_isolation,
     drill_degraded_modes,
+    drill_lost_response_at_cap,
+    drill_mismatched_restore_preflight,
+    drill_pause_cancel_percentiles,
     drill_remote_occupancy,
     drill_restore_deployment,
     drill_token_rotation,
+    drill_volume_fill_during_pause,
+    profile_binding_row,
+    reviewer_wip_bound_row,
+    summarize_for_publication,
 )
 from forge.api_lane_control import lane_control_token  # noqa: E402
 from forge.config import Settings  # noqa: E402
@@ -130,6 +162,24 @@ Append exactly one line containing the word `done` to the file `NOTES.md`
 RUN_ID_RE = re.compile(r"go ([0-9a-f]{32})")
 
 REPORT_STAMP = "forge.deployment.ops/1"
+
+#: The FROZEN supported profile (#307) every R38-18 measurement binds to.
+SUPPORTED_PROFILE = REPO_ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1.json"
+
+#: Where the FULL diagnostics report (the pre-sanitization document)
+#: lands: OUTSIDE the repository, per the #304 discipline — the public
+#: tree carries the sanitized summary only.
+PRIVATE_REPORT_DIR = Path.home() / ".forge-private" / "deployment-ops"
+
+#: The configured safety threshold for the volume-fill arm's quota-tmp-dir
+#: store (bytes; a real disk is never filled — the typed-refusal path is
+#: what is measured).
+VOLUME_FILL_SAFETY_THRESHOLD_BYTES = 4096
+
+#: The stated reviewer-WIP policy bound (R38-18 human-capacity
+#: discipline): how much concurrent WIP one human reviewer can safely
+#: review. A POLICY FIELD, never a measurement — overridable per run.
+DEFAULT_REVIEWER_WIP_BOUND = 5
 
 
 class Refused(Exception):
@@ -237,6 +287,58 @@ def psql_select(sql: str) -> list[dict[str, str]]:
     return rows
 
 
+def observe_deployment_bind() -> dict[str, str]:
+    """The READ-ONLY deployment observation the profile bind compares.
+
+    Every axis the frozen profile's ``control_plane.executed_lab``
+    names: the forge-app image identity (name, id, digest — read-only
+    ``podman inspect``), the deployed schema head (read-only SELECT
+    against ``alembic_version``) and the reported version (``/health``).
+    Nothing here writes a lab row or touches a container lifecycle.
+    """
+
+    entry = podman_json("inspect", "forge-app")
+    raw = entry[0] if isinstance(entry, list) and entry else {}
+    image_name = str(raw.get("ImageName") or raw.get("Config", {}).get("Image") or "")
+    image_id = str(raw.get("Image") or "")
+    image_digest = ""
+    if image_id:
+        image = podman_json("image", "inspect", image_id)
+        image_digest = (
+            str((image[0] or {}).get("Digest") or "") if isinstance(image, list) and image else ""
+        )
+    schema_rows = psql_select("SELECT version_num FROM alembic_version")
+    return {
+        "image_name": image_name,
+        "image_id": image_id,
+        "image_digest": image_digest,
+        "schema_head": schema_rows[0]["col0"] if schema_rows else "",
+        "reported_version": str(app_health().get("version") or ""),
+    }
+
+
+def load_profile_binding() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the FROZEN supported profile and compute the bind row.
+
+    Returns ``(manifest_document, binding_row)``. A missing or unreadable
+    manifest refuses loudly (the caller records the refusal) — the
+    measurements never run unbound.
+    """
+
+    if not SUPPORTED_PROFILE.is_file():
+        raise Refused(f"the frozen supported profile is absent: {SUPPORTED_PROFILE}")
+    manifest = json.loads(SUPPORTED_PROFILE.read_text(encoding="utf-8"))
+    binding = profile_binding_row(manifest, observe_deployment_bind())
+    log(
+        "profile: "
+        f"{binding['profile']} (manifest {str(binding['manifest_digest'])[:16]}…) — "
+        f"bind {binding['bind']} → {binding['qualification']}"
+    )
+    for difference in binding.get("differences") or []:
+        log(f"   [profile difference] {difference}")
+    return manifest, binding
+
+
 def gitlab_get(settings: Settings, path: str, **kwargs: Any) -> httpx.Response:
     return httpx.get(
         f"{settings.GITLAB_URL.rstrip('/')}/api/v4{path}",
@@ -330,7 +432,7 @@ def section_topology(settings: Settings) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class LabRemoteDispatchLane(RemoteDispatchLane):
+class LabRemoteDispatchLane(CapBoundaryLane):
     """The REAL deployment's dispatch entry, driven natively.
 
     Every cycle is the app's own flow: a GitLab issue on the DISPOSABLE
@@ -354,6 +456,8 @@ class LabRemoteDispatchLane(RemoteDispatchLane):
         self.slow_ack_delay_s = slow_ack_delay_s
         self.issues: list[int] = []
         self.runs: dict[int, str] = {}
+        #: the over-cap cycle's pre-planned run (index → run id).
+        self._preplanned: dict[int, str] = {}
         #: filled by cycle 0's pause leg — the slow-control-ACK
         #: measurement the degraded section reports.
         self.ack_measurement: dict[str, Any] = {}
@@ -474,11 +578,10 @@ class LabRemoteDispatchLane(RemoteDispatchLane):
             return "never_dispatched"
         return "native_running" if row["col6"] else "dispatched_unknown"
 
-    async def dispatch(self, index: int) -> RemoteCycleRecord:
-        record = RemoteCycleRecord(index=index)
-        issue_iid = self.issues[index]
-        # /implement → the app plans (one cheap model call per cycle).
-        self._note(issue_iid, "@forge /implement")
+    async def _await_plan_note(self, issue_iid: int) -> str:
+        """``/implement`` is already posted: await the plan note's run id
+        (the app's plan is one cheap model call — bounded wait)."""
+
         plan_run_id = ""
         deadline = time.monotonic() + 420.0
         while time.monotonic() < deadline:
@@ -492,18 +595,15 @@ class LabRemoteDispatchLane(RemoteDispatchLane):
             if plan_run_id:
                 break
             await asyncio.sleep(10.0)
-        if not plan_run_id:
-            record.end_state = "no_plan"
-            record.detail = "the plan note never arrived within the bounded wait"
-            return record
-        run_id = plan_run_id
-        self.runs[index] = run_id
-        record.run_id = run_id
+        return plan_run_id
 
-        # /go — the dispatch entry: the app reserves the execution lease
-        # (the observed limit) and dispatches the REAL pipeline.
+    async def _drive_go(
+        self, run_id: str, issue_iid: int, record: RemoteCycleRecord
+    ) -> RemoteCycleRecord:
+        """``/go`` posted: await the dispatch verdict (the REAL pipeline,
+        or the typed blocked park) and measure queue wait / execution."""
+
         requested_at = datetime.now(UTC)
-        self._note(issue_iid, f"@forge /go {run_id}")
         record.end_state = "go_posted"
         dispatched: tuple[dict[str, Any], dict[str, Any]] | None = None
         blocked_reason = ""
@@ -551,11 +651,138 @@ class LabRemoteDispatchLane(RemoteDispatchLane):
             f"pipeline {record.pipeline_id}, lane job {record.job_id} "
             f"({job.get('status')}) on runner 4 (unraid)"
         )
-        if index == 0:
+        return record
+
+    async def dispatch(self, index: int) -> RemoteCycleRecord:
+        record = RemoteCycleRecord(index=index)
+        issue_iid = self.issues[index]
+        # /implement → the app plans (one cheap model call per cycle).
+        self._note(issue_iid, "@forge /implement")
+        plan_run_id = await self._await_plan_note(issue_iid)
+        if not plan_run_id:
+            record.end_state = "no_plan"
+            record.detail = "the plan note never arrived within the bounded wait"
+            return record
+        run_id = plan_run_id
+        self.runs[index] = run_id
+        record.run_id = run_id
+
+        # /go — the dispatch entry: the app reserves the execution lease
+        # (the observed limit) and dispatches the REAL pipeline.
+        self._note(issue_iid, f"@forge /go {run_id}")
+        record = await self._drive_go(run_id, issue_iid, record)
+        if index == 0 and record.end_state == "dispatched":
             # The slow-control-ACK leg happens INSIDE the slot's window:
             # pause the run, let the command sit received (the slow lane),
             # then ack the ladder through the app's real endpoints.
             self.ack_measurement = await self._pause_and_slow_ack(run_id, issue_iid)
+        return record
+
+    async def plan_cycle(self, index: int) -> RemoteCycleRecord:
+        """Phase A: ``/implement`` → the plan note. The plan holds NO
+        lease and NO capacity (and its model call stays OUTSIDE the /go
+        probe window — a deployment reality: plans are slow and
+        fair-use-limited, dispatch verdicts at a full cap are seconds)."""
+
+        record = RemoteCycleRecord(index=index)
+        issue_iid = self.issues[index]
+        self._note(issue_iid, "@forge /implement")
+        plan_run_id = await self._await_plan_note(issue_iid)
+        if not plan_run_id:
+            record.end_state = "no_plan"
+            record.detail = "the plan note never arrived within the bounded wait"
+            return record
+        self.runs[index] = plan_run_id
+        self._preplanned[index] = plan_run_id
+        record.run_id = plan_run_id
+        record.end_state = "planned"
+        record.detail = "planned, not dispatched — the /go is held for the probe phase"
+        return record
+
+    async def go_dropped(self, index: int) -> RemoteCycleRecord:
+        """Phase B (the client seam): ``/go`` the PLANNED cycle — the app
+        reserves the lease and dispatches its REAL pipeline — and this
+        client then DELIBERATELY never processes the dispatch's answer
+        (no pipeline lookup, no job identity). The cycle's occupancy is
+        proven afterwards from the DURABLE lease row alone (read-only),
+        never from the answer that was dropped. The teardown's branch
+        cancel still runs afterwards (bounded spend — that is not the
+        dispatch response, it is the cleanup)."""
+
+        record = RemoteCycleRecord(index=index)
+        issue_iid = self.issues[index]
+        run_id = self._preplanned.get(index, "")
+        if not run_id:
+            record.end_state = "no_plan"
+            record.detail = "the dropped-dispatch cycle was never planned"
+            return record
+        record.run_id = run_id
+        requested_at = datetime.now(UTC)
+        self._note(issue_iid, f"@forge /go {run_id}")
+        # The response is DROPPED here: the ONLY thing this client reads
+        # afterwards is the durable lease row (read-only) — the pipeline
+        # and job the dispatch minted are never looked up by this leg.
+        lease = None
+        deadline = time.monotonic() + 240.0
+        while time.monotonic() < deadline:
+            lease = self._lease_row(run_id)
+            if lease is not None and not lease["col3"]:
+                break
+            await asyncio.sleep(0.5)
+        if lease is None or lease["col3"]:
+            record.end_state = "no_dispatch_verdict"
+            record.detail = "no durable lease row within the bounded wait (the dropped response resolved nothing)"
+            return record
+        acquired_at = datetime.fromisoformat(lease["col2"]) if lease["col2"] else None
+        if acquired_at is not None and acquired_at.tzinfo is None:
+            acquired_at = acquired_at.replace(tzinfo=UTC)
+        record.lease_acquired = True
+        record.queue_wait_s = (
+            (acquired_at - requested_at).total_seconds() if acquired_at is not None else None
+        )
+        record.end_state = "dispatched_response_dropped"
+        record.detail = (
+            "the dispatch response was dropped at the client seam — occupancy proven from "
+            "the durable lease row only (the pipeline/job identity was never read)"
+        )
+        self.notes.append(
+            f"dropped-dispatch leg: run {run_id[:8]}… lease accounted "
+            f"(queue wait {record.queue_wait_s and round(record.queue_wait_s, 1)}s)"
+        )
+        return record
+
+    async def go_fill(self, index: int) -> RemoteCycleRecord:
+        """Phase B (the fill): ``/go`` the PLANNED cycle and observe its
+        dispatch — the pipeline and lane job are read, the lease row's
+        acquired_at gives the queue wait."""
+
+        record = RemoteCycleRecord(index=index)
+        issue_iid = self.issues[index]
+        run_id = self._preplanned.get(index, "")
+        if not run_id:
+            record.end_state = "no_plan"
+            record.detail = "the fill cycle was never planned"
+            return record
+        record.run_id = run_id
+        self._note(issue_iid, f"@forge /go {run_id}")
+        return await self._drive_go(run_id, issue_iid, record)
+
+    async def go_over_cap(self, index: int) -> RemoteCycleRecord:
+        """Phase D: ``/go`` the ALREADY-PLANNED over-cap cycle the moment
+        the cap is reached, and await its verdict — the typed park, or an
+        honest dispatch if a slot freed in between."""
+
+        record = RemoteCycleRecord(index=index)
+        run_id = self._preplanned.get(index, "")
+        if not run_id:
+            record.end_state = "no_plan"
+            record.detail = "the over-cap cycle was never planned"
+            return record
+        record.run_id = run_id
+        issue_iid = self.issues[index]
+        self._note(issue_iid, f"@forge /go {run_id}")
+        record = await self._drive_go(run_id, issue_iid, record)
+        self.notes.append(f"over-cap leg: run {run_id[:8]}… verdict {record.end_state}")
         return record
 
     async def _pause_and_slow_ack(self, run_id: str, issue_iid: int) -> dict[str, Any]:
@@ -961,6 +1188,81 @@ async def section_occupancy(settings: Settings, project_id: int, *, cycles: int)
 
 
 # ---------------------------------------------------------------------------
+# Section 2b — the R38-18 lost-response-at-the-cap arm (same disposable
+# project as the occupancy section)
+# ---------------------------------------------------------------------------
+
+
+async def section_cap_arm(
+    settings: Settings,
+    *,
+    profile_binding: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """A dropped native dispatch response + the concurrency cap reached
+    immediately, on the REAL control plane (the review's negative test
+    1). Runs on its OWN disposable project: the app's fair-use gate
+    counts a user's runs per project per hour (6), and the occupancy
+    section already spent that budget on its own project — a fresh
+    disposable project gives the arm its own window (and a clean
+    teardown). Every cycle is PLANNED first (plans hold no lease), then
+    one ``/go`` drops its dispatch response at the client seam while
+    the fill ``/go`` cycles bring the project to its observed limit, the
+    cycle after the cap parks typed, and the dropped run's occupancy
+    keeps consuming capacity until the deployment's own reconciler
+    resolves it by observation."""
+
+    name = f"forge-ops-319-cap-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+    project_id = setup_disposable_project(settings, name)
+    lane = LabRemoteDispatchLane(settings, project_id, cycles=0)
+    limit = lane.limit
+    lane.cycles = limit + 1
+    try:
+        for index in range(limit + 1):
+            created = gitlab_post(
+                settings,
+                f"/projects/{project_id}/issues",
+                json={
+                    "title": f"cap-arm task {index + 1}: dropped dispatch at the cap",
+                    "description": TASK_BODY,
+                },
+            )
+            if created.status_code not in (200, 201):
+                raise Refused(f"issue creation failed: {created.text[:200]}")
+            lane.issues.append(int(created.json()["iid"]))
+        log(
+            f"cap_arm: own disposable project {project_id}, {limit + 1} issues created — "
+            f"every cycle planned first, then one dropped dispatch response, the cap "
+            f"({limit}) reached immediately, one cycle over the cap"
+        )
+        outcome = await drill_lost_response_at_cap(
+            lane, profile_binding=profile_binding, reconcile_timeout_s=300.0, sample_interval_s=1.0
+        )
+        document = outcome.as_document()
+        document["scope"] = DEPLOYMENT_DRILL_SCOPE
+        document["lane_notes"] = lane.notes
+        # The parked cycle's issue is closed so nothing re-drives it later.
+        for index, run_id in lane.runs.items():
+            try:
+                detail = lane._run_detail(run_id)  # noqa: SLF001 — this driver owns the lane
+                if str(detail.get("state")) == "blocked":
+                    gitlab_put(
+                        settings,
+                        f"/projects/{project_id}/issues/{lane.issues[index]}",
+                        json={"state_event": "close"},
+                    )
+            except (httpx.HTTPError, Refused):
+                pass
+        return document, project_id
+    except Exception:
+        # The arm's own project never leaks past a failed arm.
+        try:
+            gitlab_delete(settings, f"/projects/{project_id}")
+        except httpx.HTTPError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Section 3 — backup/restore across the real deployment
 # ---------------------------------------------------------------------------
 
@@ -1182,6 +1484,114 @@ async def section_backup_restore(work_dir: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Section 3b — the R38-18 mismatched-restore preflight arm
+# ---------------------------------------------------------------------------
+
+
+async def section_mismatched_restore(
+    work_dir: Path, *, profile_binding: dict[str, Any], expected_schema_head: str
+) -> dict[str, Any]:
+    """Mismatched metadata/blob snapshots restored into DISPOSABLE
+    installations (the review's negative test 3): the preflight refuses
+    typed BEFORE any new model turn — the halves consistency the backup
+    contract enforces, plus the schema-head bind against the frozen
+    profile's head (an installation declaring the profile's predecessor
+    is refused, never silently upgraded)."""
+
+    outcome = await drill_mismatched_restore_preflight(
+        work_dir / "mismatched-restore",
+        profile_binding=profile_binding,
+        expected_schema_head=expected_schema_head,
+    )
+    document = outcome.as_document()
+    document["scope"] = DEPLOYMENT_DRILL_SCOPE
+    signal = document["signals"]["preflight.restore_gate"]
+    log(
+        f"mismatched_restore: halves refused {signal['refusals']['backup-halves']}, "
+        f"schema {expected_schema_head}-bind refused {signal['refusals']['schema-head']}, "
+        f"model turns before refusals {signal['model_turns_before_refusals']}"
+    )
+    return document
+
+
+# ---------------------------------------------------------------------------
+# Section 5b — the R38-18 volume-fill-during-pause arm
+# ---------------------------------------------------------------------------
+
+
+async def section_volume_fill(
+    work_dir: Path, *, profile_binding: dict[str, Any], paused_run_id: str = ""
+) -> dict[str, Any]:
+    """The checkpoint volume filled to the configured safety threshold
+    while a run is PAUSED with a pinned checkpoint (the review's negative
+    test 2), on a quota-tmp-dir store shape — a real disk is NEVER
+    filled; the typed-refusal path is what is measured. If the occupancy
+    section paused a REAL run, that run's pins on the deployment's real
+    store are observed READ-ONLY as context (never a pass/fail input —
+    the pinned-survives proof runs on the disposable store)."""
+
+    outcome = await drill_volume_fill_during_pause(
+        work_dir / "volume-fill",
+        profile_binding=profile_binding,
+        safety_threshold_bytes=VOLUME_FILL_SAFETY_THRESHOLD_BYTES,
+    )
+    document = outcome.as_document()
+    document["scope"] = DEPLOYMENT_DRILL_SCOPE
+    deployment_pins: dict[str, Any] = {"observed": False, "run": paused_run_id or None}
+    if paused_run_id and STORE_ROOT.is_dir():
+        from forge.adaptive.checkpoint_repository import FilesystemCheckpointRepository
+
+        try:
+            real_store = FilesystemCheckpointRepository(STORE_ROOT)
+            pins = await real_store.pins(paused_run_id)
+            deployment_pins.update(
+                {
+                    "observed": True,
+                    "pins": len(pins),
+                    "note": "read-only observation of the real store's pin records",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 — context only, recorded honestly
+            deployment_pins["note"] = f"read-only pin observation failed: {type(exc).__name__}"
+    document["deployment_paused_run_pins"] = deployment_pins
+    signal = document["signals"]["storage.volume_fill"]
+    log(
+        f"volume_fill: {signal['typed_refusals']} typed refusals at "
+        f"{signal['store_bytes_at_refusal']}B (threshold {signal['safety_threshold_bytes']}B), "
+        f"pinned WIP survives {signal['pinned_wip_survives']}"
+    )
+    return document
+
+
+# ---------------------------------------------------------------------------
+# Section 5c — the R38-18 pause/cancel percentiles measurement
+# ---------------------------------------------------------------------------
+
+
+async def section_percentiles(
+    work_dir: Path, *, profile_binding: dict[str, Any], control_objective_s: float
+) -> dict[str, Any]:
+    """Pause/cancel responsiveness with STATED percentiles and scope under
+    upload + slow-provider load, through the REAL lane-control endpoints
+    over a disposable database (never the lab's)."""
+
+    outcome = await drill_pause_cancel_percentiles(
+        work_dir / "percentiles",
+        profile_binding=profile_binding,
+        control_objective_s=control_objective_s,
+    )
+    document = outcome.as_document()
+    document["scope"] = DEPLOYMENT_DRILL_SCOPE
+    signal = document["signals"]["control.pause_cancel_percentiles_s"]
+    log(
+        f"percentiles: control p50 {signal['control']['p50_s']}s "
+        f"p95 {signal['control']['p95_s']}s (n={signal['control']['n']}), "
+        f"cancel-under-slow-provider p95 {signal['cancel_under_slow_provider']['p95_s']}s"
+    )
+    return document
+
+
+# ---------------------------------------------------------------------------
 # Section 4 — credential isolation + egress denial
 # ---------------------------------------------------------------------------
 
@@ -1360,21 +1770,58 @@ async def section_rotation(settings: Settings, work_dir: Path) -> dict[str, Any]
 # Assembly
 # ---------------------------------------------------------------------------
 
-SECTIONS = ("topology", "occupancy", "backup_restore", "credentials", "degraded", "rotation")
+SECTIONS = (
+    "topology",
+    "occupancy",
+    "cap_arm",
+    "backup_restore",
+    "mismatched_restore",
+    "credentials",
+    "degraded",
+    "volume_fill",
+    "percentiles",
+    "rotation",
+)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_deployment_ops",
-        description="R37-20: qualify the deployment's operating boundaries (read-only + disposable).",
+        description=(
+            "R38-18: measure the deployment's operating limits BOUND to the frozen "
+            "supported profile (read-only + disposable)."
+        ),
     )
-    parser.add_argument("--out", type=Path, default=None, help="write the JSON report to this path")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="write the SANITIZED published report to this path (the raw diagnostics stay private)",
+    )
+    parser.add_argument(
+        "--private-dir",
+        type=Path,
+        default=PRIVATE_REPORT_DIR,
+        help=(
+            "where the FULL diagnostics report lands (OUTSIDE the repository — the #304 "
+            f"discipline; default {PRIVATE_REPORT_DIR})"
+        ),
+    )
     parser.add_argument(
         "--sections",
         default="all",
         help=f"comma-separated sections (or 'all'): {', '.join(SECTIONS)}",
     )
     parser.add_argument("--cycles", type=int, default=4, help="dispatch cycles (default 4)")
+    parser.add_argument(
+        "--reviewer-wip-bound",
+        type=int,
+        default=DEFAULT_REVIEWER_WIP_BOUND,
+        help=(
+            "the STATED reviewer-WIP policy bound (concurrent reviewable WIP; a policy "
+            f"field, never a measurement — default {DEFAULT_REVIEWER_WIP_BOUND})"
+        ),
+    )
     parser.add_argument(
         "--keep-project", action="store_true", help="keep the disposable GitLab project"
     )
@@ -1386,15 +1833,23 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     work_dir = Path(tempfile.mkdtemp(prefix="forge-deployment-ops-"))
     report: dict[str, Any] = {
         "schema": REPORT_STAMP,
-        "issue": "R37-20 (#301) — qualify customer operating limits, recovery and data boundaries",
+        "issue": (
+            "R38-18 (#319) — operating limits and recovery measured on the actual "
+            "supported deployment, BOUND to the frozen profile (previous: R37-20 #301)"
+        ),
         "generated_at": _now_iso(),
         "scope": DEPLOYMENT_DRILL_SCOPE,
         "read_only": True,
         "sections_requested": [],
         "topology": None,
+        "profile": None,
         "drills": [],
         "refusals": [],
+        "policy_findings": [],
         "service_objectives": None,
+        "measured_limits": None,
+        "reviewer_wip": None,
+        "private_diagnostics": None,
         "runbook": "docs/operations/deployment-boundaries.md",
     }
     selected = (
@@ -1404,7 +1859,32 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     )
     report["sections_requested"] = selected
 
+    # -- the profile bind FIRST: every measurement below is evidence only
+    # for the deployment the frozen profile's executed-lab bind names.
+    manifest: dict[str, Any] = {}
+    profile_binding: dict[str, Any] = {}
+    expected_schema_head = "027"
+    try:
+        manifest, profile_binding = load_profile_binding()
+        report["profile"] = profile_binding
+    except Exception as exc:  # noqa: BLE001 — an unbound run is recorded, never retried green
+        record = {"section": "profile", "reason": str(exc)[:400]}
+        report["refusals"].append(record)
+        log(f"   [REFUSED] profile: {record['reason']}")
+    if manifest:
+        control_plane = manifest.get("control_plane") or {}
+        expected_schema_head = str(
+            (control_plane.get("schema_revision") or {}).get("head")
+            or (control_plane.get("executed_lab") or {}).get("deployed_schema_head")
+            or expected_schema_head
+        )
+
     def record_drill(document: dict[str, Any]) -> None:
+        if profile_binding:
+            # R38-18: EVERY drill row names the supported-profile manifest
+            # digest it ran against (the sanitized projection keeps the
+            # digest + qualification; the private report keeps the row).
+            document["profile"] = dict(profile_binding)
         report["drills"].append(document)
         for objective in document.get("achieved_objectives", []):
             log(f"   [ok] {objective}")
@@ -1417,8 +1897,11 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         log(f"   [REFUSED] {section}: {entry['reason']}")
 
     occupancy_document: dict[str, Any] | None = None
+    cap_document: dict[str, Any] | None = None
     ack_measurement: dict[str, Any] = {}
+    paused_run_id = ""
     project_id: int | None = None
+    disposable_projects: list[int] = []
     try:
         if "topology" in selected:
             log("== section: topology (read-only)")
@@ -1427,18 +1910,40 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("topology", exc)
 
-        if "occupancy" in selected:
-            log("== section: occupancy (disposable project, real native jobs, immediate cancels)")
-            name = f"forge-ops-301-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        needs_project = "occupancy" in selected
+        if needs_project:
+            log("== section: the disposable project (real native jobs, immediate cancels)")
+            name = f"forge-ops-319-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
             try:
                 project_id = setup_disposable_project(settings, name)
+                disposable_projects.append(project_id)
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("disposable_project", exc)
+
+        if "occupancy" in selected and project_id is not None:
+            log("== section: occupancy (disposable project, real native jobs, immediate cancels)")
+            try:
                 occupancy_document = await section_occupancy(
                     settings, project_id, cycles=args.cycles
                 )
                 record_drill(occupancy_document)
                 ack_measurement = dict(occupancy_document.get("slow_control_ack") or {})
+                paused_run_id = str(ack_measurement.get("work_id") or "")
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("occupancy", exc)
+
+        if "cap_arm" in selected:
+            log(
+                "== section: cap_arm (own disposable project; dropped dispatch response at the cap)"
+            )
+            try:
+                cap_document, cap_project_id = await section_cap_arm(
+                    settings, profile_binding=profile_binding
+                )
+                disposable_projects.append(cap_project_id)
+                record_drill(cap_document)
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("cap_arm", exc)
 
         if "backup_restore" in selected:
             log("== section: backup_restore (read-only snapshot + disposable targets)")
@@ -1446,6 +1951,19 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                 record_drill(await section_backup_restore(work_dir))
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("backup_restore", exc)
+
+        if "mismatched_restore" in selected:
+            log("== section: mismatched_restore (preflight refuses before any new model turn)")
+            try:
+                record_drill(
+                    await section_mismatched_restore(
+                        work_dir,
+                        profile_binding=profile_binding,
+                        expected_schema_head=expected_schema_head,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("mismatched_restore", exc)
 
         if "credentials" in selected:
             log("== section: credentials (recorded envelope + live deny probes)")
@@ -1461,12 +1979,58 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("degraded", exc)
 
+        if "volume_fill" in selected:
+            log("== section: volume_fill (quota tmp dir during a PAUSED run, pinned WIP)")
+            try:
+                record_drill(
+                    await section_volume_fill(
+                        work_dir, profile_binding=profile_binding, paused_run_id=paused_run_id
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("volume_fill", exc)
+
+        if "percentiles" in selected:
+            log("== section: percentiles (pause/cancel under upload + slow-provider load)")
+            try:
+                record_drill(
+                    await section_percentiles(
+                        work_dir, profile_binding=profile_binding, control_objective_s=60.0
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("percentiles", exc)
+
         if "rotation" in selected:
             log("== section: rotation (disposable configuration, generation-scoped refusal)")
             try:
                 record_drill(await section_rotation(settings, work_dir))
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("rotation", exc)
+
+        # -- the human-capacity discipline (a STATED POLICY FIELD) -------
+        admission_limit = 3
+        for document in report["drills"]:
+            signal = (document.get("signals") or {}).get("execution.occupied_vs_limit") or {}
+            if signal.get("limit"):
+                admission_limit = int(signal["limit"])
+                break
+        if report["topology"]:
+            observed_limit = report["topology"]["observed"]["admission"]["max_active_per_project"]
+            admission_limit = int(observed_limit)
+        reviewer_wip = reviewer_wip_bound_row(
+            admission_limit=admission_limit, reviewer_wip_bound=args.reviewer_wip_bound
+        )
+        report["reviewer_wip"] = reviewer_wip
+        if not reviewer_wip["coherent"]:
+            report["policy_findings"].append(
+                {
+                    "policy": "reviewer_wip",
+                    "finding": reviewer_wip["statement"],
+                    "action": "lower the admission bound or grow review capacity before increasing load",
+                }
+            )
+            log(f"   [POLICY] reviewer-WIP: {reviewer_wip['statement']}")
 
         # -- the agreed service objectives, with the measured values ----
         queue_wait_max = None
@@ -1519,22 +2083,78 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             ],
             "documented_degraded_modes": ((degraded_document or {}).get("signals") or {}),
         }
+
+        # -- the measured-limits table (R38-18: the runbook's numbers,
+        # bound to the frozen profile) -------------------------------
+        cap_signal = ((cap_document or {}).get("signals") or {}).get(
+            "execution.occupied_vs_limit"
+        ) or {}
+        percentile_signal = {}
+        for document in report["drills"]:
+            if document.get("drill") == "deployment_pause_cancel_percentiles":
+                percentile_signal = (document.get("signals") or {}).get(
+                    "control.pause_cancel_percentiles_s"
+                ) or {}
+        report["measured_limits"] = {
+            "profile": {
+                "manifest_digest": profile_binding.get("manifest_digest"),
+                "qualification": profile_binding.get("qualification"),
+            },
+            "concurrency": {
+                "limit": cap_signal.get("limit") or admission_limit,
+                "peak_occupied": cap_signal.get("peak_occupied"),
+                "occupied_at_cap": cap_signal.get("occupied_at_cap"),
+                "occupancy_mix_at_cap": cap_signal.get("occupancy_mix_at_cap"),
+                "over_cap_verdict": (
+                    ((cap_document or {}).get("signals") or {})
+                    .get("native.occupancy_unknown", {})
+                    .get("over_cap_verdict")
+                ),
+                "scope": (
+                    "one dropped native dispatch response + the cap reached immediately; "
+                    "running/unknown/draining observed under the controlled failure "
+                    "(per-drill tested_limits carry the exact N and waits)"
+                ),
+            },
+            "pause_cancel_responsiveness": {
+                "control_percentiles_s": percentile_signal.get("control"),
+                "cancel_under_slow_provider_percentiles_s": percentile_signal.get(
+                    "cancel_under_slow_provider"
+                ),
+                "scope": percentile_signal.get("scope"),
+            },
+            "command_latency_under_contention": {
+                "control.received_to_applied_s": received_to_applied,
+                "scope": (
+                    "the slow-control-ACK window measured through the app's real "
+                    "lane-control endpoints during the occupancy load; the machinery "
+                    "percentiles are in pause_cancel_responsiveness"
+                ),
+            },
+            "restore_time_s": {
+                "measured": restore_seconds,
+                "scope": "the deployment's CURRENT store size — remeasure as it grows; the number does not extrapolate",
+            },
+        }
         report["summary"] = {
             "drills_run": len(report["drills"]),
             "passed": sum(1 for d in report["drills"] if d.get("outcome") == "pass"),
             "failed": sum(1 for d in report["drills"] if d.get("outcome") == "fail"),
             "refused_sections": len(report["refusals"]),
+            "profile_qualification": (profile_binding or {}).get("qualification"),
+            "policy_findings": len(report["policy_findings"]),
         }
     finally:
-        if project_id is not None and not args.keep_project:
-            try:
-                response = gitlab_delete(settings, f"/projects/{project_id}")
-                if response.status_code in (200, 202, 204):
-                    log(f"teardown: disposable project {project_id} deleted")
-                else:
-                    log(f"teardown: project delete answered {response.status_code}")
-            except httpx.HTTPError as exc:
-                log(f"teardown: project delete failed: {exc}")
+        if not args.keep_project:
+            for disposable_id in disposable_projects:
+                try:
+                    response = gitlab_delete(settings, f"/projects/{disposable_id}")
+                    if response.status_code in (200, 202, 204):
+                        log(f"teardown: disposable project {disposable_id} deleted")
+                    else:
+                        log(f"teardown: project delete answered {response.status_code}")
+                except httpx.HTTPError as exc:
+                    log(f"teardown: project delete failed: {exc}")
         if args.keep_work:
             log(f"work directory kept: {work_dir}")
         else:
@@ -1547,19 +2167,60 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.out is None:
-        args.out = REPO_ROOT / "qualification" / "deployment-ops-2026-09-24.json"
+        args.out = REPO_ROOT / "qualification" / "deployment-ops-2026-09-25.json"
     settings = Settings()
     report = asyncio.run(_run(args, settings))
+
+    # The FULL diagnostics report goes PRIVATE (outside the repository —
+    # the #304 discipline); the PUBLISHED document is the sanitized
+    # summary. Only the retention receipt travels with the public tree.
+    private_path: Path | None = None
+    try:
+        args.private_dir.mkdir(parents=True, exist_ok=True)
+        private_path = (
+            args.private_dir
+            / f"deployment-ops-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-full.json"
+        )
+        private_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        log(f"private report write failed ({exc}) — the sanitized summary still publishes")
+    report["private_diagnostics"] = {
+        "retained": private_path is not None,
+        "location_class": (
+            "outside the repository, access-controlled (never a public artifact)"
+            if private_path is not None
+            else "not retained (write failed)"
+        ),
+        "schema": REPORT_STAMP,
+        "note": (
+            "raw diagnostics (run/job/pipeline identifiers, per-cycle details, host "
+            "paths, refusal stderr) live ONLY there — the public tree carries the "
+            "sanitized summary (#304 discipline)"
+        ),
+    }
+
+    published = summarize_for_publication(report)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    log(f"report: {args.out}")
+    args.out.write_text(json.dumps(published, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    log(f"published report (sanitized): {args.out}")
+    if private_path is not None:
+        log(f"private diagnostics (full):  {private_path}")
     summary = report.get("summary", {})
     log(
         f"summary: {summary.get('passed', 0)}/{summary.get('drills_run', 0)} drills passed "
-        f"({summary.get('failed', 0)} failed, {summary.get('refused_sections', 0)} section(s) refused)"
+        f"({summary.get('failed', 0)} failed, {summary.get('refused_sections', 0)} section(s) "
+        f"refused), profile {summary.get('profile_qualification')}, "
+        f"{summary.get('policy_findings', 0)} policy finding(s)"
     )
     log(f"scope: {report['scope']}")
-    failed = summary.get("failed", 0) > 0 or summary.get("refused_sections", 0) > 0
+    failed = (
+        summary.get("failed", 0) > 0
+        or summary.get("refused_sections", 0) > 0
+        or summary.get("profile_qualification") != PROFILE_QUALIFIED
+        or summary.get("policy_findings", 0) > 0
+    )
     return 1 if failed else 0
 
 

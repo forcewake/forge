@@ -38,6 +38,35 @@ namespace, never project 68 or anything else the lab owns):
   DRAFT with an empty ``merged_at`` — asserted from the provider's own
   listing, not from local state.
 
+R38-13 / #314 adds the qualification arms (the review's named deltas —
+all CONTENT-verified by blob reads, never by commit-history scans
+alone):
+
+- **the same-file read/apply window**: a REAL human commit to the
+  payload file lands between the publication's preflight read and the
+  server apply (the failpoint schedule inside the effect window) — the
+  pre-apply content recheck refuses with the TYPED conflict BEFORE any
+  effect, the human's content stays the branch head, the saga marker
+  never lands, ``saga.content_conflict`` is outboxed and no review
+  opens;
+- **the unrelated-file window schedule**: the same window, an
+  UNRELATED file — the publication PROCEEDS on top of the human commit
+  (its parent), the unrelated content and the payload are both read
+  back blob-level, and the payload preconditions are DURABLY recorded
+  beside the expected head;
+- **the delayed-apply window**: the commit response dies and the first
+  probe comes back negative (the injected delayed-visibility window)
+  — the same mutation is NOT blindly redispatched (durable
+  ``outcome_unknown``, exactly one commit in the real history), and
+  the recovering process adopts by CONTENT-verified correlation once
+  the effect is visible;
+- **access revoked during recovery**: the consumer's reads ride a
+  project-scoped credential (a REAL project access token, ``read_api``
+  only) that is REVOKED mid-recovery — every consumer read fails
+  closed with that credential's 401 and the surface NEVER falls back
+  to the wider admin credential the process also holds (structurally
+  there is no fallback path: one client per repository).
+
 Gating is honest: real PostgreSQL under ``FORGE_PG_TEST_URL`` (the FI
 convention — point it at a DISPOSABLE database, the pe_db fixture
 resets its whole public schema per test) AND the live GitLab under
@@ -47,6 +76,7 @@ skips visibly; nothing runs half-native.
 
 from __future__ import annotations
 
+import datetime
 import os
 import uuid
 from dataclasses import replace
@@ -55,14 +85,21 @@ from typing import Any, NamedTuple
 import httpx
 import pytest
 
+from forge.adaptive.publication_saga import ProviderUnavailableError
 from forge.adaptive.saga_durable import (
     DurablePublicationEntry,
     ProcessDied,
+    SAGA_PRECONDITIONS_KEY,
     kill_at_boundary,
 )
-from forge.adaptive.saga_native import GitLabNativeEffects
+from forge.adaptive.saga_native import (
+    DEFAULT_PAYLOAD_PATH,
+    GitLabNativeEffects,
+    payload_document,
+)
 from forge.adaptive.two_writer_qualification import TwoWriterScenario, default_scenario
 from forge.adaptive.workpackage_service import ChildSubject
+from forge.durable import FlowRun
 from forge.gitlab.client import GitLabClient
 
 pytestmark = pytest.mark.production_entry
@@ -552,3 +589,294 @@ class TestNativeTwoRecoverers:
         assert on_branch[0]["state"] == "opened" and not on_branch[0]["merged_at"]
         assert all(review["state"] == "opened" and not review["merged_at"] for review in reviews)
         assert effects.destructive_operations() == []
+
+
+# ---------------------------------------------------------------------------
+# R38-13 / #314 — the qualification arms: content preconditions, the
+# read/apply-window schedules, delayed apply, and revoked scoped access.
+# ---------------------------------------------------------------------------
+
+
+async def _blob_at(lab: LiveGitLabLab, project: int, path: str, ref: str) -> str | None:
+    """The file's CONTENT at *ref* (None when the provider proves absence) —
+    the CONTENT-level assertion basis: a blob read, never a history scan."""
+    blob = await lab.client.read_blob(project, path, ref=ref)
+    if blob.status == "not_found":
+        return None
+    assert blob.status == "found", blob.detail
+    return str(blob.content)
+
+
+async def _recorded_preconditions(pe_db, entry: DurablePublicationEntry) -> dict[str, Any]:
+    """The payload preconditions the entry durably recorded beside the
+    expected head (the additive evidence key)."""
+    async with pe_db.worker_factory()() as session:
+        run = await session.get(FlowRun, entry.parent_run_id)
+        assert run is not None
+        return dict((run.evidence or {}).get(SAGA_PRECONDITIONS_KEY) or {})
+
+
+_LIVE_ARM_GATES = pytest.mark.skipif(
+    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
+    reason=_LIVE_REASON,
+)
+
+
+@_LIVE_ARM_GATES
+class TestNativeSameFileWindow:
+    """The review's named arm: a human edits THE SAME FILE between the
+    preflight read and the server apply — refused typed, the human's
+    content preserved at the head (content-verified), never a silent
+    full-file replacement."""
+
+    async def test_a_same_file_window_edit_is_refused_with_the_typed_conflict(
+        self, pe_db, live_lab
+    ):
+        producer = await live_lab.new_publication_branch(live_lab.producer_project, "same-p")
+        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "same-c")
+        scenario = _live_scenario(f"tw2n-same-{uuid.uuid4().hex[:6]}", producer, consumer)
+        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
+        human = "a person edited the payload file inside the window\n"
+        # the failpoint schedule: a REAL commit through the REAL client,
+        # inside the publication's preflight→apply window
+        effects.in_window_human_edits = {PRODUCER: ((DEFAULT_PAYLOAD_PATH, human),)}
+        entry = _entry(pe_db, live_lab, scenario, effects)
+        await entry.start()
+        report = await entry.drive()
+
+        saga = await entry._saga_state()
+        producer_repo = saga.repo(PRODUCER)
+        assert producer_repo is not None
+        assert producer_repo.status == "failed"
+        assert "content conflict" in producer_repo.note  # the explicit conflict
+        assert report.package_state != "complete"
+        # the conflict is TRACKED, not folded into a generic refusal
+        events = [event["event_type"] for event in await entry.outbox_events()]
+        assert "saga.content_conflict" in events
+
+        # CONTENT preserved at the head — a blob read at the HEAD COMMIT,
+        # not a commit-history assertion
+        head = await live_lab.client.get_branch_head(live_lab.producer_project, producer[0])
+        assert await _blob_at(live_lab, live_lab.producer_project, DEFAULT_PAYLOAD_PATH, head) == (
+            human
+        )
+        # the real history: base + the human commit; the saga's marker
+        # never landed, and no review was ever opened
+        listed = await live_lab.client.list_commits(live_lab.producer_project, producer[0])
+        assert len(listed) == 2
+        assert all(saga.commit_marker not in str(commit.get("message") or "") for commit in listed)
+        assert effects.merge_request_creates(PRODUCER) == 0
+        assert effects.merge_request_creates(CONSUMER) == 0  # the consumer never got admitted
+        # the consumer's publication state was never even persisted (gate)
+        consumer_repo = saga.repo(CONSUMER)
+        assert consumer_repo is not None and consumer_repo.status == "preparing"
+
+    async def test_an_unrelated_window_edit_proceeds_with_the_change_preserved(
+        self, pe_db, live_lab
+    ):
+        producer = await live_lab.new_publication_branch(live_lab.producer_project, "unrel-p")
+        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "unrel-c")
+        scenario = _live_scenario(f"tw2n-unrel-{uuid.uuid4().hex[:6]}", producer, consumer)
+        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
+        # the negative schedule: an UNRELATED file, same window
+        effects.in_window_human_edits = {PRODUCER: (("HUMAN_WINDOW_EDIT.md", "kept\n"),)}
+        entry = _entry(pe_db, live_lab, scenario, effects)
+        await entry.start()
+        report = await entry.drive()
+
+        saga = await entry._saga_state()
+        assert report.package_state == "complete", report.refusal
+        assert str(saga.status) == "complete"
+        # the producer's landed commit built ON the human's commit (its
+        # parent), and the effect counts stay exactly one per repository
+        landed = await effects.commits_carrying(PRODUCER, producer[0], saga.commit_marker)
+        assert len(landed) == 1
+        listed = await live_lab.client.list_commits(live_lab.producer_project, producer[0])
+        human_sha = str(listed[1]["sha"])  # newest-first: [ours, human, base]
+        assert landed[0].parent == human_sha
+        assert effects.commit_calls[PRODUCER] == 1
+        assert effects.merge_request_creates(PRODUCER) == 1
+        # CONTENT assertions, independent of history: the unrelated human
+        # change is still readable at the head, and the payload is exactly
+        # the intended document
+        head = await live_lab.client.get_branch_head(live_lab.producer_project, producer[0])
+        assert await _blob_at(
+            live_lab, live_lab.producer_project, "HUMAN_WINDOW_EDIT.md", head
+        ) == ("kept\n")
+        assert await _blob_at(
+            live_lab, live_lab.producer_project, DEFAULT_PAYLOAD_PATH, head
+        ) == payload_document(saga.commit_marker)
+        # the preconditions are DURABLY recorded beside the expected head —
+        # the payload was proved absent at preflight on this fresh branch
+        recorded = await _recorded_preconditions(pe_db, entry)
+        assert recorded[PRODUCER]["expected_head"] == producer[1]
+        assert recorded[PRODUCER]["payload_base"] == ""
+        assert recorded[PRODUCER]["file_versions"] == {DEFAULT_PAYLOAD_PATH: ""}
+        assert recorded[PRODUCER]["conflicted"] is False
+        # the consumer published normally underneath its own base
+        consumer_landed = await effects.commits_carrying(CONSUMER, consumer[0], saga.commit_marker)
+        assert len(consumer_landed) == 1 and consumer_landed[0].parent == consumer[1]
+
+
+@_LIVE_ARM_GATES
+class TestNativeDelayedApply:
+    """The delayed-apply window: the commit response dies and the first
+    probe comes back negative — the same mutation is never blindly
+    redispatched; the recovering process adopts by CONTENT-verified
+    correlation once the effect is visible."""
+
+    async def test_no_blind_redispatch_then_adoption_by_content(self, pe_db, live_lab):
+        producer = await live_lab.new_publication_branch(live_lab.producer_project, "delay-p")
+        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "delay-c")
+        scenario = _live_scenario(f"tw2n-delay-{uuid.uuid4().hex[:6]}", producer, consumer)
+        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
+        effects.lose_commit_response = {PRODUCER}  # the response dies, the commit lands
+        effects.delayed_visibility = {PRODUCER: 1}  # the first probe is negative
+
+        entry_a = _entry(pe_db, live_lab, scenario, effects)
+        await entry_a.start()
+        report_a = await entry_a.drive()
+        saga_a = await entry_a._saga_state()
+        producer_repo = saga_a.repo(PRODUCER)
+        assert producer_repo is not None
+        # the honest booking: the outcome is unknown (fail-closed, tracked)
+        assert producer_repo.status == "outcome_unknown"
+        assert producer_repo.adopted is False
+        assert report_a.package_state != "complete"
+        events_a = [event["event_type"] for event in await entry_a.outbox_events()]
+        assert "saga.unknown_effects" in events_a
+        # the REAL history holds exactly ONE marker commit (the apply was
+        # real; the process refused to redispatch it against the negative
+        # probe — content-verified count, not a message scan)
+        landed = await effects.commits_carrying(PRODUCER, producer[0], saga_a.commit_marker)
+        assert len(landed) == 1
+        assert effects.commit_calls[PRODUCER] == 1
+
+        # process 2 (the delay resolves — the mutation becomes visible):
+        # adoption by CONTENT-verified correlation, no second commit, ever
+        effects.lose_commit_response = set()
+        effects.delayed_visibility = {}
+        entry_b = _entry(pe_db, live_lab, scenario, effects)
+        report_b = await entry_b.drive()
+        saga_b = await entry_b._saga_state()
+        assert report_b.package_state == "complete", report_b.refusal
+        producer_repo = saga_b.repo(PRODUCER)
+        assert producer_repo is not None
+        assert producer_repo.status == "ready_for_review"
+        assert producer_repo.adopted is True
+        landed = await effects.commits_carrying(PRODUCER, producer[0], saga_b.commit_marker)
+        assert len(landed) == 1 and landed[0].parent == producer[1]
+        assert effects.commit_calls[PRODUCER] == 1
+        assert effects.merge_request_creates(PRODUCER) == 1
+        events_b = [event["event_type"] for event in await entry_b.outbox_events()]
+        assert "recovery.native_adoption" in events_b
+
+
+def _admin_client(live_projects: LiveProjects) -> httpx.Client:
+    return httpx.Client(
+        base_url=f"{live_projects.url.rstrip('/')}/api/v4",
+        headers={"PRIVATE-TOKEN": live_projects.token},
+        timeout=60.0,
+    )
+
+
+def _mint_scoped_credential(live_projects: LiveProjects, project_id: int) -> tuple[int, str]:
+    """A REAL project access token (``read_api`` only — the consumer's own
+    scoped credential, narrower than the admin token the fixture holds)."""
+    admin = _admin_client(live_projects)
+    try:
+        expires = (datetime.date.today() + datetime.timedelta(days=2)).isoformat()
+        response = admin.post(
+            f"/projects/{project_id}/access_tokens",
+            json={
+                "name": f"forge-tw3-scoped-{uuid.uuid4().hex[:6]}",
+                "scopes": ["read_api"],
+                "expires_at": expires,
+            },
+        )
+        response.raise_for_status()
+        created = response.json()
+        return int(created["id"]), str(created["token"])
+    finally:
+        admin.close()
+
+
+def _revoke_scoped_credential(live_projects: LiveProjects, project_id: int, token_id: int) -> None:
+    admin = _admin_client(live_projects)
+    try:
+        response = admin.delete(f"/projects/{project_id}/access_tokens/{token_id}")
+        response.raise_for_status()
+    finally:
+        admin.close()
+
+
+@_LIVE_ARM_GATES
+class TestNativeRevokedAccess:
+    """Access to one target revoked during recovery: every read of the
+    revoked target fails CLOSED with ITS OWN credential's refusal, and no
+    differently-scoped credential is ever reached for — the surface has
+    exactly one client per repository and no fallback path exists."""
+
+    async def test_a_revoked_scoped_credential_fails_closed_without_fallback(
+        self, pe_db, live_lab, live_projects
+    ):
+        producer = await live_lab.new_publication_branch(live_lab.producer_project, "revo-p")
+        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "revo-c")
+        scenario = _live_scenario(f"tw2n-revo-{uuid.uuid4().hex[:6]}", producer, consumer)
+
+        token_id, token_value = _mint_scoped_credential(live_projects, live_lab.consumer_project)
+        scoped = GitLabClient(
+            base_url=live_projects.url,
+            token=token_value,
+            timeout=60.0,  # noqa: S106 — a test credential
+        )
+        try:
+            # the consumer's reads ride the SCOPED credential only
+            effects = GitLabNativeEffects(
+                live_lab.client,
+                live_lab.projects(),
+                scoped_clients={CONSUMER: scoped},
+            )
+            # process 1 dies with the consumer's intent recorded (no commit)
+            entry_a = _entry(
+                pe_db,
+                live_lab,
+                scenario,
+                effects,
+                on_boundary=kill_at_boundary(CONSUMER, "commit_intent"),
+            )
+            await entry_a.start()
+            with pytest.raises(ProcessDied):
+                await entry_a.drive()
+            assert effects.commit_calls.get(CONSUMER, 0) == 0
+
+            # the credential is REVOKED while the coordinator is dead
+            _revoke_scoped_credential(live_projects, live_lab.consumer_project, token_id)
+
+            # process 2: recovery — the consumer's surface reads fail CLOSED
+            # with the revoked credential's own 401 (never a wider token)
+            entry_b = _entry(pe_db, live_lab, scenario, effects)
+            report_b = await entry_b.drive()
+            saga_b = await entry_b._saga_state()
+            consumer_repo = saga_b.repo(CONSUMER)
+            assert consumer_repo is not None
+            assert consumer_repo.status == "intent_recorded"  # uncertain, not failed
+            assert report_b.package_state != "complete"
+            assert effects.commit_calls.get(CONSUMER, 0) == 0  # nothing written blind
+            assert effects.effects_for(CONSUMER) == []  # no consumer effect anywhere
+            with pytest.raises(ProviderUnavailableError, match="401"):
+                await effects.remote_head(CONSUMER, consumer[0])
+            # the producer's reviewable effect stands as the honest partial
+            producer_repo = saga_b.repo(PRODUCER)
+            assert producer_repo is not None
+            assert producer_repo.status == "ready_for_review"
+            producer_landed = await effects.commits_carrying(
+                PRODUCER, producer[0], saga_b.commit_marker
+            )
+            assert len(producer_landed) == 1
+            assert effects.merge_request_creates(PRODUCER) == 1
+            partial = await entry_b.partial_publication()
+            assert [effect.repository_id for effect in partial.standing] == [PRODUCER]
+            assert [effect.repository_id for effect in partial.outstanding] == [CONSUMER]
+        finally:
+            await scoped.close()

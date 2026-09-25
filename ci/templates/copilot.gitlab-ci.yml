@@ -40,6 +40,12 @@
 #   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
 # forge downloads the artifacts and publishes via the trusted publisher;
 # claims in the trace are never trusted.
+# Interactive restore (R38-01, #302 note): NOT supported — this is a
+# BATCH recipe (a scripted one-shot `-p` call, no forge.lane_driver
+# process, so no checkpoint restore and no workspace generation).
+# WIP-continuity (`required` resume) dispatches belong on the SDK lane
+# templates (claude-sdk-lane and siblings); claude-code carries the
+# shipped required-resume refusal gate (#288).
 
 forge-agent:
   image: node:22-bookworm
@@ -103,6 +109,12 @@ forge-agent:
       fi
     - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
     - export FORGE_LOG_PLATFORM=gitlab
+    # R38-17 (#318, ADR-0032): the model route is the versioned
+    # execution spec's PIN — the dispatched FORGE_HARNESS_MODEL (the
+    # approved RunSpec's frozen route) outranks the ambient COPILOT_MODEL
+    # project variable, which stays only as the documented override for a
+    # dispatch that carries no pin (empty = the Copilot CLI default).
+    - export COPILOT_MODEL="${FORGE_HARNESS_MODEL:-${COPILOT_MODEL:-}}"
     - |
       FORGE_DRIVER_EXIT="completed"
       copilot -p Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \

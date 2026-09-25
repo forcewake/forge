@@ -387,7 +387,9 @@ def test_stopped_control_plane_is_plannable(repo_root: Path) -> None:
         raise AlignmentError("GET http://localhost:8420/health unreachable")
 
     runner.http_get_json = unreachable  # type: ignore[method-assign]
-    plan = build_plan(runner, repo_root, backup_dir=repo_root / "backups")
+    # R38-03 (#304): an in-repo backup destination is refused — the backup
+    # dir must sit outside the repo root
+    plan = build_plan(runner, repo_root, backup_dir=repo_root.parent / "private-backups")
     assert plan.already_aligned is False
     assert f"recreate-{APP_CONTAINER}" in [step.name for step in plan.steps]
     assert plan.observations["controlplane_unreachable"]

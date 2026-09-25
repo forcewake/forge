@@ -35,6 +35,12 @@
 #   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
 # forge downloads the artifacts and publishes via the trusted publisher;
 # claims in the trace are never trusted.
+# Interactive restore (R38-01, #302 note): NOT supported — this is a
+# BATCH recipe (a scripted one-shot `-p` call, no forge.lane_driver
+# process, so no checkpoint restore and no workspace generation).
+# WIP-continuity (`required` resume) dispatches belong on the SDK lane
+# templates (claude-sdk-lane and siblings); claude-code carries the
+# shipped required-resume refusal gate (#288).
 
 forge-agent:
   image: node:22-bookworm

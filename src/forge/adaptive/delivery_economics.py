@@ -1,4 +1,4 @@
-"""R37-13 — accepted-delivery economics over REAL attempt/usage identities.
+"""R37-13 + R38-09 — accepted-delivery economics over REAL attempt/usage identities.
 
 ``delivery_measurement`` (R36-17 / #276) links the recorded facts by
 identity and folds them with honest unknowns; this module is the next
@@ -7,7 +7,15 @@ join layer: an :class:`EconomicsLinker` that takes that
 PROFILE VERSIONS, and emits an :class:`EconomicsReport` (stamp
 ``forge.delivery.economics/1``) explaining what one accepted work item
 cost — and what the whole programme cost per accepted item — from
-receipts that trace to the same population.
+receipts that trace to the same population. R38-09 (#310) feeds the same
+measures from INGESTED lane usage rows (``forge.adaptive.usage_ingestion``
+documents joined through ``ledger_records_from_ingested_usage``): every
+priced entry now names its ``cost_basis`` (estimated vs provider-reported
+vs billing-reconciliation — never summed into one column) and its
+attribution SEGMENT (route + route version + rate card; a change is a new
+segment, history never rewritten), and the report adds the
+successful-attempt cost as its OWN measure beside the accepted-item
+all-attempt total and programme-per-accepted.
 
 The honesty rules, all pinned by ``tests/test_delivery_economics.py``:
 
@@ -308,7 +316,12 @@ class PricedEntry:
     ``billed_usd`` is the receipt's OWN cost figure (basis ``billing``);
     ``estimate_usd`` is the rate card's figure over its token counters
     (basis ``estimate``). A receipt carries at most one of them; neither
-    column ever sums the other.
+    column ever sums the other. R38-09 adds two additive identity fields
+    ingested lane receipts carry: ``cost_basis`` — WHERE the billed figure
+    came from (``provider-reported``: the SDK's own meter; ``estimated``:
+    a rate card; ``billing-reconciliation``: a billing export) — and
+    ``segment``, the attribution segment over route + route version +
+    rate card (a change writes NEW rows; history is never rewritten).
     """
 
     work_id: str
@@ -323,6 +336,8 @@ class PricedEntry:
     rate_card_version: str = ""
     input_tokens_inclusive: int | None = None
     output_tokens: int | None = None
+    cost_basis: str = ""
+    segment: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -338,6 +353,8 @@ class PricedEntry:
             "rate_card_version": self.rate_card_version,
             "input_tokens_inclusive": self.input_tokens_inclusive,
             "output_tokens": self.output_tokens,
+            "cost_basis": self.cost_basis,
+            "segment": self.segment,
         }
 
 
@@ -812,6 +829,8 @@ class EconomicsLinker:
                                 rate_card_version=rate_card.version if rate_card else "",
                                 input_tokens_inclusive=claim.input_tokens_inclusive,
                                 output_tokens=claim.output_tokens,
+                                cost_basis=claim.cost_basis,
+                                segment=claim.segment,
                             )
                         )
                         continue
@@ -845,6 +864,8 @@ class EconomicsLinker:
                             rate_card_version=rate_card.version if rate_card else "",
                             input_tokens_inclusive=claim.input_tokens_inclusive,
                             output_tokens=claim.output_tokens,
+                            cost_basis=claim.cost_basis,
+                            segment=claim.segment,
                         )
                     )
                 attempts.append(
@@ -995,6 +1016,14 @@ class EconomicsReport:
         estimate_entries = [entry for entry in entries if entry.estimate_usd is not None]
         coverage_expected = attempt_count + unobserved
         coverage_received = len({entry.receipt_id for entry in entries})
+        # R38-09: the provider-reported column — the SDK's own meter, named
+        # separately from billing-reconciliation figures and never summed
+        # with estimates.
+        provider_reported = [
+            entry.billed_usd
+            for entry in billed_entries
+            if entry.cost_basis == "provider-reported" and entry.billed_usd is not None
+        ]
         return {
             "works": len(works),
             "attempts": attempt_count,
@@ -1003,6 +1032,9 @@ class EconomicsReport:
             "billed_usd": _round6(_sum(billed_values)) if billed_exact else None,
             "billed_exact": billed_exact,
             "billed_known_lower_bound_usd": _round6(_sum(billed_values)),
+            "provider_reported_usd": _round6(_sum(provider_reported))
+            if provider_reported
+            else None,
             "estimate_usd": (
                 _round6(_sum([entry.estimate_usd or 0.0 for entry in estimate_entries]))
                 if estimate_entries
@@ -1075,6 +1107,128 @@ class EconomicsReport:
                 " every throughput comparison (R37-13)"
             ),
         }
+
+    def _cost_basis_census(self) -> dict[str, Any]:
+        """The estimated / provider-reported / billing-reconciliation split.
+
+        R38-09 scope item 5: every priced entry names WHERE its figure came
+        from, and the three never sum into one column. An entry whose
+        source carried no explicit basis keeps the historical default of
+        its column (a billed figure without a stated origin is grouped as
+        ``billing-reconciliation`` — the conservative reading, never
+        promoted to provider-reported).
+        """
+        census: dict[str, dict[str, Any]] = {}
+        for entry in self._entries():
+            if entry.basis == "refused":
+                continue
+            if entry.cost_basis:
+                basis = entry.cost_basis
+            elif entry.basis == "billing":
+                basis = "billing-reconciliation"
+            else:
+                basis = "estimated"
+            row = census.setdefault(basis, {"receipts": 0, "usd": 0.0})
+            row["receipts"] += 1
+            figure = entry.billed_usd if entry.billed_usd is not None else entry.estimate_usd
+            row["usd"] = _round6((row["usd"] or 0.0) + (figure or 0.0))
+        return {
+            "bases": dict(sorted(census.items())),
+            "note": (
+                "cost figures are separated by origin: provider-reported (the"
+                " SDK's own meter), estimated (a versioned rate card),"
+                " billing-reconciliation (a billing export) — never summed"
+                " into one column (R38-09)"
+            ),
+        }
+
+    def _attribution_segments(self) -> list[dict[str, Any]]:
+        """The per-segment fold — a route/version or card change is a NEW row.
+
+        Segments group each population's priced entries by their carried
+        attribution segment (route + route version + rate-card identity;
+        unlabelled historical entries share the ``""`` segment of their
+        route). Existing segments are immutable: a changed route, model
+        version or rate card writes entries under a NEW segment id and the
+        fold simply shows both — history is never rewritten.
+        """
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for entry in self._entries():
+            if entry.basis == "refused":
+                continue
+            key = (entry.segment or f"route:{entry.route_key}", entry.route_key)
+            row = grouped.setdefault(
+                key,
+                {
+                    "segment": entry.segment or f"route:{entry.route_key}",
+                    "route": entry.route_key,
+                    "rate_card_versions": set(),
+                    "receipts": 0,
+                    "cost_usd": 0.0,
+                    "exact": True,
+                },
+            )
+            row["receipts"] += 1
+            if entry.rate_card_version:
+                row["rate_card_versions"].add(entry.rate_card_version)
+            figure = entry.billed_usd if entry.billed_usd is not None else entry.estimate_usd
+            row["cost_usd"] = _round6((row["cost_usd"] or 0.0) + (figure or 0.0))
+            if figure is None:
+                row["exact"] = False
+        return [
+            {
+                "segment": row["segment"],
+                "route": row["route"],
+                "rate_card_versions": sorted(row["rate_card_versions"]),
+                "receipts": row["receipts"],
+                "cost_usd": row["cost_usd"],
+                "note": (
+                    "cost figures grouped by attribution segment — a route,"
+                    " route-version or rate-card change is a NEW segment;"
+                    " historical segments are never rewritten (R38-09)"
+                ),
+            }
+            for row in sorted(grouped.values(), key=lambda row: (row["segment"], row["route"]))
+        ]
+
+    def _successful_attempt_costs(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """The SUCCESSFUL-ATTEMPT cost — the third distinct measure (R38-09).
+
+        The accepted/successful attempt's OWN receipts only: never the
+        work's failed precursors (that is the accepted-item all-attempt
+        total), never the programme's other works (that is
+        programme-per-accepted). An attempt with no priced receipt renders
+        as an explicit unknown with a zero lower bound and a note — never
+        an exact zero cost.
+        """
+        costs: dict[str, dict[str, dict[str, Any]]] = {}
+        for work in sorted(self.works, key=lambda row: row.work_id):
+            for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
+                if attempt.outcome != "accepted":
+                    continue
+                entries = [entry for entry in attempt.receipts if entry.basis not in ("refused",)]
+                billed = [entry for entry in entries if entry.billed_usd is not None]
+                conflicted = any(
+                    row.kind == "receipt" and row.identity in {e.receipt_id for e in entries}
+                    for row in self.conflicts
+                )
+                exact = bool(entries and billed and not conflicted and len(billed) == len(entries))
+                costs.setdefault(work.work_id, {})[attempt.attempt_id] = {
+                    "cost_usd": _round6(_sum([e.billed_usd or 0.0 for e in billed]))
+                    if exact
+                    else None,
+                    "known_cost_lower_bound_usd": _round6(
+                        _sum([e.billed_usd or 0.0 for e in billed])
+                    ),
+                    "receipts": len(entries),
+                    "note": (
+                        "the successful attempt's OWN receipts — a different"
+                        " measure from the accepted item's all-attempt total and"
+                        " from programme spend per accepted item (R38-09)"
+                        + ("" if entries else " — no priced receipt: unknown, never zero")
+                    ),
+                }
+        return costs
 
     def to_document(self) -> dict[str, Any]:
         """The stored artifact: the full stamped economics report."""
@@ -1167,6 +1321,17 @@ class EconomicsReport:
                 "accepted_items": accepted,
                 "programme_per_accepted_item": per_accepted,
                 "accepted_item_totals": dict(sorted(accepted_item_totals.items())),
+                "successful_attempt_costs": dict(
+                    sorted(
+                        (
+                            work_id,
+                            dict(sorted(attempts.items())),
+                        )
+                        for work_id, attempts in self._successful_attempt_costs().items()
+                    )
+                ),
+                "cost_basis_census": self._cost_basis_census(),
+                "attribution_segments": self._attribution_segments(),
                 "coverage": self._coverage_block(),
             },
             "evidence": self._evidence_block(),
@@ -1236,6 +1401,8 @@ class EconomicsReport:
                         rate_card_version=_text(row.get("rate_card_version")),
                         input_tokens_inclusive=_nn_int(row.get("input_tokens_inclusive")),
                         output_tokens=_nn_int(row.get("output_tokens")),
+                        cost_basis=_text(row.get("cost_basis")),
+                        segment=_text(row.get("segment")),
                     )
                     for row in receipts_raw
                     if isinstance(row, Mapping)

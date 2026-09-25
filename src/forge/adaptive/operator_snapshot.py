@@ -1217,6 +1217,23 @@ class OperatorSnapshotReader:
         active = evidence.get("active_candidate_sha")
         if isinstance(active, str) and active.strip():
             row["active_candidate_sha"] = active.strip()
+        # R38-15: the #302 finalization markers' slice — where a harness
+        # cycle journals the lane outcome on the run's evidence
+        # (``FORGE_LANE_OUTCOME:{driver_exit, collector_exit,
+        # candidate_state}``, landing in the harness fragment or at the
+        # top level), the run row carries it as the documented
+        # ``lane_outcome`` shape the recovery surface's delivery outcome
+        # derives from. Nothing is invented: no recorded marker, no slice.
+        harness = evidence.get("harness") if isinstance(evidence.get("harness"), Mapping) else {}
+        lane_outcome: dict[str, Any] = {}
+        for key in ("driver_exit", "collector_exit", "candidate_state"):
+            for source in (harness, evidence):
+                value = source.get(key)
+                if value not in (None, ""):
+                    lane_outcome[key] = value
+                    break
+        if lane_outcome:
+            row["lane_outcome"] = lane_outcome
         return row
 
     @staticmethod

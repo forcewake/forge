@@ -47,16 +47,20 @@ from forge.adaptive.ops_drills import (
     DrillOutcome,
     FaultedNativeLane,
     LostStartResponse,
+    NON_SECRET_CREDENTIAL_REF_NAMES,
     UploadAdmissionBudget,
     UploadBudgetExceeded,
     build_fixture,
     checkpoint_payload,
+    credential_shaped_names,
     drill_backup_restore,
     drill_checkpoint_upload_load,
     drill_control_responsiveness,
+    drill_credential_isolation,
     drill_degraded_faults,
     drill_native_start_load,
     drill_operator_override_audit,
+    is_non_secret_credential_ref,
     run_drill,
 )
 from forge.models.base import Base
@@ -421,6 +425,109 @@ class TestReportShape:
         assert outcome.outcome == "fail"
         assert outcome.objectives == []
         assert outcome.violations == ["the pinned invariant"]
+
+
+# ---------------------------------------------------------------------------
+# R38-17 (#318) — the credential-name pattern's non-secret REF names
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialRefPattern:
+    """#303's note, pinned: the non-secret delivery REF variables are
+    references (they name where a value lives), so the isolation drill
+    stops flagging them as "credential-shaped beyond the lane token" —
+    while a real token-shaped name still flags."""
+
+    #: A recorded dispatch envelope of the #288 shape, plus the #303
+    #: delivery ref variables the live re-run tripped over.
+    ENVELOPE_WITH_REFS = {
+        "resume_mode": "required",
+        "checkpoint_digest": "a" * 64,
+        "decision_id": "dec-42",
+        "attempt_generation": 3,
+        "control_url": "https://forge.example",
+        "token_dispatched": True,
+        "variable_keys": [
+            "FORGE_LANE_RESUME_MODE",
+            "FORGE_LANE_RESUME",
+            "FORGE_RESUME_CHECKPOINT",
+            "FORGE_ATTEMPT_GENERATION",
+            "FORGE_CONTINUATION_DECISION_ID",
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
+            "FORGE_CREDENTIAL_REF",
+            "FORGE_CREDENTIAL_REDEEM",
+        ],
+    }
+
+    def test_the_delivery_refs_pass_the_isolation_drill(self):
+        """The exact live re-run shape: a bound, required-resume SDK
+        dispatch carrying the two #303 ref variables is CLEAN."""
+        outcome = drill_credential_isolation(
+            envelope=self.ENVELOPE_WITH_REFS,
+            control_plane_env={"FORGE_LANE_CONTROL_SECRET": "never-recorded"},
+            deny_probes=[
+                {"name": "lane-control with a foreign token", "outcome": "denied-unauthorized"}
+            ],
+        )
+        assert outcome.violations == []
+        assert outcome.signals["credential_shaped_beyond_lane_token"] == []
+
+    def test_a_token_shaped_name_still_flags(self):
+        leaked = dict(self.ENVELOPE_WITH_REFS)
+        leaked["variable_keys"] = [*self.ENVELOPE_WITH_REFS["variable_keys"], "ZAI_API_KEY"]
+        outcome = drill_credential_isolation(
+            envelope=leaked,
+            control_plane_env={},
+            deny_probes=[],
+        )
+        assert outcome.outcome == "fail"
+        assert outcome.signals["credential_shaped_beyond_lane_token"] == ["ZAI_API_KEY"]
+
+    def test_the_native_value_carrier_still_flags(self):
+        """The native profiles' VALUE carrier (FORGE_MODEL_<SEGMENT>)
+        is a secret name — a ref spelling must never exempt it."""
+        leaked = dict(self.ENVELOPE_WITH_REFS)
+        leaked["variable_keys"] = [
+            *self.ENVELOPE_WITH_REFS["variable_keys"],
+            "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+        ]
+        outcome = drill_credential_isolation(
+            envelope=leaked,
+            control_plane_env={},
+            deny_probes=[],
+        )
+        assert outcome.signals["credential_shaped_beyond_lane_token"] == [
+            "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
+        ]
+
+    def test_the_ref_shape_covers_dispatch_key_spellings(self):
+        assert is_non_secret_credential_ref("FORGE_CREDENTIAL_REF")
+        assert is_non_secret_credential_ref("FORGE_CREDENTIAL_REDEEM")
+        assert is_non_secret_credential_ref("credential_ref")
+        assert is_non_secret_credential_ref("model_credential_ref")
+        assert is_non_secret_credential_ref("Credential-Redeem")
+        assert not is_non_secret_credential_ref("FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN")
+        assert not is_non_secret_credential_ref("ZAI_API_KEY")
+        assert not is_non_secret_credential_ref("MCP_TOKEN")
+        assert not is_non_secret_credential_ref("CREDENTIAL_REF_VALUE")
+        assert NON_SECRET_CREDENTIAL_REF_NAMES == (
+            "FORGE_CREDENTIAL_REF",
+            "FORGE_CREDENTIAL_REDEEM",
+        )
+
+    def test_credential_shaped_names_excludes_the_refs(self):
+        names = credential_shaped_names(
+            {
+                "FORGE_CREDENTIAL_REF": "ENV_ANTHROPIC_AUTH_TOKEN",
+                "FORGE_CREDENTIAL_REDEEM": "",
+                "credential_ref": "x",
+                "ZAI_API_KEY": "v",
+                "HOME": "/x",
+                "MCP_TOKEN": "t",
+            }
+        )
+        assert names == ["MCP_TOKEN", "ZAI_API_KEY"]
 
 
 # ---------------------------------------------------------------------------

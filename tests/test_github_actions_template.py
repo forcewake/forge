@@ -66,6 +66,11 @@ class TestWorkflowTemplateContract:
             # (fresh | required | restart) — mapped onto the driver step's
             # FORGE_LANE_RESUME env below.
             "lane_resume_mode",
+            # R38-02 (#303): the credential DELIVERY reference (the ref,
+            # never a value — the secret FORGE_MODEL_<ref> holds the
+            # value) + the runner-redemption flag (profile b).
+            "credential_ref",
+            "credential_redeem",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
@@ -986,3 +991,46 @@ class TestWheelBootstrapRunsOnRealPip:
         assert not (workdir / ".forge" / "lane_install.json").exists()
         target = workdir / "pip-target"
         assert not target.exists() or not any(target.iterdir())
+
+
+# ----------------------------------------------------------------------
+# R38-17 (issue #318, ADR-0032): the driver step's variable-resolution
+# header consumes the versioned execution spec's PINS (dispatch
+# inputs); the ambient variables that remain are the documented,
+# non-authority ones.
+# ----------------------------------------------------------------------
+
+
+class TestExecutionSpecVariableResolution:
+    def test_the_driver_step_documents_the_spec_pins_and_the_ambient_boundary(self):
+        """FORGE_DRIVER / FORGE_MODEL / FORGE_LANE_RESUME / the
+        credential ref pair are the spec's pins (dispatch inputs); the
+        header states that nothing ambient re-derives a model,
+        authority or artifact choice."""
+        text = TEMPLATE.read_text()
+        assert "R38-17 (#318, ADR-0032): the variable-resolution contract" in text
+        assert "re-derive a pinned member ambiently" in text
+        # The model pin stays the dispatch input (R04/A02), with the
+        # empty-pin case the recorded unpinned one.
+        assert "The model route pin (R04/A02)" in text
+        workflow = load_template()
+        driver_step = next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Run harness driver"
+        )
+        assert driver_step["env"]["FORGE_MODEL"] == "${{ inputs.model }}"
+        assert driver_step["env"]["FORGE_DRIVER"] == "${{ inputs.driver }}"
+
+    def test_the_azure_lane_documents_the_same_pin_boundary(self):
+        """The Azure variables block carries the same contract: the
+        parameter-mapped members are the spec's pins, and the ambient
+        reads left are the documented non-authority ones."""
+        azure = (
+            Path(__file__).parents[1] / "ci" / "templates" / "forge-lane.azure-pipelines.yml"
+        ).read_text()
+        assert "R38-17 (#318, ADR-0032): this block is the lane's" in azure
+        assert "versioned execution spec's PINS" in azure.lower() or (
+            "VERSIONED execution spec's PINS" in azure
+        )
+        assert "FORGE_MODEL: ${{ parameters.model }}" in azure

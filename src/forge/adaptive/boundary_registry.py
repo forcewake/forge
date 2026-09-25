@@ -1,4 +1,4 @@
-"""R36-20 (issue #279): the declarative OWNERSHIP registry for the six
+"""R36-20 (issue #279): the declarative OWNERSHIP registry for the
 authority boundaries — the review's "same decision made in two places"
 defect class made mechanically visible.
 
@@ -14,7 +14,9 @@ decision. This registry is the machine-readable consolidation: each
 boundary records the decision it owns, the owner modules, the
 production callers that may depend on the owner's surface, the
 mechanical confinement rule that guards it, and the negative contract —
-what must NOT decide the same thing elsewhere.
+what must NOT decide the same thing elsewhere. R38-17 (#318) added the
+seventh entry (execution_delivery_spec, ADR-0032): the versioned
+execution/delivery specification the lane templates consume.
 
 The registry is consumed by ``tests/test_architecture_boundaries.py``:
 
@@ -96,7 +98,8 @@ class AuthorityBoundary:
     rule_sets: tuple[tuple[str, ...], ...] = field(default=())
 
 
-#: The six owning boundaries, as landed in the R36 session (ADR-0030).
+#: The owning boundaries: the six of the R36 session (ADR-0030) plus
+#: the execution/delivery spec contract (R38-17 / #318, ADR-0032).
 BOUNDARIES: tuple[AuthorityBoundary, ...] = (
     AuthorityBoundary(
         name="repository_identity_checkpoint_lifecycle",
@@ -338,6 +341,44 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "No surface may assert a state workers did not derive, "
             "offer an action outside the state × actor matrix, or read "
             "durable rows around the authorized subject-scoped reader."
+        ),
+    ),
+    AuthorityBoundary(
+        name="execution_delivery_spec",
+        decision=(
+            "WHICH execution and delivery choices a lane template "
+            "consumes as PINS — the run/attempt identity, the driver + "
+            "model route, the resume mode + pinned checkpoint ref, the "
+            "credential delivery mode + ref, the profile digest and the "
+            "artifact contract (collector entry, output root) — plus "
+            "the supported composition matrix and its preflight "
+            "refusals."
+        ),
+        owner_modules=("forge.adaptive.execution_spec",),
+        allowed_dependents=(),
+        enforcement=(
+            "Import-registration only (the contract travels as template "
+            "VARIABLES, not imports — the shipped templates render the "
+            "pins at their variable-resolution headers; a production "
+            "module composing the spec contract registers here like "
+            "every other caller)."
+        ),
+        negative_contract=(
+            "No dispatch, service or template may re-derive a pinned "
+            "member from ambient variables (the model route, the resume "
+            "contract, the credential route, the artifact contract), "
+            "nor compose an unsupported provider/recipe/harness/"
+            "credential combination — an unlisted composition is a "
+            "preflight refusal, never an ambient fallback."
+        ),
+        honest_gaps=(
+            "The dispatch services adopt the spec's rendering seam "
+            "composition-by-composition (ADR-0029's ladder); the "
+            "templates already consume the pins as documented "
+            "(ADR-0032 §2). Azure carries no resume-mode surface and "
+            "the GitLab batch lanes restore no checkpoint — the matrix "
+            "records both as resume-incapable recipes rather than "
+            "fabricating parity."
         ),
     ),
 )

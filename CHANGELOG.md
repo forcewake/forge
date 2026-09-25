@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — R38-01 (#302): the GitLab SDK lanes finish the job before declaring success
+
+- All four SDK lane templates (`claude-sdk-lane`, `codex-sdk-lane`,
+  `copilot-sdk-lane`, `opencode-sdk-lane`) ended their script with an
+  unconditional driver-rc exit — a SUCCESSFUL turn exited the job before
+  the meta floor, the collection and the markers ever ran (GitLab runs
+  `before_script` + `script` in ONE shell; the live single-writer run hit
+  `harness_artifact_missing` and needed a manual patch). The finalization
+  is now driver / collection / final-status phases in one shell with a
+  single guarded exit at the end: the driver rc wins, and a green driver
+  with a failed collector fails the job too.
+- Collection now runs the PACKAGED generation-aware collector
+  (`forge.harness_entry --collect-candidate`, trusted run/attempt/base/
+  checkpoint identity, `--require-generation` on required-resume
+  dispatches) instead of inline `git add -A` on the original checkout —
+  a resumed agent's generation ships as the candidate, the checkout is
+  never collected accidentally. Credentials stay read-only (no push
+  anywhere); a stale prior-attempt `candidate.diff` is removed and never
+  re-uploaded on collection failure. `FORGE_LANE_OUTCOME:{driver_exit,
+  collector_exit, candidate_state}` rides the trace as separate fields.
+- The batch recipes (`claude-code`, `grok`, `copilot`, `opencode`,
+  `dotnet-lane`) are documented as restore-incapable (no
+  `forge.lane_driver`, no workspace generation; #288).
+- Regression: `tests/test_gitlab_sdk_lane_finalization.py` executes the
+  EXTRACTED shipped shell (real Bash, real Git, a stub driver leg on the
+  `FORGE_LANE_PYTHON` seam, the real packaged collector) over the full
+  driver-rc × collector-outcome matrix, restored generations and stale
+  prior-attempt artifacts.
+
 ## [0.37.0] - 2026-09-24
 
 ### Added — the 4af6b33 review COMPLETE: all 20 R37 items (#282-#301)

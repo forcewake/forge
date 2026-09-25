@@ -1,0 +1,1594 @@
+{
+  "created_at": "2026-09-25T00:18:35.839645+00:00",
+  "failures": [
+    {
+      "at": "2026-09-25T00:18:45.669441+00:00",
+      "reason": "control plane not aligned onto the repo version 0.37.0: {'status': 'degraded', 'version': '0.37.0', 'database': 'ok', 'litellm': 'unreachable', 'redis': 'ok', 'queue_depth': 0, 'dlq_depth': 3}"
+    },
+    {
+      "at": "2026-09-25T00:24:26.950908+00:00",
+      "reason": "revision staging failed: Traceback (most recent call last):\n  File \"<string>\", line 7, in <module>\n    from forge.adaptive.models import PlanRevision, PlanStep, RevisionDecision\nImportError: cannot import name 'RevisionDecision' from 'forge.adaptive.models' (/app/src/forge/adaptive/models.py)\n"
+    },
+    {
+      "at": "2026-09-25T00:27:58.881567+00:00",
+      "reason": "the post-revision dispatch envelope names checkpoint 6b7653313a54\u2026 not the preserved 6b7653313a54\u2026"
+    }
+  ],
+  "issue": "R38-12 (#313) combined steering qualification",
+  "phases": {
+    "collect": {
+      "finished_at": "2026-09-25T00:53:08.070207+00:00",
+      "result": "green",
+      "started_at": "2026-09-25T00:51:37.240758+00:00"
+    },
+    "counterfactual~c2": {
+      "dispatches": [
+        {
+          "branch": "factory/3/f834068d",
+          "candidate_lines": [
+            "2026-09-25T00:49:32.414597Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}"
+          ],
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "completed",
+            "model": "glm-5.3-flash",
+            "steering_journal": [],
+            "terminal_reason": "completed",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 190976,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 13843,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 190976,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.18032720000000002,
+                  "inputTokens": 13843,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 4338,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 4338,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.18032720000000002
+            },
+            "workspace_generation": null
+          },
+          "collector_lines": [
+            "2026-09-25T00:49:32.414600Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T00:47:43.858363Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "failure_reason": null,
+          "job_status": "success",
+          "lane_job_id": 798,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 452,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/pipelines/452",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T00:47:43.857401Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T00:47:43.858363Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "trace_sha256": "114a2c2d3e5873b252a51c321a47338a47bfb21c6184bf92efbed29a0b58d1ad",
+          "trace_tail": "completed\n2026-09-25T00:49:31.654347Z 01O forge lane: driver_exit=0 (completed)\n2026-09-25T00:49:32.411960Z 01O {\n2026-09-25T00:49:32.411964Z 01O   \"base_oid\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\",\n2026-09-25T00:49:32.411965Z 01O   \"checkpoint_binding\": \"fresh\",\n2026-09-25T00:49:32.411966Z 01O   \"checkpoint_id\": \"\",\n2026-09-25T00:49:32.411966Z 01O   \"diff_digest\": \"7834cc07c265d259392a21555a9c0dd08a5608bcf5fcc6b90b874a2df24c16f8\",\n2026-09-25T00:49:32.411967Z 01O   \"diff_path\": \"/builds/forcewake/forge-steer-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T00:49:32.411967Z 01O   \"generation_path\": \"/builds/forcewake/forge-steer-2026-09-25\",\n2026-09-25T00:49:32.411967Z 01O   \"resolved_work_id\": \"f834068da94048aaa5ca4b7a0bc81d8a\",\n2026-09-25T00:49:32.411968Z 01O   \"source\": \"checkout\",\n2026-09-25T00:49:32.411968Z 01O   \"zero_change\": false\n2026-09-25T00:49:32.411968Z 01O }\n2026-09-25T00:49:32.414597Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}\n2026-09-25T00:49:32.414600Z 01O FORGE_RESULT:{\"head\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T00:49:32.414600Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}\n2026-09-25T00:49:32.577396Z 00O section_end:1790297372:step_script\r\u001b[0K\n2026-09-25T00:49:32.578128Z 00O+section_start:1790297372:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:49:32.578135Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for successful job\u001b[0;m\u001b[0;m\n2026-09-25T00:49:33.124248Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T00:49:33.164809Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:49:33.164814Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:49:33.327759Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3B0KYGA9W0H0RQXJ325A9ZR id\u001b[0;m=798 status\u001b[0;m=201 token\u001b[0;m=67_Ak6ZsU\n2026-09-25T00:49:33.551086Z 00O section_end:1790297373:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:49:33.551292Z 00O+section_start:1790297373:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:49:33.551296Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T00:49:34.341556Z 00O section_end:1790297374:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:49:34.926459Z 00O \u001b[32;1mJob succeeded\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 190976,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 13843,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 190976,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.18032720000000002,
+                "inputTokens": 13843,
+                "maxOutputTokens": 32000,
+                "outputTokens": 4338,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 4338,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.18032720000000002
+          }
+        }
+      ],
+      "finished_at": "2026-09-25T00:50:00.729599+00:00",
+      "issue": {
+        "iid": 3,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/work_items/3"
+      },
+      "mr": {
+        "candidate_sha": "acaaddeceadee3f9258ccd762214eef3ae0d5edf",
+        "changed_paths": [
+          "src/validators/email.py"
+        ],
+        "diff_digest": "a701973fd186fdbc106be1b91b283a226f4f9d9f186bb5f6708ffe4fc0257f6f",
+        "draft": true,
+        "merged": false,
+        "mr_iid": 3,
+        "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/3",
+        "oracle_pipeline_id": 459,
+        "oracle_tampering": [],
+        "title": "Draft: Add email validation with the check() entrypoint"
+      },
+      "plan": {
+        "body_tail": "urns False rather than raising.\n- Implement validate_many(emails: list[str]) -> list[bool] as [check(e) for e in emails] so it yields one verdict per input in the same order and is trivially consistent with check().\n- Optionally define __all__ = ['check', 'validate_many'] for a clean public surface without touching other files.\n- Do not create or modify anything under tests/ or .gitlab-ci.yml; the precommitted smoke job is the acceptance oracle.\n\n**Risks:**\n- The frozen smoke job's exact cases are unknown; edge cases like 'a@b.', '.a@b.com', 'a@.b', consecutive dots, or '@b.com' may be judged valid or invalid by rules not fully spelled out \u2014 implement literally per the stated rules (exactly one '@', non-empty local part, domain with >=1 dot, no spaces) to minimize divergence.\n- check() raising on unexpected input types could fail the oracle; an isinstance-guard returning False mitigates this.\n- validate_many must return exactly one result per input even for an empty list or non-string elements; ensure it never short-circuits or reorders.\n\n**Files (hints):** `src/validators/email.py`\n## Implementation\n- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash\n- Fallbacks: claude-code\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `d4b11824e12ec0116c7c3b60a9a4067a0278d2f2e068c236c2a8af8619c103d9`\n\nApprove this exact plan by commenting `@forge /go f834068da94048aaa5ca4b7a0bc81d8a`.\n\nApprovers: @forcewake.\n\n*This is an automated message.*",
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 592,
+        "run_id": "f834068da94048aaa5ca4b7a0bc81d8a"
+      },
+      "result": "green",
+      "started_at": "2026-09-25T00:46:48.658069+00:00",
+      "steer_rows_present": 0,
+      "unsteered_candidate": {
+        "validator_content": "\"\"\"Syntactic e-mail address validation (issue #3).\n\nThe single-address entrypoint :func:`check` answers one question per\nstring: does it satisfy the project's stated syntactic rules?  The rules\nare deliberately LITERAL \u2014 this is a syntactic gate, not an RFC 5322\nparser:\n\n* exactly one ``@`` separating the local part from the domain;\n* a non-empty local part before the ``@``;\n* a non-empty domain after the ``@`` containing at least one ``.``;\n* no whitespace characters anywhere in the address.\n\nEverything else \u2014 including non-string input \u2014 is simply not a valid\naddress and yields ``False``; :func:`check` never raises on malformed\ninput.  :func:`validate_many` applies :func:`check` element-wise,\npreserving order and length.\n\"\"\"\n\nfrom __future__ import annotations\n\n__all__ = [\"check\", \"validate_many\"]\n\n\ndef check(email: str) -> bool:\n    \"\"\"Return True only when *email* satisfies the stated syntactic rules.\n\n    Non-string input (or any other malformed value) returns False rather\n    than raising.\n    \"\"\"\n    # Guard: anything that is not a string (None, bytes, an int, ...) is\n    # not a valid address \u2014 reject it instead of letting the str\n    # operations below raise.\n    if not isinstance(email, str):\n        return False\n\n    # Rule: no whitespace anywhere in the address.\n    if any(character.isspace() for character in email):\n        return False\n\n    # Rule: exactly one '@'.\n    if email.count(\"@\") != 1:\n        return False\n\n    local, _, domain = email.partition(\"@\")\n\n    # Rule: non-empty local part; non-empty domain holding >= 1 '.'.\n    return bool(local) and \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Apply :func:`check` to each element, preserving order and length.\"\"\"\n    return [check(email) for email in emails]\n",
+        "validator_content_sha256": "932d6d09e0b8780b52a31f3d623256dd7ce2da39668f30b1e947a95c9a633189",
+        "validator_path": "src/validators/email.py",
+        "x_entrypoint_present": true,
+        "y_entrypoint_present": false
+      },
+      "updated_at": "2026-09-25T00:50:00.601733+00:00"
+    },
+    "preflight": {
+      "checks": {
+        "caps.forge-app": {
+          "adaptive_commands": true,
+          "budget_profiles": true,
+          "lane_budget": true
+        },
+        "caps.forge-worker": {
+          "adaptive_commands": true,
+          "budget_profiles": true,
+          "lane_budget": true
+        },
+        "controlplane.health": {
+          "status": "ok",
+          "version": "0.37.0"
+        },
+        "doctor": {
+          "failed": [],
+          "returncode": 0,
+          "status": "ok"
+        },
+        "inventory_lab": {
+          "returncode": 0,
+          "stdout_tail": "inventory_lab: wrote /Users/Pavel_Nasovich/Projects/personal/codeward/forge/qualification/inventory-2026-09-25.json\ninventory_lab: compatibility verdict: misaligned\n  -      match  control-plane.version == pinned release: 0.37.0\n  -   mismatch  control-plane.image_digest == promoted image digest: sha256:20e9cdcd5691e7f54df29e7bc4808b12b63776dda41d1a3344b744c5eecbbce1\n  -      match  schema at repo chain head: 027\n  -   mismatch  lane template pinned to the promoted release: v0.36.0\n  - unverified  installed lane wheel observable: lane venv /tmp/forge-lane-venv absent on this host \u2014 the lane installs per CI job on the runner; observe it there or via the next install-check\n  -      match  numerical budget caps configured: present and numerical\n"
+        },
+        "runners_online": [
+          4
+        ],
+        "schema_head": "027"
+      },
+      "doctor_attempts": [
+        {
+          "attempt": 1,
+          "failed": [],
+          "returncode": 0,
+          "status": "ok"
+        }
+      ],
+      "finished_at": "2026-09-25T00:19:07.956703+00:00",
+      "result": "green",
+      "started_at": "2026-09-25T00:18:40.622905+00:00"
+    },
+    "resume": {
+      "dispatches": [
+        {
+          "branch": "factory/1/e18fb442",
+          "candidate_lines": [
+            "2026-09-25T00:27:21.297653Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}"
+          ],
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "completed",
+            "model": "glm-5.3-flash",
+            "steering_journal": [],
+            "terminal_reason": "completed",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 163392,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 41754,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 163392,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.2920344,
+                  "inputTokens": 41754,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 4617,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 4617,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.2920344
+            },
+            "workspace_generation": "/builds/forcewake/.forge-workspace-gen-6b7653313a54"
+          },
+          "collector_lines": [
+            "2026-09-25T00:27:21.297657Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T00:25:20.485022Z 01O forge dispatch envelope: resume=required checkpoint=6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b attempt=1"
+          ],
+          "failure_reason": null,
+          "job_status": "success",
+          "lane_job_id": 779,
+          "lane_job_status_at_capture": "success",
+          "pipeline_id": 433,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/pipelines/433",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T00:25:20.484174Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T00:25:20.485022Z 01O forge dispatch envelope: resume=required checkpoint=6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b attempt=1"
+          ],
+          "trace_sha256": "6c8a40ffebd2da69898832d8ff868596d8be84889d29d5a99fa167974c3134e5",
+          "trace_tail": "d)\n2026-09-25T00:27:21.295299Z 01O {\n2026-09-25T00:27:21.295304Z 01O   \"base_oid\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\",\n2026-09-25T00:27:21.295305Z 01O   \"checkpoint_binding\": \"exact\",\n2026-09-25T00:27:21.295306Z 01O   \"checkpoint_id\": \"6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b\",\n2026-09-25T00:27:21.295307Z 01O   \"diff_digest\": \"ca2ecaba34de640bd535658fc36cfa11af80fb44236cd9f96324fe569b64ed96\",\n2026-09-25T00:27:21.295307Z 01O   \"diff_path\": \"/builds/forcewake/forge-steer-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T00:27:21.295308Z 01O   \"generation_path\": \"/builds/forcewake/.forge-workspace-gen-6b7653313a54\",\n2026-09-25T00:27:21.295309Z 01O   \"resolved_work_id\": \"e18fb44246b14d5c8ef918f78f6bc01a\",\n2026-09-25T00:27:21.295309Z 01O   \"source\": \"generation\",\n2026-09-25T00:27:21.295310Z 01O   \"zero_change\": false\n2026-09-25T00:27:21.295310Z 01O }\n2026-09-25T00:27:21.297653Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}\n2026-09-25T00:27:21.297656Z 01O FORGE_RESULT:{\"head\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T00:27:21.297657Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}\n2026-09-25T00:27:21.470640Z 00O section_end:1790296041:step_script\r\u001b[0K\n2026-09-25T00:27:21.471068Z 00O+section_start:1790296041:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:27:21.471072Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for successful job\u001b[0;m\u001b[0;m\n2026-09-25T00:27:21.809469Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T00:27:21.846954Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:27:21.846959Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:27:22.143052Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3AZBAFD08NX9RFK49QWCEQC id\u001b[0;m=779 status\u001b[0;m=201 token\u001b[0;m=67_k65PR-\n2026-09-25T00:27:22.307756Z 00O section_end:1790296042:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:27:22.307957Z 00O+section_start:1790296042:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:27:22.307961Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T00:27:22.740437Z 00O section_end:1790296042:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:27:23.353037Z 00O \u001b[32;1mJob succeeded\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 163392,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 41754,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 163392,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.2920344,
+                "inputTokens": 41754,
+                "maxOutputTokens": 32000,
+                "outputTokens": 4617,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 4617,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.2920344
+          }
+        }
+      ],
+      "final_candidate": {
+        "bulk_entrypoint_present": true,
+        "validator_content": "\"\"\"Single-address and bulk email validation (issue #1).\n\nThe contract is deliberately literal: exactly one ``@``, a non-empty\nlocal part, a domain containing at least one ``.``, and no whitespace\nanywhere.\n\"\"\"\n\n\ndef check(email: str) -> bool:\n    \"\"\"Return ``True`` when *email* is a structurally valid address.\n\n    Rules:\n      - non-string input is invalid;\n      - no whitespace anywhere in the address;\n      - exactly one ``@``;\n      - the local part (before ``@``) is non-empty;\n      - the domain (after ``@``) is non-empty and contains at least\n        one ``.``.\n    \"\"\"\n    if not isinstance(email, str):\n        return False\n    if any(char.isspace() for char in email):\n        return False\n    if email.count(\"@\") != 1:\n        return False\n    local, domain = email.split(\"@\")\n    if not local or not domain:\n        return False\n    return \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Return one verdict per input, in order, via :func:`check`.\"\"\"\n    return [check(email) for email in emails]\n",
+        "validator_content_sha256": "a5cd9e5b84418d72ebaf70949d93ea05b5020a30a905a24b20e9e09b4cc9079c",
+        "validator_path": "src/validators/email.py",
+        "x_entrypoint_present": true,
+        "y_entrypoint_present": false
+      },
+      "finished_at": "2026-09-25T00:30:59.673628+00:00",
+      "mr": {
+        "candidate_sha": "7e0be9ec45375af30317f67569b177286f1b99cc",
+        "changed_paths": [
+          "src/validators/email.py"
+        ],
+        "diff_digest": "233b7dd9ed1ad831d3ce14f07e7bb09e2833e5072d1847aef6dff1d589042c75",
+        "draft": true,
+        "merged": false,
+        "mr_iid": 1,
+        "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/1",
+        "oracle_pipeline_id": 435,
+        "oracle_tampering": [],
+        "title": "Draft: Add email validation with the check() entrypoint"
+      },
+      "restore_evidence": {
+        "envelope_lines": [
+          "2026-09-25T00:25:20.485022Z 01O forge dispatch envelope: resume=required checkpoint=6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b attempt=1"
+        ],
+        "preserved_checkpoint_expected": "6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b",
+        "restore_lines": [],
+        "restored_checkpoint_match": true,
+        "workspace_generation": "/builds/forcewake/.forge-workspace-gen-6b7653313a54"
+      },
+      "result": "green",
+      "resume_dispatch_envelope": {
+        "checkpoint": "6b7653313a54",
+        "decision_id": "3b30d6f20901",
+        "envelope_digest": "20d6944ac002",
+        "lines": [
+          {
+            "attempt": "0",
+            "checkpoint": "none",
+            "decision": "none",
+            "envelope": "6e664f0964b0",
+            "kind": "fresh",
+            "run": "e18fb442"
+          },
+          {
+            "attempt": "1",
+            "checkpoint": "6b7653313a54",
+            "decision": "3b30d6f20901",
+            "envelope": "20d6944ac002",
+            "kind": "required",
+            "run": "e18fb442"
+          }
+        ],
+        "resume_mode": "required",
+        "source": "worker-journal"
+      },
+      "retry_note": {
+        "body": "@forge /retry",
+        "note_id": 541,
+        "posted_at": "2026-09-25T00:24:53.671857+00:00"
+      },
+      "started_at": "2026-09-25T00:24:53.671836+00:00",
+      "updated_at": "2026-09-25T00:30:59.673308+00:00"
+    },
+    "resume~c2": {
+      "dispatches": [
+        {
+          "branch": "factory/2/c3236a3e",
+          "candidate_lines": [
+            "2026-09-25T00:44:06.891026Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}"
+          ],
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "completed",
+            "model": "glm-5.3-flash",
+            "steering_journal": [
+              {
+                "at": "2026-09-25T00:42:30.087482+00:00",
+                "command_id": "cmd-b2ff9c86b04f",
+                "delivery": "application_observed",
+                "detail": {
+                  "delivered": "mid-turn",
+                  "mailbox_status": "checkpointed"
+                },
+                "kind": "steer",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 4
+              }
+            ],
+            "terminal_reason": "completed",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 183232,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 23353,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 183232,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.1961384,
+                  "inputTokens": 23353,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 3304,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 3304,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.1961384
+            },
+            "workspace_generation": "/builds/forcewake/.forge-workspace-gen-8c8fafe4e8e6"
+          },
+          "collector_lines": [
+            "2026-09-25T00:44:06.891040Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T00:42:22.871132Z 01O forge dispatch envelope: resume=required checkpoint=8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61 attempt=1"
+          ],
+          "failure_reason": null,
+          "job_status": "success",
+          "lane_job_id": 784,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 438,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/pipelines/438",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T00:42:22.869780Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T00:42:22.871132Z 01O forge dispatch envelope: resume=required checkpoint=8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61 attempt=1"
+          ],
+          "trace_sha256": "f64f21c9e0962c5d4add6af46bbe5fd233269438ce018d3daaebb74837adda69",
+          "trace_tail": "d)\n2026-09-25T00:44:06.888552Z 01O {\n2026-09-25T00:44:06.888558Z 01O   \"base_oid\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\",\n2026-09-25T00:44:06.888559Z 01O   \"checkpoint_binding\": \"exact\",\n2026-09-25T00:44:06.888560Z 01O   \"checkpoint_id\": \"8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61\",\n2026-09-25T00:44:06.888561Z 01O   \"diff_digest\": \"76f3a7a0219b63e6b06a9c8fe431d68092f7d1107eb50082f998086a062bebd0\",\n2026-09-25T00:44:06.888561Z 01O   \"diff_path\": \"/builds/forcewake/forge-steer-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T00:44:06.888562Z 01O   \"generation_path\": \"/builds/forcewake/.forge-workspace-gen-8c8fafe4e8e6\",\n2026-09-25T00:44:06.888563Z 01O   \"resolved_work_id\": \"c3236a3e9314452e934a60e6c6db668c\",\n2026-09-25T00:44:06.888563Z 01O   \"source\": \"generation\",\n2026-09-25T00:44:06.888564Z 01O   \"zero_change\": false\n2026-09-25T00:44:06.888564Z 01O }\n2026-09-25T00:44:06.891026Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}\n2026-09-25T00:44:06.891031Z 01O FORGE_RESULT:{\"head\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T00:44:06.891040Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}\n2026-09-25T00:44:07.056413Z 00O section_end:1790297047:step_script\r\u001b[0K\n2026-09-25T00:44:07.057176Z 00O+section_start:1790297047:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:44:07.057183Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for successful job\u001b[0;m\u001b[0;m\n2026-09-25T00:44:07.441446Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T00:44:07.488871Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:44:07.488879Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:44:07.767046Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3B0A0FCKRC82ZC0VKATYWFR id\u001b[0;m=784 status\u001b[0;m=201 token\u001b[0;m=67_FzSPxK\n2026-09-25T00:44:07.964159Z 00O section_end:1790297047:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T00:44:07.964449Z 00O+section_start:1790297047:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:44:07.964454Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T00:44:08.463105Z 00O section_end:1790297048:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:44:09.190055Z 00O \u001b[32;1mJob succeeded\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 183232,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 23353,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 183232,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.1961384,
+                "inputTokens": 23353,
+                "maxOutputTokens": 32000,
+                "outputTokens": 3304,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 3304,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.1961384
+          }
+        }
+      ],
+      "final_candidate": {
+        "bulk_entrypoint_present": true,
+        "validator_content": "\"\"\"Email validation \u2014 a syntactic single-address verdict plus a bulk wrapper.\n\nThe contract (also asserted by the precommitted ``smoke`` CI job):\n``validate_email(email)`` is True only when the address\n\n* contains exactly one ``@``,\n* has a non-empty local part before the ``@``,\n* has a domain after the ``@`` holding at least one ``.``,\n* carries no whitespace character anywhere.\n\nEvery other input \u2014 including degenerate ones (empty string, no ``@``,\nseveral ``@``, a dotless domain, whitespace anywhere) \u2014 is False, never\nan exception. ``validate_many`` maps that same verdict over a sequence\nof addresses, one result per input, in order.\n\"\"\"\n\n\ndef validate_email(email: str) -> bool:\n    \"\"\"Return True iff *email* satisfies the stated syntactic rules.\"\"\"\n    if not isinstance(email, str):\n        return False\n    if email.count(\"@\") != 1:\n        # Covers the empty string, a missing '@' and multiple '@' alike.\n        return False\n    if any(char.isspace() for char in email):\n        # \"Whitespace\" in the broad sense: spaces, tabs, newlines, ...\n        return False\n    local, _, domain = email.partition(\"@\")\n    return bool(local) and \".\" in domain\n\n\ndef validate_many(emails: list[str]) -> list[bool]:\n    \"\"\"Return one verdict per address in *emails*, in the same order.\"\"\"\n    return [validate_email(email) for email in emails]\n",
+        "validator_content_sha256": "6f98782fa5a188a5c3862be539a2c3437e2bed41b09aef1c1287bfe3b356224e",
+        "validator_path": "src/validators/email.py",
+        "x_entrypoint_present": false,
+        "y_entrypoint_present": true
+      },
+      "finished_at": "2026-09-25T00:44:37.739916+00:00",
+      "mr": {
+        "candidate_sha": "2d21d6159719a032f613d104db411a1bc87dab10",
+        "changed_paths": [
+          "src/validators/email.py"
+        ],
+        "diff_digest": "744869c5eba5d3b5557e62eeabc2e2bfcb2831bb295406b70e1ab9ed66189108",
+        "draft": true,
+        "merged": false,
+        "mr_iid": 2,
+        "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/merge_requests/2",
+        "oracle_pipeline_id": 440,
+        "oracle_tampering": [],
+        "title": "Draft: Add email validation with the check() entrypoint"
+      },
+      "restore_evidence": {
+        "envelope_lines": [
+          "2026-09-25T00:42:22.871132Z 01O forge dispatch envelope: resume=required checkpoint=8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61 attempt=1"
+        ],
+        "preserved_checkpoint_expected": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+        "restore_lines": [],
+        "restored_checkpoint_match": true,
+        "workspace_generation": "/builds/forcewake/.forge-workspace-gen-8c8fafe4e8e6"
+      },
+      "result": "green",
+      "resume_dispatch_envelope": {
+        "checkpoint": "8c8fafe4e8e6",
+        "decision_id": "4f986bd31d06",
+        "envelope_digest": "61fe471ea856",
+        "lines": [
+          {
+            "attempt": "0",
+            "checkpoint": "none",
+            "decision": "none",
+            "envelope": "9d9075d874cb",
+            "kind": "fresh",
+            "run": "c3236a3e"
+          },
+          {
+            "attempt": "1",
+            "checkpoint": "8c8fafe4e8e6",
+            "decision": "4f986bd31d06",
+            "envelope": "61fe471ea856",
+            "kind": "required",
+            "run": "c3236a3e"
+          }
+        ],
+        "resume_mode": "required",
+        "source": "worker-journal"
+      },
+      "retry_note": {
+        "body": "@forge /retry",
+        "note_id": 559,
+        "posted_at": "2026-09-25T00:41:55.150357+00:00"
+      },
+      "standing_direction_fate": {
+        "command_id": "cmd-b2ff9c86b04f",
+        "final_rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "final_status": "checkpointed",
+        "lane_journal_entry": {
+          "at": "2026-09-25T00:42:30.087482+00:00",
+          "command_id": "cmd-b2ff9c86b04f",
+          "delivery": "application_observed",
+          "detail": {
+            "delivered": "mid-turn",
+            "mailbox_status": "checkpointed"
+          },
+          "kind": "steer",
+          "outcome": "applied",
+          "reason": "",
+          "sequence": 4
+        },
+        "moments": {
+          "application_observed_at": "2026-09-25T00:42:30.075015+00:00",
+          "applied_at": "2026-09-25T00:42:26.981682+00:00",
+          "authorized_at": "2026-09-25T00:42:26.902341+00:00",
+          "received_at": "2026-09-25T00:41:52.100243+00:00"
+        }
+      },
+      "standing_direction_note": {
+        "body": "@forge /steer c3236a3e9314452e934a60e6c6db668c Operator steer, standing direction for this continuation: the public entrypoint of src/validators/email.py is validate_email \u2014 entrypoint validate_email (not check) in src/validators/email.py. The restored WIP already carries that naming; keep it, finish the remaining work under it, and leave no `check` definition behind.",
+        "note_id": 557,
+        "posted_at": "2026-09-25T00:41:51.695585+00:00"
+      },
+      "standing_direction_row": {
+        "command_id": "cmd-b2ff9c86b04f",
+        "status_at_post": "received"
+      },
+      "started_at": "2026-09-25T00:41:51.695562+00:00",
+      "updated_at": "2026-09-25T00:44:37.738412+00:00"
+    },
+    "revision": {
+      "after": {
+        "activated_by_decision": "dec-combined-e18fb44246b1",
+        "active_plan_digest": "677fddf14145b7a8b15fcf97cfbb59ed57c321076b44c2c5e046aa314b33e5ba",
+        "active_plan_revision": 2,
+        "preserved_checkpoint_id": "6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b",
+        "reuse_route": "preserve",
+        "reuse_route_reason": "compatible revision: 6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b \u2014 the checkpoint stands under the new plan",
+        "run_plan_digest": "677fddf14145b7a8b15fcf97cfbb59ed57c321076b44c2c5e046aa314b33e5ba",
+        "status": "blocked"
+      },
+      "approve_note": {
+        "body": "@forge /approve-revision e18fb44246b14d5c8ef918f78f6bc01a dec-combined-e18fb44246b1",
+        "note_id": 539,
+        "posted_at": "2026-09-25T00:24:42.968883+00:00"
+      },
+      "before": {
+        "run_plan_digest": "e99617af8c805709d11ba0f24183ffa43c4ba30715367a321e5f3972f2a09dd2",
+        "spec_digest": "8ea084e8332b01bbc9575aaa9e7a532aa5d7324c8a2ab6114bf800fa6924a33f"
+      },
+      "finished_at": "2026-09-25T00:24:48.373376+00:00",
+      "result": "green",
+      "staged": {
+        "active_digest_seeded": "e99617af8c805709d11ba0f24183ffa43c4ba30715367a321e5f3972f2a09dd2",
+        "contract_digest": "8ea084e8332b01bbc9575aaa9e7a532aa5d7324c8a2ab6114bf800fa6924a33f",
+        "decision_id": "dec-combined-e18fb44246b1",
+        "revision1_digest": "e677c3552951ba95f6a23fa555217e77bac7bd66aef45445f8f963dc50793e66",
+        "revision2_digest": "677fddf14145b7a8b15fcf97cfbb59ed57c321076b44c2c5e046aa314b33e5ba",
+        "spec_digest": "8ea084e8332b01bbc9575aaa9e7a532aa5d7324c8a2ab6114bf800fa6924a33f",
+        "staged_at": "2026-09-25T00:24:42.945720+00:00",
+        "staged_digest": "677fddf14145b7a8b15fcf97cfbb59ed57c321076b44c2c5e046aa314b33e5ba",
+        "work_id": "e18fb44246b14d5c8ef918f78f6bc01a"
+      },
+      "started_at": "2026-09-25T00:24:26.050160+00:00",
+      "updated_at": "2026-09-25T00:24:43.179109+00:00"
+    },
+    "revision~c2": {
+      "after": {
+        "activated_by_decision": "dec-combined-c3236a3e9314",
+        "active_plan_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+        "active_plan_revision": 2,
+        "preserved_checkpoint_id": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+        "reuse_route": "preserve",
+        "reuse_route_reason": "compatible revision: 8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61 \u2014 the checkpoint stands under the new plan",
+        "run_plan_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+        "status": "blocked"
+      },
+      "approve_note": {
+        "body": "@forge /approve-revision c3236a3e9314452e934a60e6c6db668c dec-combined-c3236a3e9314",
+        "note_id": 555,
+        "posted_at": "2026-09-25T00:41:42.313532+00:00"
+      },
+      "before": {
+        "run_plan_digest": "6520b670c01e83f75b29562ebd593589b643d40faf5d556989275575eadb10a4",
+        "spec_digest": "9e246db72666c0bde220b3cce8751ed67fddaa77c79083cef6bf7bafc3ff9864"
+      },
+      "finished_at": "2026-09-25T00:41:47.837838+00:00",
+      "result": "green",
+      "staged": {
+        "active_digest_seeded": "6520b670c01e83f75b29562ebd593589b643d40faf5d556989275575eadb10a4",
+        "contract_digest": "9e246db72666c0bde220b3cce8751ed67fddaa77c79083cef6bf7bafc3ff9864",
+        "decision_id": "dec-combined-c3236a3e9314",
+        "revision1_digest": "4dbe110470aa1b9ca8251931d6d34130bb036c902df89cc6035098d0c176756d",
+        "revision2_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+        "spec_digest": "9e246db72666c0bde220b3cce8751ed67fddaa77c79083cef6bf7bafc3ff9864",
+        "staged_at": "2026-09-25T00:41:42.302675+00:00",
+        "staged_digest": "19a92667bb5fed1b518bb2bf4ae85526c55d28ae8f23337b25fcfe5389fdfb17",
+        "work_id": "c3236a3e9314452e934a60e6c6db668c"
+      },
+      "started_at": "2026-09-25T00:41:41.640373+00:00",
+      "updated_at": "2026-09-25T00:41:42.561918+00:00"
+    },
+    "setup": {
+      "bot_member": {
+        "user_id": 15,
+        "username": "forge"
+      },
+      "ci_yaml_sha256": "f87613f532c503f0b902b03e1bd6e24722300a6bddae400e4e80bedb79747356",
+      "labels_created": true,
+      "project": {
+        "id": 96,
+        "path": "forcewake/forge-steer-2026-09-25"
+      },
+      "seed_commit_sha": "af2ee5f34e0b3ded01677ce1810d1e96f31107e7",
+      "started_at": "2026-09-25T00:18:35.863551+00:00",
+      "task": {
+        "approach_x_entrypoint": "check",
+        "bulk_entrypoint": "validate_many",
+        "steer_text": "Operator steer, mid-work direction change: rename the validator's public entrypoint \u2014 entrypoint validate_email (not check) in src/validators/email.py. Define `validate_email(email: str) -> bool` as the public API and remove the `check` definition; keep the validation semantics, the bulk entrypoint and every other requirement of the plan unchanged.",
+        "steer_y_entrypoint": "validate_email",
+        "validator_path": "src/validators/email.py"
+      },
+      "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+      "updated_at": "2026-09-25T00:18:37.472458+00:00",
+      "variables": [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "FORGE_BOT_READ_TOKEN",
+        "FORGE_HARNESS_HTTPS_PROXY",
+        "FORGE_LANE_REF=59ba869a312e\u2026",
+        "FORGE_STEERING_ENABLED=1\u2026",
+        "FORGE_CLAUDE_DRAIN_TIMEOUT=3\u2026"
+      ],
+      "webhook_url": "https://forge.forcewake.me/webhook"
+    },
+    "steer": {
+      "blocked_classification": {
+        "cancel_requested": false,
+        "commit_cycle": 1,
+        "created_at": "2026-09-25T00:19:16.684871+00:00",
+        "id": "e18fb44246b14d5c8ef918f78f6bc01a",
+        "issue_iid": 1,
+        "mr_iid": null,
+        "project_id": 96,
+        "status": "blocked",
+        "status_reason": "harness_code: harness job forge-agent-claude-sdk failed (script_failure)",
+        "updated_at": "2026-09-25T00:21:59.578995+00:00"
+      },
+      "dispatches": [
+        {
+          "branch": "factory/1/e18fb442",
+          "candidate_lines": [
+            "2026-09-25T00:21:44.023554Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"failed\"}"
+          ],
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "failed",
+            "model": "glm-5.3-flash",
+            "steering_journal": [
+              {
+                "at": "2026-09-25T00:20:48.088452+00:00",
+                "command_id": "cmd-cb297d8c56ea",
+                "delivery": "application_observed",
+                "detail": {
+                  "delivered": "mid-turn",
+                  "mailbox_status": "checkpointed"
+                },
+                "kind": "steer",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 1
+              },
+              {
+                "at": "2026-09-25T00:21:36.924889+00:00",
+                "command_id": "cmd-58e39b84fff2",
+                "delivery": "application_observed",
+                "detail": {
+                  "delivered": "mid-turn",
+                  "mailbox_status": "checkpointed"
+                },
+                "kind": "steer",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 2
+              },
+              {
+                "at": "2026-09-25T00:21:37.484751+00:00",
+                "command_id": "cmd-5f630dd1f3e9",
+                "delivery": "application_observed",
+                "detail": {
+                  "checkpoint_receipt": {
+                    "checkpoint_id": null,
+                    "remote_ref": "e18fb44246b14d5c8ef918f78f6bc01a@6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b",
+                    "verified": true
+                  },
+                  "interrupt_latency_s": 0.001,
+                  "interrupt_outcome": "acknowledged",
+                  "mailbox_status": "checkpointed",
+                  "pause": "interrupt-sent",
+                  "pause_status": "paused",
+                  "retained_guidance": [],
+                  "wip_artifact_id": "6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b"
+                },
+                "kind": "pause",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 3
+              }
+            ],
+            "terminal_reason": "error_during_execution",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 128384,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 36177,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 128384,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.24674479999999996,
+                  "inputTokens": 36177,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 3818,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 3818,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.24674479999999996
+            },
+            "workspace_generation": null
+          },
+          "collector_lines": [
+            "2026-09-25T00:21:44.023575Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T00:19:57.002305Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "failure_reason": "script_failure",
+          "job_status": "failed",
+          "lane_job_id": 775,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 429,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/pipelines/429",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T00:19:57.001634Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T00:19:57.002305Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "trace_sha256": "b1df7fd40f58d749ee02464ecd1d124344c4b7178b988a88b0a27d44375b2224",
+          "trace_tail": "n\n2026-09-25T00:21:43.042843Z 01O forge lane: driver_exit=1 (failed)\n2026-09-25T00:21:44.021003Z 01O {\n2026-09-25T00:21:44.021007Z 01O   \"base_oid\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\",\n2026-09-25T00:21:44.021008Z 01O   \"checkpoint_binding\": \"fresh\",\n2026-09-25T00:21:44.021008Z 01O   \"checkpoint_id\": \"\",\n2026-09-25T00:21:44.021009Z 01O   \"diff_digest\": \"08e585d26c9615ac725c466bb109a1683b78330f904384f8a75ca98b01aa60b1\",\n2026-09-25T00:21:44.021010Z 01O   \"diff_path\": \"/builds/forcewake/forge-steer-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T00:21:44.021010Z 01O   \"generation_path\": \"/builds/forcewake/forge-steer-2026-09-25\",\n2026-09-25T00:21:44.021011Z 01O   \"resolved_work_id\": \"e18fb44246b14d5c8ef918f78f6bc01a\",\n2026-09-25T00:21:44.021011Z 01O   \"source\": \"checkout\",\n2026-09-25T00:21:44.021012Z 01O   \"zero_change\": false\n2026-09-25T00:21:44.021012Z 01O }\n2026-09-25T00:21:44.023554Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"failed\"}\n2026-09-25T00:21:44.023557Z 01O FORGE_RESULT:{\"head\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T00:21:44.023575Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}\n2026-09-25T00:21:44.188325Z 00O section_end:1790295704:step_script\r\u001b[0K\n2026-09-25T00:21:44.189065Z 00O+section_start:1790295704:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T00:21:44.189071Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for failed job\u001b[0;m\u001b[0;m\n2026-09-25T00:21:44.614063Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T00:21:44.667496Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:21:44.667502Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:21:45.033706Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3AZ116K2TVQ4YE2ZCZAFYZK id\u001b[0;m=775 status\u001b[0;m=201 token\u001b[0;m=67_6q-doe\n2026-09-25T00:21:45.211542Z 00O section_end:1790295705:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T00:21:45.211754Z 00O+section_start:1790295705:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:21:45.211757Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T00:21:45.686831Z 00O section_end:1790295705:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:21:46.386425Z 00O \u001b[31;1mERROR: Job failed: exit code 1\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 128384,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 36177,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 128384,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.24674479999999996,
+                "inputTokens": 36177,
+                "maxOutputTokens": 32000,
+                "outputTokens": 3818,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 3818,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.24674479999999996
+          }
+        }
+      ],
+      "driver_anchor": {
+        "anchor": "2026-09-25T00:19:57.002421Z",
+        "job_status": "running",
+        "observed_at": "2026-09-25T00:20:42.937537+00:00"
+      },
+      "finished_at": "2026-09-25T00:22:07.620465+00:00",
+      "interleaving_notes": {
+        "pause": {
+          "body": "@forge /pause e18fb44246b14d5c8ef918f78f6bc01a",
+          "note_id": 536,
+          "posted_at": "2026-09-25T00:21:33.005675+00:00"
+        },
+        "steer2": {
+          "body": "@forge /steer e18fb44246b14d5c8ef918f78f6bc01a Operator steer: give src/validators/email.py a one-line module docstring naming its public entrypoint.",
+          "note_id": 535,
+          "posted_at": "2026-09-25T00:21:32.831873+00:00"
+        },
+        "steer2_before_pause": true
+      },
+      "interleaving_rows": {
+        "pause": {
+          "command_id": "cmd-5f630dd1f3e9",
+          "journal": [
+            {
+              "at": "2026-09-25T00:21:33.730200+00:00",
+              "to": "received"
+            },
+            {
+              "at": "2026-09-25T00:21:37.236888+00:00",
+              "from": "received",
+              "to": "authorized"
+            },
+            {
+              "at": "2026-09-25T00:21:37.238125+00:00",
+              "lane_ack": "authorized",
+              "row": {
+                "at": "2026-09-25T00:21:37.175647+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "authorized",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            },
+            {
+              "at": "2026-09-25T00:21:37.314073+00:00",
+              "epoch": 1,
+              "from": "authorized",
+              "to": "dispatching",
+              "vendor_correlation_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+            },
+            {
+              "at": "2026-09-25T00:21:37.315293+00:00",
+              "lane_ack": "dispatching",
+              "row": {
+                "at": "2026-09-25T00:21:37.248549+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "dispatching",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            },
+            {
+              "at": "2026-09-25T00:21:37.469879+00:00",
+              "from": "dispatching",
+              "to": "vendor_accepted"
+            },
+            {
+              "at": "2026-09-25T00:21:37.471939+00:00",
+              "from": "vendor_accepted",
+              "to": "applied"
+            },
+            {
+              "at": "2026-09-25T00:21:37.474199+00:00",
+              "from": "applied",
+              "to": "checkpointed"
+            },
+            {
+              "at": "2026-09-25T00:21:37.475324+00:00",
+              "lane_ack": "checkpointed",
+              "row": {
+                "at": "2026-09-25T00:21:37.410122+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "checkpointed",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            }
+          ],
+          "rungs": [
+            "received",
+            "authorized",
+            "dispatching",
+            "vendor_accepted",
+            "applied",
+            "checkpointed"
+          ],
+          "status": "checkpointed"
+        },
+        "sequence_order": {
+          "pause": 3,
+          "steer2": 2
+        },
+        "steer2": {
+          "command_id": "cmd-58e39b84fff2",
+          "journal": [
+            {
+              "at": "2026-09-25T00:21:33.327398+00:00",
+              "to": "received"
+            },
+            {
+              "at": "2026-09-25T00:21:33.767832+00:00",
+              "from": "received",
+              "to": "authorized"
+            },
+            {
+              "at": "2026-09-25T00:21:33.771962+00:00",
+              "lane_ack": "authorized",
+              "row": {
+                "at": "2026-09-25T00:21:33.703751+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "authorized",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            },
+            {
+              "at": "2026-09-25T00:21:33.835095+00:00",
+              "epoch": 1,
+              "from": "authorized",
+              "to": "dispatching",
+              "vendor_correlation_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+            },
+            {
+              "at": "2026-09-25T00:21:33.836456+00:00",
+              "lane_ack": "dispatching",
+              "row": {
+                "at": "2026-09-25T00:21:33.781637+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "dispatching",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            },
+            {
+              "at": "2026-09-25T00:21:36.907649+00:00",
+              "from": "dispatching",
+              "to": "vendor_accepted"
+            },
+            {
+              "at": "2026-09-25T00:21:36.909669+00:00",
+              "from": "vendor_accepted",
+              "to": "applied"
+            },
+            {
+              "at": "2026-09-25T00:21:36.913396+00:00",
+              "from": "applied",
+              "to": "checkpointed"
+            },
+            {
+              "at": "2026-09-25T00:21:36.914603+00:00",
+              "lane_ack": "checkpointed",
+              "row": {
+                "at": "2026-09-25T00:21:36.847554+00:00",
+                "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+                "source": "lane_channel",
+                "state": "checkpointed",
+                "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+              }
+            }
+          ],
+          "moments": {
+            "application_observed_at": "2026-09-25T00:21:36.913396+00:00",
+            "applied_at": "2026-09-25T00:21:33.835095+00:00",
+            "authorized_at": "2026-09-25T00:21:33.767832+00:00",
+            "received_at": "2026-09-25T00:21:33.327398+00:00"
+          },
+          "rungs": [
+            "received",
+            "authorized",
+            "dispatching",
+            "vendor_accepted",
+            "applied",
+            "checkpointed"
+          ],
+          "status": "checkpointed"
+        }
+      },
+      "issue": {
+        "iid": 1,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/work_items/1"
+      },
+      "job_cancel": {
+        "http_status": 201,
+        "job_id": 775,
+        "job_status_before": "failed",
+        "status_after": "failed"
+      },
+      "paid": true,
+      "pause_checkpoint": {
+        "checkpoint_id": "6b7653313a54faa2bb470810530a137cf5e9b148c99f647036d561c2fb38c41b",
+        "files": 1,
+        "sequence": 0,
+        "uploaded_at": "2026-09-25T00:21:37+00:00"
+      },
+      "plan": {
+        "body_tail": " and package __init__ remain unchanged; functions are plain module-level callables importable from src.validators.email.\n\n**Risks:**\n- The frozen smoke-job oracle may interpret edge cases (e.g., 'a@.b', 'a@b.', leading/trailing dots in the domain, uppercase/local-part quirks) more strictly or more loosely than the literal spec; the literal reading is implemented to minimize divergence.\n- The oracle may import via a package-level path (e.g., from validators.email import check) rather than the file path; since only email.py may be created, __init__ cannot be modified, so module-level functions are used and any existing package layout must already permit this import.\n- Non-string inputs (None, ints) have undefined behavior in the spec; check() defensively returns False for them, which may or may not match oracle expectations.\n- The requirement 'at least one dot' alone would accept degenerate domains like '.x' or 'x.'; a minimal non-empty-domain guard is added, which is a judgment call that could conflict with a purely literal oracle.\n\n**Files (hints):** `src/validators/email.py`, `.py`\n## Implementation\n- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash\n- Fallbacks: claude-code\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `e99617af8c805709d11ba0f24183ffa43c4ba30715367a321e5f3972f2a09dd2`\n\nApprove this exact plan by commenting `@forge /go e18fb44246b14d5c8ef918f78f6bc01a`.\n\nApprovers: @forcewake.\n\n*This is an automated message.*",
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 530,
+        "run_id": "e18fb44246b14d5c8ef918f78f6bc01a"
+      },
+      "post_steer_dwell_s": 46.2,
+      "result": "green",
+      "started_at": "2026-09-25T00:19:15.951070+00:00",
+      "steer_note": {
+        "body": "@forge /steer e18fb44246b14d5c8ef918f78f6bc01a Operator steer, mid-work direction change: rename the validator's public entrypoint \u2014 entrypoint validate_email (not check) in src/validators/email.py. Define `validate_email(email: str) -> bool` as the public API and remove the `check` definition; keep the validation semantics, the bulk entrypoint and every other requirement of the plan unchanged.",
+        "note_id": 533,
+        "posted_at": "2026-09-25T00:20:43.026169+00:00"
+      },
+      "steer_reply": {
+        "at": "2026-09-25T00:20:43.460Z",
+        "body": "Steering recorded for run `e18fb442` (classified `steer`) \u2014 guidance is delivered at the next checkpoint boundary and never grants authority.\n\n*This is an automated message.*",
+        "note_id": 534
+      },
+      "steer_row": {
+        "command_id": "cmd-cb297d8c56ea",
+        "dedup_key": "adaptive:steer:e18fb44246b14d5c8ef918f78f6bc01a:533",
+        "journal": [
+          {
+            "at": "2026-09-25T00:20:43.377408+00:00",
+            "to": "received"
+          },
+          {
+            "at": "2026-09-25T00:20:44.901076+00:00",
+            "from": "received",
+            "to": "authorized"
+          },
+          {
+            "at": "2026-09-25T00:20:44.903098+00:00",
+            "lane_ack": "authorized",
+            "row": {
+              "at": "2026-09-25T00:20:44.835370+00:00",
+              "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+              "source": "lane_channel",
+              "state": "authorized",
+              "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+            }
+          },
+          {
+            "at": "2026-09-25T00:20:44.980536+00:00",
+            "epoch": 1,
+            "from": "authorized",
+            "to": "dispatching",
+            "vendor_correlation_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+          },
+          {
+            "at": "2026-09-25T00:20:44.983390+00:00",
+            "lane_ack": "dispatching",
+            "row": {
+              "at": "2026-09-25T00:20:44.913252+00:00",
+              "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+              "source": "lane_channel",
+              "state": "dispatching",
+              "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+            }
+          },
+          {
+            "at": "2026-09-25T00:20:48.071772+00:00",
+            "from": "dispatching",
+            "to": "vendor_accepted"
+          },
+          {
+            "at": "2026-09-25T00:20:48.074265+00:00",
+            "from": "vendor_accepted",
+            "to": "applied"
+          },
+          {
+            "at": "2026-09-25T00:20:48.076499+00:00",
+            "from": "applied",
+            "to": "checkpointed"
+          },
+          {
+            "at": "2026-09-25T00:20:48.077649+00:00",
+            "lane_ack": "checkpointed",
+            "row": {
+              "at": "2026-09-25T00:20:47.995734+00:00",
+              "run_id": "e18fb44246b14d5c8ef918f78f6bc01a",
+              "source": "lane_channel",
+              "state": "checkpointed",
+              "vendor_session_id": "723dff11-d0a0-4691-b948-4d2a71453d18"
+            }
+          }
+        ],
+        "moments": {
+          "application_observed_at": "2026-09-25T00:20:48.076499+00:00",
+          "applied_at": "2026-09-25T00:20:44.980536+00:00",
+          "authorized_at": "2026-09-25T00:20:44.901076+00:00",
+          "received_at": "2026-09-25T00:20:43.377408+00:00"
+        },
+        "rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "status": "checkpointed"
+      },
+      "steer_rung": {
+        "offset_s": 35.0,
+        "reached_at": "2026-09-25T00:20:43.025923+00:00"
+      },
+      "updated_at": "2026-09-25T00:22:07.619563+00:00"
+    },
+    "steer~c2": {
+      "blocked_classification": {
+        "cancel_requested": false,
+        "commit_cycle": 1,
+        "created_at": "2026-09-25T00:38:17.853578+00:00",
+        "id": "c3236a3e9314452e934a60e6c6db668c",
+        "issue_iid": 2,
+        "mr_iid": null,
+        "project_id": 96,
+        "status": "blocked",
+        "status_reason": "harness_code: harness job forge-agent-claude-sdk failed (script_failure)",
+        "updated_at": "2026-09-25T00:40:47.454593+00:00"
+      },
+      "dispatches": [
+        {
+          "branch": "factory/2/c3236a3e",
+          "candidate_lines": [
+            "2026-09-25T00:40:38.097085Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"failed\"}"
+          ],
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "failed",
+            "model": "glm-5.3-flash",
+            "steering_journal": [
+              {
+                "at": "2026-09-25T00:39:48.835600+00:00",
+                "command_id": "cmd-04d388ce4c96",
+                "delivery": "application_observed",
+                "detail": {
+                  "delivered": "mid-turn",
+                  "mailbox_status": "checkpointed"
+                },
+                "kind": "steer",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 1
+              },
+              {
+                "at": "2026-09-25T00:40:36.788552+00:00",
+                "command_id": "cmd-3a25c458e5b1",
+                "delivery": "application_observed",
+                "detail": {
+                  "checkpoint_receipt": {
+                    "checkpoint_id": null,
+                    "remote_ref": "c3236a3e9314452e934a60e6c6db668c@8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+                    "verified": true
+                  },
+                  "interrupt_latency_s": 0.001,
+                  "interrupt_outcome": "acknowledged",
+                  "mailbox_status": "checkpointed",
+                  "pause": "interrupt-sent",
+                  "pause_status": "paused",
+                  "retained_guidance": [],
+                  "wip_artifact_id": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61"
+                },
+                "kind": "pause",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 3
+              },
+              {
+                "at": "2026-09-25T00:40:36.981649+00:00",
+                "command_id": "cmd-0d8660b50d56",
+                "delivery": "application_observed",
+                "detail": {
+                  "mailbox_status": "checkpointed",
+                  "queued_for_resume": true
+                },
+                "kind": "steer",
+                "outcome": "applied",
+                "reason": "",
+                "sequence": 2
+              }
+            ],
+            "terminal_reason": "error_during_execution",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 76736,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 39807,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 76736,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.2499952,
+                  "inputTokens": 39807,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 3771,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 3771,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.2499952
+            },
+            "workspace_generation": null
+          },
+          "collector_lines": [
+            "2026-09-25T00:40:38.097089Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T00:38:57.133502Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "failure_reason": "script_failure",
+          "job_status": "failed",
+          "lane_job_id": 782,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 436,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/pipelines/436",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T00:38:57.132717Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T00:38:57.133502Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "trace_sha256": "8d7d104ab2def9678d15bfbe577008357fceda8fdc780c3c433906850b5a3b54",
+          "trace_tail": "n\n2026-09-25T00:40:37.390373Z 01O forge lane: driver_exit=1 (failed)\n2026-09-25T00:40:38.094713Z 01O {\n2026-09-25T00:40:38.094718Z 01O   \"base_oid\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\",\n2026-09-25T00:40:38.094720Z 01O   \"checkpoint_binding\": \"fresh\",\n2026-09-25T00:40:38.094720Z 01O   \"checkpoint_id\": \"\",\n2026-09-25T00:40:38.094721Z 01O   \"diff_digest\": \"6a26f10cbc6df3508dccf634c127e5daff9ff4d5efb23a6b2768accb719918cd\",\n2026-09-25T00:40:38.094722Z 01O   \"diff_path\": \"/builds/forcewake/forge-steer-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T00:40:38.094723Z 01O   \"generation_path\": \"/builds/forcewake/forge-steer-2026-09-25\",\n2026-09-25T00:40:38.094723Z 01O   \"resolved_work_id\": \"c3236a3e9314452e934a60e6c6db668c\",\n2026-09-25T00:40:38.094724Z 01O   \"source\": \"checkout\",\n2026-09-25T00:40:38.094724Z 01O   \"zero_change\": false\n2026-09-25T00:40:38.094725Z 01O }\n2026-09-25T00:40:38.097085Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"artifact\": \"candidate.diff\", \"exit\": \"failed\"}\n2026-09-25T00:40:38.097088Z 01O FORGE_RESULT:{\"head\": \"af2ee5f34e0b3ded01677ce1810d1e96f31107e7\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T00:40:38.097089Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}\n2026-09-25T00:40:38.254898Z 00O section_end:1790296838:step_script\r\u001b[0K\n2026-09-25T00:40:38.255485Z 00O+section_start:1790296838:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T00:40:38.255489Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for failed job\u001b[0;m\u001b[0;m\n2026-09-25T00:40:38.572108Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T00:40:38.608854Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:40:38.608859Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T00:40:38.772711Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3B03MFQM5WCFWD09T1WRYJ1 id\u001b[0;m=782 status\u001b[0;m=201 token\u001b[0;m=67_STyFMU\n2026-09-25T00:40:38.936191Z 00O section_end:1790296838:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T00:40:38.936620Z 00O+section_start:1790296838:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:40:38.936626Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T00:40:39.379143Z 00O section_end:1790296839:cleanup_file_variables\r\u001b[0K\n2026-09-25T00:40:40.012258Z 00O \u001b[31;1mERROR: Job failed: exit code 1\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 76736,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 39807,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 76736,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.2499952,
+                "inputTokens": 39807,
+                "maxOutputTokens": 32000,
+                "outputTokens": 3771,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 3771,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.2499952
+          }
+        }
+      ],
+      "driver_anchor": {
+        "anchor": "2026-09-25T00:38:57.133683Z",
+        "job_status": "running",
+        "observed_at": "2026-09-25T00:39:44.837548+00:00"
+      },
+      "finished_at": "2026-09-25T00:41:06.034105+00:00",
+      "interleaving_notes": {
+        "pause": {
+          "body": "@forge /pause c3236a3e9314452e934a60e6c6db668c",
+          "note_id": 552,
+          "posted_at": "2026-09-25T00:40:34.938506+00:00"
+        },
+        "steer2": {
+          "body": "@forge /steer c3236a3e9314452e934a60e6c6db668c Operator steer: give src/validators/email.py a one-line module docstring naming its public entrypoint.",
+          "note_id": 551,
+          "posted_at": "2026-09-25T00:40:34.797515+00:00"
+        },
+        "steer2_before_pause": true
+      },
+      "interleaving_rows": {
+        "pause": {
+          "command_id": "cmd-3a25c458e5b1",
+          "journal": [
+            {
+              "at": "2026-09-25T00:40:35.409712+00:00",
+              "to": "received"
+            },
+            {
+              "at": "2026-09-25T00:40:36.537785+00:00",
+              "from": "received",
+              "to": "authorized"
+            },
+            {
+              "at": "2026-09-25T00:40:36.540730+00:00",
+              "lane_ack": "authorized",
+              "row": {
+                "at": "2026-09-25T00:40:36.473562+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "authorized",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            },
+            {
+              "at": "2026-09-25T00:40:36.601625+00:00",
+              "epoch": 1,
+              "from": "authorized",
+              "to": "dispatching",
+              "vendor_correlation_id": "9949a034-e87a-4029-931c-61e52764a833"
+            },
+            {
+              "at": "2026-09-25T00:40:36.603673+00:00",
+              "lane_ack": "dispatching",
+              "row": {
+                "at": "2026-09-25T00:40:36.552043+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "dispatching",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            },
+            {
+              "at": "2026-09-25T00:40:36.764053+00:00",
+              "from": "dispatching",
+              "to": "vendor_accepted"
+            },
+            {
+              "at": "2026-09-25T00:40:36.768473+00:00",
+              "from": "vendor_accepted",
+              "to": "applied"
+            },
+            {
+              "at": "2026-09-25T00:40:36.772335+00:00",
+              "from": "applied",
+              "to": "checkpointed"
+            },
+            {
+              "at": "2026-09-25T00:40:36.774121+00:00",
+              "lane_ack": "checkpointed",
+              "row": {
+                "at": "2026-09-25T00:40:36.711553+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "checkpointed",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            }
+          ],
+          "rungs": [
+            "received",
+            "authorized",
+            "dispatching",
+            "vendor_accepted",
+            "applied",
+            "checkpointed"
+          ],
+          "status": "checkpointed"
+        },
+        "sequence_order": {
+          "pause": 3,
+          "steer2": 2
+        },
+        "steer2": {
+          "command_id": "cmd-0d8660b50d56",
+          "journal": [
+            {
+              "at": "2026-09-25T00:40:35.151388+00:00",
+              "to": "received"
+            },
+            {
+              "at": "2026-09-25T00:40:36.837193+00:00",
+              "from": "received",
+              "to": "authorized"
+            },
+            {
+              "at": "2026-09-25T00:40:36.839329+00:00",
+              "lane_ack": "authorized",
+              "row": {
+                "at": "2026-09-25T00:40:36.788634+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "authorized",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            },
+            {
+              "at": "2026-09-25T00:40:36.901396+00:00",
+              "epoch": 1,
+              "from": "authorized",
+              "to": "dispatching",
+              "vendor_correlation_id": "9949a034-e87a-4029-931c-61e52764a833"
+            },
+            {
+              "at": "2026-09-25T00:40:36.903866+00:00",
+              "lane_ack": "dispatching",
+              "row": {
+                "at": "2026-09-25T00:40:36.849505+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "dispatching",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            },
+            {
+              "at": "2026-09-25T00:40:36.960854+00:00",
+              "from": "dispatching",
+              "to": "vendor_accepted"
+            },
+            {
+              "at": "2026-09-25T00:40:36.964531+00:00",
+              "from": "vendor_accepted",
+              "to": "applied"
+            },
+            {
+              "at": "2026-09-25T00:40:36.967831+00:00",
+              "from": "applied",
+              "to": "checkpointed"
+            },
+            {
+              "at": "2026-09-25T00:40:36.969465+00:00",
+              "lane_ack": "checkpointed",
+              "row": {
+                "at": "2026-09-25T00:40:36.914069+00:00",
+                "run_id": "c3236a3e9314452e934a60e6c6db668c",
+                "source": "lane_channel",
+                "state": "checkpointed",
+                "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+              }
+            }
+          ],
+          "moments": {
+            "application_observed_at": "2026-09-25T00:40:36.967831+00:00",
+            "applied_at": "2026-09-25T00:40:36.901396+00:00",
+            "authorized_at": "2026-09-25T00:40:36.837193+00:00",
+            "received_at": "2026-09-25T00:40:35.151388+00:00"
+          },
+          "rungs": [
+            "received",
+            "authorized",
+            "dispatching",
+            "vendor_accepted",
+            "applied",
+            "checkpointed"
+          ],
+          "status": "checkpointed"
+        }
+      },
+      "issue": {
+        "iid": 2,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-steer-2026-09-25/-/work_items/2"
+      },
+      "job_cancel": {
+        "http_status": 201,
+        "job_id": 782,
+        "job_status_before": "failed",
+        "status_after": "failed"
+      },
+      "paid": true,
+      "pause_checkpoint": {
+        "checkpoint_id": "8c8fafe4e8e66227ae483395f167964970ea25e08e4b38c6d52e0d4c56cc8e61",
+        "files": 1,
+        "sequence": 0,
+        "uploaded_at": "2026-09-25T00:40:36+00:00"
+      },
+      "plan": {
+        "body_tail": " domain without a dot, spaces anywhere) by returning False rather than raising.\n- Implement validate_many(emails: list[str]) -> list[bool] that returns exactly one result per input, in the same order, by delegating each element to check so both entrypoints stay consistent.\n- Do not create or modify anything under tests/ or .gitlab-ci.yml; the precommitted smoke job is the verifier.\n- Self-review edge cases (e.g. '@example.com', 'a@', 'a@b', 'a b@c.d', 'a@b.c') against the stated rules before finishing.\n\n**Risks:**\n- The smoke job's exact expected verdicts are unknown; ambiguous cases (e.g. dot only in the local part, '@' as first/last character, consecutive dots, tab/newline as 'space') must be resolved strictly per the rule wording to avoid mismatches.\n- Non-string inputs (None, ints) are not covered by the spec; passing them to string operations may raise, so calling behavior must be assumed to be strings only.\n- Any accidental edit to tests/ or .gitlab-ci.yml (or adding files outside src/validators/email.py) fails acceptance outright.\n\n**Files (hints):** `src/validators/email.py`\n## Implementation\n- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash\n- Fallbacks: claude-code\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `6520b670c01e83f75b29562ebd593589b643d40faf5d556989275575eadb10a4`\n\nApprove this exact plan by commenting `@forge /go c3236a3e9314452e934a60e6c6db668c`.\n\nApprovers: @forcewake.\n\n*This is an automated message.*",
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 546,
+        "run_id": "c3236a3e9314452e934a60e6c6db668c"
+      },
+      "post_steer_dwell_s": 45.9,
+      "result": "green",
+      "started_at": "2026-09-25T00:38:17.131467+00:00",
+      "steer_note": {
+        "body": "@forge /steer c3236a3e9314452e934a60e6c6db668c Operator steer, mid-work direction change: rename the validator's public entrypoint \u2014 entrypoint validate_email (not check) in src/validators/email.py. Define `validate_email(email: str) -> bool` as the public API and remove the `check` definition; keep the validation semantics, the bulk entrypoint and every other requirement of the plan unchanged.",
+        "note_id": 549,
+        "posted_at": "2026-09-25T00:39:44.917230+00:00"
+      },
+      "steer_reply": {
+        "at": "2026-09-25T00:39:45.388Z",
+        "body": "Steering recorded for run `c3236a3e` (classified `steer`) \u2014 guidance is delivered at the next checkpoint boundary and never grants authority.\n\n*This is an automated message.*",
+        "note_id": 550
+      },
+      "steer_row": {
+        "command_id": "cmd-04d388ce4c96",
+        "dedup_key": "adaptive:steer:c3236a3e9314452e934a60e6c6db668c:549",
+        "journal": [
+          {
+            "at": "2026-09-25T00:39:45.307753+00:00",
+            "to": "received"
+          },
+          {
+            "at": "2026-09-25T00:39:45.684513+00:00",
+            "from": "received",
+            "to": "authorized"
+          },
+          {
+            "at": "2026-09-25T00:39:45.686454+00:00",
+            "lane_ack": "authorized",
+            "row": {
+              "at": "2026-09-25T00:39:45.621957+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "authorized",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:39:45.754666+00:00",
+            "epoch": 1,
+            "from": "authorized",
+            "to": "dispatching",
+            "vendor_correlation_id": "9949a034-e87a-4029-931c-61e52764a833"
+          },
+          {
+            "at": "2026-09-25T00:39:45.756025+00:00",
+            "lane_ack": "dispatching",
+            "row": {
+              "at": "2026-09-25T00:39:45.696989+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "dispatching",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          },
+          {
+            "at": "2026-09-25T00:39:48.820286+00:00",
+            "from": "dispatching",
+            "to": "vendor_accepted"
+          },
+          {
+            "at": "2026-09-25T00:39:48.823055+00:00",
+            "from": "vendor_accepted",
+            "to": "applied"
+          },
+          {
+            "at": "2026-09-25T00:39:48.825342+00:00",
+            "from": "applied",
+            "to": "checkpointed"
+          },
+          {
+            "at": "2026-09-25T00:39:48.826553+00:00",
+            "lane_ack": "checkpointed",
+            "row": {
+              "at": "2026-09-25T00:39:48.767234+00:00",
+              "run_id": "c3236a3e9314452e934a60e6c6db668c",
+              "source": "lane_channel",
+              "state": "checkpointed",
+              "vendor_session_id": "9949a034-e87a-4029-931c-61e52764a833"
+            }
+          }
+        ],
+        "moments": {
+          "application_observed_at": "2026-09-25T00:39:48.825342+00:00",
+          "applied_at": "2026-09-25T00:39:45.754666+00:00",
+          "authorized_at": "2026-09-25T00:39:45.684513+00:00",
+          "received_at": "2026-09-25T00:39:45.307753+00:00"
+        },
+        "rungs": [
+          "received",
+          "authorized",
+          "dispatching",
+          "vendor_accepted",
+          "applied",
+          "checkpointed"
+        ],
+        "status": "checkpointed"
+      },
+      "steer_rung": {
+        "offset_s": 35.0,
+        "reached_at": "2026-09-25T00:39:44.915943+00:00"
+      },
+      "updated_at": "2026-09-25T00:41:06.033212+00:00"
+    },
+    "teardown": {
+      "deleted": true,
+      "deleted_at": "2026-09-25T00:52:41.914996+00:00",
+      "started_at": "2026-09-25T00:52:41.673909+00:00"
+    }
+  },
+  "project": {},
+  "stamp": "forge.combined-steering.live/1"
+}

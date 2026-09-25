@@ -50,6 +50,16 @@ github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
 # OpenCode rides the httpx core dependency.
 interactive = ["claude-agent-sdk>=0.2.118"]
 
+# R38-17 (issue #318 / ADR-0032 §5): the console entry-points the
+# v0.37.0 wheel owed — the module mains existed, the wheel never
+# exposed them. `forge-doctor` is the machine-checkable environment
+# verification; `forge` is a thin dispatcher onto the same mains (no
+# new logic, no shadowed flags — each subcommand's argparse keeps
+# owning its own surface).
+[project.scripts]
+forge = "forge.cli:main"
+forge-doctor = "forge.doctor:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -19,6 +19,25 @@ legal is `scripts/align_lab.py` (receipts:
 > (`real-provider-e2e`, the green flow) derives **supported**
 > (the lattice's honest minimum — one failed capability). Human approval
 > on any promotion decision: **pending**.
+>
+> **Update (2026-09-25, R38-05/R38-06): the open delivery arm was
+> DELIVERED by the useful-WIP trace, and the composition is now
+> FROZEN.** `docs/evaluation/2026-09-25-useful-wip-resume/` re-ran the
+> interrupted arm with the pause AFTER observed useful work (through the
+> #302-finalized template): the pre-pause checkpoint carried all three
+> file shapes with verified digests, a second runner restored the EXACT
+> authorized checkpoint, the final candidate passed the precommitted
+> oracle on the exact candidate sha and landed as a Draft MR — outcome
+> `useful-wip-continued`, zero validation findings. R38-06 (#307) then
+> froze the exact composition into
+> `qualification/profiles/supported-gitlab-ce-v1.json` (stamp
+> `forge.supported.profile/1`, every value from an actual receipt) and
+> proved the cold installs (fresh / upgrade / verify) via
+> `scripts/cold_install_check.py` — see
+> `docs/operations/supported-profile-runbook.md` and
+> `qualification/profiles/gitlab-ce-v1.md` §12. This document's
+> historical arm-2 failure stays on record verbatim: superseded negative
+> evidence is never rewritten. Human approval: still **pending**.
 
 ## 1. The frozen combination (identity card)
 

@@ -175,6 +175,7 @@ __all__ = [
     "RECORD_VALIDATION_OBSERVABILITY",
     "REQUALIFICATION_AXES",
     "REQUALIFICATION_AXIS_LABELS",
+    "SUPPORTED_PROFILE_STAMP",
     "TESTED_SHA_OBSERVABILITY",
     "TRACE_PROVENANCES",
     "TRACE_RECORD_STAMP",
@@ -192,6 +193,7 @@ __all__ = [
     "ProfileRecordImmutableError",
     "ProfileRecordStore",
     "RefusalResolution",
+    "SupportedProfileBinding",
     "SupportedProfileEntry",
     "SupportedProfilesManifest",
     "TraceRecord",
@@ -206,6 +208,7 @@ __all__ = [
     "evaluate_record",
     "load_profile_approvals",
     "load_profile_records",
+    "load_supported_profile",
     "load_trace_records",
     "manifest_trigger_triggers",
     "profile_promotion_refusals",
@@ -213,6 +216,7 @@ __all__ = [
     "requalification_triggers",
     "render_capabilities",
     "render_json",
+    "supported_profile_binding",
     "upgrade_claim",
     "validate_record",
     "write_profile_record",
@@ -237,6 +241,17 @@ MANIFEST_STAMP: Final[str] = "forge.profile.manifest/1"
 #: of :func:`build_supported_profiles` that is written by a person, not by
 #: evidence collection (``qualification/profile-approvals.json``).
 APPROVAL_STAMP: Final[str] = "forge.profile.approvals/1"
+
+#: Versioned stamp of the FROZEN supported-profile manifest (R38-06,
+#: #307) — the manifest-of-manifests that pins ONE exact deployment
+#: composition (wheel/image/template/runner/harness/model/credential
+#: identities, every value from an actual receipt) under
+#: ``qualification/profiles/``. Written by
+#: ``scripts/freeze_supported_profile.py``; this module BINDS it to the
+#: record store (see :func:`supported_profile_binding`) without ever
+#: granting it a verdict — the frozen manifest is install evidence, and
+#: the record store remains the only source of qualification verdicts.
+SUPPORTED_PROFILE_STAMP: Final[str] = "forge.supported.profile/1"
 
 #: The evidence classes, weakest first. Each names a DIFFERENT applicability
 #: — no class substitutes for another (the R36-22 substitution rules).
@@ -2037,6 +2052,175 @@ class ProfileRecordStore:
         return load_profile_approvals(self.root)
 
 
+# ---------------------------------------------------------------------------
+# R38-06 (#307): the frozen supported-profile manifest's binding to the
+# record store — a cross-reference, never a verdict
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SupportedProfileBinding:
+    """One identity axis, cross-referenced between the FROZEN
+    supported-profile manifest (:data:`SUPPORTED_PROFILE_STAMP`) and a
+    profile-qualification record.
+
+    ``status`` is ``match`` (the manifest and the record pin the SAME
+    artifact identity), ``divergent`` (they pin different identities —
+    named, never silently merged: the R38-06 defect was exactly two
+    compositions under one version string) or ``unbound`` (one side
+    leaves the axis empty — honest absence, never an assumed match).
+    The binding grants NO verdict: the derived verdict still comes only
+    from the record's evidence (:func:`derive_verdict`).
+    """
+
+    axis: str
+    manifest_value: str
+    record_value: str
+    status: str
+    note: str
+
+    def __post_init__(self) -> None:
+        if self.status not in ("match", "divergent", "unbound"):
+            raise ProfileRecordError(
+                f"binding status {self.status!r} is not one of match/divergent/unbound — "
+                "the vocabulary is closed so a binding can never smuggle a verdict"
+            )
+        for name in ("axis", "note"):
+            if not str(getattr(self, name)).strip():
+                raise ProfileRecordError(f"a supported-profile binding needs a non-empty {name}")
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "axis": self.axis,
+            "manifest_value": self.manifest_value,
+            "record_value": self.record_value,
+            "status": self.status,
+            "note": self.note,
+        }
+
+
+def load_supported_profile(root: Path) -> Mapping[str, object] | None:
+    """The committed frozen supported-profile manifest, or None.
+
+    ``qualification/profiles/supported-*.json`` (the freeze commits
+    exactly one). A file with the WRONG stamp refuses the load — a
+    foreign document never binds. A missing manifest is simply None (the
+    store predates the freeze; nothing degrades).
+    """
+    base = root / "qualification" / "profiles"
+    if not base.is_dir():
+        return None
+    for path in sorted(base.glob("supported-*.json")):
+        document: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+        stamp = document.get("schema")
+        if stamp != SUPPORTED_PROFILE_STAMP:
+            raise ProfileRecordError(
+                f"{path.name} carries stamp {stamp!r} != {SUPPORTED_PROFILE_STAMP!r} — a "
+                "foreign document under the supported-profile name never binds"
+            )
+        return document
+    return None
+
+
+def _binding_axis(
+    axis: str,
+    manifest_value: str,
+    record_value: str,
+    *,
+    note: str,
+) -> SupportedProfileBinding:
+    if not manifest_value and not record_value:
+        status = "unbound"
+    elif not manifest_value or not record_value:
+        status = "unbound"
+    else:
+        status = "match" if manifest_value == record_value else "divergent"
+    return SupportedProfileBinding(
+        axis=axis,
+        manifest_value=manifest_value,
+        record_value=record_value,
+        status=status,
+        note=note,
+    )
+
+
+def supported_profile_binding(
+    document: Mapping[str, object],
+    records: Sequence[ProfileQualificationRecord],
+) -> tuple[SupportedProfileBinding, ...]:
+    """Cross-reference the frozen manifest against the record it cites.
+
+    The manifest's own receipt names ``qualification/records/
+    gitlab-ce-v1@0.37.0.json``; the binding compares the identity axes
+    BOTH sides pin (wheel sha256, image digest, harness version, release
+    version) against that record when it exists, else against the
+    profile's latest record (named in the note). Every difference is a
+    NAMED divergence — most honestly, the record's historical image axis
+    (the R37-08 patched-install build) versus the manifest's frozen
+    identities — never a silent merge, and never a verdict.
+    """
+    control = document.get("control_plane")
+    promoted = control.get("promoted", {}) if isinstance(control, Mapping) else {}
+    harness = document.get("harness", {}) if isinstance(document.get("harness"), Mapping) else {}
+    record_id = "gitlab-ce-v1@0.37.0"
+    record = next((item for item in records if item.record_id == record_id), None)
+    if record is None:
+        record = next(
+            (
+                item
+                for item in sorted(
+                    (r for r in records if r.profile == "gitlab-ce-v1"),
+                    key=lambda r: (version_key(r.release_version), r.record_id),
+                )[-1:]
+            ),
+            None,
+        )
+    if record is None:
+        return (
+            SupportedProfileBinding(
+                axis="record",
+                manifest_value=record_id,
+                record_value="",
+                status="unbound",
+                note="no gitlab-ce-v1 record exists — the manifest binds nothing in the store",
+            ),
+        )
+    source_note = (
+        f"vs {record.record_id} (the record the manifest's receipt names)"
+        if record.record_id == record_id
+        else f"vs {record.record_id} (the profile's latest record — the manifest's named record is absent)"
+    )
+    return (
+        _binding_axis(
+            "wheel_sha256",
+            str(promoted.get("wheel_sha256", "")),
+            record.wheel_sha256,
+            note=f"the lane wheel identity {source_note}",
+        ),
+        _binding_axis(
+            "image_digest",
+            str(promoted.get("image_digest", "")),
+            record.image_digest,
+            note=(
+                f"the release image identity {source_note}; the manifest's executed-lab "
+                "bind is a separate, separately-named identity (the working-tree build)"
+            ),
+        ),
+        _binding_axis(
+            "harness_version",
+            str(harness.get("version", "")),
+            record.harness_version,
+            note=f"the harness binary version {source_note}",
+        ),
+        _binding_axis(
+            "release_version",
+            str(promoted.get("release_version", "")),
+            record.release_version,
+            note=f"the release version {source_note} (text only — never sufficient alone)",
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class SupportedProfileEntry:
     """One profile's row in the supported-profiles manifest (R37-17).
@@ -2339,6 +2523,25 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_binding(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    document = load_supported_profile(root)
+    if document is None:
+        print(
+            "profile-qualification binding: no committed supported-profile manifest under "
+            "qualification/profiles/ — nothing to bind",
+            file=sys.stderr,
+        )
+        return 1
+    bindings = supported_profile_binding(document, load_profile_records(root))
+    for binding in bindings:
+        print(
+            f"{binding.status:>9}  {binding.axis}: manifest={binding.manifest_value!r} "
+            f"record={binding.record_value!r} — {binding.note}"
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m forge.profile_qualification",
@@ -2372,6 +2575,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     manifest.add_argument("--root", default=".", type=Path)
     manifest.set_defaults(func=_cmd_manifest)
+
+    binding = sub.add_parser(
+        "binding",
+        help=(
+            "cross-reference the FROZEN supported-profile manifest "
+            "(forge.supported.profile/1) against the qualification record it cites — "
+            "named matches/divergences per identity axis, never a verdict"
+        ),
+    )
+    binding.add_argument("--root", default=".", type=Path)
+    binding.set_defaults(func=_cmd_binding)
 
     args = parser.parse_args(argv)
     try:

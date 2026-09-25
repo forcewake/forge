@@ -7,7 +7,12 @@ is a stale 0.28.0 dev build, the schema is one head behind, and the
 numerical budget caps are absent. This script moves the lab onto the
 repo's own head BEFORE the paid run — scripted, idempotent, receipted:
 
-1. **backup** — ``pg_dump`` out of the lab Postgres (runbook §3 step 0);
+1. **backup** — ``pg_dump`` out of the lab Postgres (runbook §3 step 0)
+   into the MAINTAINER-PRIVATE storage base (``FORGE_PRIVATE_BACKUP_DIR``,
+   default ``~/forge-private/backups``), never into the repository — an
+   in-repo backup destination is REFUSED (R38-03 / #304: operational
+   database bytes are not publishable evidence; only a sanitized receipt
+   is);
 2. **rollback-tag** — the current image gets an addressable alias, so the
    pre-alignment build stays rollback-addressable (images are never
    pruned by this script);
@@ -51,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -99,6 +105,46 @@ _RUNTIME_ENV = frozenset({"HOSTNAME"})
 DEFAULT_RECEIPTS = (
     REPO_ROOT / "docs" / "evaluation" / "2026-09-24-live-single-writer" / "alignment-receipts.json"
 )
+
+#: R38-03 (#304): operational backups go to MAINTAINER-PRIVATE storage.
+PRIVATE_BACKUP_ENV = "FORGE_PRIVATE_BACKUP_DIR"
+
+
+def private_backup_base(env: Mapping[str, str] | None = None) -> Path:
+    """The private storage base: ``FORGE_PRIVATE_BACKUP_DIR`` or the default."""
+    if env is None:
+        env = dict(os.environ)
+    return Path(env.get(PRIVATE_BACKUP_ENV, "") or (Path.home() / "forge-private" / "backups"))
+
+
+def resolve_backup_dir(
+    root: Path,
+    explicit: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Where the pre-alignment pg_dump lands — private, NEVER inside the repo.
+
+    An explicit ``--backup-dir`` is honored verbatim (the operator chose it)
+    but STILL refused when it sits inside the repository tree: the default
+    (``private_backup_base`` + the session's date subdirectory) exists so
+    the R38-03 defect — an operational database backup committed under
+    ``docs/`` — cannot recur.
+    """
+    base = explicit if explicit is not None else private_backup_base(env)
+    # resolve() both sides so a relative or symlinked in-repo destination
+    # cannot slip past the refusal
+    resolved_root = root.expanduser().resolve()
+    resolved = Path(base).expanduser().resolve()
+    if resolved == resolved_root or resolved.is_relative_to(resolved_root):
+        raise AlignmentError(
+            f"backup destination {resolved} is INSIDE the repository {root} — refused "
+            "(R38-03/#304: operational backups belong in private storage, e.g. "
+            f"{PRIVATE_BACKUP_ENV}; only a sanitized receipt is publishable)"
+        )
+    if explicit is None:
+        date = datetime.now(timezone.utc)
+        resolved = resolved / f"{date:%Y-%m-%d}"
+    return resolved
 
 
 class AlignmentError(Exception):
@@ -513,9 +559,7 @@ def build_plan(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rollback_tag = f"localhost/forge:pre-r3708-{stamp}"
     dump_remote = f"/tmp/pre-r3708-alignment-{stamp}.dump"
-    backup_target = (backup_dir or DEFAULT_RECEIPTS.parent / "backups") / (
-        f"pre-r3708-alignment-{stamp}.dump"
-    )
+    backup_target = resolve_backup_dir(root, backup_dir) / f"pre-r3708-alignment-{stamp}.dump"
     database_url = next(
         (entry.partition("=")[2] for entry in app_spec.env if entry.startswith("DATABASE_URL=")),
         "",
@@ -799,7 +843,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--apply", action="store_true", help="EXECUTE the plan (stops consumers)")
     parser.add_argument("--receipts", type=Path, default=DEFAULT_RECEIPTS)
-    parser.add_argument("--backup-dir", type=Path, default=None)
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=None,
+        help=(
+            "where the pre-alignment pg_dump lands. DEFAULT: the private storage "
+            f"base ({PRIVATE_BACKUP_ENV}, else ~/forge-private/backups) plus the "
+            "session's date subdirectory — R38-03 (#304): a destination inside "
+            "the repository is REFUSED; only a sanitized receipt is publishable"
+        ),
+    )
     parser.add_argument("--budget-profiles", default=DEFAULT_BUDGET_PROFILES)
     parser.add_argument("--lane-budget-seconds", default=DEFAULT_LANE_BUDGET_SECONDS)
     parser.add_argument("--lane-grace-seconds", default=DEFAULT_LANE_GRACE_SECONDS)

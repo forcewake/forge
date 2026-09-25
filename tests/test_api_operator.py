@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
@@ -47,7 +49,7 @@ from forge.api_lane_control import lane_control_token
 from forge.api_operator import operator_subject_scope_token
 from forge.config import Settings
 from forge.database import reset_engine
-from forge.durable.models import ActionLog, FlowRun
+from forge.durable.models import ActionLog, FlowRun, PublicationIntent
 from forge.main import create_app
 
 SECRET = "operator-secret"  # noqa: S105 — fake value for tests
@@ -609,6 +611,24 @@ def _steer_command_row(run_id: str, seq: int = 1) -> ControlCommandRow:
     )
 
 
+def _pause_command_row(run_id: str, seq: int = 1) -> ControlCommandRow:
+    """A pause command landed through the booking (``checkpointed``)."""
+    return ControlCommandRow(
+        id=f"cmd-{run_id[:6]}-{seq}",
+        work_id=run_id,
+        run_id=run_id,
+        kind="pause",
+        payload={"run_id": run_id},
+        status="checkpointed",
+        sequence=seq,
+        dedup_key=f"key-{run_id[:6]}-{seq}",
+        actor_ref="human:op",
+        actor_origin="server_authenticated_human",
+        created_at=NOW - timedelta(minutes=25),
+        applied_at=NOW - timedelta(minutes=24),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stale actions — hints only; the guarded route revalidates the world
 # ---------------------------------------------------------------------------
@@ -774,3 +794,151 @@ async def test_native_comment_lines_and_the_api_render_agree(app, client, reposi
     assert document["identity"]["candidate_shas"][0][:12] in identity_line
     if document["blocked_reason"]:
         assert any(line.startswith("Blocked:") for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# The R38-15 recovery surface — detail section, stale-action display,
+# bounded export diagnostics
+# ---------------------------------------------------------------------------
+
+
+async def test_the_detail_renders_the_recovery_section(app, client, repository):
+    """The detail route carries the recovery surface: the delivery outcome
+    (an empty resumed diff is a FAILED/no-effect delivery), the
+    five-milestone ladder (each independent) and the advisory hint naming
+    the guarded route — beside the existing projection render."""
+    checkpoint = "e" * 64
+    await _seed(
+        app,
+        _run(
+            RUN_A,
+            REPO_A,
+            status="proposing",
+            evidence={
+                "harness": {
+                    "driver_exit": "completed",
+                    "collector_exit": 0,
+                    "candidate_state": "zero_change",
+                }
+            },
+        ),
+        _pause_command_row(RUN_A),
+        ControlCommandRow(
+            id=f"cmd-{RUN_A[:6]}-2",
+            work_id=RUN_A,
+            run_id=RUN_A,
+            kind="resume",
+            payload={"run_id": RUN_A, "checkpoint_ref": f"{RUN_A}@{checkpoint}"},
+            status="applied",
+            sequence=2,
+            dedup_key=f"key-{RUN_A[:6]}-2",
+            actor_ref="human:op",
+            actor_origin="server_authenticated_human",
+            created_at=NOW - timedelta(minutes=20),
+            applied_at=NOW - timedelta(minutes=19),
+        ),
+        PauseFenceRow(
+            work_id=RUN_A,
+            publication_epoch_bumped=2,
+            fenced_at=NOW - timedelta(minutes=25),
+            cleared_at=NOW - timedelta(minutes=19),
+        ),
+    )
+    repository.entry_document = {
+        "checkpoint_id": checkpoint,
+        "sequence": 3,
+        "files": 2,
+        "uploaded_at": (NOW - timedelta(minutes=24)).isoformat(),
+    }
+    headers = _scope_headers([SUBJECT_A])
+
+    response = await client.get(
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=headers
+    )
+
+    assert response.status_code == 200
+    document = response.json()
+    assert document["state"] == "resumed"  # the activation receipt holds
+    recovery = document["recovery"]
+    assert recovery["schema"] == "forge.operator.recovery/1"
+    assert recovery["delivery"]["outcome"] == "empty_diff_no_effect"
+    assert recovery["delivery"]["failed"] is True
+    assert "FAILED/no-effect delivery" in recovery["delivery"]["headline"]
+    statuses = {name: entry["status"] for name, entry in recovery["ladder"].items()}
+    assert statuses == {
+        "pause_requested": "present",
+        "checkpoint_committed": "present",
+        "runner_stopped": "absent",  # occupancy queried, no lease row — no terminal observation
+        "resume_authorized": "present",
+        "exact_resume_applied": "present",
+    }
+    assert recovery["consistency"] == "observed"
+    hint = recovery["hint"]
+    assert "not a successful resume" in hint["advisory"]
+    assert {command["via"] for command in hint["commands"]} >= {
+        "command_router:/steer",
+        "command_router:/resume",
+    }
+    # a consistent render: the action hints carry no stale mark
+    assert document["actions_stale"] is False
+    assert all("stale" not in entry for entry in document["actions"])
+
+
+async def test_the_bundle_export_carries_bounded_allowlisted_diagnostics(app, client, repository):
+    """The export's diagnostics slice rides the bundle: entry-bounded,
+    field-allowlisted, and raw operational backup names excluded (the
+    #304 receipts referenced at most) — the whole document still under
+    the export's byte accounting."""
+    await _seed(
+        app,
+        _run(
+            RUN_A,
+            REPO_A,
+            status="failed",
+            status_reason=(
+                "restore failed: pre-r3708-alignment-1.dump unreadable "
+                "(credential revoked, token expired)"
+            ),
+        ),
+        *[
+            PublicationIntent(
+                run_id=RUN_A,
+                provider="github",
+                repo=REPO_A,
+                operation="commit",
+                target_ref="refs/heads/forge/run",
+                idempotency_scope=f"cycle-{index}",
+                operation_key=f"op-{RUN_A[:6]}-{index}",
+                status="unknown",
+                created_at=NOW - timedelta(minutes=40 - index),
+                updated_at=NOW - timedelta(minutes=5),
+            )
+            for index in range(15)  # more uncertain effects than the diagnostics cap
+        ],
+    )
+    headers = _scope_headers([SUBJECT_A])
+
+    response = await client.get(
+        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
+    )
+
+    assert response.status_code == 200
+    bundle = response.json()
+    diagnostics = bundle["diagnostics"]
+    assert diagnostics["schema"] == "forge.operator.diagnostics/1"
+    # bounded: the 15 uncertain effects render as at most the cap blocked reasons
+    assert len(diagnostics["sections"]["blocked_reasons"]) == 10
+    assert diagnostics["export"]["truncated"]["blocked_reasons"] is True
+    # allowlisted: every section key is a declared field
+    from forge.adaptive.operator_view import DIAGNOSTIC_SECTION_FIELDS
+
+    for entry in diagnostics["sections"]["blocked_reasons"]:
+        assert set(entry) <= DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"]
+    # backup-free: the raw dump name never reaches the diagnostics slice,
+    # and its exclusion is counted (the bundle's evidence sections are the
+    # R38-03 surface, not the diagnostics slice)
+    rendered = json.dumps(diagnostics)
+    assert "alignment-1.dump" not in rendered
+    assert diagnostics["export"]["raw_backups_excluded"] >= 1
+    # the byte accounting includes the diagnostics slice
+    assert bundle["export"]["bytes"] == len(response.content)

@@ -40,6 +40,7 @@ from forge.profile_qualification import (
     MANIFEST_STATUSES,
     MANIFEST_TRIGGER_AXES,
     PROFILE_RECORD_STAMP,
+    SUPPORTED_PROFILE_STAMP,
     TESTED_SHA_OBSERVABILITY,
     TRACE_RECORD_STAMP,
     UNMET_CAPABILITIES_OBSERVABILITY,
@@ -65,12 +66,14 @@ from forge.profile_qualification import (
     latest_record_per_profile,
     load_profile_approvals,
     load_profile_records,
+    load_supported_profile,
     load_trace_records,
     manifest_trigger_triggers,
     profile_promotion_refusals,
     requalification_required,
     requalification_triggers,
     render_capabilities,
+    supported_profile_binding,
     upgrade_claim,
     validate_record,
     write_profile_record,
@@ -1547,3 +1550,87 @@ def test_the_tiers_column_is_trace_derived() -> None:
     assert "real-provider-e2e: live" in row
     without = render_capabilities((record,))
     assert "real-provider-e2e: none" in without.splitlines()[2]
+
+
+# ---------------------------------------------------------------------------
+# R38-06 (#307) — the frozen supported-profile manifest's binding
+# ---------------------------------------------------------------------------
+
+SUPPORTED_MANIFEST = ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1.json"
+
+
+def _supported_document() -> dict[str, object]:
+    import json as _json
+
+    return _json.loads(SUPPORTED_MANIFEST.read_text(encoding="utf-8"))
+
+
+def test_supported_profile_stamp_is_exported() -> None:
+    from forge.profile_qualification import SUPPORTED_PROFILE_STAMP
+
+    assert SUPPORTED_PROFILE_STAMP == "forge.supported.profile/1"
+
+
+def test_load_supported_profile_reads_the_committed_manifest() -> None:
+    document = load_supported_profile(ROOT)
+    assert document is not None
+    assert document["schema"] == SUPPORTED_PROFILE_STAMP  # type: ignore[index]
+    assert document["profile"] == "supported-gitlab-ce-v1"  # type: ignore[index]
+
+
+def test_load_supported_profile_none_when_absent(tmp_path: Path) -> None:
+    assert load_supported_profile(tmp_path) is None
+
+
+def test_load_supported_profile_refuses_a_foreign_stamp(tmp_path: Path) -> None:
+    profiles = tmp_path / "qualification" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "supported-fake.json").write_text('{"schema": "forge.other/1"}', encoding="utf-8")
+    with pytest.raises(ProfileRecordError, match="foreign document"):
+        load_supported_profile(tmp_path)
+
+
+def test_supported_profile_binding_matches_the_cited_record() -> None:
+    bindings = supported_profile_binding(_supported_document(), load_profile_records(ROOT))
+    by_axis = {binding.axis: binding for binding in bindings}
+    assert set(by_axis) == {"wheel_sha256", "image_digest", "harness_version", "release_version"}
+    assert all(binding.status == "match" for binding in by_axis.values())
+    assert "the record the manifest's receipt names" in by_axis["wheel_sha256"].note
+
+
+def test_supported_profile_binding_names_a_swapped_wheel_under_a_constant_version() -> None:
+    records = list(load_profile_records(ROOT))
+    cited = next(record for record in records if record.record_id == "gitlab-ce-v1@0.37.0")
+    swapped = ProfileQualificationRecord(**{**cited.__dict__, "wheel_sha256": "9" * 64})
+    bindings = supported_profile_binding(_supported_document(), [swapped])
+    wheel = next(binding for binding in bindings if binding.axis == "wheel_sha256")
+    assert wheel.status == "divergent"
+    assert "never a silent merge" not in wheel.note  # the note names, the status speaks
+    # an unbound axis (an image-only record) is honest absence:
+    image_only = ProfileQualificationRecord(**{**cited.__dict__, "wheel_sha256": ""})
+    unbound = supported_profile_binding(_supported_document(), [image_only])
+    assert {binding.status for binding in unbound} <= {"match", "unbound"}
+    assert next(b for b in unbound if b.axis == "wheel_sha256").status == "unbound"
+
+
+def test_supported_profile_binding_falls_back_to_the_latest_record_with_a_note() -> None:
+    records = [
+        record for record in load_profile_records(ROOT) if record.record_id != "gitlab-ce-v1@0.37.0"
+    ]
+    if not any(record.profile == "gitlab-ce-v1" for record in records):
+        pytest.skip("no alternative gitlab record to fall back to")
+    bindings = supported_profile_binding(_supported_document(), records)
+    assert any("the profile's latest record" in binding.note for binding in bindings)
+
+
+def test_supported_profile_binding_grants_no_verdict() -> None:
+    """The binding is a cross-reference: a matched axis never upgrades a
+    record's derived verdict (that comes only from its evidence)."""
+    records = load_profile_records(ROOT)
+    cited = next(record for record in records if record.record_id == "gitlab-ce-v1@0.37.0")
+    bindings = supported_profile_binding(_supported_document(), records)
+    assert all(binding.status in ("match", "divergent", "unbound") for binding in bindings)
+    for field_name in ("verdict", "derived_verdict", "status_verdict"):
+        assert not hasattr(bindings[0], field_name)
+    # and the record's own verdict is unchanged by the binding existing:
+    assert derive_verdict(cited) in ("unqualified", "declared_only", "lab-qualified", "supported")

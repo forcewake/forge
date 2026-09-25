@@ -69,6 +69,20 @@ parameters:
   - name: spec_digest
     type: string
     default: ''
+  # R38-02 (#303): the credential DELIVERY reference (non-secret — the
+  # ref the control plane's broker bound). Runtime/template parameters
+  # are documented "No support for secret values", so the VALUE never
+  # rides the run_pipeline body: under the native profile the lane reads
+  # the authorized VARIABLE GROUP's secret variable
+  # FORGE_MODEL_ANTHROPIC_AUTH_TOKEN (see the variables block below);
+  # under the redemption profile (credential_redeem=1) the SDK lane
+  # driver redeems the credential from the control plane at startup.
+  - name: credential_ref
+    type: string
+    default: ''
+  - name: credential_redeem
+    type: string
+    default: ''
 
 jobs:
   - job: harness
@@ -79,6 +93,27 @@ jobs:
       vmImage: ubuntu-latest
     timeoutInMinutes: 60
     variables:
+      # R38-17 (#318, ADR-0032): this block is the lane's
+      # variable-resolution contract. The members mapped from queue-time
+      # PARAMETERS (FORGE_RUN_ID / FORGE_ATTEMPT_BASE / FORGE_DRIVER /
+      # FORGE_MODEL / the envelope digests / the credential ref pair)
+      # are the VERSIONED execution spec's PINS — the approved RunSpec's
+      # frozen choices the dispatch carried; nothing below re-derives a
+      # model/authority/artifact choice from ambient pipeline state.
+      # The remaining ambient reads are the documented non-authority
+      # ones: the lane install route (FORGE_LANE_REF / the wheel pair)
+      # and the per-driver secret mappings below.
+      #
+      # R38-02 (#303): the credential carrier is a SECRET pipeline
+      # variable named after the provider env slot (ANTHROPIC_AUTH_TOKEN,
+      # ...) — held in the pipeline UI or, RECOMMENDED, in the authorized
+      # VARIABLE GROUP `forge-lane-credentials` (a protected resource:
+      # create it under Pipelines → Library, add the secret variable,
+      # authorize THIS pipeline against it; optionally link the group to
+      # Key Vault for native rotation). Runtime parameters are documented
+      # "No support for secret values", so the VALUE never rides the
+      # run_pipeline body — the conditional per-driver mappings below
+      # surface the selected driver's secret to the lane step only.
       FORGE_RUN_ID: ${{ parameters.run_id }}
       # The dispatched branch (predefined variable, full ref form): the
       # lane fetches it belt-and-braces before pinning the attempt base.
@@ -98,6 +133,10 @@ jobs:
       FORGE_PLAN_NOTE_ID: ${{ parameters.plan_note_id }}
       FORGE_ENVELOPE_DIGEST: ${{ parameters.envelope_digest }}
       FORGE_SPEC_DIGEST: ${{ parameters.spec_digest }}
+      # R38-02 (#303): the credential DELIVERY reference + the redemption
+      # flag — refs only, never a value (parameters carry no secrets).
+      FORGE_CREDENTIAL_REF: ${{ parameters.credential_ref }}
+      FORGE_CREDENTIAL_REDEEM: ${{ parameters.credential_redeem }}
       # C03: per-driver credential selection — EXACTLY the control plane's
       # DRIVER_CREDENTIAL_VARS registry (ci contract test cross-checks):
       #   claude-code: ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
@@ -277,6 +316,24 @@ jobs:
             python -m forge.harness_entry --render-brief-azure \
               || echo "brief fetch failed — falling back to .forge/brief.md"
           fi
+          # R38-02 (#303): resolve the lane's model credential BEFORE the
+          # vendor process starts. A BOUND dispatch (FORGE_CREDENTIAL_REF
+          # set, redemption off) must find the mapped secret pipeline
+          # variable (ANTHROPIC_AUTH_TOKEN above) populated — an empty one
+          # is a missing onboarding step and the lane fails closed
+          # (infrastructure/config, zero model calls; the driver step
+          # exits nonzero so the failure is visible). NO ambient fallback
+          # to another credential; the same family's other credential
+          # variables are unset. Under the redemption profile the SDK lane
+          # driver redeems at startup itself.
+          if [ -n "${FORGE_CREDENTIAL_REF:-}" ] && [ "${FORGE_CREDENTIAL_REDEEM:-}" != "1" ]; then
+            if [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+              printf 'failed\n' > .forge/exit
+              echo "FORGE_BOOTSTRAP_FAILED: the bound credential pipeline variable ANTHROPIC_AUTH_TOKEN (group forge-lane-credentials) is empty or missing — provision it as a secret variable and authorize this pipeline, or dispatch with the runner-redemption profile (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            unset CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true
+          fi
           python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
           exit 0
         displayName: Run harness driver
@@ -318,6 +375,14 @@ jobs:
           FORGE_GROK_AUTH: $(LANE_FORGE_GROK_AUTH)
           ZAI_API_KEY: $(LANE_ZAI_API_KEY)
           COPILOT_GITHUB_TOKEN: $(LANE_COPILOT_GITHUB_TOKEN)
+          # R38-02 (#303): the credential DELIVERY reference + the
+          # redemption flag (refs only, never a value — the value rides
+          # the secret pipeline variable above). The resolution script at
+          # the top of the driver step fails CLOSED when a bound dispatch
+          # finds the mapped secret empty; under the redemption profile
+          # the SDK lane driver redeems at startup instead.
+          FORGE_CREDENTIAL_REF: ${{ parameters.credential_ref }}
+          FORGE_CREDENTIAL_REDEEM: ${{ parameters.credential_redeem }}
 
       # Candidate capture — condition: always(): the audit trail survives
       # failures (mirror of the Actions lane).

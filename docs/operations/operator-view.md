@@ -10,9 +10,12 @@ bundle (`forge.adaptive.support_bundle`), the authorized snapshot reader
 canonical repository subjects that scope every operator read, the
 R37-03 current-state projection rules (exact activation receipts,
 per-attempt generations, current-candidate binding, the source-version
-fence) and the R37-16 bounded operator experience (bounded drill-down,
+fence), the R37-16 bounded operator experience (bounded drill-down,
 typed blocked-reason diagnostics, pending-command/occupancy surfaces,
-bounded bundle export, time-to-diagnose observability).
+bounded bundle export, time-to-diagnose observability) and the R38-15
+recovery surface (the delivery outcome as a first-class field, the
+five-milestone pause/resume ladder, advisory recovery hints and the
+bounded, allowlisted, backup-free export diagnostics).
 
 For the control commands themselves, see
 [operator-commands.md](operator-commands.md) and
@@ -292,8 +295,8 @@ calls, no state transitions):
 | Route | Returns |
 |---|---|
 | `GET /operator/runs?subject=<family>/<connection>/<native>&limit=&cursor=` | A bounded page of thin summaries per run: state, underlying state, blocked/waiting line, `updated_at`, `projection_age_seconds`, `projection_inconsistent`, unresolved-effect count, plus the page bound and the scope-bound continuation cursor |
-| `GET /operator/runs/{run_id}?subject=…&limit=&sections=` | The full `render()` document plus `subject`, `subject_id`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice), `source_version` / `projection_inconsistent` (the consistency fence), `actions` — the ADVISORY hints — and the R37-16 diagnostics sections: `sections` (the read bounds), `pending_commands`, `occupancy_summary` and `blocked_reasons` |
-| `GET /operator/runs/{run_id}/support-bundle?subject=…&max_bytes=&sections=` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on, with the same `subject_id` and fence marks, plus the `export` block stating its scope and size (see §10) |
+| `GET /operator/runs/{run_id}?subject=…&limit=&sections=` | The full `render()` document plus `subject`, `subject_id`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice), `source_version` / `projection_inconsistent` (the consistency fence), `recovery` (the R38-15 recovery section, §11), `actions` — the ADVISORY hints — and the R37-16 diagnostics sections: `sections` (the read bounds), `pending_commands`, `occupancy_summary` and `blocked_reasons` |
+| `GET /operator/runs/{run_id}/support-bundle?subject=…&max_bytes=&sections=` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on, with the same `subject_id` and fence marks, plus the `export` block stating its scope and size (see §10) and the bounded `diagnostics` slice (§11.4) |
 
 **Authentication** is the lane-control credential family, reused: the
 same `HMAC-SHA256` under `FORGE_LANE_CONTROL_SECRET`, presented as a
@@ -428,7 +431,113 @@ accumulates; thousands-of-runs paging is pinned by tests (the
 checkpoint authority is consulted once per PAGE MEMBER, never per run
 in scope).
 
-## 11. Diagnosing the pilot failure cases
+## 11. The recovery surface (R38-15)
+
+The live single-writer run's exact pain: an empty resumed diff displayed
+as a "successful resume" shape, and operators could not tell a requested
+pause from a verified checkpoint, a stopped runner, an authorized resume
+or an applied exact resume. The recovery surface (in
+`forge.adaptive.operator_view`, rendered by the detail route's
+`recovery` document, `forge.operator.recovery/1`) separates exactly
+those facts. It is still read-only by charter: every hint names an
+EXISTING guarded route; nothing here is a second authorization surface.
+
+### 11.1 The delivery outcome — a first-class field
+
+`delivery_outcome_of(rows)` derives what the CURRENT attempt actually
+delivered from the markers already recorded — never from a successful
+SDK turn:
+
+| Outcome | Meaning | The evidence that derives it |
+|---|---|---|
+| `delivered` | A candidate was collected | `candidate_state=candidate` (#302 marker), or collected `candidate_shas` |
+| `empty_diff_no_effect` | A zero-change candidate — a FAILED/no-effect delivery, never a successful resume | `candidate_state=zero_change`, or the run row's `repair_no_effect` / `harness_no_changes` |
+| `collection_failed` | The collector failed; no candidate exists | `candidate_state=collection_failed`, or `harness_artifact_missing` / `harness_candidate_invalid` |
+| `driver_failed` | The lane driver failed before a candidate existed | `candidate_state=driver_failed`, `driver_exit` ≠ `completed`, or `harness_driver_failed` |
+| `not_collected_yet` | No delivery recorded — an honest unknown | nothing recorded |
+
+The #302 finalization markers
+(`FORGE_LANE_OUTCOME:{driver_exit, collector_exit, candidate_state}`)
+land on the run's evidence (the harness fragment, or the top-level
+spelling); the reader maps them onto the run row's `lane_outcome` slice
+and the view derives from that. Priority: the recorded `candidate_state`
+wins (the lane already reconciled driver and collector), then the driver
+exit, then the run row's typed blocked reason, then collected
+candidates, then the honest nothing-recorded.
+
+**The display rule:** the three failure outcomes
+(`empty_diff_no_effect`, `collection_failed`, `driver_failed`) render
+`delivery.failed: true` with a headline that says FAILED — the state
+ladder may honestly say `resumed` (the activation receipt holds), and
+the recovery document says the resume delivered no changes. Never a
+successful resume of useful work.
+
+### 11.2 The five-milestone ladder
+
+`recovery_ladder(rows, coverage, occupancy)` renders each milestone
+independently — `present` (with its thin evidence link and moment),
+`absent` (the authority was observed and holds no such row) or
+`unknown` (never queried, or the authority was unreachable):
+
+| Milestone | The row that proves it |
+|---|---|
+| `pause_requested` | the pause COMMAND row (any rung — the request itself is the milestone) |
+| `checkpoint_committed` | the verified checkpoint (its id + digest) |
+| `runner_stopped` | the native job's terminal observation — a RELEASED execution lease (the reconciler's probe, never a timer) |
+| `resume_authorized` | the resume DECISION row — a resume command not refused on the ladder (`rejected`/`expired` was never authorized) |
+| `exact_resume_applied` | the R37-03 activation receipt: an applied resume whose recorded `checkpoint_ref` named THIS checkpoint (`activation: "matched"`); an unmatched one activates nothing |
+
+A checkpoint authority that is unavailable while the DB stays healthy
+makes both checkpoint milestones `unknown` — never "no checkpoint". A
+snapshot whose source fence moved (§8) renders the whole recovery
+document with `consistency: "inconsistent"` plus an explicit uncertainty
+note instead of a confident ladder assembled from mixed versions.
+
+### 11.3 Recovery hints — advisory, guarded routes named
+
+`recovery_hint(state, delivery_outcome, blocked_reason)` answers every
+state × outcome with an advisory whose commands each carry the EXACT
+command shape and the guarded route that executes it
+(`/steer <run-id> <text>` via `command_router:/steer`,
+`/resume <run-id>` via `command_router:/resume`, `/retry <run-id>` via
+`operator-commands:/retry`, `/reconcile <run-id>` via
+`operator-commands:/reconcile`, the probe via `read-only:/status`, the
+credential rotation via `runbook:token-rotation`). The pinned rules:
+
+- a revoked/stale authority (the R37-16/#297 non-retryable wording)
+  outranks the delivery outcome — rotate or reconcile, `retryable:
+  false`, and NEVER a retry verb;
+- `empty_diff_no_effect` in `resumed` names BOTH escapes (re-issue the
+  guidance, or restart from the verified checkpoint);
+- `collection_failed` carries the collector's typed error and the rerun
+  path; `driver_failed` the guarded rerun; `not_collected_yet` the probe;
+- `None` only for the healthy ends (a delivered candidate that is
+  verified or accepted);
+- unknown states and outcomes fail visibly.
+
+**Stale action hints.** The detail route's action block
+(`action_hint_block`) marks every hint `stale: true` with the current
+state's safe alternative (`probe`) when the snapshot's consistency fence
+moved — the display half of the refusal the guarded routes already
+enforce (CTL-04 CAS); the block also states why it is stale.
+
+### 11.4 The bounded export diagnostics
+
+The support-bundle export carries a `diagnostics` slice
+(`forge.operator.diagnostics/1`), structurally bounded three ways:
+
+- **SIZE** — at most 10 entries per list section (`truncated` names what
+  was cut) on top of the export's byte cap;
+- **ALLOWLIST** — every section serializes only its declared
+  `DIAGNOSTIC_SECTION_FIELDS` (the audit-export `CREDENTIAL_DOCUMENT_FIELDS`
+  pattern); anything else a source row carried is dropped;
+- **BACKUP EXCLUSION** — raw operational backup names (the R38-03/#304
+  world: `*.dump`, `*.pgdump`, `*.sql`, `backups/…`) are scrubbed from
+  every string the slice carries, counted as
+  `export.raw_backups_excluded`; a sanitized RECEIPT reference (a value
+  naming a receipt) is referenced at most.
+
+## 12. Diagnosing the pilot failure cases
 
 The runbook slice for the agreed pilot failure cases — each typed
 blocked reason mapped to where the operator looks and the safe next
@@ -438,6 +547,7 @@ noted here (API availability is not usability proof).
 
 | The failure you see | Where to look first | Safe next action |
 |---|---|---|
+| A resume "succeeded" but nothing changed (`empty_diff_no_effect`) | Detail → `recovery.delivery` (outcome + headline: a FAILED/no-effect delivery, never a successful resume), `recovery.hint` | Re-issue the guidance (`/steer <run-id> <text>`) or restart from the verified checkpoint (`/resume <run-id>`) — both through the command router |
 | A run waits with `revoked_authority` | Detail → `blocked_reasons[0].evidence` (the run row), `source_coverage` for which sections were even queried | Rotate/rebind the credential per [token-rotation.md](token-rotation.md), then re-probe — do NOT retry |
 | A terminal run still holds external effects (`uncertain_native_effect`) | Detail → `unresolved_effects` (operation keys, target refs) | Run the guarded `/reconcile` to determine each landing before anything else |
 | A paused run cannot resume (`required_checkpoint_loss`) | Detail → `source_coverage.checkpoints` (`missing`/`unknown`), the checkpoint identity | Restore from backup per [backup-restore.md](backup-restore.md) or retire the run — do NOT retry |

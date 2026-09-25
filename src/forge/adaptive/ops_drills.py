@@ -57,6 +57,22 @@ The drills and what each proves:
   draining — an override never relabels uncertain occupancy
   observed-terminal silently.
 
+R38-18 (issue #319) adds the PROFILE-BOUND deployment arms, every one
+recording the frozen supported profile's manifest digest and rendering
+``unqualified-for-profile`` on a deployment/bind mismatch:
+:func:`drill_lost_response_at_cap` (a dropped native dispatch response
+with the concurrency cap reached immediately), :func:
+`drill_volume_fill_during_pause` (the checkpoint volume filled to the
+configured safety threshold during a PAUSED run with a pinned
+checkpoint), :func:`drill_mismatched_restore_preflight` (mismatched
+metadata/blob snapshots refused at preflight before any new model
+turn), :func:`drill_pause_cancel_percentiles` (pause/cancel
+responsiveness with stated percentiles and scope under upload +
+slow-provider load), plus :func:`profile_binding_row`,
+:func:`percentile_summary`, :func:`reviewer_wip_bound_row` and
+:func:`summarize_for_publication` (the sanitized published summary —
+raw diagnostics stay private, the #304 discipline).
+
 The SATURATION SIGNALS (the issue's observability):
 ``execution.occupied_vs_limit``, ``native_start.unknown_age``,
 ``checkpoint.upload_memory_budget``, ``control.command_latency``,
@@ -74,6 +90,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -116,8 +133,10 @@ from forge.durable import FlowRun
 from forge.models.base import Base
 
 __all__ = [
+    "BACKUP_RESTORE_MODEL_TURN_GATE",
     "CAS_SHARED_VOLUME_STATEMENT",
     "CAS_UNSHARED_REPLICA_BOUNDARY",
+    "CapBoundaryLane",
     "CONTROL_PLANE_ROOT_CREDENTIAL_NAMES",
     "DEPLOYMENT_DRILL_SCOPE",
     "DRILLS",
@@ -126,13 +145,19 @@ __all__ = [
     "DrillOutcome",
     "FaultedNativeLane",
     "LostStartResponse",
+    "PROFILE_BINDING_AXES",
+    "PROFILE_QUALIFIED",
+    "PROFILE_UNQUALIFIED",
+    "PUBLISHED_REPORT_STAMP",
     "RemoteCycleRecord",
     "RemoteDispatchLane",
+    "RestorePreflightRefused",
     "UploadAdmissionBudget",
     "UploadBudgetExceeded",
     "build_fixture",
     "build_topology_document",
     "checkpoint_payload",
+    "check_profile_binding",
     "credential_shaped_names",
     "drill_backup_restore",
     "drill_checkpoint_upload_load",
@@ -140,12 +165,22 @@ __all__ = [
     "drill_credential_isolation",
     "drill_degraded_faults",
     "drill_degraded_modes",
+    "drill_lost_response_at_cap",
+    "drill_mismatched_restore_preflight",
     "drill_native_start_load",
     "drill_operator_override_audit",
+    "drill_pause_cancel_percentiles",
     "drill_remote_occupancy",
     "drill_restore_deployment",
     "drill_token_rotation",
+    "drill_volume_fill_during_pause",
+    "percentile_summary",
+    "profile_binding_row",
+    "profile_manifest_digest",
+    "restore_with_preflight",
+    "reviewer_wip_bound_row",
     "run_drill",
+    "summarize_for_publication",
 ]
 
 #: The report's scope sentence — every drill outcome carries it and the
@@ -1666,16 +1701,50 @@ _CREDENTIAL_NAME_PATTERN = re.compile(
     r"(?i)(token|secret|key|password|passwd|credential|pat\b|api_key)"
 )
 
+#: The #303 credential-delivery REFERENCE names — non-secret: a ref
+#: names WHERE the value lives (the CI secret/variable or the
+#: redemption route), never a value. R38-17 (#318): the isolation
+#: drill flagged them as "credential-shaped beyond the lane token" on
+#: a live re-run; they are the delivery CONTRACT's own variables.
+NON_SECRET_CREDENTIAL_REF_NAMES: Final = (
+    "FORGE_CREDENTIAL_REF",
+    "FORGE_CREDENTIAL_REDEEM",
+)
+
+#: A ``credential_ref``-shaped dispatch key (``credential_ref``,
+#: ``model_credential_ref``, …) — the same reference meaning in any
+#: casing/separator spelling. Deliberately narrow: only names ENDING
+#: in the ref/redeem words match, so the VALUE carrier names the
+#: native profiles map (``FORGE_MODEL_<SEGMENT>`` — e.g.
+#: ``FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN``) keep flagging.
+_NON_SECRET_REF_SHAPE = re.compile(r"(?i)(^|_)(credential[_-]?ref|credential[_-]?redeem)$")
+
+
+def is_non_secret_credential_ref(name: str) -> bool:
+    """Whether *name* is a credential REFERENCE (a non-secret pointer).
+
+    The #303 delivery vocabulary's two variables, plus any
+    ``credential_ref``-shaped dispatch key: refs point at where a
+    value lives; they are never values themselves, so the isolation
+    boundary (values beyond the lane token) does not apply to them.
+    """
+    return name in NON_SECRET_CREDENTIAL_REF_NAMES or bool(_NON_SECRET_REF_SHAPE.search(name))
+
 
 def credential_shaped_names(env: Mapping[str, str]) -> list[str]:
     """The credential-shaped NAMES in *env* (values never touched).
 
     The #296 executor's ``scan_credential_env`` pattern, applied to a
     supplied mapping so the deployment drill can name what the control
-    plane holds without ever recording a value.
+    plane holds without ever recording a value. The #303 non-secret
+    REFERENCE names are excluded — they are pointers, not values.
     """
 
-    return sorted(name for name in env if _CREDENTIAL_NAME_PATTERN.search(name))
+    return sorted(
+        name
+        for name in env
+        if _CREDENTIAL_NAME_PATTERN.search(name) and not is_non_secret_credential_ref(name)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2286,16 +2355,23 @@ def drill_credential_isolation(
         f"leaks: {leaked or 'none'})",
     )
     # The stronger shape: the ONLY credential-shaped variable the dispatch
-    # may inject is the work-scoped lane token itself.
+    # may inject is the work-scoped lane token itself — plus the #303
+    # delivery REFERENCES (R38-17/#318: FORGE_CREDENTIAL_REF /
+    # FORGE_CREDENTIAL_REDEEM name where a value lives, never a value;
+    # the live re-run false positive is gone, a token-shaped name still
+    # flags).
     leaked_credential_shaped = [
         key
         for key in variable_keys
-        if _CREDENTIAL_NAME_PATTERN.search(key) and key != "FORGE_LANE_CONTROL_TOKEN"
+        if _CREDENTIAL_NAME_PATTERN.search(key)
+        and key != "FORGE_LANE_CONTROL_TOKEN"
+        and not is_non_secret_credential_ref(key)
     ]
     outcome.check(
         not leaked_credential_shaped,
         f"the dispatch envelope carries NO credential-shaped variable beyond the "
-        f"work-scoped lane token (extra: {leaked_credential_shaped or 'none'})",
+        f"work-scoped lane token and the non-secret delivery refs (extra: "
+        f"{leaked_credential_shaped or 'none'})",
     )
     outcome.check(
         bool(variable_keys) and bool(envelope.get("token_dispatched")),
@@ -2616,3 +2692,1184 @@ async def drill_token_rotation(
         return outcome
     finally:
         await fixture.dispose()
+
+
+# ---------------------------------------------------------------------------
+# R38-18 (issue #319) — the PROFILE-BOUND deployment arms
+#
+# The R37-20 drills above measured the deployment as it stood. The frozen
+# supported profile (#307,
+# ``qualification/profiles/supported-gitlab-ce-v1.json``) changed the
+# contract: the measurements are only evidence for the profile whose
+# executed-lab bind the deployment MATCHES. Every drill below therefore
+# records the manifest digest it ran against and refuses to pass silently
+# against a different deployment (``unqualified-for-profile``), and the
+# review's three named deployment-only failure arms — lost response at
+# the cap, volume fill during pause, mismatched restore — are exercised
+# as their own drills with typed outcomes.
+# ---------------------------------------------------------------------------
+
+#: The two renderings of a drill's profile qualification (R38-18): a
+#: mismatch never passes silently, it renders unqualified.
+PROFILE_QUALIFIED: Final = "qualified-for-profile"
+PROFILE_UNQUALIFIED: Final = "unqualified-for-profile"
+
+#: The executed-lab bind axes: (axis label, manifest key under
+#: ``control_plane.executed_lab``, observed-deployment key). Every axis
+#: must be BOTH observed on the deployment and equal to the manifest's
+#: executed-lab bind — an unobserved axis is a named difference, never a
+#: silent pass.
+PROFILE_BINDING_AXES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("image_name", "image_name", "image_name"),
+    ("image_id", "image_id", "image_id"),
+    ("image_digest", "image_digest", "image_digest"),
+    ("deployed_schema_head", "deployed_schema_head", "schema_head"),
+    ("reported_version", "reported_version", "reported_version"),
+)
+
+
+def profile_manifest_digest(document: Mapping[str, Any]) -> str:
+    """Recompute a supported-profile manifest's self-vouching digest.
+
+    The same canonical shape ``scripts/freeze_supported_profile.py``
+    froze: sha256 over the document WITHOUT its own ``manifest_digest``
+    field, sorted keys, compact separators. A file that drifted from its
+    freeze does not vouch for itself — the caller names that, never
+    passes it.
+    """
+
+    body = {key: value for key, value in document.items() if key != "manifest_digest"}
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def profile_binding_row(
+    manifest: Mapping[str, Any], observed_deployment: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The profile bind row every R38-18 drill report carries.
+
+    *manifest* is the frozen supported-profile document;
+    *observed_deployment* the read-only deployment observation
+    (``image_name`` / ``image_id`` / ``image_digest`` / ``schema_head`` /
+    ``reported_version``). The row states the digest, the bind verdict
+    and every difference — and renders the qualification
+    ``unqualified-for-profile`` on ANY difference (including a manifest
+    that no longer vouches for itself, or an axis the probes could not
+    observe): the measurement is evidence only for the deployment the
+    profile's executed-lab bind names, never silently for another.
+    """
+
+    differences: list[str] = []
+    declared = str(manifest.get("manifest_digest") or "")
+    if not declared:
+        differences.append("the manifest carries no manifest_digest — nothing to bind")
+    elif profile_manifest_digest(manifest) != declared:
+        differences.append(
+            "the manifest does not vouch for itself (recomputed digest differs from the "
+            "declared manifest_digest — the file drifted from its freeze)"
+        )
+    executed_lab = dict((manifest.get("control_plane") or {}).get("executed_lab") or {})
+    for axis, manifest_key, observed_key in PROFILE_BINDING_AXES:
+        expected = str(executed_lab.get(manifest_key) or "")
+        actual = str(observed_deployment.get(observed_key) or "")
+        if not actual:
+            differences.append(f"{axis}: not observed — the read-only deployment probe must see it")
+        elif expected and actual != expected:
+            differences.append(
+                f"{axis}: the deployment reports {actual!r} but the profile's executed-lab "
+                f"bind is {expected!r}"
+            )
+    return {
+        "profile": str(manifest.get("profile") or ""),
+        "manifest_digest": declared,
+        "bind": "matched" if not differences else "mismatched",
+        "differences": differences,
+        "qualification": PROFILE_QUALIFIED if not differences else PROFILE_UNQUALIFIED,
+        "statement": (
+            "the measurements bind to THIS frozen profile's executed-lab composition; a "
+            "deployment that differs renders unqualified-for-profile, never a silent pass"
+        ),
+    }
+
+
+def check_profile_binding(outcome: DrillOutcome, binding: Mapping[str, Any]) -> None:
+    """Record the profile bind as an objective or a violation.
+
+    The R38-18 discipline: a profile-bound drill that ran against a
+    deployment differing from the frozen profile's executed-lab bind
+    FAILS naming ``unqualified-for-profile`` — the alternative (passing
+    against a different deployment) is exactly the silent substitution
+    the profile freeze exists to prevent.
+    """
+
+    qualification = str(binding.get("qualification") or "")
+    digest = str(binding.get("manifest_digest") or "")
+    if qualification == PROFILE_QUALIFIED and digest:
+        outcome.objectives.append(
+            f"the drill ran BOUND to the frozen supported profile (manifest {digest[:16]}…, "
+            "executed-lab bind matched) — qualified-for-profile"
+        )
+        return
+    differences = "; ".join(str(item) for item in binding.get("differences") or ())
+    outcome.violations.append(
+        f"the deployment does NOT match the frozen supported profile (manifest {digest[:16]}…): "
+        f"{differences or 'no differences recorded'} — {PROFILE_UNQUALIFIED}, the measurement "
+        "is not evidence for this deployment"
+    )
+
+
+def percentile_summary(
+    samples: Sequence[float], *, objective_s: float | None = None
+) -> dict[str, Any]:
+    """The stated-percentiles summary R38-18 demands (never one latency).
+
+    Nearest-rank percentiles over *samples* (the p-XX value is the
+    ``ceil(p/100 · n)``-th ordered sample): ``n``, ``min_s``, ``p50_s``,
+    ``p95_s``, ``max_s`` and the optional objective. An empty sample set
+    answers ``None`` percentiles with ``n=0`` — never a fabricated zero.
+    """
+
+    ordered = sorted(float(sample) for sample in samples)
+
+    def _pct(fraction: float) -> float:
+        index = min(len(ordered) - 1, max(0, math.ceil(fraction * len(ordered)) - 1))
+        return ordered[index]
+
+    if not ordered:
+        return {
+            "n": 0,
+            "min_s": None,
+            "p50_s": None,
+            "p95_s": None,
+            "max_s": None,
+            "objective_s": objective_s,
+        }
+    return {
+        "n": len(ordered),
+        "min_s": round(ordered[0], 4),
+        "p50_s": round(_pct(0.50), 4),
+        "p95_s": round(_pct(0.95), 4),
+        "max_s": round(ordered[-1], 4),
+        "objective_s": objective_s,
+    }
+
+
+def reviewer_wip_bound_row(*, admission_limit: int, reviewer_wip_bound: int) -> dict[str, Any]:
+    """The human-capacity discipline row (R38-18 acceptance 5).
+
+    A STATED POLICY FIELD, not a measurement and never a throughput
+    claim: the operator declares how much concurrent WIP one human
+    reviewer can safely review, and the deployment's admission bound must
+    stay within it — model throughput and human review capacity are
+    never conflated. An incoherent row (admission beyond the reviewable
+    volume) names itself; the caller surfaces it as a policy finding.
+    """
+
+    coherent = admission_limit <= reviewer_wip_bound
+    return {
+        "policy": (
+            "admission never queues more work than the stated human review capacity can "
+            "safely review (R38-18: human review capacity measured separately from model "
+            "throughput)"
+        ),
+        "reviewer_wip_bound": reviewer_wip_bound,
+        "admission_bound": admission_limit,
+        "unit": "concurrent reviewable WIP (a STATED POLICY FIELD, not a measured value)",
+        "coherent": coherent,
+        "statement": (
+            f"the deployment's admission bound ({admission_limit} active runs per project) "
+            f"stays within the stated reviewer-WIP bound ({reviewer_wip_bound}) — the "
+            "operator does not admit work beyond the reviewable volume"
+            if coherent
+            else f"the admission bound ({admission_limit}) EXCEEDS the stated reviewer-WIP "
+            f"bound ({reviewer_wip_bound}) — admission is queuing work beyond the reviewable "
+            "volume; lower the admission bound or grow review capacity BEFORE increasing load"
+        ),
+        "throughput_claim": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# R38-18 arm 1 — a lost native dispatch response AT the concurrency cap
+# ---------------------------------------------------------------------------
+
+
+class CapBoundaryLane(RemoteDispatchLane):
+    """The occupancy seam, phased for the cap-boundary probe.
+
+    The deployment reality this seam encodes: a plan is a model call
+    (slow, unbounded-ish latency — and per-project fair-use limited),
+    while a ``/go`` dispatch verdict at a full cap lands in SECONDS, and
+    a dispatched trivial job COMPLETES within minutes (its lease then
+    releases). The arm therefore runs in strict phases:
+
+    - ``plan_cycle(index)`` — plan one cycle WITHOUT dispatching it (no
+      lease, no capacity; every cycle is planned before ANY dispatch);
+    - ``go_dropped(index)`` — ``/go`` the planned cycle and DROP the
+      native dispatch response at the client seam: the dispatch IS
+      issued, the answer is deliberately never processed — the run's
+      occupancy must be proven from DURABLE state afterwards, never from
+      the answer the drill pretended not to receive (#241 semantics at
+      the cap boundary);
+    - ``go_fill(index)`` — ``/go`` the planned cycle and observe its
+      dispatch (the cap fill);
+    - ``go_over_cap(index)`` — ``/go`` the ALREADY-PLANNED over-cap
+      cycle the moment the cap is reached and answer its verdict (the
+      typed park, or an honest dispatch if a slot freed).
+
+    With every plan done up front, the /go probe window contains no
+    model call — exactly the review's "concurrency cap immediately
+    reached" shape.
+    """
+
+    async def plan_cycle(self, index: int) -> RemoteCycleRecord:
+        """Plan cycle *index* without dispatching it (no lease held)."""
+        record = RemoteCycleRecord(index=index)
+        record.end_state = "planned"
+        return record
+
+    async def go_dropped(self, index: int) -> RemoteCycleRecord:
+        raise NotImplementedError
+
+    async def go_fill(self, index: int) -> RemoteCycleRecord:
+        raise NotImplementedError
+
+    async def go_over_cap(self, index: int) -> RemoteCycleRecord:
+        raise NotImplementedError
+
+
+async def drill_lost_response_at_cap(
+    lane: CapBoundaryLane,
+    *,
+    profile_binding: Mapping[str, Any],
+    reconcile_timeout_s: float = 300.0,
+    sample_interval_s: float = 0.5,
+) -> DrillOutcome:
+    """A native dispatch response dropped + the cap reached immediately.
+
+    The review's negative test 1 (R38-18): every cycle is PLANNED first
+    (plans hold no capacity); then one ``/go`` loses its native dispatch
+    response at the client seam while the remaining ``/go`` cycles bring
+    the project to its concurrency cap; the cycle AFTER the cap must
+    park with the typed verdict; the dropped run's occupancy keeps
+    consuming capacity (proven from the durable lease row — never from
+    the dropped answer) until the reconciler resolves it by observation.
+    """
+
+    outcome = DrillOutcome(drill="deployment_lost_response_at_cap")
+    limit = lane.limit
+    outcome.tested_limits = {
+        "observed_limit": limit,
+        "dropped_response_cycle": 1,
+        "cycles_at_cap": limit,
+        "over_cap_cycles": 1,
+        "phasing": (
+            "every cycle planned BEFORE any dispatch (a plan holds no lease); the /go "
+            "probe window contains no model call"
+        ),
+        "over_cap_cycle": "pre-planned (its model call completes BEFORE the cap fills)",
+        "reconcile_timeout_s": reconcile_timeout_s,
+        "sample_interval_s": sample_interval_s,
+        "native_jobs": "REAL on the deployment's runner, cancelled job-level immediately after observation",
+    }
+    check_profile_binding(outcome, profile_binding)
+    peak_occupied = 0
+    occupancy_words_seen: set[str] = set()
+    stop = asyncio.Event()
+    sampler_done = asyncio.Event()
+
+    async def sampler() -> None:
+        nonlocal peak_occupied
+        while not stop.is_set():
+            snapshot = await lane.occupancy_snapshot()
+            peak_occupied = max(peak_occupied, sum(snapshot.values()))
+            occupancy_words_seen.update(snapshot)
+            await asyncio.sleep(sample_interval_s)
+        sampler_done.set()
+
+    sampler_task = asyncio.create_task(sampler())
+    # Phase A — every cycle PLANNED, nothing dispatched, no capacity held
+    # (a plan is a model call: it stays OUTSIDE the probe window).
+    plans = list(await asyncio.gather(*(lane.plan_cycle(index) for index in range(limit + 1))))
+    unplanned = [record.index for record in plans if record.end_state != "planned"]
+    # Phase B — the dropped-response /go FIRST, the fill cycles with it:
+    # the cap is reached immediately with one occupant the client never
+    # observed. The whole phase is seconds wide (no model calls inside).
+    dropped, *fill = list(
+        await asyncio.gather(
+            lane.go_dropped(0),
+            *(lane.go_fill(index) for index in range(1, limit)),
+        )
+    )
+    # Phase C — the durable-state proof (never the dropped answer): the
+    # lease row still accounts the dropped run, and the cap is full.
+    lease_of_dropped = await lane.lease_state(dropped.run_id)
+    snapshot_at_cap = await lane.occupancy_snapshot()
+    occupied_at_cap = sum(snapshot_at_cap.values())
+    # Phase D — the already-planned over-cap cycle meets the cap head-on.
+    over = await lane.go_over_cap(limit)
+    stop.set()
+    await sampler_done.wait()
+    sampler_task.cancel()
+    dispatched = [dropped, *fill]
+    for record in dispatched:
+        if record.end_state in {"dispatched", "dispatched_response_dropped"}:
+            await lane.cancel_immediately(record)
+    drained, drained_after_s = await lane.wait_project_drained(reconcile_timeout_s)
+
+    outcome.check(
+        not unplanned,
+        f"every cycle was PLANNED before any dispatch — the /go probe window contains no "
+        f"model call (unplanned cycles: {unplanned or 'none'})",
+    )
+    outcome.check(
+        peak_occupied <= limit,
+        f"open leases NEVER exceeded the observed limit of {limit} through the dropped "
+        f"dispatch response and the cap race (peak observed {peak_occupied})",
+    )
+    outcome.check(
+        lease_of_dropped != "",
+        "the DROPPED native dispatch response released NOTHING on its own — the run's "
+        f"lease stayed accounted in durable state (occupancy {lease_of_dropped!r} proven "
+        "from the lease row, never from the dropped answer)",
+    )
+    outcome.check(
+        occupancy_words_seen & {"dispatched_unknown", "draining", "native_running"},
+        "the controlled failure kept its occupancy VISIBLE while unresolved (words seen: "
+        f"{sorted(occupancy_words_seen)}) — unknown occupancy keeps consuming capacity",
+    )
+    outcome.check(
+        occupied_at_cap == limit,
+        f"the cap was reached with the unknown occupancy INSIDE it ({occupied_at_cap}/{limit} "
+        "leases open at the cap, mix "
+        f"{dict(sorted(snapshot_at_cap.items()))}) — running/unknown/draining correspond to "
+        "the configured bound under the controlled failure",
+    )
+    outcome.check(
+        over.end_state.startswith("parked"),
+        f"the cycle immediately after the cap parked with the TYPED verdict "
+        f"({over.end_state}) — never silent oversubscription",
+    )
+    outcome.check(
+        drained,
+        f"after job-level cancels the reconciler resolved the unknown occupancy BY "
+        f"OBSERVATION and drained the project to zero open leases within "
+        f"{reconcile_timeout_s}s (waited {drained_after_s:.1f}s)",
+    )
+    outcome.signals = {
+        "execution.occupied_vs_limit": {
+            "limit": limit,
+            "peak_occupied": peak_occupied,
+            "occupied_at_cap": occupied_at_cap,
+            "occupancy_mix_at_cap": dict(sorted(snapshot_at_cap.items())),
+            "occupancy_words_seen": sorted(occupancy_words_seen),
+        },
+        "native.occupancy_unknown": {
+            "dropped_response_lease_word": lease_of_dropped,
+            "resolved_by": "reconciler observation (job-level cancels; never the dropped answer)",
+            "over_cap_verdict": over.end_state,
+        },
+        "queue_wait_s": {
+            "dropped_cycle": (
+                None if dropped.queue_wait_s is None else round(dropped.queue_wait_s, 3)
+            ),
+            "measured_from": "the durable lease row (the dispatch response was dropped)",
+        },
+        "drained_after_s": round(drained_after_s, 1),
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R38-18 arm 2 — the checkpoint volume filled to the safety threshold
+# during a PAUSED run
+# ---------------------------------------------------------------------------
+
+
+async def drill_volume_fill_during_pause(
+    work_dir: Path,
+    *,
+    profile_binding: Mapping[str, Any],
+    safety_threshold_bytes: int = 4096,
+    pinned_read_objective_s: float = 5.0,
+) -> DrillOutcome:
+    """The checkpoint volume filled to the configured safety threshold
+    while a run is PAUSED with a pinned checkpoint (R38-18 negative test
+    2).
+
+    The volume is a QUOTA'D DISPOSABLE tmp-dir store — a real disk is
+    never filled; the typed-refusal path is what is measured. The paused
+    run's WIP is the pause-fence shape (a checkpoint PINNED by the
+    persisted continuation decision); the fill is the further WIP
+    snapshots that keep landing. At the threshold: new writes refuse
+    TYPED (:class:`StorageQuotaExceededError`), every further write
+    refuses at the same predictable boundary (admission stops on a typed
+    signal, never a silent queue), and the PINNED WIP survives — a
+    verified read at/after the threshold, its bytes never deleted.
+    """
+
+    from forge.api_checkpoint_channel import StoragePolicy, StorageQuotaExceededError
+
+    outcome = DrillOutcome(drill="deployment_volume_fill_during_pause")
+    outcome.tested_limits = {
+        "volume_shape": "a quota'd DISPOSABLE tmp-dir store (a real disk is NEVER filled)",
+        "safety_threshold_bytes": safety_threshold_bytes,
+        "paused_work": "a checkpoint PINNED by the pause fence (the persisted continuation decision)",
+        "further_write_attempts": 4,
+        "pinned_read_objective_s": pinned_read_objective_s,
+    }
+    check_profile_binding(outcome, profile_binding)
+
+    root = work_dir / "volume-fill-store"
+    repository = FilesystemCheckpointRepository(
+        root, policy=StoragePolicy(max_total_bytes_per_work=safety_threshold_bytes)
+    )
+    # The paused run's pinned WIP.
+    work_id = "wp-paused-run"
+    pinned_manifest, pinned_blobs, pinned_id = checkpoint_payload(
+        work_id, 0, blob_count=2, blob_bytes=256
+    )
+    await repository.put(work_id, pinned_id, pinned_manifest, pinned_blobs)
+    await repository.pin(
+        work_id, pinned_id, reason="pause fence: the persisted continuation decision"
+    )
+
+    # Fill toward the configured safety threshold — further WIP snapshots
+    # keep landing for the paused work until the volume refuses.
+    typed_refusals = 0
+    landed_during_fill = 0
+    sequence = 1
+    for _attempt in range(8):
+        manifest, blobs, checkpoint_id = checkpoint_payload(
+            work_id, sequence, blob_count=2, blob_bytes=512
+        )
+        sequence += 1
+        try:
+            await repository.put(work_id, checkpoint_id, manifest, blobs)
+            landed_during_fill += 1
+        except StorageQuotaExceededError:
+            typed_refusals += 1
+            break
+    # AT the threshold: every further new write must refuse at the same
+    # predictable boundary (zero silent growth — admission stops typed).
+    silent_writes = 0
+    for extra in range(4):
+        manifest, blobs, checkpoint_id = checkpoint_payload(
+            work_id, sequence + extra, blob_count=2, blob_bytes=512
+        )
+        try:
+            await repository.put(work_id, checkpoint_id, manifest, blobs)
+            silent_writes += 1
+        except StorageQuotaExceededError:
+            typed_refusals += 1
+
+    # The pinned WIP survives: a VERIFIED read at/after the threshold.
+    entry = await repository.entry(work_id)
+    pins = await repository.pins(work_id)
+    pin_rows = [pin for pin in pins if str(pin.get("checkpoint_id")) == pinned_id]
+    started = time.monotonic()
+    verified_read = False
+    if entry is not None and entry.get("checkpoint_id"):
+        manifest_back, _blobs_back = await repository.read_entry(entry)
+        verified_read = manifest_back is not None
+    pinned_read_s = time.monotonic() - started
+    pinned_bytes_present = (root / pinned_id[:2] / pinned_id).is_file() and all(
+        (root / digest[:2] / digest).is_file() for digest in pinned_blobs
+    )
+    store_bytes = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+    outcome.check(
+        typed_refusals >= 1 and silent_writes == 0,
+        f"new writes at the safety threshold refused TYPED (StorageQuotaExceededError; "
+        f"{typed_refusals} refusals, {silent_writes} silent writes) — storage growth "
+        "stopped at the configured boundary",
+    )
+    outcome.check(
+        bool(pin_rows) and verified_read,
+        "the PINNED WIP SURVIVED the fill: the paused run's pinned checkpoint still reads "
+        f"VERIFIED at the threshold ({len(pin_rows)} pin record(s), verified read "
+        f"{pinned_read_s:.3f}s)",
+    )
+    outcome.check(
+        pinned_bytes_present,
+        "the pinned checkpoint's bytes were never deleted — quota exhaustion removed "
+        "nothing the pause fence pinned",
+    )
+    outcome.check(
+        pinned_read_s <= pinned_read_objective_s,
+        f"the paused run's resume-read stayed responsive at the threshold "
+        f"({pinned_read_s:.3f}s ≤ {pinned_read_objective_s}s objective)",
+    )
+    outcome.signals = {
+        "storage.volume_fill": {
+            "safety_threshold_bytes": safety_threshold_bytes,
+            "store_bytes_at_refusal": store_bytes,
+            "typed_refusals": typed_refusals,
+            "landed_during_fill": landed_during_fill,
+            "silent_writes": silent_writes,
+            "admission_stop": (
+                "typed refusal at the store boundary — every further write refused at the "
+                "same predictable boundary (quota-tmp-dir shape, never a real disk)"
+            ),
+            "pinned_wip_survives": bool(pin_rows) and verified_read,
+            "pinned_read_s": round(pinned_read_s, 4),
+        }
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R38-18 arm 3 — mismatched metadata/blob snapshots refused at preflight
+# ---------------------------------------------------------------------------
+
+
+class RestorePreflightRefused(Exception):
+    """The restore preflight refused — TYPED, before any new model turn.
+
+    ``reason`` is ``"schema-head"`` (the disposable installation's
+    declared schema head does not match the frozen profile's) or
+    ``"backup-halves"`` (the metadata half names checkpoints whose blob
+    bytes the other half lacks). Either way the restore never starts and
+    the resume dispatch — the first thing that would spend a model turn
+    — is never reached.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"restore preflight refused ({reason}): {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+#: The gate's receipt stamp: the preflight order is asserted by counting
+#: model turns BEFORE the gate may open (R38-18: preflight refuses
+#: BEFORE any new model turn).
+BACKUP_RESTORE_MODEL_TURN_GATE: Final = (
+    "preflight → restore → resume dispatch (the first model turn)"
+)
+
+
+async def restore_with_preflight(
+    backup_dir: Path,
+    target: Path,
+    *,
+    expected_schema_head: str,
+    observed_schema_head: str,
+    session_factory: Any | None = None,
+) -> dict[str, Any]:
+    """The R38-18 restore preflight gate (schema bind + halves + restore).
+
+    The order the review demands: the installation's declared schema
+    head must match the frozen profile's, the backup halves must be
+    consistent, and only then does the restore run. Every refusal is the
+    TYPED :class:`RestorePreflightRefused` — the caller's resume
+    dispatch (a new model turn) sits AFTER this gate and is never
+    reached on a refusal.
+    """
+
+    if observed_schema_head != expected_schema_head:
+        raise RestorePreflightRefused(
+            "schema-head",
+            f"the disposable installation declares schema head {observed_schema_head!r} but "
+            f"the frozen profile binds {expected_schema_head!r} — the metadata snapshot "
+            "belongs to a different schema generation",
+        )
+    mismatches = verify_backup_consistency(backup_dir)
+    if mismatches:
+        affected = sorted({str(item.get("work_id")) for item in mismatches})
+        raise RestorePreflightRefused(
+            "backup-halves",
+            f"the metadata half names {len(mismatches)} checkpoint(s) whose blob bytes the "
+            f"other half lacks (affected works: {', '.join(affected)})",
+        )
+    return dict(await restore_store(backup_dir, target, session_factory=session_factory))
+
+
+async def drill_mismatched_restore_preflight(
+    work_dir: Path,
+    *,
+    profile_binding: Mapping[str, Any],
+    expected_schema_head: str = "027",
+    mismatched_schema_head: str = "026",
+) -> DrillOutcome:
+    """Mismatched metadata/blob snapshots restored into a DISPOSABLE
+    installation: the preflight refuses BEFORE any new model turn
+    (R38-18 negative test 3, against the frozen profile's schema head).
+
+    Three installations are tried in order, counting model turns: the
+    mismatched-halves snapshot and the wrong-schema installation both
+    refuse TYPED with ZERO model turns spent; only the consistent
+    snapshot at the profile's schema head restores — and only then may
+    the resume dispatch (the first new model turn) run.
+    """
+
+    outcome = DrillOutcome(drill="deployment_mismatched_restore_preflight")
+    outcome.tested_limits = {
+        "expected_schema_head": expected_schema_head,
+        "mismatched_schema_head": mismatched_schema_head,
+        "snapshot_shape": "metadata naming checkpoints the blob half lacks (t2 metadata + t1 blobs)",
+        "installations": "DISPOSABLE target roots (never the deployment's store)",
+        "gate": BACKUP_RESTORE_MODEL_TURN_GATE,
+    }
+    check_profile_binding(outcome, profile_binding)
+
+    # A seeded disposable source: two works, a pinned checkpoint.
+    root = work_dir / "preflight-source"
+    repository = FilesystemCheckpointRepository(root)
+    for work_index in range(2):
+        work_id = f"wp-preflight-{work_index}"
+        for sequence in range(2):
+            manifest, blobs, checkpoint_id = checkpoint_payload(work_id, sequence)
+            await repository.put(work_id, checkpoint_id, manifest, blobs)
+    entry = await repository.entry("wp-preflight-0")
+    assert entry is not None, "the preflight source must hold an active checkpoint"
+    pinned_id = str(entry["checkpoint_id"])
+    await repository.pin("wp-preflight-0", pinned_id, reason="preflight drill pin")
+    backup = await backup_store(root, work_dir / "preflight-backup")
+
+    # The model-turn gate: the resume dispatch that would spend the first
+    # NEW model turn after a restore. It opens ONLY after a consistent
+    # restore passes preflight.
+    model_turns = 0
+
+    def _open_gate() -> None:
+        nonlocal model_turns
+        model_turns += 1
+
+    # -- 1) mismatched halves: t2 metadata + t1 blobs --------------------
+    import shutil
+
+    mismatch_dir = work_dir / "preflight-mismatched"
+    mismatch_dir.mkdir(parents=True)
+    shutil.copytree(backup.path / "works", mismatch_dir / "works", dirs_exist_ok=True)
+    if (backup.path / "pins").is_dir():
+        shutil.copytree(backup.path / "pins", mismatch_dir / "pins", dirs_exist_ok=True)
+    ghost_manifest, ghost_blobs, ghost_id = checkpoint_payload("wp-preflight-ghost", 9)
+    (mismatch_dir / "works" / "wp-preflight-ghost.json").write_text(
+        json.dumps(
+            {
+                "work_id": "wp-preflight-ghost",
+                "checkpoints": [
+                    {
+                        "checkpoint_id": ghost_id,
+                        "sequence": 9,
+                        "files": len(ghost_manifest),
+                        "uploaded_at": "",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for shard in sorted(p for p in backup.path.iterdir() if p.is_dir() and len(p.name) == 2):
+        shutil.copytree(shard, mismatch_dir / shard.name, dirs_exist_ok=True)
+
+    halves_refusal: RestorePreflightRefused | None = None
+    halves_target = work_dir / "preflight-refused-halves"
+    try:
+        await restore_with_preflight(
+            mismatch_dir,
+            halves_target,
+            expected_schema_head=expected_schema_head,
+            observed_schema_head=expected_schema_head,
+        )
+    except RestorePreflightRefused as exc:
+        halves_refusal = exc
+    halves_nothing_written = not halves_target.exists() or not any(halves_target.iterdir())
+
+    # -- 2) the wrong-schema installation --------------------------------
+    schema_refusal: RestorePreflightRefused | None = None
+    schema_target = work_dir / "preflight-refused-schema"
+    try:
+        await restore_with_preflight(
+            backup.path,
+            schema_target,
+            expected_schema_head=expected_schema_head,
+            observed_schema_head=mismatched_schema_head,
+        )
+    except RestorePreflightRefused as exc:
+        schema_refusal = exc
+    schema_nothing_written = not schema_target.exists() or not any(schema_target.iterdir())
+
+    # -- 3) the consistent snapshot at the profile's head MAY open the gate
+    consistent_target = work_dir / "preflight-restored"
+    coverage = await restore_with_preflight(
+        backup.path,
+        consistent_target,
+        expected_schema_head=expected_schema_head,
+        observed_schema_head=expected_schema_head,
+    )
+    restored = FilesystemCheckpointRepository(consistent_target)
+    restored_entry = await restored.entry("wp-preflight-0")
+    restored_verified = False
+    if restored_entry is not None and restored_entry.get("checkpoint_id"):
+        manifest_back, _blobs_back = await restored.read_entry(restored_entry)
+        restored_verified = manifest_back is not None
+    if restored_verified:
+        _open_gate()  # the first new model turn — only NOW legal
+
+    outcome.check(
+        halves_refusal is not None and halves_refusal.reason == "backup-halves",
+        "the mismatched metadata/blob snapshot was REFUSED at preflight with the typed "
+        f"RestorePreflightRefused (backup-halves: {halves_refusal})",
+    )
+    outcome.check(
+        halves_nothing_written,
+        "the refused mismatched restore wrote NOTHING into the disposable installation",
+    )
+    outcome.check(
+        schema_refusal is not None and schema_refusal.reason == "schema-head",
+        f"an installation declaring schema head {mismatched_schema_head!r} against the "
+        f"frozen profile's {expected_schema_head!r} was REFUSED at preflight BEFORE any "
+        "restore ran",
+    )
+    outcome.check(
+        schema_nothing_written,
+        "the wrong-schema preflight refusal wrote NOTHING into the target",
+    )
+    outcome.check(
+        model_turns == 1 and restored_verified,
+        "the preflight ordering held: ZERO model turns through both refusals, and the "
+        f"resume dispatch (the first new model turn) ran only after the consistent "
+        f"restore at schema head {expected_schema_head} verified ({model_turns} turn(s))",
+    )
+    outcome.signals = {
+        "preflight.restore_gate": {
+            "expected_schema_head": expected_schema_head,
+            "refusals": {
+                "backup-halves": halves_refusal is not None,
+                "schema-head": schema_refusal is not None,
+            },
+            "nothing_written": halves_nothing_written and schema_nothing_written,
+            "model_turns_before_refusals": 0,
+            "model_turns_after_consistent_restore": model_turns,
+            "restored_checkpoints": coverage.get("checkpoints", 0),
+            "restored_verified": restored_verified,
+        }
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R38-18 measurement — pause/cancel responsiveness percentiles under
+# upload + slow-provider load (the REAL lane-control endpoints)
+# ---------------------------------------------------------------------------
+
+
+async def drill_pause_cancel_percentiles(
+    work_dir: Path,
+    *,
+    profile_binding: Mapping[str, Any],
+    cycles: int = 12,
+    upload_workers: int = 3,
+    puts_per_worker: int = 8,
+    provider_latency_s: float = 0.05,
+    control_objective_s: float = 60.0,
+) -> DrillOutcome:
+    """Pause/cancel responsiveness with STATED PERCENTILES and scope —
+    never one best-case latency (R38-18 acceptance 2).
+
+    ``cycles`` pause/resume control commands run through the app's REAL
+    lane-control endpoints (the mounted router over a disposable
+    database — the same machinery the deployment serves), each measured
+    received→applied from the durable row, WHILE bounded uploads contend
+    on a real store and every cycle also drives one slow-provider
+    start→cancel (the cancel-under-slow-provider shape, measured
+    issued→terminal). The scope sentence travels with the numbers.
+    """
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pydantic import SecretStr
+
+    from forge.adaptive.mailbox_db import PostgresMailbox
+    from forge.adaptive.models import ControlCommand
+    from forge.api_lane_control import lane_control_router, lane_control_token
+
+    outcome = DrillOutcome(drill="deployment_pause_cancel_percentiles")
+    outcome.tested_limits = {
+        "cycles": cycles,
+        "kinds": "pause/resume control commands through the REAL lane-control endpoints",
+        "upload_workers": upload_workers,
+        "puts_per_worker": puts_per_worker,
+        "provider_latency_s": provider_latency_s,
+        "control_objective_s": control_objective_s,
+        "fixture": "disposable (a real SQLite database + the real mounted lane-control router)",
+    }
+    check_profile_binding(outcome, profile_binding)
+
+    fixture = await build_fixture(work_dir / "percentile-fixture")
+    secret = "percentile-drill-secret"
+    work_id = "wpercentile0001"
+    try:
+        async with fixture.session_factory() as session:
+            session.add(
+                FlowRun(
+                    id=work_id,
+                    project_id=1,
+                    provider="gitlab",
+                    status="waiting_harness",
+                    cancellation_generation=1,
+                )
+            )
+            await session.commit()
+
+        app = FastAPI()
+        app.include_router(lane_control_router)
+        app.state.session_factory = fixture.session_factory
+
+        class _Settings:
+            FORGE_LANE_CONTROL_SECRET = SecretStr(secret)
+
+        app.state.settings = _Settings()
+        mailbox = PostgresMailbox(fixture.session_factory)
+        token = lane_control_token(secret, work_id, generation=1)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # The bounded background load: uploads on a real store + (per
+        # cycle below) slow provider starts. Bounded by construction.
+        load_store = FilesystemCheckpointRepository(work_dir / "percentile-load-store")
+
+        async def upload_worker(offset: int) -> None:
+            for sequence in range(offset, offset + puts_per_worker):
+                manifest, blobs, checkpoint_id = checkpoint_payload(
+                    "wp-percentile-load", sequence % 6
+                )
+                await load_store.put("wp-percentile-load", checkpoint_id, manifest, blobs)
+
+        upload_tasks = [
+            asyncio.create_task(upload_worker(index * puts_per_worker))
+            for index in range(upload_workers)
+        ]
+
+        slow_lane = FaultedNativeLane(latency_s=provider_latency_s)
+        control_latencies: list[float] = []
+        cancel_latencies: list[float] = []
+        ack_failures = 0
+
+        for cycle in range(1, cycles + 1):
+            kind = "pause" if cycle % 2 == 1 else "resume"
+            command = ControlCommand.model_validate(
+                {
+                    "command_id": f"cmd-pctl-{work_id}-{cycle}",
+                    "work_id": work_id,
+                    "sequence": cycle,
+                    "kind": kind,
+                    "actor_ref": "deployment-ops drill",
+                    "actor_origin": "server_authenticated_human",
+                    "idempotency_key": f"pctl-{work_id}-{cycle}",
+                    "status": "received",
+                    "payload": {"run_id": work_id},
+                }
+            )
+            await mailbox.submit(command)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://percentile.test"
+            ) as client:
+                ladder: list[tuple[str, dict[str, Any]]] = [
+                    ("authorized", {}),
+                    ("dispatching", {"plan_revision": 0, "execution_epoch": 0}),
+                    ("vendor_accepted", {}),
+                    ("applied", {}),
+                ]
+                for state, extra in ladder:
+                    response = await client.post(
+                        f"/lane/controls/{command.command_id}/ack",
+                        headers=headers,
+                        json={"state": state, "generation": 1, **extra},
+                    )
+                    if response.status_code != 200:
+                        ack_failures += 1
+                        break
+            async with fixture.session_factory() as session:
+                from sqlalchemy import select
+
+                from forge.adaptive.mailbox_db import ControlCommandRow
+
+                row = (
+                    await session.execute(
+                        select(ControlCommandRow).where(ControlCommandRow.id == command.command_id)
+                    )
+                ).scalar_one()
+            if row.applied_at is not None:
+                received = row.created_at
+                applied = row.applied_at
+                if received.tzinfo is None:
+                    received = received.replace(tzinfo=UTC)
+                if applied.tzinfo is None:
+                    applied = applied.replace(tzinfo=UTC)
+                control_latencies.append((applied - received).total_seconds())
+            # The cancel-under-slow-provider leg: one slow start then a
+            # provider-side cancel, measured issued→terminal.
+            cancel_started = time.monotonic()
+            try:
+                answer = await slow_lane.start(work_id, f"pctl:{work_id}:{cycle}")
+            except LostStartResponse:
+                answer = None
+            if answer is not None and answer.handle:
+                await slow_lane.cancel(answer.handle)
+            cancel_latencies.append(time.monotonic() - cancel_started)
+
+        await asyncio.gather(*upload_tasks)
+    finally:
+        await fixture.dispose()
+
+    control_percentiles = percentile_summary(control_latencies, objective_s=control_objective_s)
+    cancel_percentiles = percentile_summary(cancel_latencies, objective_s=control_objective_s)
+    outcome.check(
+        len(control_latencies) == cycles and ack_failures == 0,
+        f"every pause/resume command reached APPLIED through the real ladder "
+        f"({len(control_latencies)}/{cycles} applied, {ack_failures} ack failure(s))",
+    )
+    outcome.check(
+        control_percentiles["p95_s"] is not None
+        and float(control_percentiles["p95_s"]) <= control_objective_s,
+        f"control-command received→applied p95 stayed inside the {control_objective_s}s "
+        f"objective under upload+slow-provider load (p50 {control_percentiles['p50_s']}s, "
+        f"p95 {control_percentiles['p95_s']}s, max {control_percentiles['max_s']}s over "
+        f"{control_percentiles['n']} cycles)",
+    )
+    outcome.check(
+        cancel_percentiles["p95_s"] is not None
+        and float(cancel_percentiles["p95_s"]) <= control_objective_s,
+        f"cancel-under-slow-provider issued→terminal p95 stayed inside the "
+        f"{control_objective_s}s objective (p50 {cancel_percentiles['p50_s']}s, p95 "
+        f"{cancel_percentiles['p95_s']}s, max {cancel_percentiles['max_s']}s over "
+        f"{cancel_percentiles['n']} cycles)",
+    )
+    outcome.signals = {
+        "control.pause_cancel_percentiles_s": {
+            "control": control_percentiles,
+            "cancel_under_slow_provider": cancel_percentiles,
+            "scope": (
+                f"n={cycles} pause/resume command cycles through the REAL lane-control "
+                f"endpoints over a disposable database, contended by {upload_workers}x"
+                f"{puts_per_worker} checkpoint uploads and {provider_latency_s}s provider "
+                f"start latency; the objective is {control_objective_s}s — a stated "
+                "percentile table for THIS shape, never a best-case single latency and "
+                "not a fleet claim"
+            ),
+        }
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R38-18 publication — the sanitized summary (raw diagnostics stay private)
+# ---------------------------------------------------------------------------
+
+#: The PUBLISHED report's stamp: the sanitized summary only. The full
+#: diagnostics report (schema ``forge.deployment.ops/1``) stays in
+#: access-controlled storage OUTSIDE the repository — the #304
+#: discipline: public evidence carries receipts, never operational
+#: payloads.
+PUBLISHED_REPORT_STAMP: Final = "forge.deployment.ops.sanitized/1"
+
+#: Report keys that NEVER enter the published summary (identifier- or
+#: path-bearing); the projection below is an allowlist, this is the belt
+#: and braces.
+_PRIVATE_SIGNAL_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "run_id",
+        "job_id",
+        "pipeline_id",
+        "command_id",
+        "work_id",
+        "detail",
+        "note",
+        "notes",
+        "lane_notes",
+        "url",
+        "control_url",
+        "path",
+        "host_root",
+        "receipts",
+        "per_cycle",
+        "cycle_end_states",
+        "slow_control_ack",
+        "lost_response_leg",
+        "failed_cancel_leg",
+        "works_source_unavailable",
+        "deny_probes",
+        "containers",
+    }
+)
+
+#: Per-drill signal projections for the published summary: signal key →
+#: the sub-keys that may appear. Anything not listed is dropped.
+_PUBLIC_SIGNAL_PROJECTIONS: Final[dict[str, dict[str, tuple[str, ...]]]] = {
+    "deployment_remote_occupancy": {
+        "execution.occupied_vs_limit": ("limit", "peak_occupied", "cycles", "dispatched", "parked"),
+        "queue_wait_s": ("max",),
+        "drained_after_s": (),
+    },
+    "deployment_lost_response_at_cap": {
+        "execution.occupied_vs_limit": (
+            "limit",
+            "peak_occupied",
+            "occupied_at_cap",
+            "occupancy_mix_at_cap",
+            "occupancy_words_seen",
+        ),
+        "queue_wait_s": ("measured_from",),
+        "drained_after_s": (),
+    },
+    "deployment_backup_restore": {
+        "checkpoint.reachability": (
+            "works",
+            "works_resolved",
+            "pins",
+            "pins_resolved",
+            "checkpoints",
+            "mismatch_detected",
+            "mismatch_refused",
+        ),
+        "backup_seconds": (),
+        "restore_seconds": (),
+    },
+    "deployment_mismatched_restore_preflight": {
+        "preflight.restore_gate": (
+            "expected_schema_head",
+            "refusals",
+            "nothing_written",
+            "model_turns_before_refusals",
+            "model_turns_after_consistent_restore",
+            "restored_checkpoints",
+            "restored_verified",
+        ),
+    },
+    "deployment_credential_isolation": {
+        "credential_shaped_beyond_lane_token": (),
+        "token_dispatched": (),
+        "attempt_generation": (),
+    },
+    "deployment_degraded_modes": {
+        "storage.quota_refusal": ("typed_refusal", "store_intact"),
+        "provider_throttling": (
+            "classification",
+            "revive_limit",
+            "first_death",
+            "exhausted_budget",
+            "backoff_ladder_s",
+        ),
+    },
+    "deployment_volume_fill_during_pause": {
+        "storage.volume_fill": (
+            "safety_threshold_bytes",
+            "store_bytes_at_refusal",
+            "typed_refusals",
+            "landed_during_fill",
+            "silent_writes",
+            "admission_stop",
+            "pinned_wip_survives",
+            "pinned_read_s",
+        ),
+    },
+    "deployment_pause_cancel_percentiles": {
+        "control.pause_cancel_percentiles_s": ("control", "cancel_under_slow_provider", "scope"),
+    },
+    "deployment_token_rotation": {
+        "credential.rotation_generation": (
+            "current_generation",
+            "refused_generation",
+            "refusal_status",
+            "old_secret_token_status",
+            "new_secret_token_status",
+        ),
+    },
+}
+
+
+def _scrub_private(value: Any) -> Any:
+    """Recursively drop private-bearing keys from *value* (in place)."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _scrub_private(item)
+            for key, item in value.items()
+            if str(key) not in _PRIVATE_SIGNAL_KEYS
+        }
+    if isinstance(value, list):
+        return [_scrub_private(item) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_private(item) for item in value]
+    return value
+
+
+def _public_signals(drill: str, signals: Mapping[str, Any]) -> dict[str, Any]:
+    projection = _PUBLIC_SIGNAL_PROJECTIONS.get(drill)
+    if projection is None:
+        # An unknown drill still gets a shape: scrubbed counts only. A
+        # drill without a reviewed projection publishes nothing raw.
+        return {}
+    public: dict[str, Any] = {}
+    for signal_key, keep in projection.items():
+        raw = signals.get(signal_key)
+        if raw is None:
+            continue
+        if keep:
+            public[signal_key] = _scrub_private(
+                {key: raw.get(key) for key in keep if isinstance(raw, Mapping) and key in raw}
+            )
+        else:
+            public[signal_key] = _scrub_private(raw)
+    return public
+
+
+def summarize_for_publication(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the full diagnostics report into the PUBLISHED summary.
+
+    The #304 discipline: the published document is the sanitized
+    summary — outcomes, counts, stated percentiles, the profile binding,
+    the measured-limits table and the reviewer-WIP policy field. Raw
+    diagnostics (run/job/pipeline identifiers, per-cycle details, host
+    paths, refusal stderr, container mounts) stay in the PRIVATE report
+    the runner writes outside the repository.
+    """
+
+    profile = dict(report.get("profile") or {})
+    drills: list[dict[str, Any]] = []
+    for document in report.get("drills") or []:
+        binding = dict(document.get("profile") or {})
+        drills.append(
+            {
+                "drill": document.get("drill"),
+                "outcome": document.get("outcome"),
+                "profile": {
+                    "manifest_digest": binding.get("manifest_digest"),
+                    "qualification": binding.get("qualification"),
+                },
+                "objectives_achieved": len(document.get("achieved_objectives") or []),
+                "violations": len(document.get("violations") or []),
+                "tested_limits": _scrub_private(document.get("tested_limits") or {}),
+                "signals": _public_signals(
+                    str(document.get("drill") or ""), document.get("signals") or {}
+                ),
+            }
+        )
+    summary = dict(report.get("summary") or {})
+    summary["profile_qualification"] = profile.get("qualification")
+    return {
+        "schema": PUBLISHED_REPORT_STAMP,
+        "issue": report.get("issue"),
+        "generated_at": report.get("generated_at"),
+        "scope": report.get("scope"),
+        "read_only": report.get("read_only"),
+        "runbook": report.get("runbook"),
+        "profile": {
+            "profile": profile.get("profile"),
+            "manifest_digest": profile.get("manifest_digest"),
+            "bind": profile.get("bind"),
+            "differences": profile.get("differences"),
+            "qualification": profile.get("qualification"),
+        },
+        "summary": summary,
+        "measured_limits": _scrub_private(report.get("measured_limits") or {}),
+        "reviewer_wip": _scrub_private(report.get("reviewer_wip") or {}),
+        "private_diagnostics": _scrub_private(report.get("private_diagnostics") or {}),
+        "refusals": [
+            {"section": refusal.get("section")} for refusal in report.get("refusals") or []
+        ],
+        "drills": drills,
+    }

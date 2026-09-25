@@ -58,6 +58,12 @@
 #   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
 # forge downloads the artifacts and publishes via the trusted publisher;
 # claims in the trace are never trusted.
+# Interactive restore (R38-01, #302 note): NOT supported — this is a
+# BATCH recipe (a scripted one-shot `-p` call, no forge.lane_driver
+# process, so no checkpoint restore and no workspace generation).
+# WIP-continuity (`required` resume) dispatches belong on the SDK lane
+# templates (claude-sdk-lane and siblings); claude-code carries the
+# shipped required-resume refusal gate (#288).
 
 forge-agent-dotnet:
   # R28-21: pinned by DIGEST, not the moving 9.0 tag — the SDK the lane
@@ -71,6 +77,10 @@ forge-agent-dotnet:
     # the dispatch leg). Unset/empty keeps single-driver repos as before.
     - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "dotnet-lane")'
   variables:
+    # The model route — the DOCUMENTED ambient fallback only (R38-17 /
+    # #318, ADR-0032): a dispatch carrying the execution spec's
+    # FORGE_HARNESS_MODEL pin OVERRIDES it in the script below (the
+    # approved RunSpec's frozen route, never the template's default).
     ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
     API_TIMEOUT_MS: "300000"
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
@@ -147,6 +157,12 @@ forge-agent-dotnet:
     # The task brief: approved plan, written to an ephemeral file (ADR-0012:
     # context passes through GitLab CI variables, not forge-side state).
     - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # R38-17 (#318, ADR-0032): the model route is the versioned
+    # execution spec's PIN — the dispatched FORGE_HARNESS_MODEL (the
+    # approved RunSpec's frozen route) outranks the template's ambient
+    # ANTHROPIC_MODEL default, which stays ONLY as the documented
+    # legacy fallback for a dispatch that carries no pin.
+    - export ANTHROPIC_MODEL="${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}"
     - set -o pipefail
     # Headless harness run. The driver NEVER commits or pushes: its
     # working-tree edits ARE the candidate. A nonzero exit does not abort

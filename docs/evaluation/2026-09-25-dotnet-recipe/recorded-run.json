@@ -1,0 +1,689 @@
+{
+  "arms": {
+    "build_test": {
+      "projects": [
+        {
+          "exit_code": 0,
+          "framework": "net10.0",
+          "project": "DotnetOrders.Api.Tests",
+          "report": "forge_DotnetOrders.Api.Tests_net10.0.trx",
+          "report_produced": true
+        },
+        {
+          "exit_code": 0,
+          "framework": "net10.0",
+          "project": "DotnetOrders.Projection.Tests",
+          "report": "forge_DotnetOrders.Projection.Tests_net10.0.trx",
+          "report_produced": true
+        }
+      ],
+      "report_inventory": {
+        "contract_digest": "e15cb7344597d8afecd673b0c180d4db41b66222aae867abff1297f5e8507f26",
+        "inventory_digest": "7a5c50ae6706542975b35f623b1baf03a9c4c7f886c02b17a2b0acff5d731405",
+        "reports": [
+          {
+            "bundle_digest": "ae6588ab1bb03a5bdd61b5543d496cbddf1d17db164d687e9af47e3d777f6e83",
+            "candidate_id": "dotnet-recipe-6b26df9121d0",
+            "report_path": "forge_DotnetOrders.Api.Tests_net10.0.trx",
+            "test_project": "DotnetOrders.Api.Tests"
+          },
+          {
+            "bundle_digest": "ae6588ab1bb03a5bdd61b5543d496cbddf1d17db164d687e9af47e3d777f6e83",
+            "candidate_id": "dotnet-recipe-6b26df9121d0",
+            "report_path": "forge_DotnetOrders.Projection.Tests_net10.0.trx",
+            "test_project": "DotnetOrders.Projection.Tests"
+          }
+        ],
+        "schema": "forge.verification.report-inventory/1"
+      },
+      "report_reconciliation": {
+        "aggregate": "all_passed",
+        "problems": [],
+        "verdicts": [
+          {
+            "detail": "3/3 passed",
+            "executed": 3,
+            "failed": 0,
+            "passed": 3,
+            "report_path": "forge_DotnetOrders.Api.Tests_net10.0.trx",
+            "test_project": "DotnetOrders.Api.Tests",
+            "total": 3,
+            "verdict": "passed"
+          },
+          {
+            "detail": "6/6 passed",
+            "executed": 6,
+            "failed": 0,
+            "passed": 6,
+            "report_path": "forge_DotnetOrders.Projection.Tests_net10.0.trx",
+            "test_project": "DotnetOrders.Projection.Tests",
+            "total": 6,
+            "verdict": "passed"
+          }
+        ]
+      },
+      "sdk_matches_pin": true,
+      "sdk_observed": "10.0.200",
+      "sdk_pinned": "10.0.200",
+      "status": "real",
+      "test_bundle_digest": "ae6588ab1bb03a5bdd61b5543d496cbddf1d17db164d687e9af47e3d777f6e83"
+    },
+    "migration": {
+      "after_fingerprint": {
+        "rows": 25,
+        "rows_sha256": "dfe0a6d864c65589fe83fe1fbb782b43c04a7a9584ca64e7011fffdece7c8037"
+      },
+      "baseline_fingerprint": {
+        "rows": 25,
+        "rows_sha256": "dfe0a6d864c65589fe83fe1fbb782b43c04a7a9584ca64e7011fffdece7c8037"
+      },
+      "constraint_probe": {
+        "post_upgrade_negative_insert": "rejected",
+        "pre_upgrade_negative_insert": "accepted"
+      },
+      "coverage": "real-dependency",
+      "detail": "postgres 16 upgraded the seeded baseline in the real container: 25 rows preserved (counts and sha256 fingerprints equal) and the new CHECK constraint rejects what the baseline accepted",
+      "dialect": "postgres",
+      "preserved": true,
+      "region_backfill_complete": true,
+      "status": "real"
+    },
+    "redelivery": {
+      "broker": "rabbitmq:sha256:8689ddfceca1",
+      "coverage": "real-dependency",
+      "crash_before_ack_redelivered": true,
+      "deliveries_observed": 9,
+      "detail": "4 messages, each published 2x on a real RabbitMQ queue; the unacked delivery came back redelivered (True) and every message produced exactly one durable side effect (9 deliveries observed)",
+      "duplicate_publishes_per_message": 2,
+      "effects_per_message": {
+        "order-0001": {
+          "deliveries_seen": 3,
+          "effect": "projection:order-0001:total=10:region=emea"
+        },
+        "order-0002": {
+          "deliveries_seen": 2,
+          "effect": "projection:order-0002:total=20:region=emea"
+        },
+        "order-0003": {
+          "deliveries_seen": 2,
+          "effect": "projection:order-0003:total=30:region=emea"
+        },
+        "order-0004": {
+          "deliveries_seen": 2,
+          "effect": "projection:order-0004:total=40:region=emea"
+        }
+      },
+      "exactly_once_all": true,
+      "messages": 4,
+      "queue": "forge.recipe.orders.6b26df9121d0",
+      "redeliveries_observed": 1,
+      "status": "real"
+    }
+  },
+  "authority": "none \u2014 this document grants neither merge nor deployment",
+  "candidate_id": "dotnet-recipe-6b26df9121d0",
+  "commands": [
+    {
+      "argv": [
+        "/opt/homebrew/bin/dotnet",
+        "--version"
+      ],
+      "duration_ms": 177,
+      "exit_code": 0,
+      "log_sha256": "c288703fcaeb14c24f98881a3b4232bc1815dc8bb6f0b36c77976bab9b2efbd4",
+      "name": "dotnet-version"
+    },
+    {
+      "argv": [
+        "podman",
+        "pull",
+        "docker.io/library/postgres:16@sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868"
+      ],
+      "duration_ms": 1082,
+      "exit_code": 0,
+      "log_sha256": "ddc3e2e7b3af2cd898f294690a88fbf920fbd8d649ccd1537b5c8cdbf4cab831",
+      "name": "pull-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "run",
+        "-d",
+        "--name",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "-p",
+        "127.0.0.1::5432",
+        "-e",
+        "POSTGRES_USER=forge",
+        "-e",
+        "POSTGRES_PASSWORD=forge-recipe-local",
+        "-e",
+        "POSTGRES_DB=orders",
+        "docker.io/library/postgres:16@sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868"
+      ],
+      "duration_ms": 106,
+      "exit_code": 0,
+      "log_sha256": "d546e43546d0000f1466a630993ce316505c93fc2c63d5f68bcc8245d37c2a1a",
+      "name": "run-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "image",
+        "inspect",
+        "docker.io/library/postgres:16@sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868"
+      ],
+      "duration_ms": 54,
+      "exit_code": 0,
+      "log_sha256": "8989ef19211366188bb91fe2f0a88cdbb8746f149223069d17f38744c24a1f5c",
+      "name": "digest-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "port",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "5432"
+      ],
+      "duration_ms": 57,
+      "exit_code": 0,
+      "log_sha256": "ab1ecde4207ea9e3cab6f22f42a12f810f3d3dd2b5fac3c0bde8fe5f07f7a29a",
+      "name": "port-orders-db-5432"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "pg_isready",
+        "-U",
+        "forge",
+        "-d",
+        "orders"
+      ],
+      "duration_ms": 85,
+      "exit_code": 2,
+      "log_sha256": "da7a5b817765792bc9d03f41fa08c6a90781061048316e122ac4b6b3e24ff0bb",
+      "name": "pg-isready"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "pg_isready",
+        "-U",
+        "forge",
+        "-d",
+        "orders"
+      ],
+      "duration_ms": 115,
+      "exit_code": 0,
+      "log_sha256": "8e834afb97fc8a2f48ebe4efedc70f9f14dd6571440561dcfe200e37589bdaec",
+      "name": "pg-isready"
+    },
+    {
+      "argv": [
+        "podman",
+        "pull",
+        "docker.io/library/rabbitmq:3-management@sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d"
+      ],
+      "duration_ms": 1085,
+      "exit_code": 0,
+      "log_sha256": "fb30e2696402a19d76df7d4de6f2ca6087cc5199f53d1a40e97814801d761d51",
+      "name": "pull-orders-bus"
+    },
+    {
+      "argv": [
+        "podman",
+        "run",
+        "-d",
+        "--name",
+        "forge-dotnet-recipe-orders-bus-6b26df9121d0",
+        "-p",
+        "127.0.0.1::5672",
+        "-e",
+        "RABBITMQ_DEFAULT_USER=forge",
+        "-e",
+        "RABBITMQ_DEFAULT_PASS=forge-recipe-local",
+        "docker.io/library/rabbitmq:3-management@sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d"
+      ],
+      "duration_ms": 109,
+      "exit_code": 0,
+      "log_sha256": "6d9385a197efcbdea33ff27024a82c0dedcc4ef4c2d2ba29d1e6ace7e59c8ee2",
+      "name": "run-orders-bus"
+    },
+    {
+      "argv": [
+        "podman",
+        "image",
+        "inspect",
+        "docker.io/library/rabbitmq:3-management@sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d"
+      ],
+      "duration_ms": 50,
+      "exit_code": 0,
+      "log_sha256": "f0ff01ce0712fd4e1b10937ac7c55ee51591a90032a79dbc0bd29d942ec63be0",
+      "name": "digest-orders-bus"
+    },
+    {
+      "argv": [
+        "podman",
+        "port",
+        "forge-dotnet-recipe-orders-bus-6b26df9121d0",
+        "5672"
+      ],
+      "duration_ms": 54,
+      "exit_code": 0,
+      "log_sha256": "b3f876b0b2b08d1b964ad7ad91bc52ddde1566addb081c6c34c2550ae2099e4e",
+      "name": "port-orders-bus-5672"
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/dotnet",
+        "--version"
+      ],
+      "duration_ms": 88,
+      "exit_code": 0,
+      "log_sha256": "c288703fcaeb14c24f98881a3b4232bc1815dc8bb6f0b36c77976bab9b2efbd4",
+      "name": "dotnet-version"
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/dotnet",
+        "test",
+        "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/evaluation/tested_world/dotnet-orders/tests/DotnetOrders.Api.Tests/DotnetOrders.Api.Tests.csproj",
+        "--framework",
+        "net10.0",
+        "--logger",
+        "trx;LogFileName=forge_DotnetOrders.Api.Tests_net10.0.trx",
+        "--results-directory",
+        "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-dotnet-recipe-6b26df9121d0/results"
+      ],
+      "duration_ms": 1625,
+      "exit_code": 0,
+      "log_sha256": "daaf4e614dbc579d03b0b000c09ff8fdc844ce6766930e827e439175d06f3dc9",
+      "name": "dotnet-test-DotnetOrders.Api.Tests"
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/dotnet",
+        "test",
+        "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/evaluation/tested_world/dotnet-orders/tests/DotnetOrders.Projection.Tests/DotnetOrders.Projection.Tests.csproj",
+        "--framework",
+        "net10.0",
+        "--logger",
+        "trx;LogFileName=forge_DotnetOrders.Projection.Tests_net10.0.trx",
+        "--results-directory",
+        "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-dotnet-recipe-6b26df9121d0/results"
+      ],
+      "duration_ms": 1372,
+      "exit_code": 0,
+      "log_sha256": "c3f1331689c74c3284a165dfe8639448e4aa3cfd21bfc924808f522c2d61d963",
+      "name": "dotnet-test-DotnetOrders.Projection.Tests"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-q"
+      ],
+      "duration_ms": 360,
+      "exit_code": 0,
+      "log_sha256": "3792f8fcd949775e60bfc9f919c27a00194667b4793b902e19f6fed3354737d8",
+      "name": "psql-script-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-q"
+      ],
+      "duration_ms": 261,
+      "exit_code": 0,
+      "log_sha256": "3792f8fcd949775e60bfc9f919c27a00194667b4793b902e19f6fed3354737d8",
+      "name": "psql-script-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-t",
+        "-A",
+        "-F",
+        "|",
+        "-q"
+      ],
+      "duration_ms": 97,
+      "exit_code": 0,
+      "log_sha256": "eae11844b2bc693f1d224734556625fce7d0f84fc5c332736d13f22a8383d049",
+      "name": "psql-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-q"
+      ],
+      "duration_ms": 109,
+      "exit_code": 0,
+      "log_sha256": "3792f8fcd949775e60bfc9f919c27a00194667b4793b902e19f6fed3354737d8",
+      "name": "psql-script-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-q"
+      ],
+      "duration_ms": 126,
+      "exit_code": 0,
+      "log_sha256": "3792f8fcd949775e60bfc9f919c27a00194667b4793b902e19f6fed3354737d8",
+      "name": "psql-script-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-t",
+        "-A",
+        "-F",
+        "|",
+        "-q"
+      ],
+      "duration_ms": 102,
+      "exit_code": 0,
+      "log_sha256": "eae11844b2bc693f1d224734556625fce7d0f84fc5c332736d13f22a8383d049",
+      "name": "psql-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-q"
+      ],
+      "duration_ms": 85,
+      "exit_code": 3,
+      "log_sha256": "ccf54e9d9e95633b195781597f20c8df3d54c5b5b7f854478718e4a38a93f4ba",
+      "name": "psql-script-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "exec",
+        "-i",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0",
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        "orders",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-t",
+        "-A",
+        "-F",
+        "|",
+        "-q"
+      ],
+      "duration_ms": 75,
+      "exit_code": 0,
+      "log_sha256": "28c7b0a9532a285368c52a154878fa384de2fde06d3d4a53542ed3a7905e0e5b",
+      "name": "psql-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "stop",
+        "-t",
+        "1",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0"
+      ],
+      "duration_ms": 144,
+      "exit_code": 0,
+      "log_sha256": "0d58e91da2cc100c0bd2af284edb2bf9e03cbe16390037c925f7b6bfb32ef9fe",
+      "name": "stop-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "rm",
+        "-f",
+        "forge-dotnet-recipe-orders-db-6b26df9121d0"
+      ],
+      "duration_ms": 73,
+      "exit_code": 0,
+      "log_sha256": "34d578a628c22e5a55c3ad13f39417b1b96d2be50b8eb7600299060f2a91b3b5",
+      "name": "rm-orders-db"
+    },
+    {
+      "argv": [
+        "podman",
+        "stop",
+        "-t",
+        "1",
+        "forge-dotnet-recipe-orders-bus-6b26df9121d0"
+      ],
+      "duration_ms": 1164,
+      "exit_code": 0,
+      "log_sha256": "28a3568314d141fda57f0a29fdbfe7c476c5a80e48b5e1971ac100c24eefd97a",
+      "name": "stop-orders-bus"
+    },
+    {
+      "argv": [
+        "podman",
+        "rm",
+        "-f",
+        "forge-dotnet-recipe-orders-bus-6b26df9121d0"
+      ],
+      "duration_ms": 70,
+      "exit_code": 0,
+      "log_sha256": "69db8ec160938324e04dba56d207ba48b9c420ae2a8c6e2471487c887cd673d8",
+      "name": "rm-orders-bus"
+    }
+  ],
+  "containers": [
+    {
+      "container_name": "forge-dotnet-recipe-orders-db-6b26df9121d0",
+      "image": "docker.io/library/postgres:16",
+      "pinned_digest": "sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868",
+      "resolved_digest": "sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868",
+      "role": "orders-db",
+      "status": "real"
+    },
+    {
+      "container_name": "forge-dotnet-recipe-orders-bus-6b26df9121d0",
+      "image": "docker.io/library/rabbitmq:3-management",
+      "pinned_digest": "sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d",
+      "resolved_digest": "sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d",
+      "role": "orders-bus",
+      "status": "real"
+    }
+  ],
+  "degradations": [],
+  "enforcement_profile": {
+    "env_allowlist": [
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "PATH",
+      "TMPDIR",
+      "UV_CACHE_DIR",
+      "UV_PYTHON_INSTALL_DIR"
+    ],
+    "env_allowlist_version": "env-allowlist/1",
+    "extra_env_keys": [],
+    "home_layout": [],
+    "home_path": "",
+    "home_policy": "clean-home/1",
+    "network_policy_class": "probe-gated-deny-default/1",
+    "path_entries": [
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+      "/opt/homebrew/bin"
+    ],
+    "path_policy": "system-minimum/1",
+    "schema": "forge.verification.enforcement-profile/1"
+  },
+  "enforcement_profile_digest": "b93a889b2138177609addf0b6a3b7143d6e86b8f19796a0a63fb0a470bb5bcc7",
+  "environment_digest": "28078faf9389a0a9f316c7f0220eee52e34d93f8785d3e2642adcf900f4ad5a1",
+  "isolation_enforced": true,
+  "manifest": {
+    "broker": {
+      "duplicates_per_message": 2,
+      "queue_prefix": "forge.recipe.orders"
+    },
+    "dependency_images": [
+      {
+        "digest": "sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868",
+        "image": "docker.io/library/postgres:16",
+        "role": "orders-db"
+      },
+      {
+        "digest": "sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d",
+        "image": "docker.io/library/rabbitmq:3-management",
+        "role": "orders-bus"
+      }
+    ],
+    "fixture_root": "evaluation/tested_world/dotnet-orders",
+    "manifest_digest": "e15cb7344597d8afecd673b0c180d4db41b66222aae867abff1297f5e8507f26",
+    "migrations": {
+      "baseline": "migrations/001_v1_baseline.sql",
+      "preserved_columns": [
+        "id",
+        "total",
+        "created_at"
+      ],
+      "upgrade": {
+        "postgres": "migrations/002_v2_region.postgres.sql",
+        "sqlite": "migrations/002_v2_region.sqlite.sql"
+      }
+    },
+    "packages": [
+      {
+        "name": "Microsoft.NET.Test.Sdk",
+        "version": "18.10.1"
+      },
+      {
+        "name": "xunit",
+        "version": "2.9.3"
+      },
+      {
+        "name": "xunit.runner.visualstudio",
+        "version": "4.0.0"
+      }
+    ],
+    "recipe_id": "dotnet-service-dependency/1",
+    "scenario": {
+      "redelivery_messages": 4,
+      "seed_rows": 25
+    },
+    "schema": "forge.verification.dotnet-recipe-manifest/1",
+    "sdk": {
+      "target_framework": "net10.0",
+      "version": "10.0.200"
+    },
+    "test_projects": [
+      {
+        "framework": "net10.0",
+        "name": "DotnetOrders.Api.Tests",
+        "project": "tests/DotnetOrders.Api.Tests/DotnetOrders.Api.Tests.csproj",
+        "report": "forge_DotnetOrders.Api.Tests_net10.0.trx"
+      },
+      {
+        "framework": "net10.0",
+        "name": "DotnetOrders.Projection.Tests",
+        "project": "tests/DotnetOrders.Projection.Tests/DotnetOrders.Projection.Tests.csproj",
+        "report": "forge_DotnetOrders.Projection.Tests_net10.0.trx"
+      }
+    ]
+  },
+  "probes": [
+    {
+      "detail": "orders-bus answered on 127.0.0.1:40729 \u2014 the dependency is alive and reachable",
+      "outcome": "authorized_control_succeeded",
+      "status_code": null
+    },
+    {
+      "detail": "orders-db answered on 127.0.0.1:44417 \u2014 the dependency is alive and reachable",
+      "outcome": "authorized_control_succeeded",
+      "status_code": null
+    }
+  ],
+  "problems": [],
+  "real_coverage_complete": true,
+  "recipe_id": "dotnet-service-dependency/1",
+  "schema": "forge.verification.dotnet-recipe-run/1",
+  "sdk": {
+    "matches": true,
+    "observed": "10.0.200",
+    "pinned": "10.0.200"
+  },
+  "verifies": true,
+  "workspace": "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-dotnet-recipe-6b26df9121d0"
+}

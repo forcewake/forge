@@ -694,6 +694,11 @@ class TestLaneTemplateContract:
             "plan_note_id",
             "envelope_digest",
             "spec_digest",
+            # R38-02 (#303): the credential DELIVERY reference + the
+            # redemption flag (refs only, never a value — parameters are
+            # documented "No support for secret values").
+            "credential_ref",
+            "credential_redeem",
         }
         assert all(spec["type"] == "string" for spec in parameters.values())
 

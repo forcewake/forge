@@ -117,22 +117,37 @@ __all__ = [
     "ActionDecision",
     "BLOCKED_CODES",
     "BlockedReason",
+    "DELIVERY_FAILED_OUTCOMES",
+    "DELIVERY_OUTCOMES",
+    "DIAGNOSTIC_MAX_ENTRIES",
+    "DIAGNOSTIC_SECTION_FIELDS",
+    "DIAGNOSTICS_SCHEMA",
+    "DeliveryOutcome",
     "NON_RETRYABLE_CODES",
     "OperatorAction",
     "OperatorProjection",
     "OPERATOR_STATES",
     "OPERATOR_VIEW_SCHEMA",
     "OperatorState",
+    "RECOVERY_MILESTONES",
+    "RECOVERY_SCHEMA",
     "RecoveryActions",
+    "RecoveryHint",
     "StateDerivation",
     "StaleProjectionRejected",
     "UNRESOLVED_PUBLICATION_STATUSES",
     "WEDGED_AFTER",
+    "action_hint_block",
     "apply_update",
     "current_candidate",
+    "delivery_outcome_of",
     "derive_state",
+    "export_diagnostics",
     "explain_blocked",
     "initial_projection",
+    "recovery_document",
+    "recovery_hint",
+    "recovery_ladder",
     "render",
     "source_digest",
     "status_note_lines",
@@ -1248,6 +1263,542 @@ def explain_blocked(
 
 
 # ---------------------------------------------------------------------------
+# The recovery surface (R38-15) — delivery outcome, the five-milestone
+# ladder, advisory recovery hints
+# ---------------------------------------------------------------------------
+
+#: The closed delivery-outcome vocabulary (R38-15): what the CURRENT
+#: attempt actually delivered, derived from the recorded candidate meta /
+#: collector exit + driver exit (the #302 finalization markers) — never
+#: from a successful SDK turn. ``empty_diff_no_effect`` is the issue's
+#: headline: a resumed/executing attempt whose collected candidate was
+#: ZERO-CHANGE is a FAILED/no-effect delivery, never a successful resume
+#: of useful work.
+DELIVERY_OUTCOMES: Final[tuple[str, ...]] = (
+    "delivered",
+    "empty_diff_no_effect",
+    "collection_failed",
+    "not_collected_yet",
+    "driver_failed",
+)
+
+#: The outcomes that are FAILED deliveries — a render carrying one of
+#: these NEVER presents the run as a successful resume (the R38-15
+#: acceptance arm: an empty resumed diff showed as a "successful resume"
+#: shape in the live run).
+DELIVERY_FAILED_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {"empty_diff_no_effect", "collection_failed", "driver_failed"}
+)
+
+#: The five recovery milestones (R38-15), each displayed INDEPENDENTLY —
+#: present / absent / unknown per milestone, never collapsed into one
+#: boolean. The live failure was exactly the collapse: operators could not
+#: tell a requested pause from a verified checkpoint, a stopped runner, an
+#: authorized resume or an APPLIED exact resume.
+RECOVERY_MILESTONES: Final[tuple[str, ...]] = (
+    "pause_requested",
+    "checkpoint_committed",
+    "runner_stopped",
+    "resume_authorized",
+    "exact_resume_applied",
+)
+
+#: The recovery document's schema discriminator (versioned like the view's).
+RECOVERY_SCHEMA: Final = "forge.operator.recovery/1"
+
+#: The #302 finalization marker's ``candidate_state`` spellings
+#: (``FORGE_LANE_OUTCOME:{"driver_exit": …, "collector_exit": …,
+#: "candidate_state": …}``) mapped onto the delivery-outcome vocabulary —
+#: the recorded classification wins over every derived fallback because the
+#: lane already reconciled driver and collector into one honest word.
+_CANDIDATE_STATE_OUTCOMES: Final[Mapping[str, str]] = {
+    "candidate": "delivered",
+    "zero_change": "empty_diff_no_effect",
+    "collection_failed": "collection_failed",
+    "driver_failed": "driver_failed",
+}
+
+#: The run-row blocked-reason wordings that prove a failed DELIVERY when no
+#: lane-outcome marker was journaled (the harness backend's typed codes at
+#: ``status_reason``): an empty repair, a missing/invalid artifact, a
+#: failed driver.
+_NO_EFFECT_RE: Final[re.Pattern[str]] = re.compile(
+    r"no[_-]?effect|no[_-]?changes|zero[_-]?change", re.IGNORECASE
+)
+_COLLECTION_FAILED_RE: Final[re.Pattern[str]] = re.compile(
+    r"artifact[_-]?missing|candidate[_-]?invalid|collection[_-]?failed", re.IGNORECASE
+)
+_DRIVER_FAILED_RE: Final[re.Pattern[str]] = re.compile(r"driver[_-]?failed", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class DeliveryOutcome:
+    """What the current attempt actually delivered, and from what evidence.
+
+    ``outcome`` is the closed :data:`DELIVERY_OUTCOMES` vocabulary;
+    ``reason`` names WHERE the derivation read it (the recorded
+    ``candidate_state``, the driver exit, the run row's typed blocked
+    reason, or the collected candidates — the honest "nothing recorded");
+    ``evidence`` is the thin link to the proving row. ``failed`` says
+    whether this is a FAILED delivery — the render side of the R38-15
+    acceptance: such a run never displays as a successful resume.
+    """
+
+    outcome: str
+    reason: str
+    evidence: dict[str, str]
+
+    @property
+    def failed(self) -> bool:
+        return self.outcome in DELIVERY_FAILED_OUTCOMES
+
+
+def delivery_outcome_of(source_rows: Mapping[str, Any]) -> DeliveryOutcome:
+    """Derive the delivery outcome from the rows already recorded (pure).
+
+    Priority, each rung naming its evidence in ``reason``:
+
+    1. the recorded ``candidate_state`` — the #302 marker's classification
+       where it lands in evidence (the reader-mapped ``lane_outcome``
+       slice, the harness fragment, or the top-level spelling);
+    2. a recorded ``driver_exit`` that is not ``completed``;
+    3. the run row's typed blocked reason (``repair_no_effect`` /
+       ``harness_no_changes`` → no effect; ``harness_artifact_missing`` /
+       ``harness_candidate_invalid`` → collection failed;
+       ``harness_driver_failed`` → driver failed);
+    4. collected candidates on the run row → ``delivered``;
+    5. otherwise ``not_collected_yet`` — an honest "no delivery recorded",
+       never a guessed success.
+    """
+    run = _require_run(source_rows)
+    run_id = str(_first(run, "id", "run_id") or "")
+    link = {"of": "run", "id": run_id, "ref": _row_digest(run)}
+    blocked = str(run.get("blocked_reason") or "")
+
+    lane_view = run.get("lane_outcome")
+    lane: Mapping[str, Any] = lane_view if isinstance(lane_view, Mapping) else {}
+    run_evidence = run.get("evidence") if isinstance(run.get("evidence"), Mapping) else {}
+    evidence_lane = (
+        run_evidence.get("harness") if isinstance(run_evidence.get("harness"), Mapping) else {}
+    )
+
+    def _recorded(key: str) -> Any:
+        for source in (lane, evidence_lane, run_evidence):
+            value = source.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    candidate_state = str(_recorded("candidate_state") or "").strip()
+    if candidate_state in _CANDIDATE_STATE_OUTCOMES:
+        return DeliveryOutcome(
+            _CANDIDATE_STATE_OUTCOMES[candidate_state],
+            f"harness candidate_state={candidate_state}",
+            link,
+        )
+    driver_exit = str(_recorded("driver_exit") or "").strip()
+    if driver_exit and driver_exit != "completed":
+        return DeliveryOutcome("driver_failed", f"driver_exit={driver_exit}", link)
+    if blocked:
+        if _NO_EFFECT_RE.search(blocked):
+            return DeliveryOutcome("empty_diff_no_effect", f"run blocked: {blocked}", link)
+        if _COLLECTION_FAILED_RE.search(blocked):
+            return DeliveryOutcome("collection_failed", f"run blocked: {blocked}", link)
+        if _DRIVER_FAILED_RE.search(blocked):
+            return DeliveryOutcome("driver_failed", f"run blocked: {blocked}", link)
+    candidates = [str(sha) for sha in run.get("candidate_shas") or [] if str(sha or "").strip()]
+    if candidates:
+        return DeliveryOutcome("delivered", f"collected candidates: {len(candidates)}", link)
+    return DeliveryOutcome("not_collected_yet", "no recorded lane outcome", link)
+
+
+def _section_observed(
+    coverage: Mapping[str, str] | None, section: str, source_rows: Mapping[str, Any]
+) -> bool:
+    """Whether *section*'s authority was OBSERVED for these rows — the
+    coverage map's word when given (``unknown`` or absent → not observed),
+    else whether the rows carry the section at all (a hand-built rows
+    document that omits the section never read it)."""
+    if coverage is not None:
+        return str(coverage.get(section, "") or "") in ("present", "missing")
+    return section in source_rows
+
+
+def _milestone(
+    name: str,
+    status: str,
+    *,
+    of: str = "",
+    ident: Any = None,
+    at: Any = None,
+    row: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One milestone's display row: status + (when present) the thin
+    evidence link and the moment it was observed."""
+    entry: dict[str, Any] = {"milestone": name, "status": status, "evidence": None, "at": ""}
+    if status == "present" and row is not None:
+        entry["evidence"] = {"of": of, "id": str(ident or ""), "ref": _row_digest(row)}
+        entry["at"] = _iso(at) if at else ""
+    return entry
+
+
+def recovery_ladder(
+    source_rows: Mapping[str, Any],
+    *,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """The five-milestone pause/resume ladder, each INDEPENDENT (R38-15).
+
+    - ``pause_requested`` — the pause COMMAND row (any rung: the request
+      itself is the milestone);
+    - ``checkpoint_committed`` — the verified checkpoint (its id + digest);
+    - ``runner_stopped`` — the native job's terminal observation (a
+      released execution lease — the reconciler's probe, never a timer);
+    - ``resume_authorized`` — the resume DECISION row (a resume command
+      that was not refused on the ladder);
+    - ``exact_resume_applied`` — the activation receipt from the R37-03
+      matching: an applied resume whose recorded ``checkpoint_ref`` named
+      THIS checkpoint (``activation: "matched"``).
+
+    Each is ``present`` (with its thin evidence link), ``absent`` (the
+    authority was observed and holds no such row) or ``unknown`` (the
+    section was never queried or its authority was unreachable — a
+    checkpoint outage is UNKNOWN, never "no checkpoint").
+    """
+    commands = [_norm(row) for row in source_rows.get("commands") or []]
+    checkpoints = [_norm(row) for row in source_rows.get("checkpoints") or []]
+    commands_observed = _section_observed(coverage, "commands", source_rows)
+    checkpoints_observed = _section_observed(coverage, "checkpoints", source_rows)
+
+    ladder: dict[str, dict[str, Any]] = {}
+
+    # pause_requested — the command row
+    pause = _latest_of(commands, "pause")
+    if not commands_observed:
+        ladder["pause_requested"] = _milestone("pause_requested", "unknown")
+    elif pause is not None:
+        ladder["pause_requested"] = _milestone(
+            "pause_requested",
+            "present",
+            of="pause command",
+            ident=_first(pause, "command_id", "id"),
+            at=pause.get("created_at"),
+            row=pause,
+        )
+    else:
+        ladder["pause_requested"] = _milestone("pause_requested", "absent")
+
+    # checkpoint_committed — the verified checkpoint id + digest
+    committed = [
+        cp
+        for cp in checkpoints
+        if _first(cp, "committed_at") or str(_first(cp, "status") or "") == "committed"
+    ]
+    checkpoint = committed[-1] if committed else None
+    if not checkpoints_observed:
+        ladder["checkpoint_committed"] = _milestone("checkpoint_committed", "unknown")
+    elif checkpoint is not None:
+        ladder["checkpoint_committed"] = _milestone(
+            "checkpoint_committed",
+            "present",
+            of="checkpoint",
+            ident=_first(checkpoint, "checkpoint_id", "id"),
+            at=checkpoint.get("committed_at"),
+            row=checkpoint,
+        )
+    else:
+        ladder["checkpoint_committed"] = _milestone("checkpoint_committed", "absent")
+
+    # runner_stopped — the native job's terminal observation (a released
+    # lease). The occupancy slice is observed when the caller PASSED it and
+    # the coverage map (when any) says its authority was queried — an
+    # unselected occupancy section reads unknown, never "no terminal
+    # observation".
+    occupancy_observed = occupancy is not None and (
+        coverage is None or str(coverage.get("occupancy", "") or "") in ("present", "missing")
+    )
+    if not occupancy_observed:
+        ladder["runner_stopped"] = _milestone("runner_stopped", "unknown")
+    else:
+        stopped = [row for row in occupancy if str(row.get("released_at") or "")]
+        if stopped:
+            latest = stopped[-1]
+            ladder["runner_stopped"] = _milestone(
+                "runner_stopped",
+                "present",
+                of="lease",
+                ident=latest.get("lease_id"),
+                at=latest.get("released_at"),
+                row=latest,
+            )
+        else:
+            ladder["runner_stopped"] = _milestone("runner_stopped", "absent")
+
+    # resume_authorized — the decision row (a resume not refused on the ladder)
+    resume = _latest_of(commands, "resume")
+    resume_status = str(_first(resume, "status") or "") if resume else ""
+    if not commands_observed:
+        ladder["resume_authorized"] = _milestone("resume_authorized", "unknown")
+    elif resume is not None and resume_status not in _COMMAND_REFUSED:
+        ladder["resume_authorized"] = _milestone(
+            "resume_authorized",
+            "present",
+            of="resume command",
+            ident=_first(resume, "command_id", "id"),
+            at=resume.get("created_at"),
+            row=resume,
+        )
+    else:  # no resume row, or one refused (rejected/expired) — never authorized
+        ladder["resume_authorized"] = _milestone("resume_authorized", "absent")
+
+    # exact_resume_applied — the R37-03 activation receipt (matched command)
+    applied = [
+        cp
+        for cp in checkpoints
+        if _first(cp, "activated_at") is not None
+        and str(cp.get("activation") or "") != "unmatched-command"
+    ]
+    if not checkpoints_observed:
+        ladder["exact_resume_applied"] = _milestone("exact_resume_applied", "unknown")
+    elif applied:
+        receipt = applied[-1]
+        ladder["exact_resume_applied"] = _milestone(
+            "exact_resume_applied",
+            "present",
+            of="checkpoint",
+            ident=_first(receipt, "checkpoint_id", "id"),
+            at=receipt.get("activated_at"),
+            row=receipt,
+        )
+    else:
+        ladder["exact_resume_applied"] = _milestone("exact_resume_applied", "absent")
+
+    return ladder
+
+
+@dataclass(frozen=True)
+class RecoveryHint:
+    """One ADVISORY recovery guidance (R38-15): what is safe next, in human
+    words, with the EXACT command shapes and the guarded route each one
+    executes through. Hints never authorize anything — the guarded routes
+    revalidate authority and the current world at execution time.
+
+    ``retryable`` is ``False`` exactly for the non-retryable conditions
+    (the R37-16/#297 codes): a revoked authority is rotated or reconciled,
+    never retried.
+    """
+
+    advisory: str
+    commands: tuple[dict[str, str], ...]
+    retryable: bool
+
+    def as_document(self) -> dict[str, Any]:
+        """The redacted render of one hint (the recovery surface)."""
+        return redact(
+            {
+                "advisory": self.advisory,
+                "commands": [dict(command) for command in self.commands],
+                "retryable": self.retryable,
+            }
+        )
+
+
+def recovery_hint(
+    state: str,
+    delivery_outcome: str,
+    *,
+    blocked_reason: str = "",
+) -> RecoveryHint | None:
+    """The advisory guidance for one state × delivery outcome (pure).
+
+    Priority: a revoked/stale authority (the #297 non-retryable condition
+    — rotate or reconcile, NEVER retry) outranks the delivery outcome.
+    Then the outcome speaks: an ``empty_diff_no_effect`` resume names BOTH
+    escapes with their exact shapes (re-issue the guidance, or restart
+    from the verified checkpoint); a failed collection names the typed
+    error and the rerun path; a not-yet-collected attempt says probe.
+    ``None`` only where nothing needs recovering (a delivered candidate
+    that is verified or accepted).
+
+    Unknown states and outcomes fail visibly — least-authority guessing is
+    how consoles drift into drive-by writes.
+    """
+    if state not in OPERATOR_STATES:
+        raise ValueError(f"unknown operator state: {state!r}")
+    if delivery_outcome not in DELIVERY_OUTCOMES:
+        raise ValueError(f"unknown delivery outcome: {delivery_outcome!r}")
+    blocked = str(blocked_reason or "")
+    commands = _RECOVERY_COMMANDS
+
+    if blocked and _REVOKED_AUTHORITY_RE.search(blocked):
+        return RecoveryHint(
+            advisory=(
+                f"the run's authority is revoked or stale ({blocked}) — rotate the credential "
+                "or reconcile the access before any rerun; a retry cannot restore withdrawn "
+                "authority"
+            ),
+            commands=(commands["rotate"], commands["reconcile"], commands["probe"]),
+            retryable=False,
+        )
+
+    if delivery_outcome == "empty_diff_no_effect":
+        if state == "resumed":
+            return RecoveryHint(
+                advisory=(
+                    "the resume delivered NO changes — a failed/no-effect delivery, not a "
+                    "successful resume: re-issue the task guidance or restart from the "
+                    "verified checkpoint"
+                ),
+                commands=(commands["steer"], commands["resume"], commands["probe"]),
+                retryable=True,
+            )
+        if state == "safely_paused":
+            return RecoveryHint(
+                advisory=(
+                    "the last attempt delivered a zero-change candidate — restart from the "
+                    "verified checkpoint, or re-issue the guidance once resumed"
+                ),
+                commands=(commands["resume"], commands["probe"]),
+                retryable=True,
+            )
+        if state in ("executing", "wedged"):
+            return RecoveryHint(
+                advisory=(
+                    "the attempt collected a zero-change candidate — no effect was delivered; "
+                    "re-issue the guidance so the turn has something to do"
+                ),
+                commands=(commands["steer"], commands["probe"]),
+                retryable=True,
+            )
+        return RecoveryHint(
+            advisory=(
+                "a zero-change candidate was collected — no effect was delivered; probe the "
+                "current state before deciding"
+            ),
+            commands=(commands["probe"],),
+            retryable=True,
+        )
+
+    if delivery_outcome == "collection_failed":
+        typed = f" ({blocked})" if blocked else ""
+        return RecoveryHint(
+            advisory=(
+                f"the candidate collection failed{typed} — address the collector's typed "
+                "error, then rerun the attempt through the guarded route"
+            ),
+            commands=(commands["retry"], commands["probe"]),
+            retryable=True,
+        )
+
+    if delivery_outcome == "driver_failed":
+        return RecoveryHint(
+            advisory=(
+                "the lane driver failed before a candidate existed — rerun the attempt "
+                "through the guarded route once the driver's cause is addressed"
+            ),
+            commands=(commands["retry"], commands["probe"]),
+            retryable=True,
+        )
+
+    if delivery_outcome == "not_collected_yet":
+        return RecoveryHint(
+            advisory=(
+                "no candidate collection is recorded for the current attempt — probe the "
+                "current state before deciding anything"
+            ),
+            commands=(commands["probe"],),
+            retryable=True,
+        )
+
+    # delivered — only the healthy ends need nothing
+    if state in ("verified_ready", "accepted"):
+        return None
+    if state == "unverified":
+        return RecoveryHint(
+            advisory=(
+                "the candidate was delivered but is not independently verified — verify the "
+                "CURRENT candidate before accepting it"
+            ),
+            commands=(commands["probe"],),
+            retryable=True,
+        )
+    return RecoveryHint(
+        advisory="the candidate was delivered; probe the current state for what remains",
+        commands=(commands["probe"],),
+        retryable=True,
+    )
+
+
+def _recovery_headline(state: str, delivery: DeliveryOutcome) -> str:
+    """The one-line delivery display — a FAILED delivery never reads as a
+    successful resume (R38-15's headline acceptance)."""
+    if delivery.outcome == "empty_diff_no_effect":
+        if state == "resumed":
+            return (
+                "the resume delivered no changes — a FAILED/no-effect delivery, never a "
+                "successful resume of useful work"
+            )
+        return "the attempt delivered a zero-change candidate — no effect"
+    if delivery.outcome == "collection_failed":
+        return "the delivery FAILED — the candidate was never collected"
+    if delivery.outcome == "driver_failed":
+        return "the delivery FAILED — the lane driver failed before a candidate existed"
+    if delivery.outcome == "not_collected_yet":
+        return "no delivery recorded yet"
+    return "the candidate was delivered"
+
+
+def recovery_document(
+    source_rows: Mapping[str, Any],
+    *,
+    state: str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+    projection_inconsistent: bool = False,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """The composed recovery surface over one snapshot's rows (pure).
+
+    The delivery outcome (failed deliveries display AS failures), the
+    five-milestone ladder (each independent), the advisory hint (the
+    guarded routes named) and the consistency word. A snapshot whose
+    source fence MOVED while it was read (the R37-03/#284 fence) renders
+    EXPLICIT UNCERTAINTY — ``consistency: "inconsistent"`` plus the
+    uncertainty note — instead of a confident ladder assembled from mixed
+    versions.
+    """
+    run = _require_run(source_rows)
+    moment = now if now is not None else datetime.now(timezone.utc)
+    state_word = str(state) if state else derive_state(source_rows, moment).display_state
+    delivery = delivery_outcome_of(source_rows)
+    ladder = recovery_ladder(source_rows, coverage=coverage, occupancy=occupancy)
+    hint = recovery_hint(
+        state_word, delivery.outcome, blocked_reason=str(run.get("blocked_reason") or "")
+    )
+    document: dict[str, Any] = {
+        "schema": RECOVERY_SCHEMA,
+        "state": state_word,
+        "delivery": {
+            "outcome": delivery.outcome,
+            "failed": delivery.failed,
+            "headline": _recovery_headline(state_word, delivery),
+            "reason": delivery.reason,
+            "evidence": dict(delivery.evidence),
+        },
+        "ladder": {name: dict(entry) for name, entry in ladder.items()},
+        "hint": hint.as_document() if hint is not None else None,
+        "consistency": "inconsistent" if projection_inconsistent else "observed",
+    }
+    if projection_inconsistent:
+        document["uncertainty"] = (
+            "the source fence moved while this snapshot was read — every milestone and the "
+            "delivery outcome may describe a moved world; re-read before acting"
+        )
+    return redact(document)
+
+
+# ---------------------------------------------------------------------------
 # Recovery actions — the validity matrix and the CAS-checked decision
 # ---------------------------------------------------------------------------
 
@@ -1278,6 +1829,24 @@ ACTION_VIA: Final[Mapping[str, str]] = {
     "cancel": "operator-commands:/cancel",
     "reconcile": "operator-commands:/reconcile",
     "probe": "read-only:/status",
+}
+
+#: The exact command shapes the recovery hints name (R38-15) — every one
+#: routes through an EXISTING guarded path (the command router's comment
+#: verbs, the classic operator commands, the read-only probe, the
+#: token-rotation runbook); the hint never executes anything and never
+#: becomes a second authorization surface. Defined beside :data:`ACTION_VIA`
+#: because it names those same routes.
+_RECOVERY_COMMANDS: Final[Mapping[str, dict[str, str]]] = {
+    "steer": {"command": "/steer <run-id> <corrected guidance>", "via": ACTION_VIA["steer"]},
+    "resume": {"command": "/resume <run-id>", "via": ACTION_VIA["resume"]},
+    "retry": {"command": "/retry <run-id>", "via": ACTION_VIA["retry"]},
+    "reconcile": {"command": "/reconcile <run-id>", "via": ACTION_VIA["reconcile"]},
+    "probe": {"command": "GET /operator/runs/<run-id>", "via": ACTION_VIA["probe"]},
+    "rotate": {
+        "command": "rotate/rebind the credential per the token-rotation runbook",
+        "via": _SUGGESTED_VIA["rotate_or_rebind_credential"],
+    },
 }
 
 #: The actor roles. ``approver`` is the configured approver set (the SAME
@@ -1476,3 +2045,215 @@ class RecoveryActions:
             safe_next_action=safe_next,
             action=action,
         )
+
+
+def action_hint_block(
+    projection: OperatorProjection,
+    *,
+    actor: str = "operator:read",
+    actor_role: str = "observer",
+    snapshot_inconsistent: bool = False,
+) -> dict[str, Any]:
+    """The ADVISORY action-hint block the render surfaces (R38-15).
+
+    The hints themselves are :meth:`RecoveryActions.plan` verbatim — the
+    read-only observer shape the API serves. R38-15 adds the
+    old-snapshot revalidation DISPLAY: a hint rendered from a snapshot
+    whose consistency fence MOVED (``snapshot_inconsistent`` — the
+    R37-03/#284 fence; an assembly that mixed versions, the "action hint
+    from an old snapshot" of the acceptance) carries ``stale: true`` on
+    every entry plus the current state's safe alternative, and the block
+    itself says WHY it is stale. The guarded route at execution time
+    still enforces the refusal (CTL-04 CAS); this is the honest display
+    of the same fact, before the operator clicks.
+    """
+    actions: list[dict[str, Any]] = []
+    for action in RecoveryActions.plan(projection, actor, actor_role):
+        entry: dict[str, Any] = {
+            "action": action.action,
+            "via": action.via,
+            "digest": action.digest,
+            "expected_version": action.expected_version,
+            "at": action.at,
+            "linkage": action.linkage,
+        }
+        if snapshot_inconsistent:
+            entry["stale"] = True
+            entry["safe_alternative"] = RecoveryActions.safe_next("stale", "observer")
+        actions.append(entry)
+    document: dict[str, Any] = {
+        "actions": actions,
+        "actions_advisory": (
+            "action hints only — execution goes through the guarded command routes, "
+            "which revalidate authority and the current world; this render is an "
+            "ephemeral projection, not a durable CAS ticket"
+        ),
+        "actions_stale": bool(snapshot_inconsistent),
+    }
+    if snapshot_inconsistent:
+        document["actions_stale_reason"] = (
+            "the consistency fence moved while this snapshot was read — these hints may "
+            "describe a moved world; refresh (probe) and re-decide before executing any "
+            "of them, the guarded route will refuse the stale ones anyway"
+        )
+    return document
+
+
+# ---------------------------------------------------------------------------
+# The export diagnostics slice (R38-15) — bounded, allowlisted, backup-free
+# ---------------------------------------------------------------------------
+
+#: The diagnostics document's schema discriminator.
+DIAGNOSTICS_SCHEMA: Final = "forge.operator.diagnostics/1"
+
+#: The per-section FIELD ALLOWLISTS (the audit_export
+#: ``CREDENTIAL_DOCUMENT_FIELDS`` pattern): each diagnostics section
+#: serializes ONLY its declared fields — anything else a source row ever
+#: carried is dropped, never rescued into the export.
+DIAGNOSTIC_SECTION_FIELDS: Final[Mapping[str, frozenset[str]]] = {
+    "delivery": frozenset({"outcome", "failed", "headline", "reason", "evidence"}),
+    "recovery_ladder": frozenset({"milestone", "status", "evidence", "at"}),
+    "recovery_hint": frozenset({"advisory", "commands", "retryable"}),
+    "blocked_reasons": frozenset(
+        {"code", "explanation", "evidence", "suggested_action", "via", "retryable"}
+    ),
+}
+
+#: The per-section ENTRY bound: the diagnostics slice of a support-bundle
+#: export stays small whatever the history (the evidence sections carry
+#: the full story under the export's byte cap; diagnostics summarize it).
+DIAGNOSTIC_MAX_ENTRIES: Final[int] = 10
+
+#: Raw operational backup NAME shapes (the R38-03/#304 world: PostgreSQL
+#: custom-format dumps, SQL/SQLite exports, backup directories) — a
+#: filename-shaped token carrying one of these extensions, or a backups/
+#: path. A diagnostics render never carries a raw backup name or path;
+#: the sanitized RECEIPTS are referenced at most (a value naming a
+#: receipt passes; the bytes never exist here to begin with).
+_RAW_BACKUP_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\w./\\-]+\.(?:dump|pgdump|backup|bak|sql|sqlite3?|db)(?:\.(?:gz|zst|xz|bz2))?(?![\w.-])"
+    r"|(?:^|[/\\])backups?[/\\][\w./\\-]*",
+    re.IGNORECASE,
+)
+
+
+def _allowlisted(document: Mapping[str, Any], fields: frozenset[str]) -> dict[str, Any]:
+    """One document reduced to its declared fields (unknown keys dropped)."""
+    return {str(key): document[key] for key in document if key in fields}
+
+
+def _bounded(rows: Sequence[Mapping[str, Any]], cap: int) -> tuple[list[dict[str, Any]], bool]:
+    """The first *cap* entries + whether the bound cut anything."""
+    entries = [dict(row) for row in rows]
+    if len(entries) <= cap:
+        return entries, False
+    return entries[:cap], True
+
+
+def _scrub_raw_backups(value: Any) -> tuple[Any, int]:
+    """Recursively replace raw operational backup NAMES with the exclusion
+    marker, counting what was excluded (a #304 receipt reference — a value
+    naming a receipt — survives whole; the raw backup name never does)."""
+    if isinstance(value, str):
+        if "receipt" in value.lower():
+            return value, 0
+        return _RAW_BACKUP_NAME_RE.subn("[backup-excluded]", value)
+    if isinstance(value, Mapping):
+        cleaned: dict[Any, Any] = {}
+        excluded = 0
+        for key, item in value.items():
+            cleaned[key], dropped = _scrub_raw_backups(item)
+            excluded += dropped
+        return cleaned, excluded
+    if isinstance(value, (list, tuple)):
+        items: list[Any] = []
+        excluded = 0
+        for item in value:
+            scrubbed, dropped = _scrub_raw_backups(item)
+            items.append(scrubbed)
+            excluded += dropped
+        return items, excluded
+    return value, 0
+
+
+def export_diagnostics(
+    source_rows: Mapping[str, Any],
+    *,
+    state: str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+    projection: OperatorProjection | None = None,
+    projection_inconsistent: bool = False,
+    max_entries: int = DIAGNOSTIC_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """The support-bundle export's DIAGNOSTICS slice (R38-15).
+
+    Three bounds, all structural:
+
+    - SIZE — every list section carries at most *max_entries* entries
+      (``truncated`` names what was cut; the byte cap at the export route
+      bounds the whole document on top);
+    - ALLOWLIST — every section serializes ONLY its declared
+      :data:`DIAGNOSTIC_SECTION_FIELDS` (the audit_export pattern);
+    - BACKUP EXCLUSION — raw operational backup names (R38-03/#304) are
+      scrubbed from every string the slice carries; the sanitized
+      receipts are referenced at most (``raw_backups_excluded`` counts).
+
+    Pure: derives from the same rows the bundle reads, writes nothing.
+    """
+    recovery = recovery_document(
+        source_rows,
+        state=state,
+        coverage=coverage,
+        occupancy=occupancy,
+        projection_inconsistent=projection_inconsistent,
+    )
+    if projection is None:
+        projection = initial_projection(source_rows)
+    blocked_reasons = [
+        reason.as_document()
+        for reason in explain_blocked(
+            projection,
+            coverage=coverage,
+            occupancy=occupancy,
+            checkpoints=source_rows.get("checkpoints"),
+        )
+    ]
+    ladder_rows, ladder_cut = _bounded(
+        (
+            _allowlisted(dict(entry), DIAGNOSTIC_SECTION_FIELDS["recovery_ladder"])
+            for entry in recovery["ladder"].values()
+        ),
+        max_entries,
+    )
+    hint = recovery["hint"]
+    blocked_rows, blocked_cut = _bounded(
+        (
+            _allowlisted(reason, DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"])
+            for reason in blocked_reasons
+        ),
+        max_entries,
+    )
+    sections: dict[str, Any] = {
+        "delivery": _allowlisted(dict(recovery["delivery"]), DIAGNOSTIC_SECTION_FIELDS["delivery"]),
+        "recovery_ladder": ladder_rows,
+        "recovery_hint": (
+            [_allowlisted(dict(hint), DIAGNOSTIC_SECTION_FIELDS["recovery_hint"])]
+            if isinstance(hint, Mapping)
+            else []
+        ),
+        "blocked_reasons": blocked_rows,
+    }
+    sections, excluded = _scrub_raw_backups(sections)
+    return redact(
+        {
+            "schema": DIAGNOSTICS_SCHEMA,
+            "sections": sections,
+            "export": {
+                "max_entries_per_section": max_entries,
+                "truncated": {"recovery_ladder": ladder_cut, "blocked_reasons": blocked_cut},
+                "fields": "allowlisted",
+                "raw_backups_excluded": excluded,
+            },
+        }
+    )

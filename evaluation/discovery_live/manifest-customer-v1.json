@@ -1,0 +1,211 @@
+{
+  "schema": "forge.discovery.customer.manifest/1",
+  "registered_at": "2026-09-25T00:00:00+00:00",
+  "issue": "R38-11 / #312",
+  "task": {
+    "task_id": "DP-01-customer-refund-graph",
+    "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago: wire the request through to Billing's policy client, emit the audit event the audit service requires for recent expiries, and send the shipment confirmation Shipping owns. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount, who performs that approval for orders-api, or which recipient the refund confirmation must reach.",
+    "ambiguity": {
+      "question_terms": [
+        "who approves",
+        "who performs",
+        "approver",
+        "approval owner",
+        "which recipient",
+        "which policy is current"
+      ],
+      "invented_default_terms": [
+        "auto-approve",
+        "approve automatically",
+        "no approval required",
+        "without approval",
+        "warehouse-only is current",
+        "customer-and-fulfillment is current"
+      ]
+    }
+  },
+  "repos": [
+    {
+      "key": "gitlab:orders-api",
+      "role": "writable",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-orders.internal.example",
+        "connection_id": 21
+      },
+      "numeric_id": 2101,
+      "repository_id": "orders-api",
+      "source_oid": "b652860236be7530dbd5af67829953103ef0e9d1",
+      "fixture": "fixtures-customer-v1/orders-api",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:billing-policy",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-billing.internal.example",
+        "connection_id": 22
+      },
+      "numeric_id": 2102,
+      "repository_id": "billing-policy",
+      "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+      "fixture": "fixtures-customer-v1/billing-policy",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/policy/refunds.py",
+        "marker": "REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS",
+        "min_line": 200,
+        "depth": "line-200+",
+        "note": "the manual-approval threshold lives at line 200+ of the neighbor",
+        "marker_line": 218
+      }
+    },
+    {
+      "key": "gitlab:audit-events",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-audit.internal.example",
+        "connection_id": 23
+      },
+      "numeric_id": 2103,
+      "repository_id": "audit-events",
+      "source_oid": "ca387c35b44e0ae45b89d4a9e3fe41a36051252e",
+      "fixture": "fixtures-customer-v1/audit-events",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/audit/pipeline.py",
+        "marker": "AUDIT_EMISSION_REQUIRED_AFTER_DAYS",
+        "page_chars": 2000,
+        "depth": "second-page-window",
+        "note": "the emission window lives beyond the first observation page",
+        "marker_char": 3473,
+        "marker_line": 97
+      }
+    },
+    {
+      "key": "gitlab:shipping-policy",
+      "role": "decisive_neighbor",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-shipping.internal.example",
+        "connection_id": 24
+      },
+      "numeric_id": 2104,
+      "repository_id": "shipping-policy",
+      "source_oid": "2d2d8efefa8f93ca8068abf8b1098a85bcd0ac95",
+      "fixture": "fixtures-customer-v1/shipping-policy",
+      "allowed_globs": [
+        "**"
+      ],
+      "decisive": {
+        "path": "src/shipping/confirmation.py",
+        "grep": "SHIP_CONFIRMATION_RECIPIENT",
+        "current_marker": "SHIP_CONFIRMATION_RECIPIENT_CURRENT = \"customer-and-fulfillment\"",
+        "obsolete_marker": "SHIP_CONFIRMATION_RECIPIENT_OBSOLETE = \"warehouse-only\"",
+        "revision_current": "S-2026-03",
+        "revision_obsolete": "S-2024-08",
+        "depth": "conflicting-current-vs-obsolete",
+        "note": "current and obsolete recipient policies coexist; the plan must ask",
+        "current_line": 39,
+        "obsolete_line": 71
+      }
+    },
+    {
+      "key": "gitlab:platform-docs",
+      "role": "budget_sink",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-docs.internal.example",
+        "connection_id": 25
+      },
+      "numeric_id": 2105,
+      "repository_id": "platform-docs",
+      "source_oid": "b64a44d65f5c43ccc5c8043640d726d46a60b4b6",
+      "fixture": "fixtures-customer-v1/platform-docs",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:marketing-site",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-marketing.internal.example",
+        "connection_id": 26
+      },
+      "numeric_id": 2106,
+      "repository_id": "marketing-site",
+      "source_oid": "8d876b7c76a2c94f043769321780eeddfdf6f57b",
+      "fixture": "fixtures-customer-v1/marketing-site",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:infra-terraform",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-infra.internal.example",
+        "connection_id": 27
+      },
+      "numeric_id": 2107,
+      "repository_id": "infra-terraform",
+      "source_oid": "9a323a67a0d032c8949a7c0fadc7ce7d9d1641f5",
+      "fixture": "fixtures-customer-v1/infra-terraform",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:mobile-checkout",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-mobile.internal.example",
+        "connection_id": 28
+      },
+      "numeric_id": 2108,
+      "repository_id": "mobile-checkout",
+      "source_oid": "ecd98386f9909680044d944336879a82fcaeeb52",
+      "fixture": "fixtures-customer-v1/mobile-checkout",
+      "allowed_globs": [
+        "**"
+      ]
+    },
+    {
+      "key": "gitlab:search-index",
+      "role": "noise",
+      "connection": {
+        "provider": "gitlab",
+        "base_url": "https://gitlab-search.internal.example",
+        "connection_id": 29
+      },
+      "numeric_id": 2109,
+      "repository_id": "search-index",
+      "source_oid": "5e3ec41afc419d4577438574b3a9dbeb0b989cce",
+      "fixture": "fixtures-customer-v1/search-index",
+      "allowed_globs": [
+        "**"
+      ]
+    }
+  ],
+  "caps": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "sink_max_calls": 4,
+    "budget_mode": "reasoning-heavy",
+    "max_usd": 1.0
+  },
+  "oid_scheme": "sha1-canonical-fileset/1",
+  "note": "the customer-scale planning profile graph: one writable target, three decisive neighbors at different depths, one LARGE irrelevant docs repository (the budget-sink arm) and four noise repositories; the live-model run over this graph is the partner-gated remainder (R38-14) and is not claimed here"
+}

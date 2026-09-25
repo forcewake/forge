@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -115,9 +116,9 @@ from forge.factory.llm import LLMError, LLMResponseError
 from forge.adaptive import continuation
 from forge.adaptive.credential_broker import (
     CredentialBroker,
+    CredentialDeliveryPlan,
     EnvBroker,
-    StagedDispatchCredential,
-    stage_dispatch_credential,
+    delivery_plan,
 )
 
 # Q35-07: the composition-boundary adoption (ADR-0029) — the narrow seam
@@ -4071,32 +4072,30 @@ class GitHubRunService:
         )
         if driver is None:
             driver = spec.harness_driver
-        # NEXT-19 (#207): broker resolution under the active execution
-        # lease (opened above for the composition boundary) — BEFORE any
-        # provider call. A subject the deployment never bound stages
-        # nothing (today's ambient behavior, attribution unknown); a
-        # bound subject resolves through the registry's fail-closed
-        # checks and the broker, and the workflow inputs gain ONLY the
-        # broker's staged slot for the credential route (the same
-        # input channel lane_control_token already rides; a template
-        # without the declared input drops it, harmlessly). Any typed
-        # refusal parks the run with ZERO provider dispatches — exactly
-        # like the composition-boundary refusal above.
+        # NEXT-19 (#207) / R38-02 (#303): the credential DELIVERY plan
+        # under the active execution lease (opened above for the
+        # composition boundary) — BEFORE any provider call. A subject the
+        # deployment never bound plans nothing (today's ambient behavior,
+        # attribution ambient-legacy); a bound subject resolves through
+        # the registry's fail-closed checks into a provider-safe
+        # transport (the native repo secret the workflow reads
+        # runner-side, or runner-time redemption) — and the workflow
+        # inputs gain ONLY the credential REF (a declared input; the
+        # resolved VALUE never rides a dispatch input — dispatch inputs
+        # are visible run metadata). Any typed refusal parks the run with
+        # ZERO provider dispatches.
         credential_subject = binding_subject_of_run(run)
-        staged_credential: StagedDispatchCredential | None = None
+        credential_delivery: CredentialDeliveryPlan | None = None
         if credential_subject is not None:
             try:
-                staged_credential = await stage_dispatch_credential(
+                credential_delivery = await delivery_plan(
                     self._credential_registry,
                     self._credential_broker,
                     subject=credential_subject,
-                    provider=provider_route_for_driver(driver),
+                    provider_route=provider_route_for_driver(driver),
+                    profile="github",
                     presented_ref=prior_credential_ref,
-                    grant={
-                        "run_id": run_id,
-                        "attempt_generation": generation,
-                        **({"lease_id": lease.lease_id} if lease is not None else {}),
-                    },
+                    environ=os.environ,
                 )
             except CredentialRefusal as exc:
                 logger.warning(
@@ -4107,16 +4106,16 @@ class GitHubRunService:
                 )
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, f"credential_refused: {exc}")
                 return
-            if staged_credential is not None:
+            if credential_delivery is not None:
                 logger.info(
                     "credential.binding_subject: run %s subject %s provider %s revision %d — "
-                    "credential.resolved_version %s, credential.resolver_identity %s",
+                    "credential.delivery mode %s transport %s (attribution bound-delivery)",
                     run_id[:8],
-                    staged_credential.subject,
-                    staged_credential.provider,
-                    staged_credential.binding_revision,
-                    staged_credential.resolved_version,
-                    staged_credential.resolver_identity,
+                    credential_delivery.subject,
+                    credential_delivery.provider,
+                    credential_delivery.binding_revision,
+                    credential_delivery.mode,
+                    credential_delivery.transport_ref,
                 )
         branch = github_factory_branch(issue_number, run_id)
         executor = GitHubActionsExecutor(self._stack.client, self._settings)
@@ -4210,11 +4209,23 @@ class GitHubRunService:
                     # reason) on a repair re-dispatch; cycle 1 dispatches
                     # the same shape as always.
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
-                    # NEXT-19 (#207): the broker's staged credential slot
-                    # (the binding's env var name as the input key — the
-                    # same channel lane_control_token rides; the shipped
-                    # template maps declared inputs onto the lane env).
-                    **(dict(staged_credential.staged_env) if staged_credential is not None else {}),
+                    # R38-02 (#303): the credential delivery REFERENCE —
+                    # the declared `credential_ref` input (the secret-name
+                    # segment under the native profile, the raw ref under
+                    # runner-redemption) plus the non-secret redemption
+                    # flag. Sent ONLY on a bound dispatch, so a target
+                    # whose workflow predates the input keeps receiving
+                    # the unchanged legacy payload. NEVER a value: the
+                    # workflow maps the repo secret
+                    # FORGE_MODEL_<credential_ref> runner-side.
+                    **(
+                        {
+                            "credential_ref": credential_delivery.dispatch_ref,
+                            "credential_redeem": "1" if credential_delivery.redemption else "",
+                        }
+                        if credential_delivery is not None
+                        else {}
+                    ),
                 },
             )
         except GitHubAPIError as exc:
@@ -4290,19 +4301,23 @@ class GitHubRunService:
                         "attempt_base": attempt_base,
                         "driver": correlated.driver,
                         "started_at": correlated.started_at,
-                        # NEXT-19 (#207): the extended dispatch-credential
-                        # proof (/2) beside the harness handle — binding
-                        # subject, ref, revision, resolver identity,
-                        # resolved version, grant refs and the broker
-                        # receipt. Refs and metadata only, never the value.
+                        # R38-02 (#303): the credential delivery plan
+                        # (/1) beside the harness handle — binding
+                        # subject, ref, revision, the delivery mode, the
+                        # transport reference and the expected identity.
+                        # Refs and metadata only, never the value.
                         **(
                             {
                                 "dispatch_credential": {
-                                    **staged_credential.proof,
+                                    **credential_delivery.as_document(),
                                     "attempt_generation": generation,
+                                    "grant": {
+                                        "run_id": run_id,
+                                        "attempt_generation": str(generation),
+                                    },
                                 }
                             }
-                            if staged_credential is not None
+                            if credential_delivery is not None
                             else {}
                         ),
                     },

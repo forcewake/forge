@@ -37,6 +37,14 @@ Two routes, both mounted unconditionally and FAIL-CLOSED (the
   the durable row (payload and all) instead of the pending queue — the
   immutable ResumeSpec a resumed runner restores by, still reachable
   after the command has left ``received``/``authorized``.
+- ``GET /lane/credentials/redeem`` — the runner-time MODEL-credential
+  redemption (R38-02/#303, delivery profile b): the lane exchanges its
+  EXISTING attempt-scoped token for the bound model credential at
+  startup, TTL-bound to the attempt, audited durably before the value
+  leaves. The registry's fail-closed checks re-run against the WORK's
+  own canonical subject; a revoked binding, a rotated-away ref, a
+  foreign ref or a superseded generation each refuse with 403 and zero
+  successful retrievals.
 
 Auth is a lane token: ``HMAC-SHA256(secret, work_id)`` under the
 server-side ``FORGE_LANE_CONTROL_SECRET``, injected into the lane job
@@ -110,10 +118,13 @@ from forge.adaptive.models import ControlCommand
 
 __all__ = [
     "LANE_ACK_STATES",
+    "LANE_CREDENTIAL_REDEEM_ROUTE",
     "LANE_LEGACY_TOKEN_DEADLINE_ENV",
     "LANE_LEGACY_TOKEN_START_ENV",
     "LEGACY_CREDENTIAL_ANCHOR_FILE_ENV",
     "LEGACY_CREDENTIAL_DEADLINE_ENV",
+    "REDEMPTION_TTL_ENV",
+    "DEFAULT_REDEMPTION_TTL_SECONDS",
     "LaneAuthorityUnavailable",
     "LegacyWindow",
     "LegacyWindowInvalid",
@@ -123,6 +134,7 @@ __all__ = [
     "lane_control_token",
     "legacy_token_deadline",
     "legacy_token_start",
+    "redemption_ttl_seconds",
     "resolve_legacy_window",
     "verify_lane_token",
 ]
@@ -1001,3 +1013,218 @@ async def _transition(mailbox: PostgresMailbox, current: ControlCommand, body: L
             "vendor_accepted, outcome_unknown, applied or checkpointed"
         )
     return command
+
+
+# ---------------------------------------------------------------------------
+# R38-02 (#303) — runner-time credential redemption (delivery profile b).
+# ---------------------------------------------------------------------------
+
+#: The redemption route on this router (the transport the delivery plan
+#: names under ``runner-redemption``; the lane dials it at startup).
+LANE_CREDENTIAL_REDEEM_ROUTE: Final = "/lane/credentials/redeem"
+
+#: The redemption TTL (seconds) — the response's ``expires_at`` bound.
+#: The credential is already attempt-scoped by the token's generation
+#: component; the TTL additionally bounds how long a redeemed value is
+#: presented as current.
+REDEMPTION_TTL_ENV: Final = "FORGE_CREDENTIAL_REDEEM_TTL_SECONDS"
+DEFAULT_REDEMPTION_TTL_SECONDS: Final = 3600
+
+
+def redemption_ttl_seconds(env: Mapping[str, str] | None = None) -> float:
+    """The redemption TTL from env (default 1h). Operator state: a
+    malformed or non-positive value is a typed failure, never a silent
+    re-default."""
+    source = os.environ if env is None else env
+    raw = str(source.get(REDEMPTION_TTL_ENV, "") or "").strip()
+    if not raw:
+        return float(DEFAULT_REDEMPTION_TTL_SECONDS)
+    try:
+        value = float(raw)
+    except ValueError:
+        raise LegacyWindowInvalid(
+            f"{REDEMPTION_TTL_ENV}={raw!r} is not a number — fix the value; the "
+            "redemption TTL is never silently re-defaulted"
+        ) from None
+    if value <= 0:
+        raise LegacyWindowInvalid(
+            f"{REDEMPTION_TTL_ENV}={raw!r} must be positive — fix the value; the "
+            "redemption TTL is never silently re-defaulted"
+        )
+    return value
+
+
+async def _record_redemption_audit(
+    session_factory: Any,
+    work_id: str,
+    entry: dict[str, Any],
+) -> None:
+    """Persist the redemption audit row BEFORE the value is returned.
+
+    The audit appends to the run's durable evidence under
+    ``credential_redemptions`` — refs and metadata ONLY (redemption id,
+    binding revision, resolver identity, attempt generation, expiry);
+    there is no value slot and no value digest. A failed audit write
+    REFUSES the redemption (the broker-audit doctrine: every redemption
+    is centrally auditable or it does not happen).
+    """
+    from forge.durable.models import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, work_id)
+        if run is None:
+            raise LaneAuthorityUnavailable(f"work {work_id!r} disappeared before the audit write")
+        evidence = dict(run.evidence or {})
+        redemptions = list(evidence.get("credential_redemptions") or [])
+        redemptions.append(dict(entry))
+        evidence["credential_redemptions"] = redemptions[-50:]  # bounded audit trail
+        run.evidence = evidence
+        await session.commit()
+
+
+@lane_control_router.get(LANE_CREDENTIAL_REDEEM_ROUTE)
+async def redeem_lane_credential(
+    request: Request,
+    work_id: str = Query(min_length=1),
+    credential_ref: str = Query(min_length=1),
+    provider: str = Query(min_length=1),
+    authorization: str | None = Header(None),
+) -> Any:
+    """Redeem THIS attempt's model credential (R38-02 delivery profile b).
+
+    Auth is the EXISTING attempt-scoped lane token — the same
+    ``HMAC(secret, work_id:generation)`` the dispatch minted for this
+    attempt (the ladder :func:`authorize_work_credential` owns: 503 no
+    secret, 401 no bearer, 403 wrong work / superseded generation, 503
+    authority outage). The redemption then re-runs the registry's
+    fail-closed checks against the WORK's OWN canonical subject — the
+    requested ref must be the subject's live binding for the provider
+    route (a revoked binding, a rotated-away ref, a foreign ref or a
+    changed reference from an old attempt each refuse with zero
+    successful retrievals) — resolves the value through the broker, and
+    answers over the authenticated channel with the value plus the
+    consumer receipt fields, TTL-bounded to the attempt. The audit row
+    (no value) is durable BEFORE the value leaves.
+    """
+    import uuid
+
+    from forge.adaptive.credential_broker import (
+        BrokerCredentialRefusal,
+        EnvBroker,
+        credential_policy,
+        reveal_secret,
+    )
+    from forge.adaptive.project_credentials import (
+        CredentialRefusal,
+        binding_subject_of_run,
+        registry_from_env,
+        resolve_dispatch_credential,
+    )
+
+    secret = _secret(request)
+    if not secret:
+        raise HTTPException(status_code=503, detail="lane control endpoint disabled")
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="lane control endpoint disabled")
+    try:
+        ttl = redemption_ttl_seconds()
+    except LegacyWindowInvalid as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    generation = await authorize_work_credential(
+        request, secret=secret, authorization=authorization, work_id=work_id
+    )
+    from forge.durable.models import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, work_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown work {work_id!r}")
+    subject = binding_subject_of_run(run)
+    if subject is None:
+        raise HTTPException(
+            status_code=403,
+            detail="the work names no credential binding subject — no credential is redeemed",
+        )
+    registry = getattr(request.app.state, "credential_registry", None) or registry_from_env()
+    broker = getattr(request.app.state, "credential_broker", None) or EnvBroker()
+    try:
+        dispatch_credential = resolve_dispatch_credential(
+            registry, subject=subject, provider=provider, presented_ref=credential_ref
+        )
+        resolved = await broker.resolve(
+            dispatch_credential.credential_ref,
+            grant={
+                "work_id": work_id,
+                "attempt_generation": generation,
+                "operation": "credential-redemption",
+            },
+        )
+        staged_keys = set(resolved.staged_env)
+        if staged_keys != {dispatch_credential.env_var}:
+            raise CredentialRefusal(
+                "staged_slot_mismatch",
+                {
+                    "subject": dispatch_credential.subject,
+                    "bound_env_var": dispatch_credential.env_var,
+                    "staged_env_vars": sorted(staged_keys),
+                },
+            )
+    except CredentialRefusal as exc:
+        logger.warning("credential redemption for work %s refused (%s)", work_id[:8], exc.reason)
+        raise HTTPException(status_code=403, detail=f"{exc.reason}: {exc.detail}") from exc
+    except BrokerCredentialRefusal as exc:
+        logger.warning("credential redemption for work %s refused (%s)", work_id[:8], exc.reason)
+        raise HTTPException(status_code=403, detail=f"{exc.reason}: {exc.detail}") from exc
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=ttl)
+    redemption_id = uuid.uuid4().hex
+    # R38-04 (#305) — the consumer-receipt correlation join, durable in
+    # the audit row BEFORE the value leaves: the broker's own receipt id,
+    # the resolved version's KIND (a presence stamp displays as one) and
+    # the credential policy in force. Refs/metadata only, as ever.
+    broker_receipt_id = str(resolved.receipt.get("receipt_id") or "")
+    resolved_version_kind = str(resolved.version_kind or "")
+    policy = credential_policy()
+    audit = {
+        "at": now.isoformat(),
+        "redemption_id": redemption_id,
+        "subject": dispatch_credential.subject,
+        "provider": dispatch_credential.provider,
+        "credential_ref": dispatch_credential.credential_ref,
+        "binding_revision": int(dispatch_credential.binding_revision),
+        "resolver": resolved.resolver_identity,
+        "attempt_generation": generation,
+        "expires_at": expires_at.isoformat(),
+        "broker_receipt_id": broker_receipt_id,
+        "resolved_version_kind": resolved_version_kind,
+        "credential_policy": policy,
+    }
+    try:
+        await _record_redemption_audit(session_factory, work_id, audit)
+    except LaneAuthorityUnavailable as exc:
+        logger.warning("redemption audit for work %s failed", work_id[:8], exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="the redemption audit could not be persisted — the redemption is refused",
+        ) from exc
+    return {
+        "redemption_id": redemption_id,
+        "work_id": work_id,
+        "provider": dispatch_credential.provider,
+        "credential_ref": dispatch_credential.credential_ref,
+        "env_var": dispatch_credential.env_var,
+        "value": reveal_secret(resolved.staged_env[dispatch_credential.env_var]),
+        "expires_at": expires_at.isoformat(),
+        "binding_revision": int(dispatch_credential.binding_revision),
+        "resolver_identity": resolved.resolver_identity,
+        "resolved_version": resolved.version,
+        # The consumer-receipt correlation fields (R38-04): the lane's
+        # bootstrap echoes these into its value-free consumer receipt,
+        # joining broker id ↔ redemption id ↔ attempt ↔ consumer.
+        "broker_receipt_id": broker_receipt_id,
+        "resolved_version_kind": resolved_version_kind,
+        "attempt_generation": generation,
+        "credential_policy": policy,
+    }

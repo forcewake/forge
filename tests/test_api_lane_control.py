@@ -32,6 +32,7 @@ the lane's drain climbs. Pinned here:
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -39,12 +40,17 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
+from forge.adaptive.credential_broker import StagedBroker
 from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
+from forge.adaptive.operator_snapshot import CanonicalSubject
+from forge.adaptive.project_credentials import ProjectCredentialRegistry
 from forge.api_lane_control import (
+    LANE_CREDENTIAL_REDEEM_ROUTE,
     LANE_LEGACY_TOKEN_DEADLINE_ENV,
     LANE_LEGACY_TOKEN_START_ENV,
     LEGACY_CREDENTIAL_ANCHOR_FILE_ENV,
+    REDEMPTION_TTL_ENV,
     LegacyWindowInvalid,
     _PROCESS_MIGRATION_START,
     _legacy_window_open,
@@ -52,6 +58,7 @@ from forge.api_lane_control import (
     lane_control_token,
     legacy_token_deadline,
     legacy_token_start,
+    redemption_ttl_seconds,
     resolve_legacy_window,
     verify_lane_token,
 )
@@ -1016,3 +1023,245 @@ class TestResumeSpecRead:
 
         assert response.status_code == 403
         assert response.json()["detail"] == "lane token does not scope this work"
+
+
+# -- the runner-time credential redemption (R38-02 / #303) ----------------------
+
+
+#: The sentinel the BROKER stages — what a successful redemption returns
+#: (and what the audit row must NEVER contain).
+REDEEM_SENTINEL = "sk-redeem-sentinel-0123456789"  # noqa: S105 — a test fixture value
+REDEEM_REF = "env:ANTHROPIC_AUTH_TOKEN"
+#: The run's canonical subject (gitlab family, no recorded connection,
+#: the numeric project id — the subject_of_run derivation).
+REDEEM_PROJECT_ID = 90210
+REDEEM_SUBJECT_ID = "gitlab/-/90210"
+
+
+async def _put_gitlab_run(app, work_id: str, *, generation: int) -> None:
+    async with app.state.session_factory() as session:
+        session.add(
+            FlowRun(
+                id=work_id,
+                project_id=REDEEM_PROJECT_ID,
+                provider="gitlab",
+                cancellation_generation=generation,
+            )
+        )
+        await session.commit()
+
+
+def _bound_credential_lab(app) -> None:
+    """A registry with THIS subject's live binding + a broker staging the
+    sentinel, both mounted on the app (the control plane's own wiring)."""
+    from forge.adaptive.credential_broker import StagedBroker
+    from forge.adaptive.operator_snapshot import CanonicalSubject
+    from forge.adaptive.project_credentials import ProjectCredentialRegistry
+
+    registry = ProjectCredentialRegistry()
+    registry.bind(
+        CanonicalSubject(
+            provider_family="gitlab", connection="-", native_id=str(REDEEM_PROJECT_ID)
+        ),
+        "anthropic-gateway",
+        REDEEM_REF,
+        bound_by="ops@a",
+    )
+    broker = StagedBroker()
+    broker.stage(REDEEM_REF, REDEEM_SENTINEL, env_var="ANTHROPIC_AUTH_TOKEN", version="v1")
+    app.state.credential_registry = registry
+    app.state.credential_broker = broker
+
+
+def _redeem_params(work_id: str = WORK, ref: str = REDEEM_REF) -> dict[str, str]:
+    return {"work_id": work_id, "credential_ref": ref, "provider": "anthropic-gateway"}
+
+
+async def _redemptions(app, work_id: str) -> list[dict]:
+    async with app.state.session_factory() as session:
+        run = await session.get(FlowRun, work_id)
+    return list((run.evidence or {}).get("credential_redemptions") or [])
+
+
+class TestCredentialRedemption:
+    """Delivery profile (b): the lane exchanges its EXISTING attempt-scoped
+    token for the bound model credential, TTL-bound, audited before the
+    value leaves — and every wrong-axis attempt retrieves NOTHING."""
+
+    async def test_the_current_attempt_redeems_the_bound_credential(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["value"] == REDEEM_SENTINEL
+        assert body["env_var"] == "ANTHROPIC_AUTH_TOKEN"
+        assert body["credential_ref"] == REDEEM_REF
+        assert body["binding_revision"] == 1
+        assert body["redemption_id"]
+        # TTL-bounded to the attempt: a concrete, near-future expiry.
+        expires = datetime.fromisoformat(body["expires_at"])
+        assert expires > datetime.now(timezone.utc)
+        assert expires <= datetime.now(timezone.utc) + timedelta(hours=2)
+        # The audit row persisted BEFORE the value left — refs only.
+        rows = await _redemptions(app, WORK)
+        assert len(rows) == 1
+        assert rows[0]["redemption_id"] == body["redemption_id"]
+        assert rows[0]["attempt_generation"] == 2
+        assert REDEEM_SENTINEL not in json.dumps(rows)
+
+    async def test_a_superseded_generations_token_cannot_redeem(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 1)
+        )
+
+        assert response.status_code == 403
+        assert "superseded runner generation" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []  # zero successful retrievals
+
+    async def test_another_works_token_cannot_redeem(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE,
+            params=_redeem_params(),
+            headers=_gen_headers(OTHER_WORK, 2),
+        )
+
+        assert response.status_code == 403
+        assert await _redemptions(app, WORK) == []
+
+    async def test_a_revoked_binding_redeems_nothing(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        app.state.credential_registry.revoke(
+            CanonicalSubject(
+                provider_family="gitlab", connection="-", native_id=str(REDEEM_PROJECT_ID)
+            ),
+            "anthropic-gateway",
+            revoked_by="ops@a",
+        )
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 403
+        assert "revoked" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []
+
+    async def test_a_changed_reference_redeems_nothing(self, app, client):
+        """Rotation fencing: an old attempt that changes the REQUESTED
+        reference cannot reach a new binding (acceptance 7)."""
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE,
+            params=_redeem_params(ref="vault:kv/other#1"),
+            headers=_gen_headers(WORK, 2),
+        )
+
+        assert response.status_code == 403
+        assert "wrong_project_ref" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []
+
+    async def test_an_unbound_subject_redeems_nothing(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        app.state.credential_registry = ProjectCredentialRegistry()  # no binding
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 403
+        assert "no_binding" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []
+
+    async def test_a_broker_refusal_is_a_403_never_a_value(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        app.state.credential_broker = StagedBroker()  # stages nothing
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 403
+        assert "unresolved_ref" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []
+
+    async def test_a_broker_staging_the_wrong_slot_is_refused(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        broker = StagedBroker()
+        broker.stage(REDEEM_REF, REDEEM_SENTINEL, env_var="ZAI_API_KEY")
+        app.state.credential_broker = broker
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 403
+        assert "staged_slot_mismatch" in response.json()["detail"]
+
+    async def test_a_missing_bearer_is_401_and_no_secret_is_503(self, app, client):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+
+        missing = await client.get(LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params())
+        assert missing.status_code == 401
+
+        app.state.settings.FORGE_LANE_CONTROL_SECRET = None
+        disabled = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+        assert disabled.status_code == 503
+        assert "disabled" in disabled.json()["detail"]
+
+    async def test_an_unknown_work_is_404_and_an_unsubjected_work_403(self, app, client):
+        _bound_credential_lab(app)
+        unknown = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+        assert unknown.status_code in (403, 404)  # no run row — fail closed
+
+        # A run whose row names no subject (unknown provider family).
+        async with app.state.session_factory() as session:
+            session.add(FlowRun(id=OTHER_WORK, project_id=1, provider="drill"))
+            await session.commit()
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE,
+            params=_redeem_params(work_id=OTHER_WORK),
+            headers=_gen_headers(OTHER_WORK, 0),
+        )
+        assert response.status_code == 403
+        assert "no credential binding subject" in response.json()["detail"]
+
+    async def test_a_malformed_ttl_refuses_rather_than_re_defaulting(
+        self, app, client, monkeypatch
+    ):
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        monkeypatch.setenv(REDEMPTION_TTL_ENV, "soon")
+
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+
+        assert response.status_code == 503
+        assert REDEMPTION_TTL_ENV in response.json()["detail"]
+        with pytest.raises(LegacyWindowInvalid, match=REDEMPTION_TTL_ENV):
+            redemption_ttl_seconds({"FORGE_CREDENTIAL_REDEEM_TTL_SECONDS": "soon"})
+        # The default and valid shapes.
+        assert redemption_ttl_seconds({}) == 3600.0
+        assert redemption_ttl_seconds({REDEMPTION_TTL_ENV: "600"}) == 600.0

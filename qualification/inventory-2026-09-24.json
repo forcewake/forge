@@ -3,15 +3,15 @@
     "checks": [
       {
         "check": "control-plane.version == pinned release",
-        "expected": "0.36.0",
-        "observed": "0.36.0",
+        "expected": "0.37.0",
+        "observed": "0.37.0",
         "resolution": "runbook \u00a73 step 2 \u2014 pull the promoted image digest and recreate forge-app + forge-worker via podman (NOT docker-compose)",
         "result": "match"
       },
       {
         "check": "control-plane.image_digest == promoted image digest",
-        "expected": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
-        "observed": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+        "expected": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+        "observed": "sha256:20e9cdcd5691e7f54df29e7bc4808b12b63776dda41d1a3344b744c5eecbbce1",
         "resolution": "runbook \u00a73 step 2 \u2014 pin ghcr.io/forcewake/forge@<promoted digest>, not localhost/forge:dev",
         "result": "mismatch"
       },
@@ -24,14 +24,14 @@
       },
       {
         "check": "lane template pinned to the promoted release",
-        "expected": "v0.36.0",
+        "expected": "v0.37.0",
         "observed": "v0.36.0",
         "resolution": "runbook \u00a75 \u2014 refresh the project's .gitlab-ci.yml remote includes to the v<promoted> tag refs",
-        "result": "match"
+        "result": "mismatch"
       },
       {
         "check": "installed lane wheel observable",
-        "expected": "forge==0.36.0 in the lane venv",
+        "expected": "forge==0.37.0 in the lane venv",
         "observed": "lane venv /tmp/forge-lane-venv absent on this host \u2014 the lane installs per CI job on the runner; observe it there or via the next install-check",
         "resolution": "runbook \u00a76 \u2014 observe the lane wheel on the runner (or via the qualification install-check) and record it in the next profile record",
         "result": "unverified"
@@ -47,18 +47,18 @@
     "derived_from": "the intended profile vs the stages' observed facts",
     "verdict": "misaligned"
   },
-  "generated_at": "2026-09-24T13:19:39.649801+00:00",
+  "generated_at": "2026-09-24T23:57:11.613283+00:00",
   "intended_profile": {
-    "image_digest": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
-    "release_version": "0.36.0",
+    "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+    "release_version": "0.37.0",
     "required_caps": [
       "FORGE_BUDGET_PROFILES",
       "FORGE_LANE_BUDGET_SECONDS"
     ],
     "schema_head": "027",
-    "source": "docs/releases/evidence/v0.36.0/promotion.json",
-    "wheel_sha256": "4ecd680afeb7b23301d079ff06386e91dd5c9b5756560ca88c8db8c2941b2005",
-    "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.36.0/forge-0.36.0-py3-none-any.whl"
+    "source": "docs/releases/evidence/v0.37.0/promotion.json",
+    "wheel_sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6",
+    "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.37.0/forge-0.37.0-py3-none-any.whl"
   },
   "read_only": true,
   "stages": {
@@ -162,11 +162,11 @@
       "health_url": "http://localhost:8420/health",
       "image": {
         "container": "forge-app",
-        "image_digest": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+        "image_digest": "sha256:20e9cdcd5691e7f54df29e7bc4808b12b63776dda41d1a3344b744c5eecbbce1",
         "image_name": "localhost/forge:dev",
         "status": "observed"
       },
-      "reported_version": "0.36.0",
+      "reported_version": "0.37.0",
       "status": "observed"
     },
     "lane": {
@@ -186,10 +186,10 @@
         "status": "observed"
       },
       "pinned_wheel": {
-        "release_version": "0.36.0",
-        "sha256": "4ecd680afeb7b23301d079ff06386e91dd5c9b5756560ca88c8db8c2941b2005",
-        "source": "docs/releases/evidence/v0.36.0/promotion.json",
-        "url": "https://github.com/forcewake/forge/releases/download/v0.36.0/forge-0.36.0-py3-none-any.whl"
+        "release_version": "0.37.0",
+        "sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6",
+        "source": "docs/releases/evidence/v0.37.0/promotion.json",
+        "url": "https://github.com/forcewake/forge/releases/download/v0.37.0/forge-0.37.0-py3-none-any.whl"
       },
       "status": "observed"
     },
@@ -197,7 +197,7 @@
       "containers": [
         {
           "container": "forge-worker",
-          "image_digest": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+          "image_digest": "sha256:20e9cdcd5691e7f54df29e7bc4808b12b63776dda41d1a3344b744c5eecbbce1",
           "image_name": "localhost/forge:dev",
           "status": "observed"
         }

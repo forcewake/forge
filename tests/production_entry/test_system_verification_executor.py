@@ -1,4 +1,5 @@
-"""The R37-15 / #296 production-entry trace (AT-12's verification half).
+"""The R37-15 / #296 production-entry trace (AT-12's verification
+half), under the R38-07 / #308 isolation contract.
 
 The unit file (``tests/test_verification_executor.py``) pins the RULES;
 this file proves them at the level a customer drives. Everything the
@@ -6,10 +7,14 @@ customer's verification touches is REAL:
 
 - the executor is a REAL SUBPROCESS under the scrubbed environment
   (``python -m forge.adaptive.verification_executor --candidate-set …
-  --out …``), and its isolation is proved FROM THE LAUNCHED PROCESS:
-  the sentinel and provider-shaped endpoints are real local HTTP
-  servers, the deny probes run inside the subprocess, and a leaked
-  credential actually reaches the endpoint and is caught;
+  --out …``), launched with a CLEAN EMPTY HOME and a NARROWED PATH (the
+  enforcement profile is recorded and digested in the report), and its
+  isolation is proved FROM THE LAUNCHED PROCESS: the sentinel and
+  provider-shaped endpoints are real local HTTP servers, each gated
+  deny route is paired with a no-credential POSITIVE-CONTROL route on
+  the same server, the controlled probes run inside the subprocess
+  under the five-outcome taxonomy, and a deliberately leaked
+  credential is caught from the launched process;
 - the tested services are REAL BUILT WHEELS (``uv build`` over
   ``evaluation/tested_world/``) installed by sha256 into the
   executor's own venv — the unit pipelines are the wheels' own tests,
@@ -21,8 +26,10 @@ customer's verification touches is REAL:
 
 Honest scope (the same evidence classes the evaluation README names):
 the two services are FIXTURE wheels, not customer images; the broker
-is a LOCAL fake with real sockets, not the customer's broker; the
-sentinel is a local gated endpoint, not a production egress.
+is a LOCAL fake with real sockets, not the customer's broker (the
+fixture broker and sqlite legs are labeled ``reference-coverage`` in
+the report); the sentinel is a local gated endpoint, not a production
+egress.
 
 This trace is env-clean by construction: nothing here needs
 GITLAB_*/model credentials, and the scrub proves the launched process
@@ -31,17 +38,23 @@ holds none even when the surrounding environment does.
 
 from __future__ import annotations
 
-import threading
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from forge.adaptive.verification_executor import (
     CONSUMER_SERVICE,
+    CREDENTIAL_SOURCE_SYNTHETIC,
     EXIT_CLEAN,
+    EXIT_ISOLATION_UNPROVEN,
     EXIT_ISOLATION_VIOLATED,
     EXIT_VERIFICATION_FAILED,
+    ISOLATION_PROVEN,
+    ISOLATION_UNPROVEN,
+    ISOLATION_VIOLATED,
+    OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED,
+    OUTCOME_EXPECTED_DENIAL_OBSERVED,
+    OUTCOME_UNAVAILABLE,
     PINNED_SERVICE,
     PRODUCER_SERVICE,
     CandidateBundle,
@@ -56,10 +69,11 @@ from forge.adaptive.verification_executor import (
 from forge.adaptive.system_verification import replay_against_changed_inputs
 from tests.test_verification_executor import (
     SENTINEL_SECRET,
-    _GatedHandler,
+    _closed_port_url,
     _credential_shaped,
     _source_oid,
     build_fixture_wheel,
+    gated_server,
 )
 
 pytestmark = pytest.mark.production_entry
@@ -71,16 +85,8 @@ ENV_EDGE = "environment:integration"
 
 @pytest.fixture(scope="module")
 def pe_gated_endpoints():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _GatedHandler)
-    thread = threading.Thread(target=server.serve_forever, name="pe-gated-endpoints", daemon=True)
-    thread.start()
-    try:
-        base = f"http://127.0.0.1:{server.server_address[1]}"
-        yield f"{base}/probe", f"{base}/api/v4/user"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with gated_server() as urls:
+        yield urls
 
 
 def _pe_run(
@@ -89,6 +95,8 @@ def _pe_run(
     sentinel_url: str,
     provider_url: str,
     *,
+    sentinel_control_url: str = "",
+    provider_control_url: str = "",
     extra_env: dict[str, str] | None = None,
 ):
     by_service = {wheel.service: wheel for wheel in wheels}
@@ -104,6 +112,8 @@ def _pe_run(
         sentinel_url=sentinel_url,
         provider_url=provider_url,
         work_dir=root / "work",
+        sentinel_control_url=sentinel_control_url,
+        provider_control_url=provider_control_url,
         contract_document=contract_bundle_document(),
         test_document=_test_bundle_document(),
         environment_document=environment_profile_document(),
@@ -123,11 +133,16 @@ class TestVerifiedExecutorCustomerTrace:
         """The exact two-service candidate set — the BUILT wheels —
         verifies against its required database and broker behavior,
         separately from any permission to merge or deploy."""
-        sentinel_url, provider_url = pe_gated_endpoints
+        sentinel_url, provider_url, control_url = pe_gated_endpoints
         producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
         consumer = build_fixture_wheel(CONSUMER_SERVICE, "v2", tmp_path / "w")
         run, report, bundle = _pe_run(
-            tmp_path / "green", (producer, consumer), sentinel_url, provider_url
+            tmp_path / "green",
+            (producer, consumer),
+            sentinel_url,
+            provider_url,
+            sentinel_control_url=control_url,
+            provider_control_url=control_url,
         )
         assert run.exit_code == EXIT_CLEAN
         assert report.system_ready is True
@@ -138,7 +153,27 @@ class TestVerifiedExecutorCustomerTrace:
             sorted(set(report.authority_receipt.env_keys) - {"__CF_USER_TEXT_ENCODING"})
         )
         assert not any(name for name in run.launch_env_keys if _credential_shaped(name))
-        assert report.authority_receipt.isolated is True
+        # the isolation claim is the tri-state verdict with its three
+        # SEPARATE fields — never one boolean
+        authority = report.authority_receipt
+        assert authority.isolation == ISOLATION_PROVEN
+        assert authority.environment_hygiene == "passed"
+        assert authority.credential_non_disclosure == "passed"
+        assert authority.network_enforcement == "demonstrated"
+        for probe in authority.probes:
+            assert probe.control.outcome == OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED
+            assert probe.outcome == OUTCOME_EXPECTED_DENIAL_OBSERVED
+            assert probe.presented_from_env == ""  # the synthetic credential, never ambient
+        # the enforcement profile the claims are scoped to
+        assert run.enforcement_profile_digest == report.enforcement_profile_digest
+        assert report.enforcement_profile["home_policy"] == "clean-home/1"
+        assert report.enforcement_profile["home_path"] == authority.home
+        assert authority.home_shapes_found == ()
+        # the fixture dependency legs are labeled reference coverage
+        assert report.dependency_coverage
+        assert all(
+            note.startswith("reference-coverage") for note in report.dependency_coverage.values()
+        )
         # the exact wheel bytes are what the venv ran
         installed = {wheel.service: wheel for wheel in report.executor_receipt.installed}
         assert installed[PRODUCER_SERVICE].installed_sha256 == producer.sha256
@@ -175,17 +210,27 @@ class TestVerifiedExecutorCustomerTrace:
             ("HTTP_PROXY", "http://corp-proxy"),
         ):
             monkeypatch.setenv(name, value)
-        sentinel_url, provider_url = pe_gated_endpoints
+        sentinel_url, provider_url, control_url = pe_gated_endpoints
         producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
         consumer = build_fixture_wheel(CONSUMER_SERVICE, "v2", tmp_path / "w")
         run, report, _bundle = _pe_run(
-            tmp_path / "loaded", (producer, consumer), sentinel_url, provider_url
+            tmp_path / "loaded",
+            (producer, consumer),
+            sentinel_url,
+            provider_url,
+            sentinel_control_url=control_url,
+            provider_control_url=control_url,
         )
         assert run.exit_code == EXIT_CLEAN
         leaked = {name for name in run.launch_env_keys if _credential_shaped(name)}
         assert leaked == set(), leaked
-        assert report.authority_receipt.isolated is True
-        assert all(probe.denied for probe in report.authority_receipt.deny_probes)
+        authority = report.authority_receipt
+        assert authority.isolation == ISOLATION_PROVEN
+        assert authority.credential_shaped_keys == ()
+        assert authority.environment_hygiene == "passed"
+        for probe in authority.probes:
+            assert probe.control.outcome == OUTCOME_AUTHORIZED_CONTROL_SUCCEEDED
+            assert probe.outcome == OUTCOME_EXPECTED_DENIAL_OBSERVED
         assert report.system_ready is True
 
     def test_pe8b_separately_green_pipelines_do_not_compose(
@@ -195,11 +240,16 @@ class TestVerifiedExecutorCustomerTrace:
         is not. The failed redelivery scenario blocks system readiness
         even though both unit pipelines passed — and the trace records
         the ACTUAL outcome (rejections), never a blanket claim."""
-        sentinel_url, provider_url = pe_gated_endpoints
+        sentinel_url, provider_url, control_url = pe_gated_endpoints
         producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
         old_consumer = build_fixture_wheel(CONSUMER_SERVICE, "v1", tmp_path / "w")
         run, report, bundle = _pe_run(
-            tmp_path / "incompatible", (producer, old_consumer), sentinel_url, provider_url
+            tmp_path / "incompatible",
+            (producer, old_consumer),
+            sentinel_url,
+            provider_url,
+            sentinel_control_url=control_url,
+            provider_control_url=control_url,
         )
         assert run.exit_code == EXIT_VERIFICATION_FAILED
         (contract,) = [edge for edge in report.edge_results if edge.kind == "contract"]
@@ -223,11 +273,16 @@ class TestVerifiedExecutorCustomerTrace:
         """The issue's negative test 1: run the (incompatible) world,
         then switch ONLY the ledger baseline's image under an unchanged
         source SHA — the affected proofs invalidate, the rest stand."""
-        sentinel_url, provider_url = pe_gated_endpoints
+        sentinel_url, provider_url, control_url = pe_gated_endpoints
         producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
         consumer = build_fixture_wheel(CONSUMER_SERVICE, "v2", tmp_path / "w")
         run, report, bundle = _pe_run(
-            tmp_path / "switched", (producer, consumer), sentinel_url, provider_url
+            tmp_path / "switched",
+            (producer, consumer),
+            sentinel_url,
+            provider_url,
+            sentinel_control_url=control_url,
+            provider_control_url=control_url,
         )
         assert run.exit_code == EXIT_CLEAN
         mutated = executor_candidate_set(
@@ -263,9 +318,10 @@ class TestVerifiedExecutorCustomerTrace:
     ):
         """The safe sentinel check from the issue's negative tests: a
         forbidden reach attempted from the verifier environment — with
-        a credential deliberately riding the launch — is observed by
-        the endpoint and fails the whole verification closed."""
-        sentinel_url, provider_url = pe_gated_endpoints
+        a credential deliberately riding the launch — is caught from
+        the launched process (the absence scan names the survivor) and
+        fails the whole verification closed."""
+        sentinel_url, provider_url, control_url = pe_gated_endpoints
         producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
         consumer = build_fixture_wheel(CONSUMER_SERVICE, "v2", tmp_path / "w")
         run, report, _bundle = _pe_run(
@@ -273,18 +329,62 @@ class TestVerifiedExecutorCustomerTrace:
             (producer, consumer),
             sentinel_url,
             provider_url,
+            sentinel_control_url=control_url,
+            provider_control_url=control_url,
             extra_env={"EGRESS_TOKEN": SENTINEL_SECRET},
         )
         assert run.exit_code == EXIT_ISOLATION_VIOLATED
         assert report.isolation_violated is True
-        (sentinel,) = [
-            probe
-            for probe in report.authority_receipt.deny_probes
-            if probe.name == "sentinel-egress"
-        ]
-        assert sentinel.outcome == "violated"
-        assert sentinel.presented_from_env == "EGRESS_TOKEN"
+        authority = report.authority_receipt
+        assert authority.isolation == ISOLATION_VIOLATED
+        assert authority.credential_shaped_keys == ("EGRESS_TOKEN",)
+        assert authority.environment_hygiene == "failed"
+        assert any("EGRESS_TOKEN" in violation for violation in authority.violations)
+        (sentinel,) = [probe for probe in authority.probes if probe.name == "sentinel-egress"]
+        # the probe presented ONLY the synthetic credential — the leak
+        # was caught by the absence scan, never by key-picking
+        assert sentinel.presented_from_env == ""
+        assert sentinel.credential_source == CREDENTIAL_SOURCE_SYNTHETIC
         # nothing verified: no edge results, no evidence, no readiness
         assert report.edge_results == ()
         assert report.evidence_records == ()
         assert report.system_ready is False
+
+    def test_pe8e_an_unavailable_sentinel_never_yields_an_isolation_pass(
+        self, tmp_path: Path, pe_gated_endpoints
+    ):
+        """R38-07's acceptance: a 503/DNS failure at the sentinel
+        reports unavailable/inconclusive and cannot alone yield an
+        isolation pass — the dead endpoint that once "proved" denial
+        (probe P04) now BLOCKS qualification instead of greening it."""
+        _sentinel, provider_url, control_url = pe_gated_endpoints
+        dead = _closed_port_url()
+        producer = build_fixture_wheel(PRODUCER_SERVICE, "v2", tmp_path / "w")
+        consumer = build_fixture_wheel(CONSUMER_SERVICE, "v2", tmp_path / "w")
+        run, report, bundle = _pe_run(
+            tmp_path / "offline",
+            (producer, consumer),
+            dead,
+            provider_url,
+            sentinel_control_url=dead,
+            provider_control_url=control_url,
+        )
+        assert run.exit_code == EXIT_ISOLATION_UNPROVEN
+        assert report.isolation_unproven is True
+        assert report.isolation_violated is False
+        authority = report.authority_receipt
+        assert authority.isolation == ISOLATION_UNPROVEN
+        assert authority.violations == ()  # nothing leaked — just nothing proven
+        assert authority.network_enforcement == ISOLATION_UNPROVEN
+        (sentinel,) = [probe for probe in authority.probes if probe.name == "sentinel-egress"]
+        assert sentinel.outcome == OUTCOME_UNAVAILABLE
+        assert sentinel.deny is None  # the deny probe never ran
+        assert any(
+            "sentinel-egress" in blocker and "positive control" in blocker
+            for blocker in authority.blockers
+        )
+        # the blocked verification is never consumed as evidence
+        assert report.edge_results == ()
+        assert report.system_ready is False
+        verdict = executor_readiness(report, bundle.candidate_set)
+        assert verdict.verification_ready is False

@@ -1,0 +1,57 @@
+{
+  "schema": "forge.verification.dotnet-recipe-manifest/1",
+  "recipe_id": "dotnet-service-dependency/1",
+  "fixture_root": "evaluation/tested_world/dotnet-orders",
+  "sdk": {
+    "version": "10.0.200",
+    "target_framework": "net10.0"
+  },
+  "packages": [
+    { "name": "Microsoft.NET.Test.Sdk", "version": "18.10.1" },
+    { "name": "xunit", "version": "2.9.3" },
+    { "name": "xunit.runner.visualstudio", "version": "4.0.0" }
+  ],
+  "dependency_images": [
+    {
+      "role": "orders-db",
+      "image": "docker.io/library/postgres:16",
+      "digest": "sha256:1a43e6bb8872ccce507f8467e549a6166e8ff132ad26b49879f5ec86ee612868"
+    },
+    {
+      "role": "orders-bus",
+      "image": "docker.io/library/rabbitmq:3-management",
+      "digest": "sha256:8689ddfceca1ff1ecfeaa6619cb9cfc73570cf5fa022d3d904cdb065da1f925d"
+    }
+  ],
+  "test_projects": [
+    {
+      "name": "DotnetOrders.Api.Tests",
+      "framework": "net10.0",
+      "project": "tests/DotnetOrders.Api.Tests/DotnetOrders.Api.Tests.csproj",
+      "report": "forge_DotnetOrders.Api.Tests_net10.0.trx"
+    },
+    {
+      "name": "DotnetOrders.Projection.Tests",
+      "framework": "net10.0",
+      "project": "tests/DotnetOrders.Projection.Tests/DotnetOrders.Projection.Tests.csproj",
+      "report": "forge_DotnetOrders.Projection.Tests_net10.0.trx"
+    }
+  ],
+  "migrations": {
+    "baseline": "migrations/001_v1_baseline.sql",
+    "upgrade": {
+      "postgres": "migrations/002_v2_region.postgres.sql",
+      "sqlite": "migrations/002_v2_region.sqlite.sql"
+    },
+    "preserved_columns": ["id", "total", "created_at"]
+  },
+  "broker": {
+    "queue_prefix": "forge.recipe.orders",
+    "user": "forge",
+    "duplicates_per_message": 2
+  },
+  "scenario": {
+    "seed_rows": 25,
+    "redelivery_messages": 4
+  }
+}

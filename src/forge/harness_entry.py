@@ -841,6 +841,76 @@ def lane_provenance_warning(driver: str, *, env: Mapping[str, str] | None = None
     return " ".join(warnings)
 
 
+#: R38-09: the source attribution the lane's usage artifact ingests under
+#: (the natural-key label the control plane's durable usage-receipt rows
+#: carry — distinct from the SDK's own receipt JSONs and from the
+#: planner/LLM-call ledger rows).
+USAGE_INGEST_SOURCE = "lane/.forge/usage.json"
+
+
+def usage_ingest_envelope(
+    *,
+    run_id: str,
+    attempt_id: str,
+    usage_file: Path,
+    usage_block: dict | None,
+    final: bool,
+) -> dict | None:
+    """R38-09 — the durable-ingest envelope for the lane's usage artifact.
+
+    The recorded gap (issue #310): the SDK lanes' usage artifacts rode the
+    candidate meta but never became durable ``usage_receipts`` rows, so
+    the economics report rendered unknown-cost. The emit step cannot reach
+    the control plane's database from the ephemeral runner — the artifact
+    IS the lane's durable write, so this envelope makes it INGEST-READY:
+    the receipt identity recomputed with the SAME deterministic function
+    the control plane uses (:func:`forge.runs.candidate.usage_receipt_id`
+    over run + attempt + the normalized usage), a sha256 digest over the
+    EXACT artifact bytes (tamper-evident: a changed artifact under the
+    same identity surfaces, never silently overwrites), the final marker
+    (``False`` while the artifact is a streamed partial), and the cost
+    basis (``provider-reported`` — the SDK's own meter — when the artifact
+    carries ``total_cost_usd``).
+
+    ``forge.adaptive.usage_ingestion.ingest_usage_artifact`` consumes this
+    envelope shape idempotently by (work, attempt, receipt, source) and
+    :func:`forge.adaptive.usage_ingestion.persist_ingested_rows` lands it
+    in the durable table through the R23 ``ON CONFLICT DO NOTHING`` seam —
+    a re-downloaded artifact or a replayed webhook writes NOTHING new.
+    ``None`` when no artifact exists (unknown stays unknown — the control
+    plane's own unknown bucket records the attempt, never a zero).
+    """
+    if not isinstance(usage_block, dict):
+        return None
+    from forge.runs.candidate import HarnessUsage, usage_receipt_id
+
+    usage = HarnessUsage.from_meta(usage_block, attempt_id=attempt_id)
+    attempt = usage.attempt_id or attempt_id
+    receipt_id = usage.receipt_id or usage_receipt_id(run_id, attempt, usage)
+    try:
+        artifact_digest = f"sha256:{hashlib.sha256(usage_file.read_bytes()).hexdigest()}"
+    except OSError:
+        return None
+    cost = usage_block.get("total_cost_usd", usage_block.get("cost_usd"))
+    cost_known = isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0
+    envelope: dict = {
+        "receipt_id": receipt_id,
+        "attempt_id": attempt,
+        "source": USAGE_INGEST_SOURCE,
+        "artifact_digest": artifact_digest,
+        "final": bool(final),
+        "cost_basis": "provider-reported" if cost_known else "",
+        "ingest_note": (
+            "ingest idempotently by (work, attempt, receipt, source) —"
+            " forge.adaptive.usage_ingestion (R38-09); a re-delivery of this"
+            " exact envelope writes nothing new"
+        ),
+    }
+    if cost_known:
+        envelope["total_cost_usd"] = float(cost)
+    return envelope
+
+
 def emit_candidate_meta(
     *,
     run_id: str,
@@ -873,8 +943,13 @@ def emit_candidate_meta(
     ``driver_provenance`` audit field — the exact installed CLI version
     (``FORGE_DRIVER_FINGERPRINT``), the forge wheel SHA, the declared pin
     and the registration verdict (see :func:`driver_provenance`) — absent
-    when not supplied, so pre-R28-26 metas are byte-identical. Returns
-    the written meta dict.
+    when not supplied, so pre-R28-26 metas are byte-identical. R38-09 adds
+    the additive ``usage_ingest`` envelope (see
+    :func:`usage_ingest_envelope`) — the receipt identity, the artifact
+    digest, the final marker and the cost basis — so the artifact CARRIES
+    its durable-row identity and the control plane ingests it
+    idempotently instead of the spend dying inside the meta (issue #310).
+    Returns the written meta dict.
     """
     # Imported lazily: the profile module is pure stdlib, but importing it
     # initializes the forge.runs package — never worth paying on the
@@ -896,6 +971,21 @@ def emit_candidate_meta(
     if bootstrap_status not in (BOOTSTRAP_STATUS_OK, BOOTSTRAP_STATUS_FAILED):
         bootstrap_status = ""  # unknown stays unknown — pre-A18 lanes carry no marker
     diff_bytes = Path(diff_file).read_bytes()
+    usage_block = _load_json_object(Path(usage_file))
+    # R38-09: the usage artifact rides the meta WITH its durable-ingest
+    # envelope — the receipt identity (the same sha256 the control plane
+    # recomputes), the artifact's exact-bytes digest, the final marker and
+    # the cost basis — so spend reaches the durable usage-receipt rows
+    # idempotently instead of dying inside the artifact (issue #310's
+    # recorded gap). The turn is final exactly when the driver classified
+    # it (a partial artifact from a killed turn carries final=false).
+    usage_ingest = usage_ingest_envelope(
+        run_id=run_id,
+        attempt_id=_attempt_identity(),
+        usage_file=Path(usage_file),
+        usage_block=usage_block,
+        final=exit_status in ("completed", "failed"),
+    )
     meta = {
         "schema_version": META_SCHEMA_VERSION,
         "run_id": run_id,
@@ -906,7 +996,10 @@ def emit_candidate_meta(
         "exit": exit_status,
         "bootstrap": bootstrap_status,
         "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
-        "usage": _load_json_object(Path(usage_file)),
+        "usage": usage_block,
+        # R38-09: additive — ABSENT when no usage artifact exists (unknown
+        # stays unknown), present on every artifact-carrying meta.
+        **({"usage_ingest": usage_ingest} if usage_ingest else {}),
         "profile_digest": str(profile_digest or "").strip().lower(),
         # R28-26: the EXACT execution provenance — installed CLI version
         # (FORGE_DRIVER_FINGERPRINT), forge wheel SHA, the declared pin
@@ -934,9 +1027,7 @@ def emit_candidate_meta(
             observed_execution(
                 driver=driver,
                 exit_status=exit_status,
-                usage_completeness=(
-                    (_load_json_object(Path(usage_file)) or {}).get("completeness") or "unknown"
-                ),
+                usage_completeness=(usage_block or {}).get("completeness") or "unknown",
                 candidate_changed=len(diff_bytes) > 0,
                 # C10: the trusted wrapper's receipts — one TSV row per
                 # executed command: argv_head<TAB>exit<TAB>report_file.

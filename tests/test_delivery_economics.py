@@ -54,6 +54,7 @@ from forge.adaptive.delivery_measurement import (
     MEASUREMENT_SCHEMA,
     MeasurementLinker,
     RateLabelError,
+    ledger_records_from_ingested_usage,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1212,3 +1213,179 @@ def test_committed_discovery_live_population_is_separate_and_honest():
     assert document["evidence"]["classes"] == {EVIDENCE_SYNTHETIC_COUNTER: 19}
     assert document["costs"]["programme"]["works"] == 12
     assert any("own population" in note.lower() for note in document["notes"])
+
+
+# ----------------------------------------------------------------------
+# R38-09 — ingested lane rows feeding the economics measures
+# ----------------------------------------------------------------------
+
+
+def _ingested_ledger():
+    """A ledger built from INGESTED lane receipts + planner ledger rows."""
+    rows = [
+        {
+            "work_id": "w-acc",
+            "attempt_id": "w-acc/a1",
+            "receipt_id": "ing:w-acc:a1",
+            "source": "lane/.forge/usage.json",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "counters": {"input_tokens": 1000, "output_tokens": 100},
+            "cost_usd": 0.30,
+            "cost_basis": "provider-reported",
+            "segment": "segment:v1",
+            "completeness": "aggregate",
+        },
+        {
+            "work_id": "w-acc",
+            "attempt_id": "w-acc/a2",
+            "receipt_id": "ing:w-acc:a2",
+            "source": "lane/.forge/usage.json",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "counters": {"input_tokens": 900, "output_tokens": 90},
+            "cost_usd": 0.70,
+            "cost_basis": "provider-reported",
+            "segment": "segment:v1",
+            "completeness": "aggregate",
+        },
+        {
+            "work_id": "w-rej",
+            "attempt_id": "w-rej/a1",
+            "receipt_id": "ing:w-rej:a1",
+            "source": "lane/.forge/usage.json",
+            "provider": "codex-sdk-lane",
+            "model": "gpt-5",
+            "counters": {"input_tokens": 600, "output_tokens": 60},
+            "cost_usd": 0.20,
+            "cost_basis": "provider-reported",
+            "segment": "segment:v2",
+            "completeness": "aggregate",
+        },
+        # the planner ledger row: work-level, its own population
+        {
+            "work_id": "w-acc",
+            "attempt_id": "",
+            "receipt_id": "w-acc:planner:1",
+            "source": "planner/llm_calls",
+            "provider": "zai",
+            "counters": {"input_tokens": 400, "output_tokens": 40},
+            "cost_usd": 0.05,
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+        },
+    ]
+    records = ledger_records_from_ingested_usage(
+        rows,
+        works=[
+            {"work_id": "w-acc", "outcome": "accepted"},
+            {"work_id": "w-rej", "outcome": "rejected"},
+        ],
+        attempts=[
+            {"work_id": "w-acc", "attempt_id": "w-acc/a1", "outcome": "rejected"},
+            {"work_id": "w-acc", "attempt_id": "w-acc/a2", "outcome": "accepted"},
+            {"work_id": "w-rej", "attempt_id": "w-rej/a1", "outcome": "rejected"},
+        ],
+    )
+    return MeasurementLinker().link(**records)
+
+
+def test_three_measures_from_ingested_rows_stay_distinct():
+    report = EconomicsLinker().link(
+        _ingested_ledger(),
+        acceptance_records=[
+            {
+                "work_id": "w-acc",
+                "accepted": True,
+                "decided_by": "human:operator",
+                "attempt_outcomes": {"w-acc/a1": "rejected", "w-acc/a2": "accepted"},
+            },
+            {"work_id": "w-rej", "accepted": False, "decided_by": "human:operator"},
+        ],
+    )
+    document = report.to_document()
+    costs = document["costs"]
+    # 1) the SUCCESSFUL attempt's own receipts (a2 only)
+    assert costs["successful_attempt_costs"]["w-acc"]["w-acc/a2"]["cost_usd"] == pytest.approx(0.70)
+    # 2) the accepted item's ALL-ATTEMPT total (a1 + a2)
+    assert costs["accepted_item_totals"]["w-acc"]["billed_usd"] == pytest.approx(1.00)
+    # 3) programme per accepted ((0.30 + 0.70 + 0.20) / 1)
+    assert costs["programme_per_accepted_item"]["programme_billed_per_accepted_usd"] == (
+        pytest.approx(1.20)
+    )
+    # the provider-reported column is named, separated from estimates
+    assert costs["programme"]["provider_reported_usd"] == pytest.approx(1.20)
+    census = costs["cost_basis_census"]["bases"]
+    assert census["provider-reported"]["receipts"] == 3
+    assert census["provider-reported"]["usd"] == pytest.approx(1.20)
+    # attribution segments: two routes — two segments, both kept
+    segments = {(row["segment"], row["route"]) for row in costs["attribution_segments"]}
+    assert segments == {
+        ("segment:v1", "claude-sdk-lane/glm-5.3-flash"),
+        ("segment:v2", "codex-sdk-lane/gpt-5"),
+    }
+
+
+def test_committed_live_single_writer_population_is_honest():
+    """The re-executed report's live population — the REAL captured receipts.
+
+    Coverage BEFORE the join: the durable ``usage_receipts`` table was
+    EMPTY at capture (the recorded gap). AFTER: the four SDK receipt
+    artifacts the evidence carries are ingested idempotently — the lane
+    population is measured, the killed job's spend stays unknown, and the
+    pilot's own aggregates are untouched.
+    """
+    if not COMMITTED_REPORT.exists():
+        pytest.skip("the executed economics report has not been committed yet")
+    document = json.loads(COMMITTED_REPORT.read_text())
+    populations = document.get("populations") or {}
+    live = populations.get("live_single_writer")
+    assert live is not None, "the live single-writer captures have landed — include them"
+    # the recorded gap, quoted in the population's own pilot block
+    assert live["pilot"]["durable_usage_receipts_rows_at_capture"] == 0
+    ingested = live["ingestion"]["ingested_receipt_ids"]
+    assert sorted(ingested) == [
+        "live-evidence:job723",
+        "live-evidence:job726",
+        "live-evidence:job731",
+        "live-evidence:job732",
+    ]
+    programme = live["costs"]["programme"]
+    # 3 runs, 5 lane attempts, 4 receipts — the killed job730 keeps its
+    # attempt with NO receipt: spend unknown, coverage 0.8, never zero
+    assert programme["works"] == 3
+    assert programme["attempts"] == 5
+    assert programme["receipts"] == 4
+    assert programme["receipt_coverage"] == pytest.approx(0.8)
+    assert programme["billed_exact"] is False
+    assert programme["billed_usd"] is None
+    # the SDK-reported lane spend, as a provider-reported LOWER BOUND:
+    # 0.2353712 + 0.2179536 + 0.2005248 + 0.1498992
+    assert programme["billed_known_lower_bound_usd"] == pytest.approx(0.803749, abs=1e-6)
+    assert programme["provider_reported_usd"] == pytest.approx(0.803749, abs=1e-6)
+    # every lane receipt is live-model evidence (a real SDK metered them)
+    assert live["evidence"]["classes"] == {EVIDENCE_LIVE_MODEL: 4}
+    # the successful lane attempt's OWN cost — the "$0.2180" figure, a
+    # DIFFERENT measure from all-attempt and per-accepted (both undefined
+    # here: qualification runs carry no acceptance decisions)
+    successful = live["costs"]["successful_attempt_costs"]["60b9de7f"]["job726"]
+    assert successful["cost_usd"] == pytest.approx(0.217954, abs=1e-6)
+    assert live["costs"]["accepted_items"]["works"] == 0
+    assert live["costs"]["programme_per_accepted_item"]["programme_billed_per_accepted_usd"] is None
+    # the spend-cap reservation consults the ingested totals
+    cap = live["ingestion"]["spend_cap_check"]
+    assert cap["allowed"] is True
+    assert cap["cap_usd"] == pytest.approx(2.0)
+    assert cap["reserved_usd"] == pytest.approx(0.8037488, abs=1e-6)
+    # the trace names the review window as an unknown gap, never zero
+    trace = live["trace_green_task"]
+    assert any("review" in row["record"] for row in trace["excluded_or_unknown"])
+    # planning counters stay SEPARATE (never ingested as spend rows)
+    assert live["planning_counters"]["run_budgets_durable"]["60b9de7f"] == {
+        "calls": 3,
+        "tokens": 179494,
+    }
+    # the pilot's own aggregates are untouched by the lane population
+    assert document["evidence"]["classes"] == {EVIDENCE_SYNTHETIC_COUNTER: 19}
+    assert document["costs"]["programme"]["works"] == 12
+    assert document["costs"]["programme"]["billed_known_lower_bound_usd"] == 0.0

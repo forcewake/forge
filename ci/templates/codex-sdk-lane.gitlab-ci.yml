@@ -45,9 +45,23 @@
 # CI artifacts:
 #   .forge/candidate.diff        git diff --binary --full-index vs the base
 #   .forge/candidate.meta.json   attempt base, driver, model, exit, usage
+# The delta is collected by the PACKAGED generation-aware collector
+# (R38-01/#302 — `python -m forge.harness_entry --collect-candidate`):
+# a resumed agent works in the SIBLING workspace generation the checkout's
+# .forge/workspace-generation pointer names, and the collector validates
+# that pointer's ownership, runs `git -C` on the validated tree and fails
+# typed on Git errors — never inline staging on the original checkout
+# (which shipped an empty diff beside a full generation). The candidate is
+# ADVERTISED only when BOTH the driver and the collector succeeded; the
+# script runs driver / collection / final-status phases in ONE shell and
+# exits exactly once (an early `exit` on driver success used to kill the
+# job before collection — the live harness_artifact_missing run).
 # The last trace lines carry the machine-readable markers:
 #   FORGE_CANDIDATE:{"attempt_base": "<oid>", "artifact": "candidate.diff", "exit": "<completed|failed>"}
+#   FORGE_LANE_OUTCOME:{"driver_exit": "<completed|failed>", "collector_exit": <rc>, "candidate_state": "<candidate|zero_change|driver_failed|collection_failed>"}
 #   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
+# (the collector's own JSON result above them carries collected_generation
+# and artifact_digest as further separate, non-secret fields).
 # forge downloads the artifacts and publishes via the trusted publisher;
 # claims in the trace are never trusted.
 
@@ -82,6 +96,12 @@ forge-agent-codex-sdk:
     # runner side records intent, it does not isolate.
     FORGE_LANE_PROFILE: "v1"
     FORGE_EGRESS_ALLOWLIST: ""
+    # R38-01 (#302): the lane venv's interpreter — the finalization phases
+    # (driver + collection) run through this python. A pipeline/dispatch
+    # variable overrides the default (pipeline variables beat YAML ones);
+    # the packaged-shell regression tests ride that seam with a stub
+    # interpreter on the driver leg.
+    FORGE_LANE_PYTHON: "/tmp/forge-lane-venv/bin/python"
   before_script:
     # codex CLI (the driver spawns `codex app-server` from it — npm
     # @openai/codex, retry loop like every forge lane's npm preamble).
@@ -154,40 +174,112 @@ forge-agent-codex-sdk:
     # your changes in the working tree for collection — with the FORBIDDEN
     # push URL as the architectural backstop (no write credential exists to
     # use). A nonzero exit does not abort the audit trail — the artifacts
-    # still upload (when: always) and forge classifies the run from the
-    # meta's exit, exactly like the batch lane.
+    # still upload (when: always) and the final-status phase below fails
+    # the job with the driver's own rc.
+    # R38-01 (#302): driver / collection / final-status phases in ONE
+    # shell. GitLab concatenates before_script + script into a single
+    # script whose exit code is the job's, so the old unconditional
+    # driver-rc exit killed a SUCCESSFUL job before the meta floor,
+    # the collection and the markers ever ran (the live
+    # harness_artifact_missing run + the manual guarded-exit patch that
+    # never landed). Every phase below runs to its own recorded exit
+    # code; the job exits exactly once, at the end.
     - |
+      # before_script created .forge/; the phase owns its receipts — keep
+      # the floor and the collector-result redirections self-sufficient.
+      mkdir -p .forge
       FORGE_DRIVER_EXIT="completed"
       set +e
-      /tmp/forge-lane-venv/bin/python -m forge.lane_driver --driver codex
+      "$FORGE_LANE_PYTHON" -m forge.lane_driver --driver codex
       _driver_rc=$?
       set -e
       if [ "$_driver_rc" -ne 0 ]; then
         FORGE_DRIVER_EXIT="failed"
       fi
       export FORGE_DRIVER_EXIT
-      # A driver FAILURE fails the JOB (batch-lane pipefail parity; the
-      # artifacts still upload via when:always). An agent that completed
-      # without changes keeps the job green — classified at the run level.
-      exit "$_driver_rc"
-    # Defensive meta floor: lane_driver writes the real meta itself; if it
-    # died before writing one (install/import crash), the artifacts still
-    # carry an honest failed meta instead of nothing.
-    - |
+      echo "forge lane: driver_exit=$_driver_rc ($FORGE_DRIVER_EXIT)"
+      # Defensive meta floor: lane_driver writes the real meta itself; if
+      # it died before writing one (install/import crash), the artifacts
+      # still carry an honest failed meta instead of nothing. Runs
+      # REGARDLESS of the driver rc — driver-failure diagnostics are
+      # retained even when the candidate is not advertised below.
       if [ ! -f .forge/candidate.meta.json ]; then
         printf '%s\n' "{\"attempt_base\": \"${FORGE_ATTEMPT_BASE}\", \"driver\": \"codex-sdk-lane\", \"model\": \"${FORGE_CODEX_MODEL}\", \"exit\": \"${FORGE_DRIVER_EXIT}\", \"terminal_reason\": \"lane_driver_no_meta\", \"usage\": null}" > .forge/candidate.meta.json
       fi
-    # Stage the whole working tree and capture the candidate diff against
-    # the FROZEN attempt base. No commit, no push — the artifact is the
-    # deliverable.
-    - git add -A
-    - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
-    # Machine-readable contract. FORGE_CANDIDATE points at the artifact the
-    # backend downloads; the legacy FORGE_RESULT line stays only for the
-    # v0.2 → v0.3 migration window and carries the attempt base — it is not
-    # a branch claim anymore.
-    - 'printf "FORGE_CANDIDATE:{\"attempt_base\": \"%s\", \"artifact\": \"candidate.diff\", \"exit\": \"%s\"}\n" "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"'
-    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n" "$FORGE_ATTEMPT_BASE"'
+      # Collection phase — runs REGARDLESS of the driver rc (the
+      # artifacts upload when: always; only the ADVERTISEMENT below is
+      # success-gated). The PACKAGED generation-aware collector (#260),
+      # never inline staging in the ORIGINAL checkout: a resumed agent
+      # works in the sibling generation the checkout's
+      # .forge/workspace-generation pointer names, and the collector
+      # validates that pointer's ownership (work id + exact checkpoint
+      # binding, non-following physical checks), runs git -C on the
+      # validated tree and fails typed on Git errors — the old inline
+      # staging shipped an empty diff beside a full generation.
+      # Read-only by construction: no commit, no push. The declared
+      # upload location only ever holds THIS attempt's bytes — a stale
+      # candidate.diff from an earlier attempt is removed first and is
+      # never re-uploaded when collection fails (zero artifacts beat
+      # stale artifacts).
+      rm -f .forge/candidate.diff
+      _collector_flags=""
+      if [ "${FORGE_LANE_RESUME:-}" = "1" ]; then
+        # A required-resume dispatch: the generation pointer is a
+        # precondition — collection refuses rather than silently
+        # degrading to the untouched checkout.
+        _collector_flags="--require-generation"
+      fi
+      set +e
+      # shellcheck disable=SC2086 — flags are word-split on purpose
+      "$FORGE_LANE_PYTHON" -m forge.harness_entry --collect-candidate \
+        --forge-run-id "$FORGE_RUN_ID" \
+        --attempt-base-oid "$FORGE_ATTEMPT_BASE" \
+        --expected-checkpoint-id "${FORGE_RESUME_CHECKPOINT:-}" \
+        $_collector_flags \
+        --output-root forge-output \
+        > .forge/collector-result.json 2> .forge/collector-error.log
+      _collector_rc=$?
+      set -e
+      cat .forge/collector-result.json
+      cat .forge/collector-error.log 1>&2
+      export FORGE_COLLECTOR_EXIT="$_collector_rc"
+      # Candidate advertisement semantics: only a collector-verified
+      # candidate is advertised. A driver failure keeps the marker's
+      # exit=failed (a FAILED candidate is never a valid one); a
+      # collector failure advertises NOTHING.
+      _candidate_state="collection_failed"
+      if [ "$_collector_rc" -eq 0 ]; then
+        cp forge-output/candidate.diff .forge/candidate.diff
+        _candidate_state="zero_change"
+        if [ -s .forge/candidate.diff ]; then
+          _candidate_state="candidate"
+        fi
+        # Machine-readable contract. FORGE_CANDIDATE points at the
+        # artifact the backend downloads; the legacy FORGE_RESULT line
+        # stays only for the v0.2 → v0.3 migration window and carries
+        # the attempt base — it is not a branch claim anymore. A
+        # zero-change candidate keeps the job green — a no-op turn is
+        # classified at the run level, never a lane failure.
+        printf 'FORGE_CANDIDATE:{"attempt_base": "%s", "artifact": "candidate.diff", "exit": "%s"}\n' "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"
+        printf 'FORGE_RESULT:{"head": "%s", "summary": "candidate artifacts; proposal-only lane"}\n' "$FORGE_ATTEMPT_BASE"
+      else
+        echo "forge lane: collector_exit=$_collector_rc — no candidate advertised" 1>&2
+      fi
+      if [ "$_driver_rc" -ne 0 ]; then
+        _candidate_state="driver_failed"
+      fi
+      echo "FORGE_LANE_OUTCOME:{\"driver_exit\": \"$FORGE_DRIVER_EXIT\", \"collector_exit\": $_collector_rc, \"candidate_state\": \"$_candidate_state\"}"
+      # Final status: the driver rc wins — a failed turn fails the job
+      # (the artifacts still upload via when:always). A GREEN driver with
+      # a FAILED collector fails the job too: a completed turn without
+      # its artifact is NOT a success. First meaningful failure preserved.
+      _job_rc=0
+      if [ "$_driver_rc" -ne 0 ]; then
+        _job_rc="$_driver_rc"
+      elif [ "$_collector_rc" -ne 0 ]; then
+        _job_rc="$_collector_rc"
+      fi
+      exit "$_job_rc"
   artifacts:
     paths:
       - .forge/candidate.diff
