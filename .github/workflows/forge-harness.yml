@@ -711,7 +711,7 @@ jobs:
 
       - name: Upload candidate
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: forge-candidate-${{ inputs.run_id }}
           # The staged non-hidden directory (R16/A08): its two files land
