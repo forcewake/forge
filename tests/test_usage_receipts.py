@@ -450,11 +450,18 @@ class TestMigration015:
             engine.dispose()
 
     def test_models_match_the_migrated_columns(self):
+        """015's shape plus the Q39-05 (#324) additions — the canonical
+        four-column identity (``source_namespace`` + ``identity_digest``),
+        the streamed ``final`` marker and the economics projection columns
+        (migration 028)."""
         assert {c.name for c in UsageReceipt.__table__.columns} == {
             "id",
             "run_id",
             "attempt_id",
             "receipt_id",
+            # Q39-05 (#324): the canonical durable identity + its stable digest
+            "source_namespace",
+            "identity_digest",
             "driver",
             "model",
             "input_tokens",
@@ -463,6 +470,14 @@ class TestMigration015:
             "output_tokens",
             "completeness",
             "source",
+            # Q39-05 (#324): streamed finality + the economics projection
+            "final",
+            "cost_usd",
+            "cost_basis",
+            "rate_card_id",
+            "route_version",
+            "segment",
+            "artifact_digest",
             "raw",
             "created_at",
         }

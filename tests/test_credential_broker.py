@@ -50,7 +50,9 @@ from forge.adaptive.credential_broker import (
     credential_secret_segment,
     delivery_plan,
     delivery_template_conformance,
+    native_locator,
     stage_dispatch_credential,
+    template_identity_digest,
 )
 from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.adaptive.project_credentials import (
@@ -622,6 +624,158 @@ class TestDeliveryTemplateConformance:
             delivery_template_conformance(
                 self._plan(DELIVERY_MODE_RUNNER_REDEMPTION), self._template(name)
             )
+
+
+# ----------------------------------------------------------------------
+# Q39-04 (#323) — the driver/template identity + the installed-template
+# digest dimensions of the conformance.
+# ----------------------------------------------------------------------
+
+
+class TestDriverTemplateConformance:
+    """The GitLab SDK lanes and batch routes validate against THEIR OWN
+    templates — never claude-code's by default; the INSTALLED digest is
+    verified against the local pass."""
+
+    async def test_a_named_driver_conforms_against_its_own_template(self):
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="gitlab",
+            driver="claude-sdk-lane",
+            environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+        )
+        assert plan is not None
+        sdk_template = (TEMPLATES_DIR / "claude-sdk-lane.gitlab-ci.yml").read_text()
+        assert plan.template_driver == "claude-sdk-lane"
+        assert plan.template_digest == template_identity_digest(sdk_template)
+        # NOT claude-code's template digest — the driver's own file read
+        assert plan.template_digest != template_identity_digest(
+            (TEMPLATES_DIR / "claude-code.gitlab-ci.yml").read_text()
+        )
+
+    async def test_a_driver_whose_template_lacks_the_route_refuses(self):
+        """The wrong-driver acceptance: a bound dispatch under
+        codex-sdk-lane must validate CODEX's recipe — which ships no
+        credential-consumption block yet — and refuse, not fall through
+        to a claude-code-shaped pass."""
+        with pytest.raises(CredentialRefusal, match="delivery_template_mismatch") as caught:
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="gitlab",
+                driver="codex-sdk-lane",
+                environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+            )
+        detail = caught.value.detail
+        assert detail["driver"] == "codex-sdk-lane"
+        # either arm refusing is correct fail-closed behavior for a
+        # recipe with no block: the mode markers or the structural
+        # consumer mapping is what it lacks — and the refusal names the
+        # DRIVER whose template was validated (never claude-code's).
+        assert detail.get("structural_gaps") or detail.get("missing_markers")
+
+    async def test_an_unknown_driver_refuses_consumer_route_unknown(self):
+        with pytest.raises(CredentialRefusal, match="consumer_route_unknown") as caught:
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="gitlab",
+                driver="forge-not-a-driver",
+                environ=_delivery_env(DELIVERY_MODE_GITLAB_PROTECTED),
+            )
+        assert caught.value.detail["observability"] == "credential.consumer_route_unknown"
+
+    def test_the_structural_check_refuses_marker_mentions_without_a_block(self):
+        """Structural schema/consumer checks over substring presence: a
+        template that MENTIONS every required marker (in comments) but
+        ships no consumption block refuses when a driver is named."""
+        mention_only = (
+            "# credential_ref rides here: FORGE_CREDENTIAL_REF\n"
+            "# and the carrier: FORGE_MODEL_${FORGE_CREDENTIAL_REF}\n"
+        )
+        plan = CredentialDeliveryPlan(
+            subject="s",
+            provider="anthropic-gateway",
+            profile="gitlab",
+            credential_ref=ENV_REF,
+            env_var="ANTHROPIC_AUTH_TOKEN",
+            binding_revision=1,
+            mode=DELIVERY_MODE_GITLAB_PROTECTED,
+            transport_ref="FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+            dispatch_ref="ENV_ANTHROPIC_AUTH_TOKEN",
+            redemption=False,
+        )
+        with pytest.raises(CredentialRefusal, match="delivery_template_mismatch") as caught:
+            delivery_template_conformance(plan, mention_only, driver="claude-code")
+        assert "structural_gaps" in caught.value.detail
+
+    async def test_an_installed_digest_mismatch_refuses_before_the_markers(self):
+        shipped = (TEMPLATES_DIR / "forge-harness.github.yml").read_text()
+        with pytest.raises(CredentialRefusal, match="profile_template_digest_mismatch") as caught:
+            await delivery_plan(
+                _bound_registry(),
+                StagedBroker(),
+                subject=SUBJECT,
+                provider_route="anthropic-gateway",
+                profile="github",
+                installed_template_digest="0" * 16,
+                environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+            )
+        detail = caught.value.detail
+        assert detail["observability"] == "profile.template_digest_mismatch"
+        assert detail["actual_digest"] == template_identity_digest(shipped)
+
+    async def test_a_matching_installed_digest_passes_and_is_stamped_in_the_plan(self):
+        shipped_digest = template_identity_digest(
+            (TEMPLATES_DIR / "forge-harness.github.yml").read_text()
+        )
+        plan = await delivery_plan(
+            _bound_registry(),
+            StagedBroker(),
+            subject=SUBJECT,
+            provider_route="anthropic-gateway",
+            profile="github",
+            installed_template_digest=shipped_digest,
+            environ=_delivery_env(DELIVERY_MODE_GITHUB_NATIVE),
+        )
+        assert plan is not None
+        assert plan.template_digest == shipped_digest
+        assert plan.as_document()["template_digest"] == shipped_digest
+
+    def test_the_direct_conformance_refuses_an_unknown_driver(self):
+        plan = CredentialDeliveryPlan(
+            subject="s",
+            provider="anthropic-gateway",
+            profile="gitlab",
+            credential_ref=ENV_REF,
+            env_var="ANTHROPIC_AUTH_TOKEN",
+            binding_revision=1,
+            mode=DELIVERY_MODE_GITLAB_PROTECTED,
+            transport_ref="FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+            dispatch_ref="ENV_ANTHROPIC_AUTH_TOKEN",
+            redemption=False,
+        )
+        with pytest.raises(CredentialRefusal, match="consumer_route_unknown"):
+            delivery_template_conformance(
+                plan,
+                (TEMPLATES_DIR / "claude-code.gitlab-ci.yml").read_text(),
+                driver="forge-not-a-driver",
+            )
+
+    def test_a_locator_shaped_dispatch_ref_is_charset_safe(self):
+        """The dispatch_ref a locator registry sends is inside the
+        provider carrier charset (the conformance's marker composition
+        consumes it verbatim)."""
+        locator = native_locator("vault:kv/team-a")
+        assert locator == locator.upper()
+        assert all(char.isalnum() or char == "_" for char in locator)
 
 
 # ----------------------------------------------------------------------

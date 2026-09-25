@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1073,24 +1074,64 @@ def _bound_credential_lab(app) -> None:
     app.state.credential_broker = broker
 
 
+async def _grant_dispatch(
+    app,
+    work_id: str,
+    *,
+    generation: int,
+    ref: str = REDEEM_REF,
+    provider: str = "anthropic-gateway",
+    deadline_seconds: float = 3600.0,
+    created_days_ago: float = 0.0,
+) -> str:
+    """Persist the attempt's operation grant EXACTLY the dispatch seam
+    does (Q39-01) — through :func:`persist_operation_grant`, so the test
+    evidence shape is the production one. Returns the grant id."""
+    from datetime import timedelta
+
+    from forge.adaptive.credential_broker import CredentialOperationGrant
+    from forge.api_lane_control import persist_operation_grant
+
+    now = datetime.now(timezone.utc) - timedelta(days=created_days_ago)
+    grant = CredentialOperationGrant(
+        grant_id=uuid.uuid4().hex,
+        work_id=work_id,
+        subject=REDEEM_SUBJECT_ID,
+        provider=provider,
+        credential_ref=ref,
+        binding_revision=1,
+        attempt_generation=generation,
+        delivery_mode="runner-redemption",
+        redemption_deadline=now + timedelta(seconds=deadline_seconds),
+        created_at=now,
+    )
+    effective = await persist_operation_grant(app.state.session_factory, grant=grant)
+    return effective.grant_id
+
+
 def _redeem_params(work_id: str = WORK, ref: str = REDEEM_REF) -> dict[str, str]:
     return {"work_id": work_id, "credential_ref": ref, "provider": "anthropic-gateway"}
 
 
 async def _redemptions(app, work_id: str) -> list[dict]:
-    async with app.state.session_factory() as session:
-        run = await session.get(FlowRun, work_id)
-    return list((run.evidence or {}).get("credential_redemptions") or [])
+    """The work's audit records from the APPEND-ONLY ledger (Q39-03 —
+    the table is the audit authority; the embedded evidence list is its
+    bounded projection)."""
+    from forge.adaptive.credential_audit import recent_redemptions
+
+    return await recent_redemptions(app.state.session_factory, work_id, limit=100)
 
 
 class TestCredentialRedemption:
     """Delivery profile (b): the lane exchanges its EXISTING attempt-scoped
-    token for the bound model credential, TTL-bound, audited before the
+    token for the bound model credential — authorized against the
+    attempt's OPERATION GRANT (Q39-01), TTL-bounded, audited before the
     value leaves — and every wrong-axis attempt retrieves NOTHING."""
 
     async def test_the_current_attempt_redeems_the_bound_credential(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        grant_id = await _grant_dispatch(app, WORK, generation=2)
 
         response = await client.get(
             LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
@@ -1103,6 +1144,9 @@ class TestCredentialRedemption:
         assert body["credential_ref"] == REDEEM_REF
         assert body["binding_revision"] == 1
         assert body["redemption_id"]
+        assert body["grant_id"] == grant_id  # the join every receipt keys on
+        assert body["attempt_generation"] == 2
+        assert body["work_id"] == WORK
         # TTL-bounded to the attempt: a concrete, near-future expiry.
         expires = datetime.fromisoformat(body["expires_at"])
         assert expires > datetime.now(timezone.utc)
@@ -1111,12 +1155,14 @@ class TestCredentialRedemption:
         rows = await _redemptions(app, WORK)
         assert len(rows) == 1
         assert rows[0]["redemption_id"] == body["redemption_id"]
+        assert rows[0]["grant_id"] == grant_id
         assert rows[0]["attempt_generation"] == 2
         assert REDEEM_SENTINEL not in json.dumps(rows)
 
     async def test_a_superseded_generations_token_cannot_redeem(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
 
         response = await client.get(
             LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 1)
@@ -1129,6 +1175,7 @@ class TestCredentialRedemption:
     async def test_another_works_token_cannot_redeem(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
 
         response = await client.get(
             LANE_CREDENTIAL_REDEEM_ROUTE,
@@ -1142,6 +1189,7 @@ class TestCredentialRedemption:
     async def test_a_revoked_binding_redeems_nothing(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
         app.state.credential_registry.revoke(
             CanonicalSubject(
                 provider_family="gitlab", connection="-", native_id=str(REDEEM_PROJECT_ID)
@@ -1159,10 +1207,13 @@ class TestCredentialRedemption:
         assert await _redemptions(app, WORK) == []
 
     async def test_a_changed_reference_redeems_nothing(self, app, client):
-        """Rotation fencing: an old attempt that changes the REQUESTED
-        reference cannot reach a new binding (acceptance 7)."""
+        """Q39-01: an attempt that changes the REQUESTED reference cannot
+        reach even its own route's sibling ref — the grant names the EXACT
+        ref, and the refusal happens with ZERO broker calls."""
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
+        broker = app.state.credential_broker
 
         response = await client.get(
             LANE_CREDENTIAL_REDEEM_ROUTE,
@@ -1171,12 +1222,14 @@ class TestCredentialRedemption:
         )
 
         assert response.status_code == 403
-        assert "wrong_project_ref" in response.json()["detail"]
+        assert "grant_ref_mismatch" in response.json()["detail"]
+        assert broker.resolve_calls == []  # refused before ANY broker I/O
         assert await _redemptions(app, WORK) == []
 
     async def test_an_unbound_subject_redeems_nothing(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
         app.state.credential_registry = ProjectCredentialRegistry()  # no binding
 
         response = await client.get(
@@ -1190,6 +1243,7 @@ class TestCredentialRedemption:
     async def test_a_broker_refusal_is_a_403_never_a_value(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
         app.state.credential_broker = StagedBroker()  # stages nothing
 
         response = await client.get(
@@ -1203,6 +1257,7 @@ class TestCredentialRedemption:
     async def test_a_broker_staging_the_wrong_slot_is_refused(self, app, client):
         await _put_gitlab_run(app, WORK, generation=2)
         _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
         broker = StagedBroker()
         broker.stage(REDEEM_REF, REDEEM_SENTINEL, env_var="ZAI_API_KEY")
         app.state.credential_broker = broker
@@ -1265,3 +1320,26 @@ class TestCredentialRedemption:
         # The default and valid shapes.
         assert redemption_ttl_seconds({}) == 3600.0
         assert redemption_ttl_seconds({REDEMPTION_TTL_ENV: "600"}) == 600.0
+
+    async def test_an_audit_persistence_failure_prevents_the_credential_response(
+        self, app, client, monkeypatch
+    ):
+        """Q39-03: every redemption is centrally auditable or it does not
+        happen — a failed ledger/projection write refuses the response
+        (503), the value NEVER leaves, and no partial audit row leaks."""
+        from forge.adaptive import credential_audit
+
+        await _put_gitlab_run(app, WORK, generation=2)
+        _bound_credential_lab(app)
+        await _grant_dispatch(app, WORK, generation=2)
+
+        async def failing_record(session_factory, redemption):
+            raise RuntimeError("the audit ledger is unreachable")
+
+        monkeypatch.setattr(credential_audit, "record_redemption", failing_record)
+        response = await client.get(
+            LANE_CREDENTIAL_REDEEM_ROUTE, params=_redeem_params(), headers=_gen_headers(WORK, 2)
+        )
+        assert response.status_code == 503
+        assert "redemption audit could not be persisted" in response.json()["detail"]
+        assert await _redemptions(app, WORK) == []  # zero successful retrievals

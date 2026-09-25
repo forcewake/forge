@@ -54,7 +54,9 @@ back to the human?
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+import re
+from dataclasses import dataclass, field as dataclass_field, replace
+from fnmatch import fnmatchcase
 from hashlib import sha256
 from typing import Any, Iterable, Literal, Mapping, Protocol
 
@@ -68,8 +70,17 @@ __all__ = [
     "ActivationRefused",
     "ActivationSession",
     "ActivePlanState",
+    "APPROVED_INPUT_KEY",
+    "APPROVED_INPUT_SCHEMA",
+    "APPROVED_SOURCE_REVISION",
+    "APPROVED_SOURCE_SPEC",
+    "APPROVED_SOURCE_SPEC_LEGACY",
+    "ApprovedInput",
     "ArtifactReuseDecision",
     "CHECKPOINT_KIND",
+    "CLARIFICATION_CLASS",
+    "IN_SCOPE_CORRECTION_CLASS",
+    "MATERIAL_CHANGE_CLASS",
     "CHECKPOINT_REUSE_DECISION_KEY",
     "DISCARD_DECISION",
     "DispatchPlanBinding",
@@ -83,10 +94,16 @@ __all__ = [
     "PRESERVE_DECISION",
     "Question",
     "REUSE_DECISION_SCHEMA",
+    "REVIEW_FEEDBACK_KEY",
+    "REVIEW_FEEDBACK_SCHEMA",
+    "ReviewFeedbackRefused",
+    "ReviewFeedbackRequest",
     "REVISION_ACTIVATIONS_KEY",
+    "REVISION_CONTENT_KEY",
     "REVISION_EXECUTOR_DIGEST_KEY",
     "REVISION_NOTE_MARKER",
     "RevisionDecision",
+    "RevisionRebindRefused",
     "TacticalPolicy",
     "WorkArtifact",
     "WipReuseDecision",
@@ -96,23 +113,41 @@ __all__ = [
     "apply_tactical",
     "change_log",
     "classify_revision",
+    "classify_review_feedback",
+    "correction_decision_id",
+    "correction_invalidation_set",
     "decide_wip_reuse",
     "decision_record",
     "dispatch_plan_binding",
     "executor_digest_document",
     "executor_input_digest",
     "fresh_session_brief",
+    "head_binding_guard",
     "invalidation_set",
+    "is_standing_guidance",
+    "mark_review_feedback_request",
     "parse_tactical_policy",
+    "parse_review_feedback_note",
     "plan_comment_revision_note",
     "plan_digest",
     "proposed_revision_identity",
     "read_active_plan",
     "read_wip_reuse_decision",
+    "read_review_feedback_requests",
+    "record_review_feedback_request",
+    "referenced_paths_of",
     "refused_wip_reuse",
+    "render_revision_brief",
+    "review_correction_revision",
+    "review_feedback_requests_of",
+    "review_feedback_summary_section",
+    "resolve_approved_input",
     "route_question",
     "stage_pending_revision",
+    "stage_review_correction",
+    "stage_standing_guidance_promotion",
     "stale_callback_guard",
+    "standing_guidance_revision",
     "transformation_kinds",
     "wip_artifacts_of_evidence",
 ]
@@ -934,6 +969,12 @@ REVISION_ACTIVATIONS_KEY = "revision_activations"
 ACTIVE_PLAN_KEY = "active_plan"
 PENDING_PROPOSAL_KEY = "revision_proposal"
 
+#: Q39-02 (#321): the ACTIVE-plan document's field carrying the activated
+#: revision's own content (``PlanRevision.model_dump()``) — the bytes the
+#: activation CAS switched the digest over, read back by
+#: :func:`resolve_approved_input` at every dispatch entry.
+REVISION_CONTENT_KEY = "revision_content"
+
 PENDING_PROPOSAL_SCHEMA = "forge.revision.proposal-pending/1"
 ACTIVATION_SCHEMA = "forge.revision.activation/1"
 ACTIVE_PLAN_SCHEMA = "forge.revision.active-plan/1"
@@ -1009,6 +1050,7 @@ def active_plan_document_of(
     record: ActivationRecord,
     *,
     revised_from_digest: str = "",
+    revision_content: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The durable ACTIVE-plan pointer the dispatch leg reads.
 
@@ -1020,12 +1062,22 @@ def active_plan_document_of(
     NEXT-20: ``revised_from_digest`` records the digest of the plan this
     one REPLACED (the prior active document's own digest; empty for a
     first activation, or when the prior pointer carried no digest). The
-    dispatch leg uses it to refuse a stale ``/go`` that still carries
-    the SUPERSEDED plan's digest, and the revised plan comment renders
-    its "revised from <old> to <new>" note from this pair — the journey
-    from human decision to changed execution is one durable document.
+    dispatch leg uses it to refuse a stale ``/go`` that still carries the
+    SUPERSEDED plan's digest, and the revised plan comment renders its
+    "revised from <old> to <new>" note from this pair — the journey from
+    human decision to changed execution is one durable document.
+
+    Q39-02 (#321): ``revision_content`` is the activated revision's own
+    ``model_dump()`` — the BYTES the activation CAS switched the digest
+    over. Without them the durable pointer names a revision the dispatch
+    can identify but never re-read: identity → CONTENT is the join this
+    field closes (the live counterexample's gap — the activation switched
+    the digest while the executor kept receiving the superseded brief).
+    Additive: pointers persisted before Q39-02 carry no such field and
+    parse unchanged (the dispatch resolves them through the explicit
+    legacy adapter, never a re-derivation).
     """
-    return {
+    document = {
         "schema": ACTIVE_PLAN_SCHEMA,
         "work_id": record.work_id,
         "plan_id": record.plan_id,
@@ -1037,6 +1089,9 @@ def active_plan_document_of(
         "publication_epoch": record.publication_epoch,
         "activated_by_decision": record.decision_id,
     }
+    if revision_content is not None:
+        document[REVISION_CONTENT_KEY] = dict(revision_content)
+    return document
 
 
 async def stage_pending_revision(
@@ -1343,10 +1398,17 @@ async def activate_pending_revision(
         # NEXT-20: the switched pointer remembers the digest it replaced,
         # so the next dispatch can refuse a /go still carrying the OLD
         # plan and the revised plan comment can say what it revised.
+        # Q39-02 (#321): the same switch persists the activated revision's
+        # CONTENT — the exact ``proposed`` bytes the guard digested (the
+        # staged shape, not the returned copy whose parent was rewritten),
+        # so a later dispatch resolves the approved TEXT from the same
+        # source the CAS switched, and a tampered payload fails the
+        # digest comparison at resolution instead of dispatching quietly.
         merged[ACTIVE_PLAN_KEY] = active_plan_document_of(
             current,
             record,
             revised_from_digest=str(active_raw.get("plan_digest") or ""),
+            revision_content=proposed.model_dump(),
         )
         merged.pop(PENDING_PROPOSAL_KEY, None)  # the decision is consumed
         # R36-13 (#272): the WIP reuse decision lands in the SAME commit —
@@ -2119,3 +2181,1091 @@ def executor_digest_document(
         "activated_by_decision": activated_by_decision,
         "executor_input_digest": executor_input_digest(identity),
     }
+
+
+# ---------------------------------------------------------------------------
+# Q39-02 (#321) — the ApprovedInput: the executor's brief binds to the
+# ACTIVE revision's TEXT, not the superseded spec's
+# ---------------------------------------------------------------------------
+#
+# The live counterexample (docs/evaluation/2026-09-25-combined-steering,
+# cycle 1): the operator's approved revision renamed the public entrypoint
+# (approach Y), the activation CAS switched identity AND digest, the WIP
+# reuse preserved the renamed checkpoint — and the resumed lane REVERTED to
+# approach X, because the GitLab dispatch still briefed it from the
+# spec-frozen ``plan_summary``. The run needed a SECOND manual standing
+# steer to survive. Identity → CONTENT is the missing join, closed in three
+# pieces:
+#
+# - :class:`ApprovedInput` — ONE immutable, frozen record of everything the
+#   dispatched executor may run under: the task, the ACTIVE plan TEXT, the
+#   revision identity/digest, the work-contract digest, the evidence the
+#   reuse decision preserved, the allowed writes, and the exact WIP reuse
+#   decision. Resolved at EVERY dispatch entry by
+#   :func:`resolve_approved_input`; a run with no active revision keeps
+#   today's behavior under an explicit ``source: spec`` label.
+# - the brief envelope — the GitLab ``FORGE_PLAN`` bytes are GENERATED from
+#   the resolved record (:meth:`ApprovedInput.brief`), so the brief is a
+#   pure function of durable state; the dispatch persists the record and
+#   its executor-input digest beside the native-start intent, and the
+#   three-way digest discipline (evidence == the native ledger's recorded
+#   inputs == the bytes the runner consumes) proves the rebind end to end.
+# - :func:`stage_standing_guidance_promotion` — the #313 cycle-2 remedy
+#   formalized: accepted STANDING guidance promotes into durable revision
+#   content through the EXISTING approval route (a staged pending proposal
+#   a human must ``/approve-revision``); a next-turn hint that was never
+#   approved NEVER expands authority.
+
+#: The approved-input document's schema (the versioned input contract the
+#: rollout note names: legacy attempts carry no such section and resolve
+#: through the labeled adapter below).
+APPROVED_INPUT_SCHEMA = "forge.revision.approved-input/1"
+
+#: Where the dispatch's resolved approved input lives in the evidence.
+APPROVED_INPUT_KEY = "approved_input"
+
+#: The resolution's source labels. ``revision`` — an activated revision's
+#: durable content IS the brief source. ``spec`` — no revision was ever
+#: activated; the frozen spec's plan is the brief (today's behavior,
+#: labeled). ``spec-legacy`` — a prior-version pointer carries no revision
+#: content (persisted before Q39-02): the EXPLICIT legacy adapter keeps the
+#: spec brief under its own label, never a silent re-derivation.
+APPROVED_SOURCE_REVISION = "revision"
+APPROVED_SOURCE_SPEC = "spec"
+APPROVED_SOURCE_SPEC_LEGACY = "spec-legacy"
+
+
+class RevisionRebindRefused(ValueError):
+    """The typed refusal approved-input resolution raises (Q39-02).
+
+    ``code`` is the stable machine-readable reason (the
+    ``revision.rebind_refused{reason}`` observability dimension); the
+    dispatch parks the run BEFORE any provider I/O — never a fallback to
+    the superseded brief.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"approved-input resolution refused [{code}] {detail}")
+        self.code = code
+        self.detail = detail
+
+
+def _bytes_digest(text: str) -> str:
+    """sha256 over the exact UTF-8 bytes of one text field (A03's shape)."""
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def render_revision_brief(
+    revision: PlanRevision,
+    *,
+    plan_digest_value: str = "",
+    activated_by_decision: str = "",
+    wip_reuse: Mapping[str, Any] | None = None,
+    evidence_refs: Iterable[str] = (),
+) -> str:
+    """The executor brief rendered from one ACTIVE revision's content.
+
+    A pure function of durable material only — the revision's summary and
+    step objectives, the digest the activation CAS switched, the WIP reuse
+    route, and the preserved evidence references. Deterministic by
+    construction, so two workers resolving the same durable state render
+    byte-identical briefs and the brief's content digest is reproducible.
+    """
+    lines = [
+        f"Implementation plan — active revision {revision.revision} of "
+        f"{revision.plan_id}" + (f" (digest {plan_digest_value})" if plan_digest_value else ""),
+    ]
+    if activated_by_decision:
+        lines.append(f"Activated by approved decision {activated_by_decision}.")
+    lines.append("")
+    if revision.summary.strip():
+        lines.extend([revision.summary.strip(), ""])
+    lines.append("Steps:")
+    for step in revision.steps:
+        suffix = f" [writes {step.write_repository_id}]" if step.write_repository_id else ""
+        lines.append(f"{step.step_id}. {step.objective}{suffix}")
+    reuse = dict(wip_reuse or {})
+    if reuse:
+        lines.append("")
+        lines.append(
+            f"WIP reuse route: {reuse.get('route') or 'unknown'} — "
+            f"{str(reuse.get('route_reason') or '').strip()}"
+        )
+    preserved = [ref for ref in evidence_refs if ref]
+    if preserved:
+        lines.append(f"Preserved evidence: {', '.join(sorted(preserved))}")
+    return "\n".join(lines).strip()
+
+
+@dataclass(frozen=True)
+class ApprovedInput:
+    """The ONE immutable executor-input record every dispatch resolves.
+
+    Every field comes from durable state read at the dispatch entry — the
+    frozen task text, the ACTIVE revision's identity, digest and rendered
+    TEXT (or the spec's plan under an explicit ``source`` label), the
+    work-contract digest the activation guarded, the evidence the WIP
+    reuse decision preserved, the allowed writes, and the reuse decision
+    itself. A restarted worker resolving the same durable rows
+    reconstructs the identical record — there is no clock, no counter and
+    no session memory in it.
+    """
+
+    run_id: str
+    task_title: str
+    task_description: str
+    plan_text: str
+    source: str
+    plan_id: str = ""
+    work_id: str = ""
+    active_revision: int = 0
+    plan_digest: str = ""
+    revised_from_digest: str = ""
+    work_contract_digest: str = ""
+    evidence_refs: tuple[str, ...] = ()
+    allowed_writes: tuple[str, ...] = ()
+    wip_reuse: Mapping[str, Any] = dataclass_field(default_factory=dict)
+    activated_by_decision: str = ""
+
+    @property
+    def task(self) -> str:
+        """The frozen task text — title and description, the envelope's pair."""
+        return f"{self.task_title}\n{self.task_description}".strip()
+
+    @property
+    def revision_bound(self) -> bool:
+        """True only when the ACTIVE revision's content is the brief source."""
+        return self.source == APPROVED_SOURCE_REVISION
+
+    @property
+    def plan_text_digest(self) -> str:
+        """sha256 over the brief's plan TEXT — the runner-consumed bytes."""
+        return _bytes_digest(self.plan_text)
+
+    def brief(self) -> str:
+        """The executor brief — the record's plan TEXT, byte-exactly.
+
+        The revision-bound record's text was RENDERED at resolution (a
+        pure function of the durable revision content — see
+        :func:`render_revision_brief`); the spec sources carry the frozen
+        spec's plan text byte-identically (today's behavior — the labels
+        live in the persisted document, never in changed legacy bytes).
+        The dispatch never re-renders: brief == the resolved record.
+        """
+        return self.plan_text
+
+    def document(self) -> dict[str, Any]:
+        """The durable shape persisted beside the native-start intent."""
+        return {
+            "schema": APPROVED_INPUT_SCHEMA,
+            "run_id": self.run_id,
+            "source": self.source,
+            "task_title": self.task_title,
+            "task_description": self.task_description,
+            "plan_text": self.plan_text,
+            "plan_text_digest": self.plan_text_digest,
+            "plan_id": self.plan_id,
+            "work_id": self.work_id,
+            "active_revision": self.active_revision,
+            "plan_digest": self.plan_digest,
+            "revised_from_digest": self.revised_from_digest,
+            "work_contract_digest": self.work_contract_digest,
+            "evidence_refs": list(self.evidence_refs),
+            "allowed_writes": list(self.allowed_writes),
+            "wip_reuse": dict(self.wip_reuse),
+            "activated_by_decision": self.activated_by_decision,
+        }
+
+
+async def resolve_approved_input(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    *,
+    task_title: str,
+    task_description: str,
+    spec_plan_text: str,
+    spec_plan_digest: str,
+    allowed_writes: Iterable[str] = (),
+) -> ApprovedInput:
+    """Resolve the executor's approved input from durable state (Q39-02).
+
+    Called at EVERY dispatch entry (start, retry, revival, repair
+    re-dispatch). One read; three honest outcomes:
+
+    - **no active revision** — the frozen spec's plan is the brief,
+      labeled ``source: spec`` (today's behavior, explicit);
+    - **an active revision with durable content** — the content must
+      re-parse and its canonical digest must equal the pointer's
+      ``plan_digest`` (the digest the activation CAS switched); any
+      mismatch is a typed :class:`RevisionRebindRefused` — fail closed,
+      never a quiet fallback to the superseded brief. The rendered
+      revision text becomes the brief, labeled ``source: revision``;
+    - **an active revision whose pointer predates Q39-02** (no content
+      field) — the EXPLICIT legacy adapter: the spec's plan stays the
+      brief under the label ``source: spec-legacy``. The superseded
+      revision's bytes are NOT re-derived from anything.
+
+    The WIP reuse decision (when the activation persisted one) rides the
+    record verbatim; its preserved artifacts are the evidence references.
+    """
+    from forge.durable import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise RevisionRebindRefused("run_not_found", f"flow run {run_id!r} not found")
+        evidence = run.evidence or {}
+        active_raw = evidence.get(ACTIVE_PLAN_KEY)
+        active = dict(active_raw) if isinstance(active_raw, dict) else None
+        reuse_raw = evidence.get(CHECKPOINT_REUSE_DECISION_KEY)
+        reuse = dict(reuse_raw) if isinstance(reuse_raw, dict) else {}
+
+    evidence_refs = tuple(
+        str(entry.get("artifact_id") or "")
+        for entry in (reuse.get("artifacts") or [])
+        if isinstance(entry, dict) and entry.get("decision") == PRESERVE_DECISION
+    )
+    shared = {
+        "run_id": run_id,
+        "task_title": str(task_title or ""),
+        "task_description": str(task_description or ""),
+        "evidence_refs": evidence_refs,
+        "allowed_writes": tuple(allowed_writes),
+        "wip_reuse": reuse,
+    }
+    if active is None:
+        return ApprovedInput(
+            **shared,
+            plan_text=str(spec_plan_text or ""),
+            source=APPROVED_SOURCE_SPEC,
+            plan_digest=str(spec_plan_digest or ""),
+        )
+
+    content_raw = active.get(REVISION_CONTENT_KEY)
+    if not isinstance(content_raw, dict) or not content_raw:
+        # The prior-version pointer: identity without content. The legacy
+        # adapter keeps the spec brief under its own label — the record
+        # can never pretend to know the superseded revision's bytes.
+        return ApprovedInput(
+            **shared,
+            plan_text=str(spec_plan_text or ""),
+            source=APPROVED_SOURCE_SPEC_LEGACY,
+            plan_id=str(active.get("plan_id") or ""),
+            work_id=str(active.get("work_id") or ""),
+            active_revision=int(active.get("active_revision") or 0),
+            plan_digest=str(active.get("plan_digest") or ""),
+            revised_from_digest=str(active.get("revised_from_digest") or ""),
+            work_contract_digest=str(active.get("work_contract_digest") or ""),
+            activated_by_decision=str(active.get("activated_by_decision") or ""),
+        )
+
+    try:
+        revision = PlanRevision.model_validate(dict(content_raw))
+    except Exception as exc:  # pydantic ValidationError — unreadable content
+        raise RevisionRebindRefused(
+            "content_unreadable",
+            f"the active plan's revision content does not parse: {type(exc).__name__}",
+        ) from exc
+    pointer_digest = str(active.get("plan_digest") or "")
+    content_digest = plan_digest(revision)
+    if pointer_digest != content_digest:
+        raise RevisionRebindRefused(
+            "content_digest_mismatch",
+            f"the durable revision content digests to {content_digest} but the "
+            f"active-plan pointer says {pointer_digest} — the content and the "
+            "identity the activation switched disagree",
+        )
+    revision_bound = ApprovedInput(
+        **shared,
+        plan_text=render_revision_brief(
+            revision,
+            plan_digest_value=pointer_digest,
+            activated_by_decision=str(active.get("activated_by_decision") or ""),
+            wip_reuse=reuse,
+            evidence_refs=evidence_refs,
+        ),
+        source=APPROVED_SOURCE_REVISION,
+        plan_id=str(active.get("plan_id") or "") or revision.plan_id,
+        work_id=str(active.get("work_id") or "") or revision.work_id,
+        active_revision=int(active.get("active_revision") or 0) or revision.revision,
+        plan_digest=pointer_digest,
+        revised_from_digest=str(active.get("revised_from_digest") or ""),
+        work_contract_digest=str(active.get("work_contract_digest") or ""),
+        activated_by_decision=str(active.get("activated_by_decision") or ""),
+    )
+    return revision_bound
+
+
+# ---------------------------------------------------------------------------
+# Q39-02 (#321) — the standing-guidance promotion (the #313 cycle-2 remedy)
+# ---------------------------------------------------------------------------
+
+#: The closed marker vocabulary that classifies an operator's guidance as
+#: STANDING (a direction that must outlive the current turn). A steer with
+#: none of these markers is a next-turn hint: it may shape the live turn,
+#: never the durable plan. The classification lives HERE (with the rest of
+#: the revision rules), not in the steering channel — the channel delivers,
+#: the revision gate owns authority.
+_STANDING_GUIDANCE_MARKERS: frozenset[str] = frozenset(
+    {
+        "standing direction",
+        "standing guidance",
+        "from now on",
+        "going forward",
+        "for future turns",
+        "for the remainder",
+        "henceforth",
+        "permanently",
+        "always use",
+        "always name",
+    }
+)
+
+
+def is_standing_guidance(text: str) -> bool:
+    """True only when *text* declares a STANDING direction.
+
+    Fail closed by vocabulary: an unmarked instruction is a next-turn hint
+    — it NEVER promotes, so nothing that was not explicitly standing can
+    expand the durable plan's authority.
+    """
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _STANDING_GUIDANCE_MARKERS)
+
+
+def standing_guidance_revision(
+    active: PlanRevision, text: str, *, command_id: str = ""
+) -> PlanRevision | None:
+    """The PENDING proposal an accepted standing steer promotes to.
+
+    The promoted revision keeps every STEP byte-identical (so the WIP the
+    checkpoint holds stays compatible — :func:`decide_wip_reuse` sees no
+    churn) and absorbs the standing text into the SUMMARY with its
+    provenance. The revision number follows the active one. ``None`` when
+    the text is not standing guidance: a next-turn hint promotes to
+    NOTHING. The return value is a PROPOSAL — it carries no authority
+    until a human approves it through the existing route.
+    """
+    if not is_standing_guidance(text):
+        return None
+    provenance = f" (promoted from accepted guidance {command_id})" if command_id else ""
+    folded = f"{active.summary.rstrip()}\n\nStanding direction{provenance}: {str(text).strip()}"
+    return active.model_copy(
+        update={
+            "revision": active.revision + 1,
+            "parent_revision": active.revision,
+            "summary": folded,
+        }
+    )
+
+
+async def stage_standing_guidance_promotion(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    text: str,
+    *,
+    command_id: str = "",
+) -> str | None:
+    """Promote accepted standing guidance into a PENDING revision (Q39-02).
+
+    The #313 cycle-2 remedy, formalized: the operator's channel for a
+    direction that must outlive a continuation is the DURABLE PLAN, not a
+    repeated steer. This leg resolves the active revision's durable
+    content and stages the promoted proposal through the EXISTING
+    :func:`stage_pending_revision` route — the human gate still decides
+    (``/approve-revision`` still owns the activation CAS). Returns the
+    staged decision id, or ``None`` when the text is not standing
+    guidance (nothing staged, nothing expanded) or the run carries no
+    resolvable active revision content (the promotion never guesses: an
+    identity-only pointer or an unreadable payload refuses rather than
+    re-deriving plan bytes).
+    """
+    from forge.durable import FlowRun
+
+    if not is_standing_guidance(text):
+        return None
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise RevisionRebindRefused("run_not_found", f"flow run {run_id!r} not found")
+        active_raw = (run.evidence or {}).get(ACTIVE_PLAN_KEY)
+        active = dict(active_raw) if isinstance(active_raw, dict) else None
+    if active is None:
+        return None
+    content_raw = active.get(REVISION_CONTENT_KEY)
+    if not isinstance(content_raw, dict) or not content_raw:
+        return None  # a prior-version pointer — never a re-derivation
+    try:
+        revision = PlanRevision.model_validate(dict(content_raw))
+    except Exception:
+        return None  # unreadable content refuses; the operator re-raises the proposal
+    proposed = standing_guidance_revision(revision, text, command_id=command_id)
+    if proposed is None:  # pragma: no cover — the marker check above already passed
+        return None
+    if plan_digest(proposed) == plan_digest(revision):
+        return None  # the fold changed nothing — nothing to approve
+    decision = RevisionDecision(
+        decision_id=f"rd-standing-{sha256(f'{run_id}:{command_id}:{plan_digest(proposed)}'.encode('utf-8')).hexdigest()[:16]}",
+        work_id=revision.work_id,
+        parent_revision=revision.revision,
+        proposed_revision_id=proposed_revision_identity(proposed),
+        proposed_digest=plan_digest(proposed),
+        work_contract_digest=revision.work_contract_digest,
+        authorization_epoch=int(active.get("authorization_epoch") or 0),
+    )
+    current = ActivePlanState(
+        work_id=str(active.get("work_id") or revision.work_id),
+        plan_id=str(active.get("plan_id") or revision.plan_id),
+        active_revision=int(active.get("active_revision") or revision.revision),
+        work_contract_digest=str(active.get("work_contract_digest") or ""),
+        authorization_epoch=int(active.get("authorization_epoch") or 0),
+        publication_epoch=int(active.get("publication_epoch") or 0),
+    )
+    await stage_pending_revision(session_factory, run_id, decision, proposed, current, old=revision)
+    return decision.decision_id
+
+
+# ---------------------------------------------------------------------------
+# Q39-13 (#332) — post-MR review feedback as a new bounded revision on the
+# CURRENT candidate
+# ---------------------------------------------------------------------------
+#
+# The review's most practical next scenario: a reviewer names a specific
+# edit on the Draft MR; the request binds to the CURRENT MR head; human
+# changes are preserved; only the permitted thing is fixed; the affected
+# checks rerun; a new reviewable result comes back. The workflow does not
+# end at the first Draft MR — but reviewer feedback needs the SAME
+# exact-input + authority discipline as initial implementation, so this
+# section EXTENDS the revision machinery above (no new controller):
+#
+# - :class:`ReviewFeedbackRequest` — ONE immutable, frozen record per
+#   reviewer comment (``forge.review.feedback/1``), keyed durably by the
+#   originating note id: one reviewer comment → ONE durable request,
+#   however many times the webhook replays. The record binds the request
+#   to the CURRENT MR head (``head_sha``), the originating discussion, the
+#   authorized actor and the approved work scope.
+# - :func:`classify_review_feedback` — the closed three-way
+#   classification: ``clarification`` (a question — answered, no
+#   dispatch), ``in-scope_correction`` (a bounded input revision) and
+#   ``material_change`` (the EXISTING material-revision approval route —
+#   never a permission expansion). Fail closed like every other gate
+#   here: a correction whose scope cannot be PROVEN inside the approved
+#   write scope is material, never a guessed in-scope edit.
+# - :func:`stage_review_correction` — the bounded correction: the active
+#   revision with the correction folded into its SUMMARY (steps
+#   byte-identical, so the held WIP stays compatible), staged through the
+#   EXISTING :func:`stage_pending_revision` human gate. The correction
+#   becomes the active revision TEXT through the existing activation CAS,
+#   so the #321 ApprovedInput machinery briefs the next executor with the
+#   correction + the referenced diff context + the current head — never an
+#   obsolete source version.
+# - :func:`head_binding_guard` — the head fence: the request records the
+#   MR head at request time; at the correction's dispatch the expected
+#   head is re-checked, and an unexpected head move is a typed
+#   ``stale_head`` conflict (human edits preserved, never force-
+#   overwritten).
+# - :func:`correction_invalidation_set` — precise evidence invalidation on
+#   the applicability axis: only the evidence produced under the head the
+#   correction targets is superseded; everything else is preserved. The
+#   required checks + the review rerun for the NEW candidate before any
+#   readiness claim (the sha-binding replay guards own that in the lane).
+
+#: The review-feedback request document's schema.
+REVIEW_FEEDBACK_SCHEMA = "forge.review.feedback/1"
+
+#: Where the run's review-feedback requests live inside ``FlowRun.evidence``
+#: — a dict keyed by the originating note id (the idempotency key).
+REVIEW_FEEDBACK_KEY = "review_feedback_requests"
+
+#: The closed classification vocabulary.
+CLARIFICATION_CLASS = "clarification"
+IN_SCOPE_CORRECTION_CLASS = "in-scope_correction"
+MATERIAL_CHANGE_CLASS = "material_change"
+
+#: The request's lifecycle states (the durable ``status`` field).
+REQUEST_RECORDED = "recorded"
+REQUEST_STAGED = "staged"
+REQUEST_DISPATCHED = "dispatched"
+REQUEST_STALE_HEAD = "stale_head"
+REQUEST_MATERIALIZED = "material_proposal"
+REQUEST_CLARIFICATION_OPEN = "clarification_open"
+REQUEST_REFUSED_UNAUTHORIZED = "refused_unauthorized"
+REQUEST_DELETED_DISCUSSION = "deleted_discussion"
+REQUEST_CONFLICTING = "conflicting_correction"
+REQUEST_WINDOW_CLOSED = "correction_window_closed"
+
+
+class ReviewFeedbackRefused(ValueError):
+    """The typed refusal the review-feedback legs raise (Q39-13).
+
+    ``code`` is the stable machine-readable reason (the
+    ``review_feedback.stale_head`` observability dimension and friends);
+    ``detail`` explains the mismatch for the audit trail. Callers branch
+    on ``code``, never on message text — the same contract
+    :class:`ActivationRefused` established for activations.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"review feedback refused [{code}] {detail}")
+        self.code = code
+        self.detail = detail
+
+
+#: ``/fix <bounded description>`` — the correction request (a named edit).
+_REVIEW_FIX_RE = re.compile(r"/fix\s+(.+)", re.IGNORECASE | re.DOTALL)
+#: ``/ask <question>`` — the clarification (a question, no code request).
+_REVIEW_ASK_RE = re.compile(r"/ask\s+(.+)", re.IGNORECASE | re.DOTALL)
+#: A path token inside backticks (`` `src/app.py` ``) — the explicit scope
+#: claim a reviewer makes when naming the edit's target. Deliberately
+#: narrow: a bare word is not a path claim, so an unscoped correction
+#: fails closed to the material route instead of guessing a scope.
+_PATH_TOKEN_RE = re.compile(r"`([^`\n]+)`")
+
+
+def parse_review_feedback_note(note_text: str) -> tuple[str, str] | None:
+    """Parse a review-feedback note: ``(kind, body)`` or ``None``.
+
+    ``kind`` is ``fix`` (a named edit — the bounded correction request)
+    or ``ask`` (a question — the clarification). Every other note shape
+    is NOT review feedback (``None``): the ingress ignores it exactly
+    like an unparseable ``/go``.
+    """
+    text = str(note_text or "").strip()
+    fix = _REVIEW_FIX_RE.search(text)
+    if fix is not None:
+        return "fix", fix.group(1).strip()
+    ask = _REVIEW_ASK_RE.search(text)
+    if ask is not None:
+        return "ask", ask.group(1).strip()
+    return None
+
+
+def referenced_paths_of(text: str) -> tuple[str, ...]:
+    """The paths a reviewer explicitly claimed, in note order.
+
+    Only backticked tokens count (``rename `src/entry.py` to ...``) — an
+    explicit scope claim, not an inference. A correction naming no path
+    has an UNPROVABLE scope and can never classify in-scope.
+    """
+    lowered = str(text or "")
+    return tuple(
+        dict.fromkeys(token.strip() for token in _PATH_TOKEN_RE.findall(lowered) if token.strip())
+    )
+
+
+def _path_inside_scope(path: str, allowed: Iterable[str]) -> bool:
+    """Whether one claimed path falls inside the approved write scope.
+
+    The SAME matcher the lane's changeset validation uses (fnmatch
+    globs — ``*`` spans ``/``), plus the directory-prefix reading for a
+    plain entry (``src`` / ``src/`` covers ``src/app.py``): the reviewer
+    classification and the enforcement boundary must agree on what the
+    frozen ``allowed_paths`` mean, or the gate would approve edits the
+    writer refuses (or vice versa). An empty allowed scope authorizes
+    nothing.
+    """
+    claim = path.strip().strip("/")
+    for entry in allowed:
+        pattern = str(entry).strip().strip("/")
+        if not pattern:
+            continue
+        if fnmatchcase(claim, pattern):
+            return True
+        has_wildcard = any(mark in pattern for mark in "*?[")
+        if not has_wildcard and (claim == pattern or claim.startswith(pattern + "/")):
+            return True
+    return False
+
+
+def classify_review_feedback(kind: str, text: str, allowed_paths: Iterable[str] = ()) -> str:
+    """Classify one review-feedback note into the closed vocabulary.
+
+    - ``ask`` → :data:`CLARIFICATION_CLASS` — a question. Answered,
+      routed to the approvers; NEVER a dispatch (reviewer-only recovery
+      consumes no implementation budget).
+    - ``fix`` → the correction must PROVE its scope: every explicitly
+      claimed path inside the approved write scope →
+      :data:`IN_SCOPE_CORRECTION_CLASS`. No path claimed at all (the
+      scope is unknowable) or any claimed path outside the approved
+      scope → :data:`MATERIAL_CHANGE_CLASS` — the EXISTING
+      material-revision approval route. Out-of-scope is NEVER a
+      permission expansion: the bounded lane simply refuses to widen the
+      write surface a human approved.
+    """
+    if kind == "ask":
+        return CLARIFICATION_CLASS
+    if kind == "fix":
+        claimed = referenced_paths_of(text)
+        allowed = tuple(str(entry) for entry in allowed_paths)
+        if claimed and all(_path_inside_scope(path, allowed) for path in claimed):
+            return IN_SCOPE_CORRECTION_CLASS
+        return MATERIAL_CHANGE_CLASS
+    raise ReviewFeedbackRefused("unknown_kind", f"unknown review-feedback kind {kind!r}")
+
+
+@dataclass(frozen=True)
+class ReviewFeedbackRequest:
+    """ONE immutable reviewer comment, durably recorded (Q39-13).
+
+    Every field is durable, provider-side material read at the ingress:
+    the originating note id (the idempotency key — one reviewer comment
+    → ONE request despite webhook replay), the discussion the note lives
+    in, the CURRENT MR head at request time, the authorized actor, the
+    classification, the requested text and the explicitly claimed paths,
+    and the referenced diff context (the diff-position paths a
+    positioned note carries). ``status`` is the request's lifecycle; the
+    record never mutates in place — transitions return a new record, and
+    the durable store keeps both sides.
+    """
+
+    note_id: str
+    run_id: str
+    discussion_id: str
+    mr_iid: int
+    actor: str
+    head_sha: str
+    classification: str
+    text: str
+    referenced_paths: tuple[str, ...] = ()
+    diff_context: str = ""
+    created_at: str = ""
+    decision_id: str = ""
+    status: str = REQUEST_RECORDED
+    #: The precise evidence invalidation the staging recorded (which
+    #: items the correction supersedes, which survive) — applicability
+    #: partitioned at staging time, re-readable from the record.
+    invalidation: Mapping[str, Any] = dataclass_field(default_factory=dict)
+    #: A conflicting note's refusal names the staged decision it lost to.
+    conflict_with: str = ""
+
+    def with_status(self, status: str, **updates: Any) -> "ReviewFeedbackRequest":
+        """One lifecycle transition — a new record, never an in-place edit."""
+        return replace(self, status=status, **updates)
+
+    @property
+    def code_requested(self) -> bool:
+        """True only when the reviewer asked for a change (not a question)."""
+        return self.classification != CLARIFICATION_CLASS
+
+    def document(self) -> dict[str, Any]:
+        """The durable shape frozen into the run's evidence."""
+        return {
+            "schema": REVIEW_FEEDBACK_SCHEMA,
+            "note_id": self.note_id,
+            "run_id": self.run_id,
+            "discussion_id": self.discussion_id,
+            "mr_iid": self.mr_iid,
+            "actor": self.actor,
+            "head_sha": self.head_sha,
+            "classification": self.classification,
+            "text": self.text,
+            "referenced_paths": list(self.referenced_paths),
+            "diff_context": self.diff_context,
+            "created_at": self.created_at,
+            "decision_id": self.decision_id,
+            "status": self.status,
+            "invalidation": dict(self.invalidation),
+            "conflict_with": self.conflict_with,
+        }
+
+
+def _request_of_document(document: Mapping[str, Any]) -> ReviewFeedbackRequest | None:
+    if not isinstance(document, dict):
+        return None
+    try:
+        return ReviewFeedbackRequest(
+            note_id=str(document.get("note_id") or ""),
+            run_id=str(document.get("run_id") or ""),
+            discussion_id=str(document.get("discussion_id") or ""),
+            mr_iid=int(document.get("mr_iid") or 0),
+            actor=str(document.get("actor") or ""),
+            head_sha=str(document.get("head_sha") or ""),
+            classification=str(document.get("classification") or ""),
+            text=str(document.get("text") or ""),
+            referenced_paths=tuple(str(path) for path in (document.get("referenced_paths") or [])),
+            diff_context=str(document.get("diff_context") or ""),
+            created_at=str(document.get("created_at") or ""),
+            decision_id=str(document.get("decision_id") or ""),
+            status=str(document.get("status") or REQUEST_RECORDED),
+            invalidation=dict(document.get("invalidation") or {}),
+            conflict_with=str(document.get("conflict_with") or ""),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def review_feedback_requests_of(evidence: Mapping[str, Any]) -> dict[str, ReviewFeedbackRequest]:
+    """The run's recorded review-feedback requests, keyed by note id."""
+    raw = (evidence or {}).get(REVIEW_FEEDBACK_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    requests: dict[str, ReviewFeedbackRequest] = {}
+    for key, document in raw.items():
+        request = _request_of_document(document)
+        if request is not None:
+            requests[str(key)] = request
+    return requests
+
+
+async def read_review_feedback_requests(
+    session_factory: _RevisionSessionFactory, run_id: str
+) -> dict[str, ReviewFeedbackRequest]:
+    """The run's durable review-feedback requests (or ``{}``)."""
+    from forge.durable import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        evidence = run.evidence if run is not None else {}
+    return review_feedback_requests_of(evidence or {})
+
+
+async def _write_request(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    request: ReviewFeedbackRequest,
+    *,
+    patch: dict[str, Any] | None = None,
+) -> None:
+    """Persist ONE request (or its lifecycle transition) into the evidence."""
+    from forge.durable import FlowRun, Outbox
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise ReviewFeedbackRefused("run_not_found", f"flow run {run_id!r} not found")
+        merged = dict(run.evidence or {})
+        section = dict(merged.get(REVIEW_FEEDBACK_KEY) or {})
+        section[request.note_id] = request.document()
+        merged[REVIEW_FEEDBACK_KEY] = section
+        run.evidence = merged
+        session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type="review_feedback.request",
+                payload={
+                    "run_id": run_id,
+                    "note_id": request.note_id,
+                    "classification": request.classification,
+                    "status": request.status,
+                    **(patch or {}),
+                },
+            )
+        )
+        await session.commit()
+
+
+def _request_identity(request: ReviewFeedbackRequest) -> tuple:
+    """The immutable identity fields — everything but lifecycle + clock.
+
+    A replayed delivery re-derives the SAME identity (the same note, the
+    same bindings, the same classification); the lifecycle ``status`` and
+    ``created_at`` legitimately move with time and must never turn a
+    replay into a conflict.
+    """
+    return (
+        request.note_id,
+        request.run_id,
+        request.discussion_id,
+        request.mr_iid,
+        request.actor,
+        request.head_sha,
+        request.classification,
+        request.text,
+        request.referenced_paths,
+        request.diff_context,
+    )
+
+
+async def record_review_feedback_request(
+    session_factory: _RevisionSessionFactory, run_id: str, request: ReviewFeedbackRequest
+) -> ReviewFeedbackRequest:
+    """Record the request ONCE — the note id is the idempotency key.
+
+    A replayed delivery of the SAME comment returns the recorded request
+    unchanged (no second request, no second outbox row — the replay's
+    fresh clock reading does not make it a different comment). A
+    DIFFERENT request under an already-used note id refuses
+    ``note_id_conflict`` — the identity is the provider's note, and one
+    note is one request.
+    """
+    existing = await read_review_feedback_requests(session_factory, run_id)
+    recorded = existing.get(request.note_id)
+    if recorded is not None:
+        if _request_identity(recorded) == _request_identity(request):
+            return recorded
+        raise ReviewFeedbackRefused(
+            "note_id_conflict",
+            f"note {request.note_id!r} already recorded a different request "
+            f"(status {recorded.status!r}) — one comment is one request",
+        )
+    await _write_request(session_factory, run_id, request)
+    return request
+
+
+async def mark_review_feedback_request(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    note_id: str,
+    status: str,
+    **updates: Any,
+) -> ReviewFeedbackRequest | None:
+    """Apply ONE lifecycle transition to the recorded request (idempotent)."""
+    existing = await read_review_feedback_requests(session_factory, run_id)
+    recorded = existing.get(note_id)
+    if recorded is None:
+        return None
+    updated = recorded.with_status(status, **updates)
+    await _write_request(session_factory, run_id, updated, patch={"transition": status})
+    return updated
+
+
+def head_binding_guard(expected_head: str, actual_head: str) -> None:
+    """Refuse, typed, when the MR head moved off the request's binding.
+
+    The request recorded the CURRENT MR head at request time; the
+    correction's dispatch re-checks it and any head move — a human edit
+    landed between request and publication — is the ``stale_head``
+    conflict: human edits are preserved, NEVER force-overwritten. The
+    reviewer re-raises the correction against the new head.
+    """
+    if not str(expected_head or "").strip():
+        raise ReviewFeedbackRefused(
+            "stale_head", "the request carries no head binding — refusing to dispatch blind"
+        )
+    if str(expected_head) != str(actual_head):
+        raise ReviewFeedbackRefused(
+            "stale_head",
+            f"the MR head moved: the request bound {str(expected_head)[:12]}… "
+            f"but the head is now {str(actual_head)[:12]}… — human edits are "
+            "preserved; re-raise the correction against the current head",
+        )
+
+
+def correction_invalidation_set(
+    expected_head: str, evidence_bindings: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Partition the run's evidence by APPLICABILITY to the corrected head.
+
+    The applicability axis the reuse machinery already speaks: an
+    evidence item carries the head (candidate sha) it was produced
+    under. The correction targeting ``expected_head`` invalidates ONLY
+    the items produced under that head (the review + the verification of
+    the candidate being corrected — superseded, never deleted, and an
+    invalidated verification never auto-returns to passed); everything
+    else is preserved as-is. "The plan changed somewhere" is never
+    grounds to drop evidence — the correction must NAME its victims.
+    """
+    invalidated: list[tuple[str, str]] = []
+    preserved: list[str] = []
+    for evidence_id, binding in evidence_bindings.items():
+        applicability = str((binding or {}).get("applicability") or "")
+        if applicability and applicability == expected_head:
+            invalidated.append((evidence_id, f"bound to the corrected head {expected_head[:12]}…"))
+        else:
+            preserved.append(evidence_id)
+    return {
+        "expected_head": expected_head,
+        "invalidated": invalidated,
+        "preserved": preserved,
+        "superseded": dict(invalidated),
+    }
+
+
+def correction_decision_id(run_id: str, note_id: str) -> str:
+    """The staged correction's decision id — derived from the note identity.
+
+    Deterministic by construction: a replayed delivery re-derives the
+    SAME decision id, so the note's identity and the staged proposal's
+    identity can never drift apart.
+    """
+    digest = sha256(f"{run_id}:{note_id}".encode("utf-8")).hexdigest()[:16]
+    return f"rd-review-{digest}"
+
+
+def review_correction_revision(
+    active: PlanRevision, request: ReviewFeedbackRequest
+) -> PlanRevision:
+    """The bounded input revision an in-scope correction stages (Q39-13).
+
+    Every STEP stays byte-identical — the correction rewords the
+    revision's own guidance, so the WIP the checkpoint holds remains
+    compatible (:func:`decide_wip_reuse` sees no churn) and only the
+    permitted thing changes. The correction rides the SUMMARY with its
+    full provenance: the originating discussion + note, the head the
+    request is bound to, the permitted change the reviewer named, and
+    the referenced diff context — the exact material the next executor's
+    brief renders (:func:`render_revision_brief`), so the agent sees the
+    REFERENCED DIFF and the CURRENT HEAD, never an obsolete source
+    version. The return value is a PROPOSAL: it carries no authority
+    until a human approves it through the existing activation route.
+    """
+    provenance = f"discussion {request.discussion_id or 'unknown'}"
+    lines = [
+        f"Reviewer correction ({provenance}, note {request.note_id}, "
+        f"head {request.head_sha[:12]}…): {request.text.strip()}"
+    ]
+    if request.referenced_paths:
+        lines.append("Permitted paths: " + ", ".join(request.referenced_paths))
+    if request.diff_context.strip():
+        lines.append(f"Referenced diff: {request.diff_context.strip()}")
+    lines.append(
+        "Only this correction is permitted — preserve every other human edit on the branch."
+    )
+    folded = f"{active.summary.rstrip()}\n\n" + "\n".join(lines)
+    return active.model_copy(
+        update={
+            "revision": active.revision + 1,
+            "parent_revision": active.revision,
+            "summary": folded,
+        }
+    )
+
+
+async def _active_revision_content(
+    session_factory: _RevisionSessionFactory, run_id: str
+) -> tuple[PlanRevision, dict[str, Any]]:
+    """The run's ACTIVE revision content + the pointer document it came from.
+
+    The correction never re-derives plan bytes: an identity-only pointer
+    (a prior-version document without content) or an unreadable payload
+    refuses — the operator re-raises the proposal instead.
+    """
+    from forge.durable import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise ReviewFeedbackRefused("run_not_found", f"flow run {run_id!r} not found")
+        active_raw = (run.evidence or {}).get(ACTIVE_PLAN_KEY)
+        active = dict(active_raw) if isinstance(active_raw, dict) else None
+    if active is None:
+        raise ReviewFeedbackRefused(
+            "no_active_plan",
+            f"run {run_id!r} carries no durable active plan — a correction revises "
+            "an ACTIVE revision, never the frozen spec",
+        )
+    content_raw = active.get(REVISION_CONTENT_KEY)
+    if not isinstance(content_raw, dict) or not content_raw:
+        raise ReviewFeedbackRefused(
+            "content_unreadable",
+            "the active-plan pointer predates the content join — the superseded "
+            "revision's bytes are not re-derived",
+        )
+    try:
+        revision = PlanRevision.model_validate(dict(content_raw))
+    except Exception as exc:
+        raise ReviewFeedbackRefused(
+            "content_unreadable",
+            f"the active plan's revision content does not parse: {type(exc).__name__}",
+        ) from exc
+    return revision, active
+
+
+async def stage_review_correction(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    request: ReviewFeedbackRequest,
+) -> str:
+    """Stage the bounded correction through the EXISTING approval route.
+
+    Resolves the active revision's durable content, folds the correction
+    in (:func:`review_correction_revision`), records the precise evidence
+    invalidation (:func:`correction_invalidation_set`), and stages the
+    proposal through :func:`stage_pending_revision` — the SAME human gate
+    ``/approve-revision`` owns. Nothing dispatches here: the correction
+    becomes the active revision TEXT only when a human approves it, and
+    the next dispatch reads it through the #321 ApprovedInput machinery.
+    """
+    if request.classification != IN_SCOPE_CORRECTION_CLASS:
+        raise ReviewFeedbackRefused(
+            "not_a_correction",
+            f"classification {request.classification!r} stages nothing — only an "
+            "in-scope correction becomes a bounded input revision",
+        )
+    revision, active = await _active_revision_content(session_factory, run_id)
+    proposed = review_correction_revision(revision, request)
+    if plan_digest(proposed) == plan_digest(
+        revision
+    ):  # pragma: no cover — the fold always adds text
+        raise ReviewFeedbackRefused(
+            "empty_correction", "the correction folded nothing into the revision"
+        )
+    decision_id = correction_decision_id(run_id, request.note_id)
+    decision = RevisionDecision(
+        decision_id=decision_id,
+        work_id=revision.work_id,
+        parent_revision=revision.revision,
+        proposed_revision_id=proposed_revision_identity(proposed),
+        proposed_digest=plan_digest(proposed),
+        work_contract_digest=revision.work_contract_digest,
+        authorization_epoch=int(active.get("authorization_epoch") or 0),
+    )
+    current = ActivePlanState(
+        work_id=str(active.get("work_id") or revision.work_id),
+        plan_id=str(active.get("plan_id") or revision.plan_id),
+        active_revision=int(active.get("active_revision") or revision.revision),
+        work_contract_digest=str(active.get("work_contract_digest") or ""),
+        authorization_epoch=int(active.get("authorization_epoch") or 0),
+        publication_epoch=int(active.get("publication_epoch") or 0),
+    )
+    await stage_pending_revision(session_factory, run_id, decision, proposed, current, old=revision)
+    # The request is durably recorded BEFORE the staged mark (a caller
+    # that staged without recording still lands ONE request — the note id
+    # remains the idempotency key either way).
+    await record_review_feedback_request(session_factory, run_id, request)
+    await mark_review_feedback_request(
+        session_factory,
+        run_id,
+        request.note_id,
+        REQUEST_STAGED,
+        decision_id=decision_id,
+        invalidation=correction_invalidation_set(
+            request.head_sha,
+            {
+                "review": {"applicability": request.head_sha},
+                "verification": {"applicability": request.head_sha},
+                "pipeline": {"applicability": request.head_sha},
+            },
+        ),
+    )
+    return decision_id
+
+
+def review_feedback_summary_section(
+    requests: Mapping[str, ReviewFeedbackRequest],
+    discussion_states: Mapping[str, bool],
+    candidate_sha: str,
+) -> str:
+    """The ``**Review feedback:**`` block the final summary appends.
+
+    Names the resolved and the still-open discussions (each line carries
+    the discussion id, the request's classification and its actor) and
+    the TESTED candidate the summary covers. A repair that passes its
+    tests while a required discussion stays unresolved is NOT ready —
+    this section is what makes that honest instead of implied. Empty
+    string when the run recorded no review feedback (the legacy comment
+    shape stays byte-identical).
+    """
+    if not requests:
+        return ""
+    resolved: list[str] = []
+    open_: list[str] = []
+    for request in requests.values():
+        line = (
+            f"- {request.discussion_id or request.note_id} "
+            f"({request.classification}, @{request.actor})"
+        )
+        if discussion_states.get(request.discussion_id, False):
+            resolved.append(line)
+        else:
+            open_.append(line)
+    lines = ["**Review feedback:**", f"- Tested candidate: `{candidate_sha}`"]
+    if resolved:
+        lines.append("Resolved discussions:")
+        lines.extend(resolved)
+    if open_:
+        lines.append("Still-open discussions:")
+        lines.extend(open_)
+    if not resolved and not open_:  # pragma: no cover — requests exist above
+        lines.append("- (no tracked discussions)")
+    return "\n".join(lines)

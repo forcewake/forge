@@ -1,4 +1,4 @@
-# Supported-profile runbook (R38-06 / #307)
+# Supported-profile runbook (R38-06 / #307 · re-frozen Q39-07 / #326)
 
 How a second engineer installs the ONE exact supported deployment
 composition from immutable artifacts — and repeats the recorded result
@@ -17,6 +17,18 @@ what THAT manifest pins.
 > forge.profile_qualification manifest`) keeps `gitlab-ce-v1` at
 > `pending-approval`, and merge/deploy stay human decisions.
 
+> **The v2 re-freeze (Q39-07 / #326).** The manifest now pins the
+> EXACT composition that completed the end-to-end trace on 2026-09-25:
+> the working-tree build (control plane + lane wheel) whose live run
+> ended `ready_for_human` with the closing review completed inside the
+> #325 closing reserve. The v0.37-composition manifest this file first
+> documented stays historical, byte-identical, at
+> `qualification/profiles/supported-gitlab-ce-v1@v0.37-composition.json`
+> — history is archived, never rewritten. What changed concretely:
+> the fresh install installs the WORKING-TREE wheel by sha256 (below),
+> and the version axis accepts the executed-lab bind (0.38.0) beside
+> the promoted one.
+
 ## 1. The frozen composition (identity card)
 
 Every axis below is a field in the manifest; `manifest_digest` (sha256
@@ -24,34 +36,40 @@ over the canonical document) vouches for the whole file.
 
 | Axis | Frozen value | Receipt |
 | --- | --- | --- |
-| Promoted release | **0.37.0**, source `1ca2656…` | `docs/releases/evidence/v0.37.0/promotion.json` |
-| Promoted image | `ghcr.io/forcewake/forge` @ `sha256:b2e290e5…` | same |
-| Lane install | the promoted **wheel** `forge-0.37.0-py3-none-any.whl` @ `sha256:a44b884f…` (the R36-07 ladder — by sha, never by tag) | same |
-| Executed lab build (evidence, NOT the install source) | `localhost/forge:dev` @ `sha256:20e9cdcd…` (image id `58e0bd3e…`, rollback tag `pre-r3708-20260924T224849Z`) | the #306 alignment receipts + `qualification/inventory-2026-09-25.json` |
-| Schema | head **027**, declared predecessor **026** | `alembic/versions/` chain |
-| Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ `sha256:95a799b1…` — **the bytes are frozen INTO the manifest** (the wheel ships no `ci/templates/`) | recovered from the disposable project's committed CI, cross-checked against the live trace |
-| Runner | GitLab runner **id 4 `unraid`**, docker executor, online | `qualification/inventory-2026-09-25.json` |
+| Promoted release (the historical install pin) | **0.37.0**, source `1ca2656…` | `docs/releases/evidence/v0.37.0/promotion.json` |
+| Newest promotion (named, NOT this composition) | **0.38.0**, source `854a5f4…` — `status: promoted, STILL NOT the qualified composition` | `docs/releases/evidence/v0.38.0/promotion.json` |
+| **The qualification composition (executed lab)** | `localhost/forge:dev` @ `sha256:33eb4622…` (image id `587e3392…`, rollback tag `pre-r3708-20260925T092917Z`, reports **0.38.0**, schema head **028**) — the WORKING-TREE build carrying #320/#321/#325 | the v2 alignment receipts + `qualification/inventory-2026-09-25-v2.json` |
+| **Lane install (the fresh-install target)** | the WORKING-TREE wheel `forge-0.38.0-py3-none-any.whl` @ `sha256:37fb5b0a…` (`lane.wheel`, source `local-uv-build`, path `dist/…`; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | `uv build` of the same tree |
+| Schema | head **028**, declared predecessor **027** | `alembic/versions/` chain |
+| Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ `sha256:3d74be37…` — **the bytes are frozen INTO the manifest** (the wheel ships no `ci/templates/`) | recovered from the v2 trace's committed CI, cross-checked against the trace record |
+| Lane of the executed trace | pushed sha `6df4020…` (main at the v0.38.0 evidence archive — the working tree is never pushed) | the v2 trace record `#task.lane_ref` |
+| Runner | GitLab runner **id 4 `unraid`**, docker executor, online | `qualification/inventory-2026-09-25-v2.json` |
 | Harness | **claude-code 2.1.273** | `qualification/records/gitlab-ce-v1@0.37.0.json` |
 | Model route | litellm **`fast`** → `openai/glm-5.3-flash`; lane model `glm-5.3-flash` via the z.ai Anthropic-compatible gateway | `litellm-config.yaml` + the record |
-| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` |
-| Verification contract | required job **`smoke`**: six exact slugify cases + app rewired + legacy deleted; candidate may not touch `.gitlab-ci.yml` or `tests/` | the live trace + the record |
+| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) — the v2 trace rode the protected-variable mode (no operation grant minted; recorded in the trace) | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` |
+| Closing budget policy | `FORGE_CLOSING_RESERVE_USD=0.50`, `FORGE_SPEND_CAP_USD=2.50` on BOTH consumers; standard budget profile 40 calls / **480 000 tokens** / 3600 s | the v2 alignment receipts (`--extra-env` + `--budget-profiles`) |
+| Verification contract | required job **`smoke`**: six exact slugify cases + app rewired + legacy deleted; candidate may not touch `.gitlab-ci.yml` or `tests/`; PLUS the v2 revision marker (`__all__ = ["slugify"]` in `src/utils/text.py`) | the v2 live trace + the record |
 
-**The named divergence (read this first).** The promoted v0.37.0
-artifacts are NOT the bytes the green live trace executed: the trace
-ran the working-tree build (`20e9cdcd…`) and lane git sha `59ba869…`.
-The same version string identified two compositions — the exact R38-06
-defect. The manifest binds BOTH identities explicitly
-(`control_plane.promoted` vs `control_plane.executed_lab`); installs
-reproduce the **promoted** bytes, and the executed-live composition
-stays bound as evidence. Neither is silently substituted for the other.
+**The named divergence (read this first).** The promoted v0.37.0 image
+digest and the executed-lab digest DIFFER — and even the newest v0.38.0
+promotion predates the working tree this manifest qualifies. The
+composition being qualified IS the executed-lab build (the alignment
+image + the uv wheel of the same tree); its promotion is PENDING,
+never assumed. A cold install from this manifest installs the
+working-tree wheel by sha256; version equality never substitutes for
+composition equality (the exact Q39-07 defect this re-freeze closes).
 
 ## 2. Prerequisites
 
-1. Python 3.13 + [uv](https://docs.astral.sh/uv/) on a clean host.
-2. Outbound access to exactly: `github.com` /
-   `release-assets.githubusercontent.com` (the wheel), `pypi.org` /
+1. Python 3.13 + [uv](https://docs.astral.sh/uv/) on a clean host, and
+   (for the fresh wheel) a checkout of the exact qualified tree — run
+   `uv build` once so `dist/forge-0.38.0-py3-none-any.whl` exists and
+   hashes to the manifest pin.
+2. Outbound access to exactly: `pypi.org` /
    `files.pythonhosted.org` (dependencies). Nothing else — the model
-   gateway is not contacted by any check here.
+   gateway is not contacted by any check here (a URL-pinned wheel
+   would additionally need `github.com` /
+   `release-assets.githubusercontent.com`).
 3. For the GitLab legs: a GitLab CE 19.3.2 instance with an online
    docker-executor runner, and a token with `api` scope for the
    disposable target project (read via `forge.config.Settings` — put
@@ -64,6 +82,7 @@ stays bound as evidence. Neither is silently substituted for the other.
 
 ```bash
 # from a checkout of this repository:
+uv build                                                    # the qualification wheel
 uv run python scripts/freeze_supported_profile.py --check   # the manifest vouches for itself
 uv run python scripts/cold_install_check.py --mode fresh
 ```
@@ -73,10 +92,11 @@ gated on `$FORGE_RUN_ID`, which a cold install never sets):
 
 1. **Clean environment** — `uv venv --seed --python 3.13` into a fresh
    temp dir, `pip --no-cache-dir` (empty caches).
-2. **Wheel by sha256** — downloads the manifest's wheel URL and
-   verifies the bytes reproduce `lane.wheel.sha256` BEFORE anything
-   installs: a different wheel under the same version string is the
-   mutable-tag refusal.
+2. **Wheel by sha256** — the manifest's lane wheel is the WORKING-TREE
+   build: the local file must exist and its bytes must reproduce
+   `lane.wheel.sha256` BEFORE anything installs (a drifted tree under
+   the same version string is the mutable-tag refusal; `uv build`
+   again or refuse).
 3. **Identity gate** — the installed package's `forge.__version__`
    must equal the wheel's version (R36-07).
 4. **Template from the manifest** — renders the disposable target
@@ -84,13 +104,11 @@ gated on `$FORGE_RUN_ID`, which a cold install never sets):
    (round-trip-checked); the moving working tree is recorded as a named
    drift, never used as the recipe source.
 5. **Preflight, offline** — `python -m forge.doctor --capabilities`
-   from the INSTALLED package, plus the execution-spec composition
-   preflight (`gitlab x gitlab-sdk-lane x claude-sdk-lane x
-   gitlab-protected-variable`, resume required). Both must be green
-   BEFORE anything else runs. (Honest seam: the promoted wheel predates
-   `forge.adaptive.execution_spec` — the composition preflight runs
-   against the working tree's matrix and the divergence is named in the
-   findings, never merged.)
+   and the execution-spec composition preflight (`gitlab x
+   gitlab-sdk-lane x claude-sdk-lane x gitlab-protected-variable`,
+   resume required), BOTH from the INSTALLED package — the v2 wheel
+   carries `forge.adaptive.execution_spec`, so the #307-era
+   "run it from the tree" seam is GONE on this composition.
 6. **Smoke** — creates a disposable GitLab project, commits the
    generated CI + the task's GOLD state (the already-completed module
    the oracle asserts), runs the pipeline and requires exactly one
@@ -110,16 +128,17 @@ uv run python scripts/cold_install_check.py --mode upgrade
 
 The chain, on a throwaway `postgres:17-alpine` container:
 
-1. `alembic upgrade head` → `alembic downgrade 026` (the declared
+1. `alembic upgrade head` → `alembic downgrade 027` (the declared
    predecessor — via the repo chain, never the lab DB);
-2. seed real-shaped rows at 026 (the canary seed set: a run mid-flight,
+2. seed real-shaped rows at 027 (the canary seed set: a run mid-flight,
    its spec, steps, a control command, a publication intent);
 3. fingerprint (per-table row counts + sha256 over ordered identity
    strings — the canary pattern);
 4. `alembic upgrade head`;
-5. require: the **actual** transition `026 -> 027` (an unchanged head
-   is refused as an upgrade claim) and every fingerprint preserved
-   EXACTLY (a changed table is named, never averaged away).
+5. require: the **actual** transition `027 -> 028`
+   (`028_credential_receipts`) and every fingerprint preserved EXACTLY
+   (a changed table is named, never averaged away). The v2 executed
+   edge: **027 → 028, all five seeded tables preserved**.
 
 ## 5. Verify an installed environment (read-only)
 
@@ -127,17 +146,19 @@ The chain, on a throwaway `postgres:17-alpine` container:
 uv run python scripts/cold_install_check.py --mode verify
 ```
 
-Read-only against the lab: podman inspect (image digests, mounts,
-caps env), `/health`, a `SELECT` on `alembic_version`, the runner API,
-and both GitLab projects' installed templates. Each axis must match ONE
-of the manifest's bound identities exactly — semver equality is never
-consulted. Exit 0 with named divergences is the expected honest outcome
-for the current lab (it runs the executed-lab build, not the promoted
-digest; the integration project's template is not the frozen recipe).
-A refusal (exit 1) fires when an axis matches NEITHER bind or a
-negative arm trips: an old worker image beside the newer app, the
+Read-only against the lab: podman inspect (image digests, mounts, caps
+env), `/health`, a `SELECT` on `alembic_version`, the runner API, and
+the trace's target project's installed template. Each axis must match
+ONE of the manifest's bound identities exactly (the VERSION axis
+accepts the promoted OR the executed-lab bind — the composition being
+qualified reports the tree's version). The v2 executed outcome: **8
+match, 1 named divergence (the integration project's own template), 0
+refusals**. A refusal (exit 1) fires when an axis matches NEITHER bind
+or a negative arm trips: an old worker image beside the newer app, the
 worker's shared checkpoint mount removed, or a mismatched target
-template.
+template. When the trace's disposable project is deleted after capture
+(the teardown's documented disposition), the template axis is verified
+against the trace receipt's pinned sha instead — named, never faked.
 
 ## 6. The four evidence records (kept distinct)
 
@@ -145,19 +166,31 @@ The manifest's `evidence_records` block — never merged into one blob:
 
 1. **Source review** — the promoted sha's required CI checks, with the
    earlier cancelled run retained on record (`conditional`).
-2. **Release canary** — the release-image canary stages; its upgrade
-   stage ran `027 -> 027` (same-head preservation, honestly NOT a
-   schema transition — the data-bearing transition is §4's separate
-   proof).
-3. **Native workflow qualification** — the green live useful-WIP trace
-   (`docs/evaluation/2026-09-25-useful-wip-resume/`): the pre-pause
-   checkpoint carried all three file shapes, a second runner restored
-   it exactly, the final candidate passed the precommitted oracle on
-   the exact candidate sha; Draft MR left for human review.
+2. **Release canary** — the v0.38.0 canary stages; the data-bearing
+   N-1→head edge for THIS manifest is §4's separate proof.
+3. **Native workflow qualification** — the v2 green live trace
+   (`docs/evaluation/2026-09-25-supported-composition-v2/`,
+   outcome **reviewed-ready**): the pre-pause checkpoint carried all
+   three file shapes, a second runner restored it exactly under the
+   APPROVED revision-2 brief (no rescue steer), the final candidate
+   passed the precommitted oracle on the exact sha, AND the closing
+   review completed within the #325 reserve so the run ended
+   `ready_for_human`. The #306 trace
+   (`docs/evaluation/2026-09-25-useful-wip-resume/`) stays historical:
+   its terminal `blocked (budget_exhausted)` at the reviewer leg is
+   exactly the gap the v2 composition closed.
 4. **Human support approval** — `pending`. This freeze approves
    nothing; approvals live in `qualification/profile-approvals.json`
    (a human-maintained artifact), and the supported-profiles manifest
    holds `gitlab-ce-v1` at `pending-approval` until then.
+
+The executed trace's own record —
+`qualification/records/supported-composition-v2-2026-09-25.json`
+(stamp `forge.profile.qualification/1`, zero validation findings) —
+names the qualified drivers/providers/resume modes (AC-07):
+gitlab × gitlab-sdk-lane × claude-sdk-lane ×
+gitlab-protected-variable, resume mode `required` (the exact-resume
+SDK lane), claude-code 2.1.273, glm-5.3-flash via the z.ai gateway.
 
 Cross-reference the manifest against the record store:
 
@@ -170,11 +203,12 @@ uv run python -m forge.profile_qualification binding
 | Symptom | Cause → fix |
 | --- | --- |
 | `REFUSED: … is not a hex64 sha256` / self-inconsistent manifest | the manifest was hand-edited → re-run `scripts/freeze_supported_profile.py` (never edit it by hand) |
-| `a DIFFERENT wheel under the SAME version string` | the release asset was re-uploaded under the same tag → re-freeze against the new promotion record; do NOT install the bytes |
+| `the manifest pins the working-tree wheel … but the file is absent` | the checkout has no `dist/forge-0.38.0…whl` → `uv build`; the bytes must then reproduce the pin or the install refuses |
+| `a DIFFERENT wheel under the SAME version string` | the tree drifted under a frozen version → rebuild (`uv build`) and re-freeze; do NOT install the bytes |
 | `MISMATCHED template` refusal | something rendered the template from the working tree or a foreign recipe → render only via `cold_install_check.py` / the manifest's frozen bytes |
 | `OLD worker image beside a newer control plane` | the worker missed the alignment recreate → re-run `scripts/align_lab.py --apply` (both consumers recreate from ONE image) |
-| `the WORKER's shared checkpoint mount … is absent` | the worker lost its `/app/data` bind → re-run the alignment with `--worker-mount <repo>/data:/app/data`; the doctor refuses a retry until the authority is consistent |
-| `UNCHANGED head` refusal in upgrade mode | the disposable DB never left head → the check deliberately downgrades to 026 first; do not skip that step |
+| `the WORKER's shared checkpoint mount … is absent` | the worker lost its `/app/data` bind → re-run the alignment with `--worker-mount <repo>/data:/app/data` |
+| `UNCHANGED head` refusal in upgrade mode | the disposable DB never left head → the check deliberately downgrades to 027 first; do not skip that step |
 | doctor `--capabilities` nonzero on the installed venv | a broken wheel install → delete the temp env, re-run fresh mode |
 | The smoke pipeline hangs | the runner is offline → `GET /api/v4/runners/4` must show `online`; the lane job needs `$FORGE_RUN_ID` to even consider running (it must stay absent in a cold install) |
 
@@ -182,10 +216,14 @@ uv run python -m forge.profile_qualification binding
 
 The manifest's `exclusions` list is normative; in short:
 
-- Installs reproduce the **promoted** v0.37.0 bytes; the green live
-  trace ran the working-tree build + lane git sha `59ba869…` (bound as
-  evidence) — the two converge only at the next promotion that carries
-  the #302/#303/#305 code.
+- The qualified composition is the WORKING-TREE build — NO release
+  carries these bytes yet (v0.38.0 predates them); installs from this
+  manifest install the working-tree wheel by sha256 and the promotion
+  is pending, never assumed.
+- The lane of the executed trace runs the PUSHED sha under
+  `lane.executed_live` (the working tree is never pushed), so the lane
+  package is one push behind the control-plane build; the brief bytes
+  are the payload.
 - No committed live `TraceRecord` yet → the supported-profiles manifest
   holds the profile at `pending-approval` (the #298 trace-tier hold).
 - `usage_receipts` coverage for harness-lane runs is partial (lane meta
@@ -199,8 +237,50 @@ The manifest's `exclusions` list is normative; in short:
 ## 9. Re-freezing (when the composition legitimately moves)
 
 1. Land the new promotion record under `docs/releases/evidence/` and
-   the new live evidence; do NOT edit the manifest by hand.
-2. `uv run python scripts/freeze_supported_profile.py` — re-captures
-   from the receipts, fail-closed on any contradiction (including a
-   template recovery that does not reproduce the traced sha).
+   the new live evidence; do NOT edit the manifest by hand. The
+   previous manifest is archived under
+   `qualification/profiles/<name>@<composition>.json` first — history
+   stays historical.
+2. `uv build`, then `uv run python scripts/freeze_supported_profile.py`
+   — re-captures from the receipts, fail-closed on any contradiction
+   (including a template recovery that does not reproduce the traced
+   sha).
 3. Re-run §3/§4/§5 — the three proofs are per-freeze, not eternal.
+
+## 10. The second-operator live repetition (the v2 trace, actual steps)
+
+The recorded live repetition of the full adaptive workflow on this
+exact profile (all native GitLab notes by the configured approver;
+every phase resumable; REFUSES on any precondition failure):
+
+```bash
+# the lab alignment (receipts + rollback tag; pins the closing reserve):
+uv build
+uv run python scripts/align_lab.py --apply \
+  --receipts docs/evaluation/<dir>/alignment-receipts.json \
+  --extra-env FORGE_CLOSING_RESERVE_USD=0.50 \
+  --extra-env FORGE_SPEND_CAP_USD=2.50 \
+  --budget-profiles '{"trivial":{…},"standard":{"max_calls":40,"max_tokens":480000,"wallclock_s":3600},"heavy":{…}}'
+uv run python scripts/inventory_lab.py --stage all --out qualification/inventory-<date>-v2.json
+
+# the live trace (the v2 phases; the interrupted arm stops at the
+# awaiting-revision gate by design):
+V2=docs/evaluation/<dir>
+uv run python scripts/run_useful_wip_resume.py setup     --evidence $V2/live-run-evidence.json --record $V2/useful-wip-resume-v2.json --project-name <name>
+uv run python scripts/run_useful_wip_resume.py preflight --evidence $V2/live-run-evidence.json --record $V2/useful-wip-resume-v2.json
+uv run python scripts/run_useful_wip_resume.py interrupt  --evidence …   # paid; pauses at the gate
+uv run python scripts/run_useful_wip_resume.py revision   --evidence …   # stage + NATIVE /approve-revision
+uv run python scripts/run_useful_wip_resume.py interrupt  --evidence …   # the resume leg → candidate → Draft MR
+uv run python scripts/run_useful_wip_resume.py review     --evidence …   # the closing review settles
+uv run python scripts/run_useful_wip_resume.py collect    --evidence … --record $V2/useful-wip-resume-v2.json
+uv run python scripts/run_useful_wip_resume.py teardown   --evidence …
+
+# then the freeze + the three cold-install proofs (§3/§4/§5)
+```
+
+Setup/intervention effort recorded for the v2 run: one preflight pass
+(green first try), one ladder iteration (rung-1 sampled the empty
+failure mode; the native /retry re-entered), one drill-side waiter
+defect fixed mid-run (root-caused in the trace's `failures`), zero
+product patches, zero manual YAML edits. Spend: $0.4032 SDK lane
+receipts + the planner/reviewer gateway calls inside the run budget.

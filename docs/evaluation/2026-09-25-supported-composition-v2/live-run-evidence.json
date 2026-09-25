@@ -1,0 +1,1366 @@
+{
+  "created_at": "2026-09-25T09:31:12.391285+00:00",
+  "failures": [
+    {
+      "at": "2026-09-25T09:45:28.375205+00:00",
+      "reason": "interrupt refused: timed out after 600s waiting for a new WIP checkpoint for f0d559fd (last: None)"
+    },
+    {
+      "at": "2026-09-25T09:47:42.010882+00:00",
+      "reason": "the v2 resume requires the approved MATERIAL revision first \u2014 run `revision` (stage_pending_revision + the native /approve-revision) so the resumed dispatch carries the revision-2 text (the #321 rebind); recorded, never resumed past"
+    },
+    {
+      "at": "2026-09-25T09:47:42.019577+00:00",
+      "reason": "interrupt refused: the v2 resume requires the approved MATERIAL revision first \u2014 run `revision` (stage_pending_revision + the native /approve-revision) so the resumed dispatch carries the revision-2 text (the #321 rebind); recorded, never resumed past"
+    },
+    {
+      "at": "2026-09-25T09:47:53.626795+00:00",
+      "reason": "the activation preserved checkpoint b3fa93afd461\u2026 but the drill sampled f70244cc49d2\u2026 \u2014 a DIFFERENT WIP is about to be restored; refusing"
+    },
+    {
+      "at": "2026-09-25T09:47:53.627609+00:00",
+      "reason": "revision refused: the activation preserved checkpoint b3fa93afd461\u2026 but the drill sampled f70244cc49d2\u2026 \u2014 a DIFFERENT WIP is about to be restored; refusing"
+    }
+  ],
+  "issue": "R38-05 (#306) live useful-WIP resume",
+  "phases": {
+    "collect": {
+      "finished_at": "2026-09-25T09:56:08.199862+00:00",
+      "gitlab_version": {
+        "enterprise": false,
+        "revision": "34042bf7d00",
+        "version": "19.3.2"
+      },
+      "installed_template": {
+        "content_sha256": "e87b2ae2bf07316dfcd14e4f5a5827fae243f86137ac933fe6b1720c188c1a04",
+        "expected_sha256_of_generated": "e87b2ae2bf07316dfcd14e4f5a5827fae243f86137ac933fe6b1720c188c1a04",
+        "last_commit_id": "f23e164431fc93f92e469fa84600511e26ba2598"
+      },
+      "started_at": "2026-09-25T09:53:06.703203+00:00",
+      "superseded_negative_evidence_preserved": {
+        "entries": 1,
+        "files_still_zero": true,
+        "path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data/checkpoints/works/905194f0e4314e9aa126325b37637d1b.json"
+      },
+      "worker_envelope_lines": [
+        {
+          "attempt": "0",
+          "checkpoint": "none",
+          "decision": "none",
+          "envelope": "850eb14bcfee",
+          "kind": "fresh",
+          "run": "f0d559fd"
+        },
+        {
+          "attempt": "1",
+          "checkpoint": "b3fa93afd461",
+          "decision": "fd16649d6d9a",
+          "envelope": "48ea02093142",
+          "kind": "required",
+          "run": "f0d559fd"
+        },
+        {
+          "attempt": "2",
+          "checkpoint": "f70244cc49d2",
+          "decision": "fe74cd758cb9",
+          "envelope": "11a7f7fda283",
+          "kind": "required",
+          "run": "f0d559fd"
+        }
+      ]
+    },
+    "interrupt": {
+      "blocked_classification": {
+        "cancel_requested": false,
+        "commit_cycle": 1,
+        "created_at": "2026-09-25T09:31:37.103799+00:00",
+        "id": "f0d559fdb7f14b98b32f1946cfa577c3",
+        "issue_iid": 1,
+        "mr_iid": null,
+        "project_id": 110,
+        "status": "blocked",
+        "status_reason": "harness_code: harness job forge-agent-claude-sdk failed (script_failure)",
+        "updated_at": "2026-09-25T09:33:20.891957+00:00"
+      },
+      "dispatches": [
+        {
+          "branch": "factory/1/f0d559fd",
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "failed",
+            "model": "glm-5.3-flash",
+            "terminal_reason": "error_during_execution",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 16960,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 29213,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 16960,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.12814399999999998,
+                  "inputTokens": 29213,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 395,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 395,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.12814399999999998
+            },
+            "workspace_generation": null
+          },
+          "checkpoint_lines": [
+            "2026-09-25T09:32:21.357951Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T09:32:21.361660Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0",
+            "2026-09-25T09:33:11.919245Z 01O   \"checkpoint_binding\": \"fresh\",",
+            "2026-09-25T09:33:11.919245Z 01O   \"checkpoint_id\": \"\","
+          ],
+          "collector_lines": [
+            "2026-09-25T09:33:11.923529Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T09:32:21.361660Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "failure_reason": "script_failure",
+          "job_status": "failed",
+          "lane_job_id": 836,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 490,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/490",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T09:32:21.357951Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T09:32:21.361660Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0"
+          ],
+          "trace_sha256": "0badae7df6d3efb7a676070e3e050590ad3325cad8fae2f84567358bd0dc5cdf",
+          "trace_tail": "\n2026-09-25T09:33:10.883571Z 01O forge lane: driver_exit=1 (failed)\n2026-09-25T09:33:11.919236Z 01O {\n2026-09-25T09:33:11.919243Z 01O   \"base_oid\": \"f23e164431fc93f92e469fa84600511e26ba2598\",\n2026-09-25T09:33:11.919245Z 01O   \"checkpoint_binding\": \"fresh\",\n2026-09-25T09:33:11.919245Z 01O   \"checkpoint_id\": \"\",\n2026-09-25T09:33:11.919246Z 01O   \"diff_digest\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n2026-09-25T09:33:11.919247Z 01O   \"diff_path\": \"/builds/forcewake/forge-wip-v2-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T09:33:11.919247Z 01O   \"generation_path\": \"/builds/forcewake/forge-wip-v2-2026-09-25\",\n2026-09-25T09:33:11.919248Z 01O   \"resolved_work_id\": \"f0d559fdb7f14b98b32f1946cfa577c3\",\n2026-09-25T09:33:11.919249Z 01O   \"source\": \"checkout\",\n2026-09-25T09:33:11.919249Z 01O   \"zero_change\": true\n2026-09-25T09:33:11.919250Z 01O }\n2026-09-25T09:33:11.923511Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"artifact\": \"candidate.diff\", \"exit\": \"failed\"}\n2026-09-25T09:33:11.923523Z 01O FORGE_RESULT:{\"head\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T09:33:11.923529Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"failed\", \"collector_exit\": 0, \"candidate_state\": \"driver_failed\"}\n2026-09-25T09:33:12.109507Z 00O section_end:1790328792:step_script\r\u001b[0K\n2026-09-25T09:33:12.110193Z 00O+section_start:1790328792:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T09:33:12.110199Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for failed job\u001b[0;m\u001b[0;m\n2026-09-25T09:33:12.597218Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T09:33:12.646291Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T09:33:12.646297Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T09:33:13.092446Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3BYJSPNH4WXCNMFATCP83V3 id\u001b[0;m=836 status\u001b[0;m=201 token\u001b[0;m=67_T83p9j\n2026-09-25T09:33:13.292738Z 00O section_end:1790328793:upload_artifacts_on_failure\r\u001b[0K\n2026-09-25T09:33:13.292964Z 00O+section_start:1790328793:cleanup_file_variables\r\u001b[0K\n2026-09-25T09:33:13.292970Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T09:33:13.823739Z 00O section_end:1790328793:cleanup_file_variables\r\u001b[0K\n2026-09-25T09:33:14.711556Z 00O \u001b[31;1mERROR: Job failed: exit code 1\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 16960,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 29213,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 16960,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.12814399999999998,
+                "inputTokens": 29213,
+                "maxOutputTokens": 32000,
+                "outputTokens": 395,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 395,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.12814399999999998
+          }
+        },
+        {
+          "branch": "factory/1/f0d559fd",
+          "lane_job_id": 838,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 492,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/492"
+        },
+        {
+          "branch": "factory/1/f0d559fd",
+          "candidate_meta": {
+            "driver": "claude-sdk-lane",
+            "exit": "completed",
+            "model": "glm-5.3-flash",
+            "terminal_reason": "completed",
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 231232,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 40888,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 231232,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.27513839999999995,
+                  "inputTokens": 40888,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 3267,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 3267,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.27513839999999995
+            },
+            "workspace_generation": "/builds/forcewake/.forge-workspace-gen-f70244cc49d2"
+          },
+          "checkpoint_lines": [
+            "2026-09-25T09:50:30.386877Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T09:50:30.387650Z 01O forge dispatch envelope: resume=required checkpoint=f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae attempt=2",
+            "2026-09-25T09:51:50.386755Z 01O   \"checkpoint_binding\": \"exact\",",
+            "2026-09-25T09:51:50.386756Z 01O   \"checkpoint_id\": \"f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae\","
+          ],
+          "collector_lines": [
+            "2026-09-25T09:51:50.389349Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+          ],
+          "envelope_lines": [
+            "2026-09-25T09:50:30.387650Z 01O forge dispatch envelope: resume=required checkpoint=f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae attempt=2"
+          ],
+          "failure_reason": null,
+          "job_status": "success",
+          "lane_job_id": 839,
+          "lane_job_status_at_capture": "running",
+          "pipeline_id": 493,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/493",
+          "restore_lines": [],
+          "resume_lines": [
+            "2026-09-25T09:50:30.386877Z 01O \u001b[32;1m$ printf '{\"resume_mode\":\"%s\",\"checkpoint\":\"%s\",\"attempt_generation\":\"%s\",\"decision_id\":\"%s\",\"control_url\":\"%s\",\"token_dispatched\":%s}\\n' \\ # collapsed multi-line command\u001b[0;m",
+            "2026-09-25T09:50:30.387650Z 01O forge dispatch envelope: resume=required checkpoint=f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae attempt=2"
+          ],
+          "trace_sha256": "bdcba28214edf6495faddfc8d2af3e776b300f624e4d498d820a839473bb7889",
+          "trace_tail": ")\n2026-09-25T09:51:50.386745Z 01O {\n2026-09-25T09:51:50.386753Z 01O   \"base_oid\": \"f23e164431fc93f92e469fa84600511e26ba2598\",\n2026-09-25T09:51:50.386755Z 01O   \"checkpoint_binding\": \"exact\",\n2026-09-25T09:51:50.386756Z 01O   \"checkpoint_id\": \"f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae\",\n2026-09-25T09:51:50.386756Z 01O   \"diff_digest\": \"3a3ab6a14ef9179b24be35495375fc21ea7e4862abb7e1c72572517c97291541\",\n2026-09-25T09:51:50.386757Z 01O   \"diff_path\": \"/builds/forcewake/forge-wip-v2-2026-09-25/forge-output/candidate.diff\",\n2026-09-25T09:51:50.386758Z 01O   \"generation_path\": \"/builds/forcewake/.forge-workspace-gen-f70244cc49d2\",\n2026-09-25T09:51:50.386758Z 01O   \"resolved_work_id\": \"f0d559fdb7f14b98b32f1946cfa577c3\",\n2026-09-25T09:51:50.386759Z 01O   \"source\": \"generation\",\n2026-09-25T09:51:50.386759Z 01O   \"zero_change\": false\n2026-09-25T09:51:50.386760Z 01O }\n2026-09-25T09:51:50.389345Z 01O FORGE_CANDIDATE:{\"attempt_base\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"artifact\": \"candidate.diff\", \"exit\": \"completed\"}\n2026-09-25T09:51:50.389348Z 01O FORGE_RESULT:{\"head\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n2026-09-25T09:51:50.389349Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}\n2026-09-25T09:51:50.571084Z 00O section_end:1790329910:step_script\r\u001b[0K\n2026-09-25T09:51:50.571749Z 00O+section_start:1790329910:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T09:51:50.571756Z 00O+\u001b[0K\u001b[36;1mUploading artifacts for successful job\u001b[0;m\u001b[0;m\n2026-09-25T09:51:50.967785Z 01O \u001b[32;1mUploading artifacts...\u001b[0;m\n2026-09-25T09:51:51.008481Z 01E .forge/candidate.diff: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T09:51:51.008489Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories\u001b[0;m \n2026-09-25T09:51:51.297674Z 01E Uploading artifacts as \"archive\" to coordinator... 201 Created\u001b[0;m  correlation_id\u001b[0;m=01M3BZMXR4D83T3162F44W6V5M id\u001b[0;m=839 status\u001b[0;m=201 token\u001b[0;m=67_ZoaYjf\n2026-09-25T09:51:51.475160Z 00O section_end:1790329911:upload_artifacts_on_success\r\u001b[0K\n2026-09-25T09:51:51.475436Z 00O+section_start:1790329911:cleanup_file_variables\r\u001b[0K\n2026-09-25T09:51:51.475441Z 00O+\u001b[0K\u001b[36;1mCleaning up project directory and file based variables\u001b[0;m\u001b[0;m\n2026-09-25T09:51:51.990915Z 00O section_end:1790329911:cleanup_file_variables\r\u001b[0K\n2026-09-25T09:51:52.742514Z 00O \u001b[32;1mJob succeeded\u001b[0;m\n",
+          "usage_receipt": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 231232,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 40888,
+            "model_usage": {
+              "glm-5.3-flash": {
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 231232,
+                "canonicalModel": "glm-5.3-flash",
+                "contextWindow": 200000,
+                "costBasis": "unknown",
+                "costUSD": 0.27513839999999995,
+                "inputTokens": 40888,
+                "maxOutputTokens": 32000,
+                "outputTokens": 3267,
+                "provider": "firstParty",
+                "thinkingTokens": 0,
+                "webSearchRequests": 0
+              }
+            },
+            "output_tokens": 3267,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.27513839999999995
+          }
+        }
+      ],
+      "finished_at": "2026-09-25T09:52:38.712046+00:00",
+      "issue": {
+        "iid": 1,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/work_items/1"
+      },
+      "job_cancel": {
+        "attempted_at": "2026-09-25T09:47:42.010267+00:00",
+        "http_status": 201,
+        "job_id": 838,
+        "job_status_before": "failed",
+        "moot": true,
+        "status_after": "failed"
+      },
+      "mr": {
+        "candidate_sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+        "changed_paths": [
+          "src/utils/legacy.py",
+          "src/utils/text.py",
+          "src/app.py"
+        ],
+        "deleted_paths": [
+          "src/utils/legacy.py"
+        ],
+        "diff_digest": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+        "draft": true,
+        "merged": false,
+        "mr_iid": 1,
+        "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/merge_requests/1",
+        "oracle_tampering": [],
+        "pipeline_status": null,
+        "revision_marker_in_candidate": true,
+        "shapes_present": {
+          "src/app.py": "present",
+          "src/utils/legacy.py": "deleted",
+          "src/utils/text.py": "present"
+        },
+        "title": "Draft: Replace the legacy helper: slugify() in src/utils/text.py, rewire src/app.py, delete src/utils/legacy.py",
+        "verification_pipeline_id": 495
+      },
+      "paid": true,
+      "plan": {
+        "body_tail": "he shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style in src/app.py must match how the project resolves the utils package (e.g. 'from utils.text import slugify' vs relative import), or imports may break\n- Unicode vs ASCII alphanumeric interpretation: decide whether 'alphanumeric' means [a-z0-9] after lowercasing or the broader str.isalnum semantics, matching the smoke oracle's expectations\n- Deleting src/utils/legacy.py could break other modules if any hidden reference to it exists outside src/app.py\n\n**Files (hints):** `src/utils/text.py`, `src/app.py`, `src/utils/legacy.py`\n## Implementation\n- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash\n- Fallbacks: claude-code\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639`\n\nApprove this exact plan by commenting `@forge /go f0d559fdb7f14b98b32f1946cfa577c3`.\n\nApprovers: @forcewake.\n\n*This is an automated message.*",
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 776,
+        "run_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+      },
+      "probe_ladder": [
+        {
+          "anchor_observed_at": "2026-09-25T09:33:03.779882+00:00",
+          "checkpoint": {
+            "checkpoint_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+            "files": 0,
+            "sequence": 0,
+            "uploaded_at": "2026-09-25T09:33:10+00:00"
+          },
+          "driver_phase_anchor": "2026-09-25T09:32:21.361690Z",
+          "job_status_at_anchor": "running",
+          "offset_s": 45.0,
+          "pause_posted_at": "2026-09-25T09:33:08.996838+00:00",
+          "rung": "rung-1@45s",
+          "verdict": "empty"
+        },
+        {
+          "adopted_on_reentry": true,
+          "checkpoint": {
+            "checkpoint_id": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+            "files": 2,
+            "sequence": 0,
+            "uploaded_at": "2026-09-25T09:35:29+00:00"
+          },
+          "note": "a driver restart found a newer files>0 checkpoint already landed by the previous rung's pause \u2014 adopted, no new dispatch",
+          "rung": "reentry-adoption@2026-09-25T09:47:41.843767+00:00",
+          "verdict": "useful"
+        }
+      ],
+      "refused": {
+        "at": "2026-09-25T09:47:42.019056+00:00",
+        "reason": "the v2 resume requires the approved MATERIAL revision first \u2014 run `revision` (stage_pending_revision + the native /approve-revision) so the resumed dispatch carries the revision-2 text (the #321 rebind); recorded, never resumed past"
+      },
+      "result": "green",
+      "resume": {
+        "collector_lines": [
+          "2026-09-25T09:51:50.389349Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+        ],
+        "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+        "envelope_digest": null,
+        "lane_job_id": 839,
+        "pipeline_id": 493,
+        "restore_lines": [],
+        "restored_checkpoint_expected": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+        "workspace_generation": "/builds/forcewake/.forge-workspace-gen-f70244cc49d2"
+      },
+      "resume_dispatch": {
+        "branch": "factory/1/f0d559fd",
+        "job_id": 839,
+        "lane_job_id": 839,
+        "pipeline_id": 493
+      },
+      "revision_at_resume": {
+        "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+        "active_revision": 2,
+        "decision_id": "dec-wipv2-f0d559fdb7f1",
+        "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "reuse_route": "preserve"
+      },
+      "started_at": "2026-09-25T09:31:36.153126+00:00",
+      "updated_at": "2026-09-25T09:52:38.101804+00:00",
+      "useful_checkpoint": {
+        "digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+        "files": 2,
+        "id": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+        "manifest_evidence": {
+          "all_shapes_present": true,
+          "deletions": [
+            "src/utils/legacy.py"
+          ],
+          "digests_hex64": true,
+          "file_count": 2,
+          "files": {
+            "src/app.py": {
+              "digest": "c9b6305a3841966a66ee3448bd6405c24fe47f4cd2a93762752debcd4d948eb5",
+              "mode": 420,
+              "role": "modified"
+            },
+            "src/utils/text.py": {
+              "digest": "a154608694557e747fafb60f18f00eec6df6f916ce0a253b8ae47a6f4b7e7fd0",
+              "mode": 420,
+              "role": "new"
+            }
+          },
+          "shape_coverage": {
+            "src/app.py": "present",
+            "src/utils/legacy.py": "deleted",
+            "src/utils/text.py": "present"
+          }
+        },
+        "sequence": 0,
+        "shape_coverage": {
+          "src/app.py": "present",
+          "src/utils/legacy.py": "deleted",
+          "src/utils/text.py": "present"
+        },
+        "source_oids": {
+          "attempt_base": "f23e164431fc93f92e469fa84600511e26ba2598"
+        },
+        "uploaded_at": "2026-09-25T09:35:29+00:00"
+      }
+    },
+    "interrupt-state": {
+      "f0d559fd": {
+        "checkpoint_metadata": [],
+        "credential_redemptions": [],
+        "evidence_full": {
+          "active_plan": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "authorization_epoch": 1,
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "plan_id": "plan-wipv2-f0d559fd",
+            "publication_epoch": 2,
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "revision_content": {
+              "assumptions": [],
+              "invalidated_step_ids": [],
+              "open_question_ids": [],
+              "parent_revision": 1,
+              "plan_id": "plan-wipv2-f0d559fd",
+              "preserved_step_ids": [],
+              "revision": 2,
+              "schema": "forge.proposal.plan-revision/1",
+              "snapshot_set_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+              "steps": [
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "Inspect the repository and the frozen oracle contract.",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S1",
+                  "write_repository_id": null
+                },
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "Implement the slugify helper in src/utils/text.py and rewire src/app.py onto it; delete src/utils/legacy.py.",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S2",
+                  "write_repository_id": "wip-v2/project"
+                },
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "The operator's approved addition: src/utils/text.py must ALSO export its public API through __all__ = [\"slugify\"] (the exact line, a module-level list after the import).",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S3",
+                  "write_repository_id": "wip-v2/project"
+                }
+              ],
+              "summary": "MATERIAL revision 2 (the operator's approved addition): everything in revision 1 PLUS the public-export requirement \u2014 src/utils/text.py must define __all__ = [\"slugify\"] as a module-level list. S1/S2 stay byte-identical so the preserved WIP remains compatible.",
+              "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+              "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+            },
+            "schema": "forge.revision.active-plan/1",
+            "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+          },
+          "approved_input": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "allowed_writes": [],
+            "evidence_refs": [
+              "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed"
+            ],
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "plan_id": "plan-wipv2-f0d559fd",
+            "plan_text": "Implementation plan \u2014 active revision 2 of plan-wipv2-f0d559fd (digest b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b)\nActivated by approved decision dec-wipv2-f0d559fdb7f1.\n\nMATERIAL revision 2 (the operator's approved addition): everything in revision 1 PLUS the public-export requirement \u2014 src/utils/text.py must define __all__ = [\"slugify\"] as a module-level list. S1/S2 stay byte-identical so the preserved WIP remains compatible.\n\nSteps:\nS1. Inspect the repository and the frozen oracle contract.\nS2. Implement the slugify helper in src/utils/text.py and rewire src/app.py onto it; delete src/utils/legacy.py. [writes wip-v2/project]\nS3. The operator's approved addition: src/utils/text.py must ALSO export its public API through __all__ = [\"slugify\"] (the exact line, a module-level list after the import). [writes wip-v2/project]\n\nWIP reuse route: preserve \u2014 compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan\nPreserved evidence: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+            "plan_text_digest": "b5c81cd74dc7aef7a0929a1848a4caa3abc6a728066482ab4b965c60e0ec5825",
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "schema": "forge.revision.approved-input/1",
+            "source": "revision",
+            "task_description": "## Task (three changes, exactly)\n\n1. **NEW file `src/utils/text.py`** \u2014 implement:\n\n```python\ndef slugify(text: str) -> str\n```\n\nLowercase the input; every RUN of non-alphanumeric characters becomes ONE\n`-`; no leading or trailing `-`; an empty (or all-separator) input returns\n`\"\"`.\n\n  slugify('Hello, World!') == 'hello-world'\n  slugify('Forge WIP--resume __2026') == 'forge-wip-resume-2026'\n  slugify('   spaces   everywhere   ') == 'spaces-everywhere'\n  slugify('already-slugged') == 'already-slugged'\n  slugify('MIXED Case 123') == 'mixed-case-123'\n  slugify('!!!leading and trailing!!!') == 'leading-and-trailing'\n\n2. **MODIFY `src/app.py`** \u2014 stop importing the deprecated helper:\nremove the `utils.legacy` import and the `shout()` call; import\n`slugify` from `utils.text` and use it so `greet()` still returns a\ngreeting string (slugified where `shout` was used).\n\n3. **DELETE `src/utils/legacy.py`** \u2014 the deprecated module is removed\nentirely (no references may remain).\n\n### Bounds\n\n- Only `src/utils/text.py` (new), `src/app.py` (modified) and\n  `src/utils/legacy.py` (deleted) may change.\n- Do NOT modify `.gitlab-ci.yml`, `tests/`, `README.md` or any other file.\n- Do not commit or push; leave changes in the working tree.\n\nThe repository's `smoke` CI job asserts all three shapes \u2014 it is the\nindependent oracle and it is NOT part of your change.",
+            "task_title": "Replace the legacy helper: slugify() in src/utils/text.py, rewire src/app.py, delete src/utils/legacy.py",
+            "wip_reuse": {
+              "activated_revision": 2,
+              "artifacts": [
+                {
+                  "artifact_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                  "decision": "preserve",
+                  "kind": "checkpoint",
+                  "reason": "every write-carrying step survived revision 2 byte-for-byte \u2014 the restored WIP stands under the new plan"
+                }
+              ],
+              "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+              "route": "preserve",
+              "route_reason": "compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan",
+              "schema": "forge.checkpoint.reuse-decision/1"
+            },
+            "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+          },
+          "backend": "ci_harness:claude-code",
+          "budget": {
+            "budget_class": "standard",
+            "enforcement": "partial",
+            "max_calls": 40,
+            "max_tokens": 480000,
+            "wallclock_s": 3600
+          },
+          "checkpoint_reuse_decision": {
+            "activated_revision": 2,
+            "artifacts": [
+              {
+                "artifact_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                "decision": "preserve",
+                "kind": "checkpoint",
+                "reason": "every write-carrying step survived revision 2 byte-for-byte \u2014 the restored WIP stands under the new plan"
+              }
+            ],
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "route": "preserve",
+            "route_reason": "compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan",
+            "schema": "forge.checkpoint.reuse-decision/1"
+          },
+          "continuation": {
+            "candidate_published": false,
+            "checkpoint_committed": true,
+            "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+            "continuation_decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+            "decided_at": "2026-09-25T09:50:06.316260+00:00",
+            "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+            "decisions": {
+              "fd16649d6d9a3014002d7e46164cf49d57da22f0c6b6a951324ae20d032e40cc": {
+                "candidate_published": false,
+                "checkpoint_committed": true,
+                "checkpoint_digest": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                "decided_at": "2026-09-25T09:33:40.199224+00:00",
+                "decision_id": "fd16649d6d9a3014002d7e46164cf49d57da22f0c6b6a951324ae20d032e40cc",
+                "discard_authorized_by": null,
+                "event": {
+                  "native_command_id": "781",
+                  "source_attempt": 0
+                },
+                "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+                "evidence_version": 3,
+                "mode": "required",
+                "mode_selected": "required",
+                "native_command_id": "781",
+                "native_start_verdict": null,
+                "no_checkpoint_baseline": false,
+                "operator_discard_requested": false,
+                "prior_mode_selected": null,
+                "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+                "source_attempt": 0,
+                "uncertain": false,
+                "vendor_started": null
+              },
+              "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898": {
+                "candidate_published": false,
+                "checkpoint_committed": true,
+                "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+                "decided_at": "2026-09-25T09:50:06.316260+00:00",
+                "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+                "discard_authorized_by": null,
+                "event": {
+                  "native_command_id": "788",
+                  "source_attempt": 1
+                },
+                "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+                "evidence_version": 3,
+                "mode": "required",
+                "mode_selected": "required",
+                "native_command_id": "788",
+                "native_start_verdict": null,
+                "no_checkpoint_baseline": false,
+                "operator_discard_requested": false,
+                "prior_mode_selected": "required",
+                "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+                "source_attempt": 1,
+                "uncertain": false,
+                "vendor_started": null
+              }
+            },
+            "discard_authorized_by": null,
+            "event": {
+              "native_command_id": "788",
+              "source_attempt": 1
+            },
+            "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+            "evidence_version": 3,
+            "mode": "required",
+            "mode_selected": "required",
+            "native_command_id": "788",
+            "native_start_verdict": null,
+            "no_checkpoint_baseline": false,
+            "operator_discard_requested": false,
+            "prior_mode_selected": "required",
+            "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+            "source_attempt": 1,
+            "uncertain": false,
+            "vendor_started": null
+          },
+          "execution_lease": {
+            "acquired": true,
+            "check": "execution_lease",
+            "lease_id": "9651394ac6ad4d359b082b9ea4f7fb7d",
+            "slot": 1
+          },
+          "harness": {
+            "branch": "factory/1/f0d559fd",
+            "dispatch_envelope": {
+              "attempt_generation": 2,
+              "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+              "control_url": "https://forge.forcewake.me",
+              "credential_binding_revision": 0,
+              "credential_delivery_mode": "",
+              "credential_ref": "",
+              "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+              "digest": "11a7f7fda283908dcc977d9d75b55812e49f9979704854713cd794f3012be14c",
+              "resume_mode": "required",
+              "token_dispatched": true,
+              "variable_keys": [
+                "FORGE_LANE_RESUME_MODE",
+                "FORGE_LANE_RESUME",
+                "FORGE_RESUME_CHECKPOINT",
+                "FORGE_ATTEMPT_GENERATION",
+                "FORGE_CONTINUATION_DECISION_ID",
+                "FORGE_LANE_CONTROL_URL",
+                "FORGE_LANE_CONTROL_TOKEN",
+                "FORGE_PLAN_DIGEST",
+                "FORGE_SPEC_DIGEST",
+                "FORGE_BRIEF_ENVELOPE_DIGEST"
+              ]
+            },
+            "driver": "claude-sdk-lane",
+            "handle": "{\"harness\": \"claude-sdk-lane\", \"pipeline_id\": 493, \"job_id\": 839, \"branch\": \"factory/1/f0d559fd\", \"base_sha\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"attempt_base\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"started_at\": \"2026-09-25T09:50:07.045789+00:00\"}",
+            "job_id": 839,
+            "pipeline_id": 493
+          },
+          "harness_change": {
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "summary": ""
+          },
+          "harness_selection": {
+            "budget_ceilings": {
+              "max_calls": 40,
+              "max_tokens": 480000,
+              "wallclock_s": 3600
+            },
+            "budget_class": "standard",
+            "harness": "claude-sdk-lane",
+            "harness_fallbacks": [
+              "claude-code"
+            ],
+            "selection_reason": "default"
+          },
+          "pipeline": {
+            "id": 495,
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "status": "success",
+            "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/495"
+          },
+          "plan": {
+            "digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "files_hint": [
+              "src/utils/text.py",
+              "src/app.py",
+              "src/utils/legacy.py"
+            ],
+            "summary": "## Implementation plan\n\n**Summary:** Add a new slugify() helper in src/utils/text.py, rewire src/app.py to use it instead of the deprecated utils.legacy.shout(), and delete src/utils/legacy.py entirely.\n\n**Steps:**\n- Create src/utils/text.py with def slugify(text: str) -> str that lowercases input, collapses every run of non-alphanumeric characters into a single '-', trims leading/trailing '-', and returns '' for empty/all-separator input\n- Verify slugify against the provided examples: 'Hello, World!'->'hello-world', 'Forge WIP--resume __2026'->'forge-wip-resume-2026', '   spaces   everywhere   '->'spaces-everywhere', 'already-slugged'->'already-slugged', 'MIXED Case 123'->'mixed-case-123', '!!!leading and trailing!!!'->'leading-and-trailing'\n- Edit src/app.py: remove the import of utils.legacy and all uses of shout(); add 'from utils.text import slugify' (matching the project's existing import style) and replace the shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style i"
+          },
+          "published_candidate": {
+            "attempt_base": "f23e164431fc93f92e469fa84600511e26ba2598",
+            "entries": 3,
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6"
+          },
+          "requested_by": "forcewake",
+          "review": {
+            "findings": [
+              {
+                "file": "src/utils/text.py",
+                "note": "The character class [^a-z0-9] treats non-ASCII letters (e.g. '\u00e9', '\u00f1') as separators after lowercasing, so they disappear into '-'. This matches the plan's ASCII-only examples but is worth knowing if unicode input ever matters.",
+                "severity": "info"
+              },
+              {
+                "file": "src/app.py",
+                "note": "greet() output semantics change from an uppercased shout ('HELLO X!') to a slug ('hello-x'). This is exactly what the plan prescribed, just noting the visible behavior change.",
+                "severity": "info"
+              }
+            ],
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+            "verdict": "ok"
+          },
+          "revision_activations": {
+            "dec-wipv2-f0d559fdb7f1": {
+              "activated_plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+              "activated_revision": 2,
+              "authorization_epoch": 1,
+              "decision_id": "dec-wipv2-f0d559fdb7f1",
+              "parent_revision": 1,
+              "plan_id": "plan-wipv2-f0d559fd",
+              "publication_epoch": 2,
+              "schema": "forge.revision.activation/1",
+              "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+              "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+            }
+          },
+          "revision_executor_digest": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "envelope_digest": "9ca1b0629ad3a08f02840eb61d6a6fa1c9006ba9b02e4b112c66742614c541dd",
+            "executor_input_digest": "f34f5d62b8b0f3e3af749d473fe73364d1f57e107279c1ad2736ef4d50fd7837",
+            "lane_resume_mode": "required",
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "schema": "forge.revision.executor-digest/1",
+            "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b"
+          },
+          "verification": {
+            "observed_at": "2026-09-25T09:52:25.920203+00:00",
+            "producer": "gitlab-pipeline",
+            "status": "passed",
+            "summary": "quality contract satisfied",
+            "surface": [
+              {
+                "name": "smoke",
+                "status": "success"
+              }
+            ],
+            "tested_oid": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6"
+          }
+        },
+        "run": {
+          "commit_cycle": 3,
+          "evidence_summary": {
+            "backend": "ci_harness:claude-code",
+            "harness": {
+              "branch": "factory/1/f0d559fd",
+              "job_id": 839,
+              "pipeline_id": 493
+            },
+            "pipeline": {
+              "id": 495,
+              "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+              "status": "success",
+              "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/495"
+            },
+            "plan": {
+              "digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+              "summary": "## Implementation plan\n\n**Summary:** Add a new slugify() helper in src/utils/text.py, rewire src/app.py to use it instead of the deprecated utils.legacy.shout(), and delete src/utils/legacy.py entirely.\n\n**Steps:**\n- Create src/utils/text.py with def slugify(text: str) -> str that lowercases input, collapses every run of non-alphanumeric characters into a single '-', trims leading/trailing '-', and returns '' for empty/all-separator input\n- Verify slugify against the provided examples: 'Hello, World!'->'hello-world', 'Forge WIP--resume __2026'->'forge-wip-resume-2026', '   spaces   everywhere   '->'spaces-everywhere', 'already-slugged'->'already-slugged', 'MIXED Case 123'->'mixed-case-123', '!!!leading and trailing!!!'->'leading-and-trailing'\n- Edit src/app.py: remove the import of utils.legacy and all uses of shout(); add 'from utils.text import slugify' (matching the project's existing import style) and replace the shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style i"
+            },
+            "review": {
+              "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+              "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+              "verdict": "ok"
+            }
+          },
+          "id": "f0d559fdb7f14b98b32f1946cfa577c3",
+          "status": "ready_for_human",
+          "status_reason": "checks passed; merge is a human decision",
+          "steps": [
+            {
+              "attempt": 0,
+              "finished_at": null,
+              "id": 152,
+              "started_at": "2026-09-25T09:31:43.922241+00:00",
+              "status": "succeeded",
+              "step_name": "checkpoint:plan"
+            }
+          ]
+        },
+        "run_budgets": [
+          {
+            "consumed_calls": 3,
+            "consumed_tokens": 278633,
+            "created_at": "2026-09-25T09:31:37.121915+00:00",
+            "id": "b288f5697c9b447f83ef3aebd2d0001c",
+            "max_calls": 40,
+            "max_tokens": 480000,
+            "reserved_calls": 0,
+            "reserved_tokens": 0,
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "status": "open",
+            "unresolved_calls": 0,
+            "unresolved_tokens": 0,
+            "updated_at": "2026-09-25T09:52:39.386863+00:00",
+            "wallclock_s": 3600
+          }
+        ],
+        "usage_receipts": []
+      },
+      "started_at": "2026-09-25T09:52:38.711411+00:00",
+      "updated_at": "2026-09-25T09:56:07.995678+00:00"
+    },
+    "preflight": {
+      "checks": {
+        "caps.forge-app": {
+          "budget_profiles": true,
+          "lane_budget": true
+        },
+        "caps.forge-worker": {
+          "budget_profiles": true,
+          "lane_budget": true
+        },
+        "controlplane.health": {
+          "status": "ok",
+          "version": "0.38.0"
+        },
+        "doctor": {
+          "failed": [],
+          "returncode": 0,
+          "status": "ok"
+        },
+        "runners_online": [
+          4
+        ],
+        "schema_head": "028"
+      },
+      "doctor_attempts": [
+        {
+          "attempt": 1,
+          "failed": [],
+          "returncode": 0,
+          "status": "ok"
+        }
+      ],
+      "finished_at": "2026-09-25T09:31:30.652045+00:00",
+      "result": "green",
+      "started_at": "2026-09-25T09:31:19.401328+00:00"
+    },
+    "review": {
+      "candidate_sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+      "closing_reserve_basis": "FORGE_CLOSING_RESERVE_USD=0.50 on forge-worker, FORGE_SPEND_CAP_USD=2.50 \u2014 the policy the closing review rode under (observed read-only after the run settled)",
+      "configured_closing_reserve_usd": 0.5,
+      "finished_at": "2026-09-25T09:53:58.408980+00:00",
+      "outcome": {
+        "approved_input": null,
+        "executor_input_digest": null,
+        "review": {
+          "reviewed_sha_matches_candidate": true,
+          "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+          "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+          "verdict": "ok"
+        },
+        "review_budget_block": null,
+        "settled_at": "2026-09-25T09:53:57.945127+00:00",
+        "status": "ready_for_human",
+        "status_reason": "checks passed; merge is a human decision"
+      },
+      "paid": true,
+      "result": "reviewed-ready",
+      "started_at": "2026-09-25T09:52:59.894011+00:00"
+    },
+    "review-state": {
+      "f0d559fd": {
+        "checkpoint_metadata": [],
+        "credential_redemptions": [],
+        "evidence_full": {
+          "active_plan": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "authorization_epoch": 1,
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "plan_id": "plan-wipv2-f0d559fd",
+            "publication_epoch": 2,
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "revision_content": {
+              "assumptions": [],
+              "invalidated_step_ids": [],
+              "open_question_ids": [],
+              "parent_revision": 1,
+              "plan_id": "plan-wipv2-f0d559fd",
+              "preserved_step_ids": [],
+              "revision": 2,
+              "schema": "forge.proposal.plan-revision/1",
+              "snapshot_set_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+              "steps": [
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "Inspect the repository and the frozen oracle contract.",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S1",
+                  "write_repository_id": null
+                },
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "Implement the slugify helper in src/utils/text.py and rewire src/app.py onto it; delete src/utils/legacy.py.",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S2",
+                  "write_repository_id": "wip-v2/project"
+                },
+                {
+                  "acceptance_refs": [
+                    "AC-1"
+                  ],
+                  "depends_on": [],
+                  "evidence_refs": [],
+                  "impact": [
+                    "internal"
+                  ],
+                  "objective": "The operator's approved addition: src/utils/text.py must ALSO export its public API through __all__ = [\"slugify\"] (the exact line, a module-level list after the import).",
+                  "schema": "forge.proposal.plan-step/1",
+                  "step_id": "S3",
+                  "write_repository_id": "wip-v2/project"
+                }
+              ],
+              "summary": "MATERIAL revision 2 (the operator's approved addition): everything in revision 1 PLUS the public-export requirement \u2014 src/utils/text.py must define __all__ = [\"slugify\"] as a module-level list. S1/S2 stay byte-identical so the preserved WIP remains compatible.",
+              "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+              "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+            },
+            "schema": "forge.revision.active-plan/1",
+            "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+          },
+          "approved_input": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "allowed_writes": [],
+            "evidence_refs": [
+              "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed"
+            ],
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "plan_id": "plan-wipv2-f0d559fd",
+            "plan_text": "Implementation plan \u2014 active revision 2 of plan-wipv2-f0d559fd (digest b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b)\nActivated by approved decision dec-wipv2-f0d559fdb7f1.\n\nMATERIAL revision 2 (the operator's approved addition): everything in revision 1 PLUS the public-export requirement \u2014 src/utils/text.py must define __all__ = [\"slugify\"] as a module-level list. S1/S2 stay byte-identical so the preserved WIP remains compatible.\n\nSteps:\nS1. Inspect the repository and the frozen oracle contract.\nS2. Implement the slugify helper in src/utils/text.py and rewire src/app.py onto it; delete src/utils/legacy.py. [writes wip-v2/project]\nS3. The operator's approved addition: src/utils/text.py must ALSO export its public API through __all__ = [\"slugify\"] (the exact line, a module-level list after the import). [writes wip-v2/project]\n\nWIP reuse route: preserve \u2014 compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan\nPreserved evidence: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+            "plan_text_digest": "b5c81cd74dc7aef7a0929a1848a4caa3abc6a728066482ab4b965c60e0ec5825",
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "schema": "forge.revision.approved-input/1",
+            "source": "revision",
+            "task_description": "## Task (three changes, exactly)\n\n1. **NEW file `src/utils/text.py`** \u2014 implement:\n\n```python\ndef slugify(text: str) -> str\n```\n\nLowercase the input; every RUN of non-alphanumeric characters becomes ONE\n`-`; no leading or trailing `-`; an empty (or all-separator) input returns\n`\"\"`.\n\n  slugify('Hello, World!') == 'hello-world'\n  slugify('Forge WIP--resume __2026') == 'forge-wip-resume-2026'\n  slugify('   spaces   everywhere   ') == 'spaces-everywhere'\n  slugify('already-slugged') == 'already-slugged'\n  slugify('MIXED Case 123') == 'mixed-case-123'\n  slugify('!!!leading and trailing!!!') == 'leading-and-trailing'\n\n2. **MODIFY `src/app.py`** \u2014 stop importing the deprecated helper:\nremove the `utils.legacy` import and the `shout()` call; import\n`slugify` from `utils.text` and use it so `greet()` still returns a\ngreeting string (slugified where `shout` was used).\n\n3. **DELETE `src/utils/legacy.py`** \u2014 the deprecated module is removed\nentirely (no references may remain).\n\n### Bounds\n\n- Only `src/utils/text.py` (new), `src/app.py` (modified) and\n  `src/utils/legacy.py` (deleted) may change.\n- Do NOT modify `.gitlab-ci.yml`, `tests/`, `README.md` or any other file.\n- Do not commit or push; leave changes in the working tree.\n\nThe repository's `smoke` CI job asserts all three shapes \u2014 it is the\nindependent oracle and it is NOT part of your change.",
+            "task_title": "Replace the legacy helper: slugify() in src/utils/text.py, rewire src/app.py, delete src/utils/legacy.py",
+            "wip_reuse": {
+              "activated_revision": 2,
+              "artifacts": [
+                {
+                  "artifact_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                  "decision": "preserve",
+                  "kind": "checkpoint",
+                  "reason": "every write-carrying step survived revision 2 byte-for-byte \u2014 the restored WIP stands under the new plan"
+                }
+              ],
+              "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+              "route": "preserve",
+              "route_reason": "compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan",
+              "schema": "forge.checkpoint.reuse-decision/1"
+            },
+            "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+          },
+          "backend": "ci_harness:claude-code",
+          "budget": {
+            "budget_class": "standard",
+            "enforcement": "partial",
+            "max_calls": 40,
+            "max_tokens": 480000,
+            "wallclock_s": 3600
+          },
+          "checkpoint_reuse_decision": {
+            "activated_revision": 2,
+            "artifacts": [
+              {
+                "artifact_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                "decision": "preserve",
+                "kind": "checkpoint",
+                "reason": "every write-carrying step survived revision 2 byte-for-byte \u2014 the restored WIP stands under the new plan"
+              }
+            ],
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "route": "preserve",
+            "route_reason": "compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan",
+            "schema": "forge.checkpoint.reuse-decision/1"
+          },
+          "continuation": {
+            "candidate_published": false,
+            "checkpoint_committed": true,
+            "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+            "continuation_decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+            "decided_at": "2026-09-25T09:50:06.316260+00:00",
+            "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+            "decisions": {
+              "fd16649d6d9a3014002d7e46164cf49d57da22f0c6b6a951324ae20d032e40cc": {
+                "candidate_published": false,
+                "checkpoint_committed": true,
+                "checkpoint_digest": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+                "decided_at": "2026-09-25T09:33:40.199224+00:00",
+                "decision_id": "fd16649d6d9a3014002d7e46164cf49d57da22f0c6b6a951324ae20d032e40cc",
+                "discard_authorized_by": null,
+                "event": {
+                  "native_command_id": "781",
+                  "source_attempt": 0
+                },
+                "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+                "evidence_version": 3,
+                "mode": "required",
+                "mode_selected": "required",
+                "native_command_id": "781",
+                "native_start_verdict": null,
+                "no_checkpoint_baseline": false,
+                "operator_discard_requested": false,
+                "prior_mode_selected": null,
+                "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+                "source_attempt": 0,
+                "uncertain": false,
+                "vendor_started": null
+              },
+              "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898": {
+                "candidate_published": false,
+                "checkpoint_committed": true,
+                "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+                "decided_at": "2026-09-25T09:50:06.316260+00:00",
+                "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+                "discard_authorized_by": null,
+                "event": {
+                  "native_command_id": "788",
+                  "source_attempt": 1
+                },
+                "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+                "evidence_version": 3,
+                "mode": "required",
+                "mode_selected": "required",
+                "native_command_id": "788",
+                "native_start_verdict": null,
+                "no_checkpoint_baseline": false,
+                "operator_discard_requested": false,
+                "prior_mode_selected": "required",
+                "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+                "source_attempt": 1,
+                "uncertain": false,
+                "vendor_started": null
+              }
+            },
+            "discard_authorized_by": null,
+            "event": {
+              "native_command_id": "788",
+              "source_attempt": 1
+            },
+            "evidence_digest": "0c01b058b7cfeb00165262c6283baff61558dcc186bb6f9e7a921e41b0b002d5",
+            "evidence_version": 3,
+            "mode": "required",
+            "mode_selected": "required",
+            "native_command_id": "788",
+            "native_start_verdict": null,
+            "no_checkpoint_baseline": false,
+            "operator_discard_requested": false,
+            "prior_mode_selected": "required",
+            "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+            "source_attempt": 1,
+            "uncertain": false,
+            "vendor_started": null
+          },
+          "execution_lease": {
+            "acquired": true,
+            "check": "execution_lease",
+            "lease_id": "9651394ac6ad4d359b082b9ea4f7fb7d",
+            "slot": 1
+          },
+          "harness": {
+            "branch": "factory/1/f0d559fd",
+            "dispatch_envelope": {
+              "attempt_generation": 2,
+              "checkpoint_digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+              "control_url": "https://forge.forcewake.me",
+              "credential_binding_revision": 0,
+              "credential_delivery_mode": "",
+              "credential_ref": "",
+              "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+              "digest": "11a7f7fda283908dcc977d9d75b55812e49f9979704854713cd794f3012be14c",
+              "resume_mode": "required",
+              "token_dispatched": true,
+              "variable_keys": [
+                "FORGE_LANE_RESUME_MODE",
+                "FORGE_LANE_RESUME",
+                "FORGE_RESUME_CHECKPOINT",
+                "FORGE_ATTEMPT_GENERATION",
+                "FORGE_CONTINUATION_DECISION_ID",
+                "FORGE_LANE_CONTROL_URL",
+                "FORGE_LANE_CONTROL_TOKEN",
+                "FORGE_PLAN_DIGEST",
+                "FORGE_SPEC_DIGEST",
+                "FORGE_BRIEF_ENVELOPE_DIGEST"
+              ]
+            },
+            "driver": "claude-sdk-lane",
+            "handle": "{\"harness\": \"claude-sdk-lane\", \"pipeline_id\": 493, \"job_id\": 839, \"branch\": \"factory/1/f0d559fd\", \"base_sha\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"attempt_base\": \"f23e164431fc93f92e469fa84600511e26ba2598\", \"started_at\": \"2026-09-25T09:50:07.045789+00:00\"}",
+            "job_id": 839,
+            "pipeline_id": 493
+          },
+          "harness_change": {
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "summary": ""
+          },
+          "harness_selection": {
+            "budget_ceilings": {
+              "max_calls": 40,
+              "max_tokens": 480000,
+              "wallclock_s": 3600
+            },
+            "budget_class": "standard",
+            "harness": "claude-sdk-lane",
+            "harness_fallbacks": [
+              "claude-code"
+            ],
+            "selection_reason": "default"
+          },
+          "pipeline": {
+            "id": 495,
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "status": "success",
+            "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/495"
+          },
+          "plan": {
+            "digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "files_hint": [
+              "src/utils/text.py",
+              "src/app.py",
+              "src/utils/legacy.py"
+            ],
+            "summary": "## Implementation plan\n\n**Summary:** Add a new slugify() helper in src/utils/text.py, rewire src/app.py to use it instead of the deprecated utils.legacy.shout(), and delete src/utils/legacy.py entirely.\n\n**Steps:**\n- Create src/utils/text.py with def slugify(text: str) -> str that lowercases input, collapses every run of non-alphanumeric characters into a single '-', trims leading/trailing '-', and returns '' for empty/all-separator input\n- Verify slugify against the provided examples: 'Hello, World!'->'hello-world', 'Forge WIP--resume __2026'->'forge-wip-resume-2026', '   spaces   everywhere   '->'spaces-everywhere', 'already-slugged'->'already-slugged', 'MIXED Case 123'->'mixed-case-123', '!!!leading and trailing!!!'->'leading-and-trailing'\n- Edit src/app.py: remove the import of utils.legacy and all uses of shout(); add 'from utils.text import slugify' (matching the project's existing import style) and replace the shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style i"
+          },
+          "published_candidate": {
+            "attempt_base": "f23e164431fc93f92e469fa84600511e26ba2598",
+            "entries": 3,
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6"
+          },
+          "requested_by": "forcewake",
+          "review": {
+            "findings": [
+              {
+                "file": "src/utils/text.py",
+                "note": "The character class [^a-z0-9] treats non-ASCII letters (e.g. '\u00e9', '\u00f1') as separators after lowercasing, so they disappear into '-'. This matches the plan's ASCII-only examples but is worth knowing if unicode input ever matters.",
+                "severity": "info"
+              },
+              {
+                "file": "src/app.py",
+                "note": "greet() output semantics change from an uppercased shout ('HELLO X!') to a slug ('hello-x'). This is exactly what the plan prescribed, just noting the visible behavior change.",
+                "severity": "info"
+              }
+            ],
+            "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+            "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+            "verdict": "ok"
+          },
+          "revision_activations": {
+            "dec-wipv2-f0d559fdb7f1": {
+              "activated_plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+              "activated_revision": 2,
+              "authorization_epoch": 1,
+              "decision_id": "dec-wipv2-f0d559fdb7f1",
+              "parent_revision": 1,
+              "plan_id": "plan-wipv2-f0d559fd",
+              "publication_epoch": 2,
+              "schema": "forge.revision.activation/1",
+              "work_contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+              "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+            }
+          },
+          "revision_executor_digest": {
+            "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+            "active_revision": 2,
+            "envelope_digest": "9ca1b0629ad3a08f02840eb61d6a6fa1c9006ba9b02e4b112c66742614c541dd",
+            "executor_input_digest": "f34f5d62b8b0f3e3af749d473fe73364d1f57e107279c1ad2736ef4d50fd7837",
+            "lane_resume_mode": "required",
+            "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+            "revised_from_digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "schema": "forge.revision.executor-digest/1",
+            "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b"
+          },
+          "verification": {
+            "observed_at": "2026-09-25T09:52:25.920203+00:00",
+            "producer": "gitlab-pipeline",
+            "status": "passed",
+            "summary": "quality contract satisfied",
+            "surface": [
+              {
+                "name": "smoke",
+                "status": "success"
+              }
+            ],
+            "tested_oid": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6"
+          }
+        },
+        "run": {
+          "commit_cycle": 3,
+          "evidence_summary": {
+            "backend": "ci_harness:claude-code",
+            "harness": {
+              "branch": "factory/1/f0d559fd",
+              "job_id": 839,
+              "pipeline_id": 493
+            },
+            "pipeline": {
+              "id": 495,
+              "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+              "status": "success",
+              "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/pipelines/495"
+            },
+            "plan": {
+              "digest": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+              "summary": "## Implementation plan\n\n**Summary:** Add a new slugify() helper in src/utils/text.py, rewire src/app.py to use it instead of the deprecated utils.legacy.shout(), and delete src/utils/legacy.py entirely.\n\n**Steps:**\n- Create src/utils/text.py with def slugify(text: str) -> str that lowercases input, collapses every run of non-alphanumeric characters into a single '-', trims leading/trailing '-', and returns '' for empty/all-separator input\n- Verify slugify against the provided examples: 'Hello, World!'->'hello-world', 'Forge WIP--resume __2026'->'forge-wip-resume-2026', '   spaces   everywhere   '->'spaces-everywhere', 'already-slugged'->'already-slugged', 'MIXED Case 123'->'mixed-case-123', '!!!leading and trailing!!!'->'leading-and-trailing'\n- Edit src/app.py: remove the import of utils.legacy and all uses of shout(); add 'from utils.text import slugify' (matching the project's existing import style) and replace the shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style i"
+            },
+            "review": {
+              "sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+              "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+              "verdict": "ok"
+            }
+          },
+          "id": "f0d559fdb7f14b98b32f1946cfa577c3",
+          "status": "ready_for_human",
+          "status_reason": "checks passed; merge is a human decision",
+          "steps": [
+            {
+              "attempt": 0,
+              "finished_at": null,
+              "id": 152,
+              "started_at": "2026-09-25T09:31:43.922241+00:00",
+              "status": "succeeded",
+              "step_name": "checkpoint:plan"
+            }
+          ]
+        },
+        "run_budgets": [
+          {
+            "consumed_calls": 3,
+            "consumed_tokens": 278633,
+            "created_at": "2026-09-25T09:31:37.121915+00:00",
+            "id": "b288f5697c9b447f83ef3aebd2d0001c",
+            "max_calls": 40,
+            "max_tokens": 480000,
+            "reserved_calls": 0,
+            "reserved_tokens": 0,
+            "run_id": "f0d559fdb7f14b98b32f1946cfa577c3",
+            "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+            "status": "open",
+            "unresolved_calls": 0,
+            "unresolved_tokens": 0,
+            "updated_at": "2026-09-25T09:52:39.386863+00:00",
+            "wallclock_s": 3600
+          }
+        ],
+        "usage_receipts": []
+      },
+      "started_at": "2026-09-25T09:53:00.479584+00:00",
+      "updated_at": "2026-09-25T09:53:58.407526+00:00"
+    },
+    "revision": {
+      "after": {
+        "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+        "active_plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "active_plan_revision": 2,
+        "authority_active_entry": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+        "preserved_checkpoint_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+        "reuse_artifact_names_older_checkpoint": "the activation's reuse document named b3fa93afd461\u2026 (the evidence-pinned rung-1 artifact) while the authority's active entry \u2014 what the dispatch actually restores \u2014 is f70244cc49d2\u2026 (the useful WIP); named, never merged",
+        "reuse_route": "preserve",
+        "reuse_route_reason": "compatible revision: b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed \u2014 the checkpoint stands under the new plan",
+        "run_plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "run_status": "blocked"
+      },
+      "approve_note": {
+        "at": "2026-09-25T09:47:48.382479+00:00",
+        "note_id": 786
+      },
+      "before": {
+        "run_plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "run_status": "blocked",
+        "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+        "useful_checkpoint": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae"
+      },
+      "finished_at": "2026-09-25T09:49:59.485563+00:00",
+      "refused": {
+        "at": "2026-09-25T09:47:53.627414+00:00",
+        "reason": "the activation preserved checkpoint b3fa93afd461\u2026 but the drill sampled f70244cc49d2\u2026 \u2014 a DIFFERENT WIP is about to be restored; refusing"
+      },
+      "result": "green",
+      "staged": {
+        "active_digest_seeded": "b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639",
+        "contract_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+        "decision_id": "dec-wipv2-f0d559fdb7f1",
+        "revision1_digest": "9847dfa5f7041e8ac6c492b3aafe464e7776ee28b65c30dc51eeee7dd1987984",
+        "revision2_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "revision_marker": "__all__ = [\"slugify\"]",
+        "spec_digest": "ef66c6e630bef2441473c4e0f4e9dd258ac3e12b17ee5eb5ec48e28dad54f83b",
+        "staged_at": "2026-09-25T09:47:48.166953+00:00",
+        "staged_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+        "work_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+      },
+      "started_at": "2026-09-25T09:47:47.489752+00:00",
+      "updated_at": "2026-09-25T09:47:53.627431+00:00"
+    },
+    "setup": {
+      "bot_member": {
+        "level": 30,
+        "user_id": 15,
+        "username": "forge"
+      },
+      "ci_yaml_sha256": "e87b2ae2bf07316dfcd14e4f5a5827fae243f86137ac933fe6b1720c188c1a04",
+      "labels_created": true,
+      "lane_ref": "6df4020f8f1ff233d65082788a3632c0e4cd38d3",
+      "project": {
+        "id": 110,
+        "path": "forcewake/forge-wip-v2-2026-09-25"
+      },
+      "seed_commit_sha": "f23e164431fc93f92e469fa84600511e26ba2598",
+      "started_at": "2026-09-25T09:31:12.391294+00:00",
+      "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+      "updated_at": "2026-09-25T09:31:14.487432+00:00",
+      "variables": [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "FORGE_BOT_READ_TOKEN",
+        "FORGE_HARNESS_HTTPS_PROXY",
+        "FORGE_LANE_REF=6df4020f8f1f\u2026",
+        "FORGE_STEERING_ENABLED=1\u2026"
+      ],
+      "webhook_url": "https://forge.forcewake.me/webhook"
+    },
+    "teardown": {
+      "deleted": true,
+      "deleted_at": "2026-09-25T09:56:06.784291+00:00",
+      "started_at": "2026-09-25T09:56:06.609955+00:00"
+    }
+  },
+  "project": {},
+  "stamp": "forge.useful-wip.live/1"
+}

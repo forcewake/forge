@@ -1637,3 +1637,431 @@ class TestRevisionJourneyToDispatch:
         note = plan_comment_revision_note("a" * 64, "b" * 64)
         assert note.startswith(REVISION_NOTE_MARKER)
         assert f"revised from {'a' * 64} to {'b' * 64}" in note
+
+
+# ----------------------------------------------------------------------
+# Q39-02 (#321) — the ApprovedInput: the GitLab continuation's brief binds
+# to the ACTIVE revision's TEXT. The activation persists the switched
+# revision's CONTENT beside its digest; resolution re-verifies the digest,
+# renders the brief from the content, and labels every honest fallback.
+# ----------------------------------------------------------------------
+
+
+def _pointer_document(revision: PlanRevision, *, content: dict | None) -> dict:
+    """A durable ACTIVE-plan pointer, with or without the content field."""
+    document = {
+        "schema": "forge.revision.active-plan/1",
+        "work_id": revision.work_id,
+        "plan_id": revision.plan_id,
+        "active_revision": revision.revision,
+        "plan_digest": plan_digest(revision),
+        "revised_from_digest": "e" * 64,
+        "work_contract_digest": revision.work_contract_digest,
+        "authorization_epoch": 3,
+        "publication_epoch": 8,
+        "activated_by_decision": "rd-content",
+    }
+    if content is not None:
+        document["revision_content"] = content
+    return document
+
+
+async def _set_evidence(factory, run_id: str, patch: dict) -> None:
+    from forge.durable import FlowRun
+
+    async with factory() as session:
+        run = await session.get(FlowRun, run_id)
+        evidence = dict(run.evidence or {})
+        evidence.update(patch)
+        run.evidence = evidence
+        await session.commit()
+
+
+class TestActivationPersistsRevisionContent:
+    async def test_the_switched_pointer_carries_the_content_it_digested(self, durable):
+        from forge.adaptive.revisions import (
+            ACTIVE_PLAN_KEY,
+            REVISION_CONTENT_KEY,
+            activate_pending_revision,
+            stage_pending_revision,
+        )
+
+        proposed = _revision(
+            _base_steps(), revision=2, parent_revision=1, summary="Reworded summary."
+        )
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        assert (
+            await activate_pending_revision(
+                durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+            )
+        ).status == "activated"
+
+        active = (await durable.evidence())[ACTIVE_PLAN_KEY]
+        content = active[REVISION_CONTENT_KEY]
+        # The persisted content IS the bytes the digest covers: re-parsing
+        # and re-hashing reproduces the pointer's digest exactly (the
+        # identity -> CONTENT join the live counterexample lacked).
+        reparsed = PlanRevision.model_validate(content)
+        assert plan_digest(reparsed) == active["plan_digest"]
+
+    async def test_a_prior_version_pointer_without_content_parses_unchanged(self, durable):
+        from forge.adaptive.revisions import active_plan_document_of
+
+        record = ActivationRecord(
+            decision_id="rd-x",
+            work_id="wp-demo-1",
+            plan_id="plan-demo-1",
+            parent_revision=1,
+            activated_revision=2,
+            activated_plan_digest="f" * 64,
+            work_contract_digest=D_CONTRACT,
+            authorization_epoch=3,
+            publication_epoch=8,
+        )
+        document = active_plan_document_of(_current(), record)
+        assert "revision_content" not in document  # additive: the field is opt-in
+        assert document["schema"] == "forge.revision.active-plan/1"
+        assert active_plan_document_of(_current(), record, revision_content={"revision": 2})[
+            "revision_content"
+        ] == {"revision": 2}
+
+
+class TestApprovedInputResolution:
+    async def test_no_active_plan_resolves_the_spec_brief_labeled(self, durable):
+        from forge.adaptive.revisions import resolve_approved_input
+        from forge.durable import FlowRun
+
+        # A run whose evidence carries NO active-plan pointer at all — a
+        # run that never activated a revision (today's world, labeled).
+        stranger = "c" * 32
+        async with durable.factory() as session:
+            session.add(FlowRun(id=stranger, project_id=1, status="planning"))
+            await session.commit()
+        resolved = await resolve_approved_input(
+            durable.factory,
+            stranger,
+            task_title="Add expiry",
+            task_description="Idempotent per AC-1.",
+            spec_plan_text="SPEC PLAN: approach X.",
+            spec_plan_digest="7" * 64,
+            allowed_writes=["src/**"],
+        )
+        assert resolved.source == "spec"
+        assert resolved.brief() == "SPEC PLAN: approach X."  # today's behavior, byte-identical
+        assert resolved.plan_digest == "7" * 64
+        assert resolved.allowed_writes == ("src/**",)
+        assert resolved.revision_bound is False
+        assert resolved.active_revision == 0 and resolved.activated_by_decision == ""
+
+    async def test_an_active_revision_with_content_wins_the_brief(self, durable):
+        from forge.adaptive.revisions import resolve_approved_input
+
+        second = _revision(
+            _base_steps(), revision=2, parent_revision=1, summary="Approach Y: validate_email."
+        )
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=second.model_dump())},
+        )
+        resolved = await resolve_approved_input(
+            durable.factory,
+            durable.run_id,
+            task_title="Add expiry",
+            task_description="Idempotent per AC-1.",
+            spec_plan_text="SPEC PLAN: approach X (check).",
+            spec_plan_digest="7" * 64,
+        )
+        assert resolved.source == "revision"
+        assert resolved.revision_bound is True
+        assert resolved.active_revision == 2
+        assert resolved.plan_digest == plan_digest(second)
+        brief = resolved.brief()
+        assert "Approach Y: validate_email." in brief  # the ACTIVE revision's TEXT
+        assert "approach X (check)" not in brief  # never the superseded spec brief
+        assert plan_digest(second)[:16] in brief  # the identity the CAS switched
+        assert resolved.activated_by_decision == "rd-content"
+
+    async def test_the_reuse_decision_rides_with_its_preserved_evidence(self, durable):
+        from forge.adaptive.revisions import (
+            CHECKPOINT_REUSE_DECISION_KEY,
+            resolve_approved_input,
+        )
+
+        second = _revision(_base_steps(), revision=2, parent_revision=1)
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {
+                "active_plan": _pointer_document(second, content=second.model_dump()),
+                CHECKPOINT_REUSE_DECISION_KEY: {
+                    "schema": "forge.checkpoint.reuse-decision/1",
+                    "activated_revision": 2,
+                    "plan_digest": plan_digest(second),
+                    "route": "preserve",
+                    "route_reason": "compatible revision",
+                    "artifacts": [
+                        {"artifact_id": "ckpt-1", "kind": "checkpoint", "decision": "preserve"},
+                        {
+                            "artifact_id": "verif-1",
+                            "kind": "verification",
+                            "decision": "invalidate",
+                        },
+                    ],
+                },
+            },
+        )
+        resolved = await resolve_approved_input(
+            durable.factory,
+            durable.run_id,
+            task_title="T",
+            task_description="D",
+            spec_plan_text="SPEC",
+            spec_plan_digest="7" * 64,
+        )
+        assert resolved.evidence_refs == ("ckpt-1",)  # preserved only
+        assert resolved.wip_reuse["route"] == "preserve"
+        assert "ckpt-1" in resolved.brief()  # the brief names the standing evidence
+        assert "WIP reuse route: preserve" in resolved.brief()
+
+    async def test_a_tampered_content_refuses_with_the_typed_code(self, durable):
+        import pytest as _pytest
+
+        from forge.adaptive.revisions import RevisionRebindRefused, resolve_approved_input
+
+        second = _revision(_base_steps(), revision=2, parent_revision=1)
+        content = second.model_dump()
+        content["summary"] = "TAMPERED AFTER THE CAS"
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=content)},
+        )
+        with _pytest.raises(RevisionRebindRefused) as caught:
+            await resolve_approved_input(
+                durable.factory,
+                durable.run_id,
+                task_title="T",
+                task_description="D",
+                spec_plan_text="SPEC",
+                spec_plan_digest="7" * 64,
+            )
+        assert caught.value.code == "content_digest_mismatch"
+        assert caught.value.detail.startswith("the durable revision content digests to")
+
+    async def test_a_prior_version_pointer_resolves_the_labeled_legacy_adapter(self, durable):
+        from forge.adaptive.revisions import resolve_approved_input
+
+        second = _revision(_base_steps(), revision=2, parent_revision=1)
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=None)},
+        )
+        resolved = await resolve_approved_input(
+            durable.factory,
+            durable.run_id,
+            task_title="T",
+            task_description="D",
+            spec_plan_text="SPEC PLAN (the pre-rebind brief)",
+            spec_plan_digest="7" * 64,
+        )
+        assert resolved.source == "spec-legacy"  # labeled, never a silent re-derivation
+        assert resolved.brief() == "SPEC PLAN (the pre-rebind brief)"
+        assert resolved.active_revision == 2  # the identity is still on record
+        assert resolved.plan_digest == plan_digest(second)
+
+    async def test_two_workers_resolve_the_identical_document(self, durable, tmp_path):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from forge.adaptive.revisions import resolve_approved_input
+        from forge.durable import FlowRun
+        from forge.models.base import Base
+
+        second = _revision(
+            _base_steps(), revision=2, parent_revision=1, summary="Approach Y: validate_email."
+        )
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=second.model_dump())},
+        )
+        # A RESTARTED worker: a genuinely fresh engine over the same rows.
+        db_path = tmp_path / "restart.db"
+        source = durable.factory.kw["bind"]
+        async with source.connect() as connection:
+            await connection.exec_driver_sql("ATTACH DATABASE ? AS copy", (str(db_path),))
+            await connection.exec_driver_sql(
+                "CREATE TABLE copy.flow_runs AS SELECT * FROM flow_runs"
+            )
+            await connection.commit()
+        engine_b = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        async with engine_b.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+        try:
+            first = await resolve_approved_input(
+                durable.factory,
+                durable.run_id,
+                task_title="T",
+                task_description="D",
+                spec_plan_text="SPEC",
+                spec_plan_digest="7" * 64,
+                allowed_writes=["src/**"],
+            )
+            again = await resolve_approved_input(
+                factory_b,
+                durable.run_id,
+                task_title="T",
+                task_description="D",
+                spec_plan_text="SPEC",
+                spec_plan_digest="7" * 64,
+                allowed_writes=["src/**"],
+            )
+            assert first.document() == again.document()
+            assert first.brief() == again.brief()
+            assert FlowRun is not None  # the durable row is the only difference
+        finally:
+            await engine_b.dispose()
+
+
+class TestStandingGuidancePromotion:
+    """Q39-02 (#321) — the #313 cycle-2 remedy formalized: an accepted
+    STANDING steer promotes into durable revision content through the
+    EXISTING approval route; a next-turn hint never expands authority."""
+
+    def test_the_classification_vocabulary_is_closed_and_fail_closed(self):
+        from forge.adaptive.revisions import is_standing_guidance
+
+        assert is_standing_guidance(
+            "Operator steer, standing direction for this continuation: use validate_email"
+        )
+        assert is_standing_guidance("From now on the entrypoint is validate_email.")
+        assert is_standing_guidance("Going forward, always use the new schema.")
+        assert not is_standing_guidance("fix the failing assertion first")
+        assert not is_standing_guidance("")
+        assert not is_standing_guidance("use the existing helper here")
+
+    def test_the_promoted_proposal_keeps_steps_byte_identical(self):
+        from forge.adaptive.revisions import standing_guidance_revision
+
+        active = _revision(_base_steps(), revision=2, parent_revision=1)
+        proposed = standing_guidance_revision(
+            active,
+            "standing direction: the entrypoint is validate_email",
+            command_id="cmd-steer-1",
+        )
+        assert proposed is not None
+        assert proposed.revision == 3
+        assert proposed.parent_revision == 2
+        assert proposed.steps == active.steps  # WIP compatibility survives by construction
+        assert "standing direction: the entrypoint is validate_email" in proposed.summary
+        assert "cmd-steer-1" in proposed.summary  # provenance rides the content
+        assert plan_digest(proposed) != plan_digest(active)
+
+    def test_a_next_turn_hint_promotes_to_nothing(self):
+        from forge.adaptive.revisions import standing_guidance_revision
+
+        active = _revision(_base_steps(), revision=2, parent_revision=1)
+        assert standing_guidance_revision(active, "fix the test first") is None
+
+    async def test_the_promotion_stages_through_the_existing_approval_route(self, durable):
+        from forge.adaptive.revisions import (
+            ACTIVE_PLAN_KEY,
+            PENDING_PROPOSAL_KEY,
+            REVISION_CONTENT_KEY,
+            activate_pending_revision,
+            stage_standing_guidance_promotion,
+        )
+
+        second = _revision(
+            _base_steps(), revision=2, parent_revision=1, summary="Approach X: entrypoint check."
+        )
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=second.model_dump())},
+        )
+        decision_id = await stage_standing_guidance_promotion(
+            durable.factory,
+            durable.run_id,
+            "standing direction: the entrypoint is validate_email, not check",
+            command_id="cmd-steer-1",
+        )
+        assert decision_id
+        evidence = await durable.evidence()
+        staged = evidence[PENDING_PROPOSAL_KEY]  # the human gate owns it now
+        assert staged["decision"]["decision_id"] == decision_id
+        assert staged["decision"]["parent_revision"] == 2
+        assert staged["decision"]["proposed_digest"] == plan_digest(
+            PlanRevision.model_validate(staged["proposed"])
+        )
+        assert "validate_email" in staged["proposed"]["summary"]
+        # The ACTIVE plan is UNCHANGED until the human approves: nothing
+        # that was not approved expanded any authority.
+        assert evidence[ACTIVE_PLAN_KEY]["active_revision"] == 2
+
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+        after = (await durable.evidence())[ACTIVE_PLAN_KEY]
+        assert after["active_revision"] == 3
+        assert (
+            plan_digest(PlanRevision.model_validate(after[REVISION_CONTENT_KEY]))
+            == (after["plan_digest"])
+        )
+        assert "validate_email" in after[REVISION_CONTENT_KEY]["summary"]
+
+    async def test_an_unapproved_hint_stages_nothing_and_changes_no_brief(self, durable):
+        from forge.adaptive.revisions import (
+            PENDING_PROPOSAL_KEY,
+            resolve_approved_input,
+            stage_standing_guidance_promotion,
+        )
+
+        second = _revision(_base_steps(), revision=2, parent_revision=1)
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=second.model_dump())},
+        )
+        assert (
+            await stage_standing_guidance_promotion(
+                durable.factory, durable.run_id, "just fix the test", command_id="cmd-x"
+            )
+            is None
+        )
+        evidence = await durable.evidence()
+        assert PENDING_PROPOSAL_KEY not in evidence  # nothing staged, nothing expanded
+        resolved = await resolve_approved_input(
+            durable.factory,
+            durable.run_id,
+            task_title="T",
+            task_description="D",
+            spec_plan_text="SPEC",
+            spec_plan_digest="7" * 64,
+        )
+        assert "fix the test" not in resolved.brief()
+
+    async def test_a_pointer_without_content_never_re_derives_plan_bytes(self, durable):
+        from forge.adaptive.revisions import stage_standing_guidance_promotion
+
+        second = _revision(_base_steps(), revision=2, parent_revision=1)
+        await _set_evidence(
+            durable.factory,
+            durable.run_id,
+            {"active_plan": _pointer_document(second, content=None)},
+        )
+        assert (
+            await stage_standing_guidance_promotion(
+                durable.factory,
+                durable.run_id,
+                "standing direction: anything",
+                command_id="cmd-x",
+            )
+            is None
+        )

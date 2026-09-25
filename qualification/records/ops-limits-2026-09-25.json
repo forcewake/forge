@@ -1,0 +1,156 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem'; the pause/checkpoint arm ran entirely on that authority \u2014 observed 2026-09-25, the v2 trace restored the exact content-addressed checkpoint f70244cc49d2\u2026 through it)",
+  "capabilities": [
+    "live-occupancy-limit",
+    "operator-limits-read-model",
+    "ops-observability-separation",
+    "capped-admission-accounting",
+    "negative-recovery-drills",
+    "review-budget-distinction"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer",
+    "approve-revision"
+  ],
+  "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential rode the gitlab-protected-variable route on this trace (the dispatch's credential_delivery_mode was empty \u2014 NO operation grant was minted; the #320 grant machinery is exercised by its own offline suites, not by this dispatch, recorded honestly in the trace's revision.credential_grants_basis)",
+  "evidence": [
+    {
+      "artifact_sha256": "33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+      "capability": "live-occupancy-limit",
+      "class": "live-provider",
+      "covers": "the 9/9 deployment-ops drills (qualification/deployment-ops-2026-09-25.json, generated 10:20:04Z, read-only against the real deployment): deployment_remote_occupancy measured the supported concurrent-work limit with REAL native jobs on the lab runner \u2014 observed_limit 3, peak_occupied 3, the over-cap cycle parked (parked_execution_capacity), queue wait max 5.206s measured from the durable lease row; deployment_lost_response_at_cap dropped a native dispatch response AT the cap and the occupancy mix held (native_running 3); deployment_degraded_modes ran the fake-429 lane through the app's own revival budget (transient classification, backoff ladder 60/120/240/480s, revive limit 2); measured_limits carries command_latency_under_contention received->applied 9.684s, pause/cancel percentiles (control p95 0.0288s, cancel-under-slow-provider p95 0.0521s, n=12, objective 60s), restore_time_s 0.177 at the CURRENT store size (remeasure as it grows), and the reviewer-WIP coherence (admission bound 3 within the stated reviewer bound 5).",
+      "executed_at": "2026-09-25T10:20:04+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+      "capability": "live-occupancy-limit",
+      "class": "live-provider",
+      "covers": "the #326 supported-composition v2 trace (docs/evaluation/2026-09-25-supported-composition-v2/, pipelines 490-495 on the lab runner): the adaptive probe ladder measured real recovery timings on the supported profile \u2014 rung-1 sampled the R37-08 EMPTY failure mode at +45s, the native /retry re-entered, rung-2's pause landed the USEFUL checkpoint (files=2, all three shapes), the approved-revision rebind and the REQUIRED resume restored the exact checkpoint, and the closing review completed within the #325 reserve (verdict ok, run terminal ready_for_human) \u2014 the run-state sequence a supported operator reads as progressing -> paused -> progressing -> verified on the customer vocabulary.",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "",
+      "capability": "operator-limits-read-model",
+      "class": "offline-operational",
+      "covers": "tests/test_ops_limits.py::test_the_detail_renders_the_ops_limits_read_model (+ the zero-writes, scope and history pins): the SHIPPED operator detail route renders the ops_limits block \u2014 the six quantities (current attempt, native occupancy, exact checkpoint, unresolved effects, required checks, accounting coverage), the customer state, the four ops.* measures and the review-budget distinction \u2014 over the real app, the real reader and the real subject-scope ladder on a disposable database; an out-of-scope principal gets 404 on the detail AND the bundle; an applied resume naming a DIFFERENT checkpoint never activates the current one (history never relabelled as current state); rendering moves zero rows. artifact_sha256 empty is deliberate: the drill runs on the working tree at CI, not on a released artifact.",
+      "executed_at": "2026-09-25T12:40:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "",
+      "capability": "ops-observability-separation",
+      "class": "offline-operational",
+      "covers": "tests/test_ops_limits.py::TestTheFourMeasures: ops.command_application_latency (per command, created_at->applied_at; pending commands counted, never zero-filled), ops.native_occupancy (the lease gauge by occupancy state, occupied_vs_limit, unknown ages as a stated lower bound), ops.recovery_duration (pause applied -> the MATCHED checkpoint activation; unmatched activations counted, never samples), ops.manual_intervention_minutes (wait-for-human windows only; automation resumes excluded and counted) \u2014 four separate records, four different windows, and a blended field is REFUSED (ops.measures.blended).",
+      "executed_at": "2026-09-25T12:40:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "",
+      "capability": "capped-admission-accounting",
+      "class": "offline-operational",
+      "covers": "tests/test_ops_limits.py::TestCappedAdmissionUnderSlowRunnerAndThrottling + TestAdmissionAccounting: three slots held under a slow fake native lane (realistic start latency), the fourth dispatch parks, and the capped-admission verdict derives from EXECUTION OCCUPANCY only \u2014 releasing one slot from evidence flips it while the queued INTAKE count grew (the drill's one pinned sentence); a forged intake-derived verdict raises (AdmissionAccountingError); the 429 start is ambiguous (definite_start_refusal(429) is False \u2014 the slot holds until a terminal probe), the definite 404 returns capacity immediately (AT-06).",
+      "executed_at": "2026-09-25T12:40:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "",
+      "capability": "negative-recovery-drills",
+      "class": "offline-operational",
+      "covers": "tests/test_ops_limits.py::TestControlPlaneRestart (engine disposed and recreated over the same durable store; occupancy survives; an unknown native start parks draining; the reconciler resolves it by its durable native_intent_ref through the fresh engine), TestConcurrentOperatorCommands (one logical command per sequence race on separate connections; exactly the command matching the CTL-04 world dispatches, the stale twin expires with the reason; a redelivered duplicate is adopted created=False), TestRetentionUnderPausedCheckpointAndInvestigationHold (the PINNED paused-active checkpoint and its blobs survive the retention pass; a non-terminal run holds its credential receipts; an investigation hold holds them regardless of status; only unheld terminal work prunes) and the out-of-scope private-bundle drill (404, indistinguishable from unknown).",
+      "executed_at": "2026-09-25T12:40:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "",
+      "capability": "review-budget-distinction",
+      "class": "offline-operational",
+      "covers": "tests/test_ops_limits.py::TestReviewBudgetDistinction: a budget_exhausted refusal at the reviewer leg renders WHAT failed (the review budget), WHAT SURVIVED (the current candidate, the committed checkpoint \u2014 identities, honestly absent when no row proves them) and the checks' own verdicts (a passed independent verification stays a pass), with the #325 review-only continuation and the auditable top-up named as the recovery \u2014 a FAILED REVIEW BUDGET is never lost code and never failed independent tests.",
+      "executed_at": "2026-09-25T12:40:00+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "qualification/deployment-ops-2026-09-25.json",
+    "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json",
+    "docs/evaluation/2026-09-25-supported-composition-v2/live-run-evidence.json",
+    "qualification/records/supported-composition-v2-2026-09-25.json",
+    "evaluation/economics/accepted-task-ledger-v1.json",
+    "docs/operations/support-agreement.md",
+    "tests/test_ops_limits.py"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "honest_numbers": {
+    "code_proven": {
+      "arms": [
+        "capped admission under a slow runner + vendor 429 (the verdict follows occupancy, never the intake count)",
+        "vendor 429 ambiguous start (slot holds until evidence) vs definite 404 (capacity returns)",
+        "control-plane restart (occupancy survives; resolved by native_intent_ref)",
+        "unknown native start (parks draining; only a terminal probe frees)",
+        "concurrent operator commands (one logical command; the stale CTL-04 twin expires)",
+        "retention: pinned paused-active checkpoint survives the pass; active/investigation holds refuse pruning",
+        "out-of-scope private bundle request (404 indistinguishable from unknown)"
+      ],
+      "infrastructure": "disposable (SQLite databases and tmp-dir stores the drills build; zero network, zero lab containers)",
+      "suite": "tests/test_ops_limits.py"
+    },
+    "live_proven": {
+      "command_latency_under_contention_s": 9.684,
+      "concurrency": "observed_limit 3, peak_occupied 3 with REAL native jobs; over-cap verdict parked_execution_capacity; queue_wait max 5.206s measured from the durable lease row (the dispatch response was dropped)",
+      "delivery_economics_q39_11": {
+        "ci_runtime_lower_bound_s": 254.7,
+        "operator_wait_s_exact": 347.05,
+        "setup_effort_s_exact": 58.2,
+        "source": "evaluation/economics/accepted-task-ledger-v1.json (#330)"
+      },
+      "pause_cancel_percentiles_s": {
+        "cancel_under_slow_provider_p95": 0.0521,
+        "control_p95": 0.0288,
+        "n": 12,
+        "objective_s": 60.0
+      },
+      "restore_time_s": {
+        "measured": 0.177,
+        "scope": "the deployment's CURRENT store size \u2014 remeasure as it grows"
+      },
+      "reviewer_wip": {
+        "admission_bound": 3,
+        "reviewer_wip_bound": 5,
+        "unit": "concurrent reviewable WIP (a STATED POLICY FIELD)"
+      },
+      "v2_trace_recovery": "rung-1 sampled the EMPTY failure mode at +45s; rung-2's pause landed the USEFUL checkpoint; the resumed dispatch restored the EXACT checkpoint under the revision-2 brief; terminal ready_for_human with the closing review within the #325 reserve (source: qualification/records/supported-composition-v2-2026-09-25.json)"
+    },
+    "ops_event_control_plane_outage_2026_09_25": {
+      "class": "live observation (the real event; timings bounded, not invented)",
+      "degradation": "the in-flight work degraded gracefully: blocked classification, NO lost code, ZERO paid dispatches burned on the dead native",
+      "detection_to_safe_state_honesty": "NOT derivable from committed artifacts \u2014 recorded as unmeasured, never estimated",
+      "detection_to_safe_state_s": null,
+      "ops_observation": "gitlab.forcewake.me is NXDOMAIN (a Cloudflare zone record gap); the lab's canonical URL is the duckdns hostname",
+      "outage_window": "began ~10:30Z (TLS resets on the lab GitLab; the 9/9 drills' last live contact was their 10:20:04Z completion) \u2014 recovered ~11:25Z",
+      "recovery": "by OPERATOR ACTION (the human restored the home network) \u2014 intervention, not self-healing; the ~55-minute window is bounded by human response and is the worked example for ops.manual_intervention_minutes and the excluded-failure-domains clause (home network/NAT/DNS)"
+    },
+    "pending_human": [
+      "second-operator repetition of the recovery exercise (acceptance asks for a second operator; the drills here were driven by one author)",
+      "dumps-history cleanup maintainer approval \u2014 the plan exists at ~/forge-private/backups/2026-09-24/HISTORY-CLEANUP-PLAN.md (outside the repository) and is NOT executed"
+    ]
+  },
+  "image_digest": "sha256:33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+  "legacy": false,
+  "note": "Q39-15 (#334) \u2014 the operating-limits record for the supported profile. What is LIVE-proven: the 9/9 deployment-ops drills (10:20:04Z, real native jobs, limit 3, over-cap parks) and the #326 v2 trace (real recovery timings through pause/resume/rebind to a reviewed-ready terminal). What is CODE-proven: the operator read-model, the four ops.* measures as separate records, the capped-admission accounting and the negative drills (tests/test_ops_limits.py, disposable infrastructure, zero network). What is PENDING-HUMAN: the second-operator repetition of the recovery exercise, and the dumps-history cleanup maintainer approval (~/forge-private/backups/2026-09-24/HISTORY-CLEANUP-PLAN.md exists, NOT executed) \u2014 see honest_numbers.pending_human and docs/operations/support-agreement.md.",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-25",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-25",
+  "record_id": "gitlab-ce-v1-Q39-15-ops-limits-2026-09-25",
+  "release_version": "0.38.0",
+  "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@6df4020f8f1ff233d65082788a3632c0e4cd38d3 (forge[interactive]; immutable sha pinned as the project CI variable FORGE_LANE_REF; claude-code CLI 2.1.273; uv python 3.13); control plane = the working-tree alignment build carrying forge 0.38.0 (wheel sha256 37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd, built from the same tree) \u2014 observed in the lane job traces and the alignment receipts 2026-09-25",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker from localhost/forge:dev (the working-tree build)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "verification_contract": "one required job named smoke asserting six exact slugify cases + app rewired + legacy deleted on the CURRENT candidate sha (committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/); PLUS the v2 revision marker (__all__ = [\"slugify\"] in src/utils/text.py) proving the resumed executor consumed the approved revision-2 brief",
+  "wheel_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd"
+}

@@ -27,9 +27,14 @@ ingestion contract that closes it:
 - RATE-CARD IDENTITY: every row carries its rate-card id and cost basis
   (estimated vs provider-reported vs billing-reconciliation); a route or
   card change creates a NEW attribution segment — history never rewritten.
-- SPEND CAPS: the check before the next chargeable action reserves known
-  costs plus the lower bounds of unknown intervals (conservative
-  reservation — never zero, never under-stopped).
+- SPEND CAPS (Q39-06/#325): the check before the next chargeable action
+  keeps THREE quantities separated — known spend, the unknown intervals'
+  lower bound, and their worst-case reserved LIABILITY (the upper
+  envelope) — and the hard cap consults ``known + reserved_liability +
+  projection``. A lower bound can never bound spend from above (the P03
+  probe); an unknown interval with no finite upper bound BLOCKS the next
+  chargeable action until an explicit bounded policy ceiling is supplied
+  or the interval reconciles (releasing its envelope exactly once).
 - DUPLICATE CALL IDS across attempts never false-join (one identity
   counted once, the duplication surfaced).
 - THE DURABLE WRITE: ``persist_ingested_rows`` lands rows through the R23
@@ -41,12 +46,14 @@ ingestion contract that closes it:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -57,8 +64,10 @@ from forge.adaptive.delivery_measurement import (
     ledger_records_from_ingested_usage,
 )
 from forge.adaptive.usage_ingestion import (
+    ATTRIBUTION_REFUSED,
     COST_BASIS_ESTIMATED,
     COST_BASIS_PROVIDER_REPORTED,
+    IDENTITY_REJECTED,
     IngestedUsageRow,
     UsageIngestStore,
     attribution_segment,
@@ -69,7 +78,7 @@ from forge.adaptive.usage_ingestion import (
     rows_from_documents,
     spend_cap_check,
 )
-from forge.durable import FlowRun, UsageReceipt
+from forge.durable import FlowRun, UsageIngestionConflict, UsageReceipt
 from forge.harness_entry import (
     USAGE_INGEST_SOURCE,
     emit_candidate_meta,
@@ -621,41 +630,156 @@ def test_estimated_vs_provider_reported_vs_billing_reconciliation_distinguished(
 
 
 # ----------------------------------------------------------------------
-# The spend-cap check — conservative reservation
+# The spend-cap check — three separated quantities, an UPPER envelope
+# (Q39-06/#325)
 # ----------------------------------------------------------------------
 
 
-def test_spend_cap_reserves_lower_bounds_of_unknown_intervals():
+def _cap_row(receipt_id: str, *, cost=None, lower=0.0, upper=None, final=True, basis=""):
+    return IngestedUsageRow(
+        work_id="w",
+        attempt_id="a1",
+        receipt_id=receipt_id,
+        source="lane/.forge/usage.json",
+        route=ProviderRoute("claude-sdk-lane", "m"),
+        cost_usd=cost,
+        cost_basis=basis,
+        cost_lower_bound_usd=lower,
+        cost_upper_bound_usd=upper,
+        final=final,
+    )
+
+
+def test_the_p03_counterexample_refuses_a_lower_bound_reservation():
+    """P03: cap 10, known 8, unknown interval with lower bound 0.5,
+    projection 1. The old helper reserved the LOWER bound and "allowed"
+    9.5 — while the interval may settle at 3 for an actual 12. A lower
+    bound cannot bound spend from above, so without a finite envelope
+    the check BLOCKS (requires_bounded_policy), and WITH a bounded
+    policy covering the honest worst case the hard cap REFUSES."""
     rows = [
-        IngestedUsageRow(
-            work_id="w",
-            attempt_id="a1",
-            receipt_id="known",
-            source="lane/.forge/usage.json",
-            route=ProviderRoute("claude-sdk-lane", "m"),
-            cost_usd=0.50,
-            cost_basis=COST_BASIS_PROVIDER_REPORTED,
-        ),
-        IngestedUsageRow(
-            work_id="w",
-            attempt_id="a2",
-            receipt_id="unknown-interval",
-            source="lane/.forge/usage.json",
-            route=ProviderRoute("claude-sdk-lane", "m"),
-            cost_usd=None,
-            cost_lower_bound_usd=0.25,
-        ),
+        _cap_row("known", cost=8.0, basis=COST_BASIS_PROVIDER_REPORTED),
+        _cap_row("unknown", cost=None, lower=0.5),
     ]
-    # 0.50 known + 0.25 reserved for the unknown interval = 0.75 reserved
-    blocked = spend_cap_check(rows, cap_usd=0.80, projection_usd=0.10)
-    assert blocked["allowed"] is False
-    assert blocked["reserved_usd"] == pytest.approx(0.75)
-    assert blocked["unknown_intervals"] == 1
-    assert blocked["unknown_reserved_lower_bound_usd"] == pytest.approx(0.25)
-    fits = spend_cap_check(rows, cap_usd=0.80, projection_usd=0.05)
-    assert fits["allowed"] is True
-    assert fits["headroom_usd"] == pytest.approx(0.05)
-    assert any("never zero" in note for note in fits["notes"])
+    # no finite upper bound exists -> the next chargeable action blocks
+    unbounded = spend_cap_check(rows, cap_usd=10.0, projection_usd=1.0)
+    assert unbounded["allowed"] is False
+    assert unbounded["requires_bounded_policy"] is True
+    assert unbounded["unbounded_intervals"] == 1
+    # the explicit bounded policy: the interval's honest worst case is 3
+    bounded = spend_cap_check(
+        rows, cap_usd=10.0, projection_usd=1.0, unknown_interval_ceiling_usd=3.0
+    )
+    # 8 known + 3 reserved liability + 1 projection = 12 > 10 -> REFUSED
+    assert bounded["allowed"] is False
+    assert bounded["requires_bounded_policy"] is False
+    assert bounded["reserved_liability"] == pytest.approx(3.0)
+    assert bounded["known_spend"] == pytest.approx(8.0)
+    # and a bounded policy whose envelope genuinely fits may allow
+    fits = spend_cap_check(rows, cap_usd=10.0, projection_usd=1.0, unknown_interval_ceiling_usd=0.5)
+    assert fits["allowed"] is True  # 8 + 0.5 + 1 = 9.5 <= 10
+
+
+def test_three_quantities_stay_separated_in_the_check():
+    rows = [
+        _cap_row("known-reported", cost=0.50, basis=COST_BASIS_PROVIDER_REPORTED),
+        _cap_row("known-estimate", cost=0.10, basis=COST_BASIS_ESTIMATED),
+        _cap_row("own-envelope", cost=None, lower=0.25, upper=0.90),
+        _cap_row("policy-envelope", cost=None, lower=0.05),
+    ]
+    check = spend_cap_check(
+        rows, cap_usd=5.0, projection_usd=0.10, unknown_interval_ceiling_usd=0.40
+    )
+    assert check["known_spend"] == pytest.approx(0.60)
+    assert check["unknown_lower_bound"] == pytest.approx(0.30)
+    assert check["reserved_liability"] == pytest.approx(1.30)  # 0.90 own + 0.40 policy
+    assert check["unknown_intervals"] == 2
+    assert check["reserved_usd"] == pytest.approx(1.90)
+    assert check["headroom_usd"] == pytest.approx(5.0 - 1.90)
+    assert check["allowed"] is True
+    # the three quantities are DIFFERENT numbers, never folded into one
+    assert (
+        len(
+            {
+                round(check["known_spend"], 6),
+                round(check["unknown_lower_bound"], 6),
+                round(check["reserved_liability"], 6),
+            }
+        )
+        == 3
+    )
+    assert any("never reserved as zero" in note for note in check["notes"])
+
+
+def test_no_finite_bound_blocks_the_next_chargeable_action():
+    """An unknown interval with neither its own upper bound nor a policy
+    ceiling cannot be bounded from above — the explicit bounded-policy
+    arm: block, or supply the policy field."""
+    rows = [_cap_row("unknown", cost=None, lower=0.25)]
+    check = spend_cap_check(rows, cap_usd=100.0, projection_usd=0.0)
+    assert check["allowed"] is False
+    assert check["requires_bounded_policy"] is True
+    assert check["reserved_liability"] == pytest.approx(0.0)
+    assert check["unknown_lower_bound"] == pytest.approx(0.25)  # still reported
+    assert any("bounded policy" in note for note in check["notes"])
+    # the row's OWN finite bound satisfies the policy arm on its own
+    own = spend_cap_check(
+        [_cap_row("unknown", cost=None, lower=0.25, upper=2.0)], cap_usd=3.0, projection_usd=0.5
+    )
+    assert own["allowed"] is True  # 0 + 2.0 + 0.5 <= 3
+    assert own["requires_bounded_policy"] is False
+
+
+def test_reconciliation_releases_a_reserve_exactly_once():
+    """A partial with an unknown envelope holds its worst-case reserve;
+    the final reconciles it to an exact cost (the reserve is RELEASED);
+    re-delivering the same final is a replay — released ONCE, never
+    twice, and the exact cost joins the known spend."""
+    store = UsageIngestStore()
+    ingest_usage_artifact(
+        store,
+        lane_usage_artifact(total_cost_usd=None, cost_upper_bound_usd=0.50, attempt_id="w/a1"),
+        work_id="w",
+        attempt_id="w/a1",
+        source="lane/.forge/usage.json",
+        final=False,
+    )
+    held = spend_cap_check(store.rows(), cap_usd=10.0, unknown_interval_ceiling_usd=1.0)
+    assert held["requires_bounded_policy"] is False
+    assert held["reserved_liability"] == pytest.approx(0.50)  # its own envelope
+    assert held["unknown_intervals"] == 1
+
+    # the final state reconciles the partial: cost KNOWN (0.1498992),
+    # the envelope released
+    final = ingest_usage_artifact(
+        store,
+        lane_usage_artifact(attempt_id="w/a1"),
+        work_id="w",
+        attempt_id="w/a1",
+        source="lane/.forge/usage.json",
+        final=True,
+    )
+    assert len(final.reconciled) == 1
+    released = spend_cap_check(store.rows(), cap_usd=10.0, unknown_interval_ceiling_usd=1.0)
+    assert released["unknown_intervals"] == 0
+    assert released["reserved_liability"] == pytest.approx(0.0)
+    assert released["known_spend"] == pytest.approx(0.1498992)
+
+    # a replayed identical final writes NOTHING — the release happened
+    # exactly once (a second "release" would double-count headroom)
+    replay = ingest_usage_artifact(
+        store,
+        lane_usage_artifact(attempt_id="w/a1"),
+        work_id="w",
+        attempt_id="w/a1",
+        source="lane/.forge/usage.json",
+        final=True,
+    )
+    assert not replay.wrote_something_new
+    once = spend_cap_check(store.rows(), cap_usd=10.0, unknown_interval_ceiling_usd=1.0)
+    assert once["known_spend"] == released["known_spend"]
+    assert once["reserved_liability"] == released["reserved_liability"]
+    assert once["unknown_intervals"] == 0
 
 
 # ----------------------------------------------------------------------
@@ -687,13 +811,13 @@ async def test_persist_ingested_rows_is_idempotent_at_the_database(db):
     )
     rows = store.rows()
     async with db() as session:
-        created, replayed = await persist_ingested_rows(session, rows)
+        outcome = await persist_ingested_rows(session, rows)
         await session.commit()
-    assert (created, replayed) == (1, 0)
+    assert (outcome.created, outcome.replayed) == (1, 0)
     async with db() as session:
-        created, replayed = await persist_ingested_rows(session, rows)
+        outcome = await persist_ingested_rows(session, rows)
         await session.commit()
-    assert (created, replayed) == (0, 1)
+    assert (outcome.created, outcome.replayed) == (0, 1)
     async with db() as session:
         receipts = (await session.execute(select(UsageReceipt))).scalars().all()
     assert len(receipts) == 1
@@ -702,8 +826,14 @@ async def test_persist_ingested_rows_is_idempotent_at_the_database(db):
     assert receipt.attempt_id == "386:2"
     assert receipt.input_tokens == 19163 and receipt.cached_input_tokens == 119936
     assert receipt.completeness == "aggregate"
-    assert receipt.raw["cost_basis"] == COST_BASIS_PROVIDER_REPORTED
+    assert receipt.source_namespace == "lane/.forge/usage.json"
+    assert receipt.final is True
+    assert receipt.cost_usd == pytest.approx(0.1498992)
+    assert receipt.cost_basis == COST_BASIS_PROVIDER_REPORTED
+    assert receipt.artifact_digest
     assert receipt.raw["final"] is True
+    # the canonical identity digest — stable across replays
+    assert receipt.identity_digest.startswith("identity:")
 
 
 async def test_persisted_rows_round_trip_into_ingested_rows(db):
@@ -809,3 +939,402 @@ def test_envelope_marks_a_partial_artifact_not_final(tmp_path: Path):
         store, lane_usage_artifact(input_tokens=10), work_id=RUN_ID, attempt_id="386:2", final=False
     )
     assert result.created[0].completeness == "partial"
+
+
+# ----------------------------------------------------------------------
+# Q39-05 (#324) — ONE durable identity and reconciliation contract
+# ----------------------------------------------------------------------
+
+
+def _ingested(**overrides):
+    """One ingested row built directly (the durable path's unit)."""
+    base = dict(
+        work_id=RUN_ID,
+        attempt_id="386:2",
+        receipt_id="receipt-1",
+        source="lane/.forge/usage.json",
+        route=ProviderRoute("claude-sdk-lane", "glm-5.3-flash"),
+        counters=normalize_counters(
+            {"input_tokens": 1000, "output_tokens": 100, "driver": "claude-sdk-lane"}
+        ),
+        cost_usd=0.20,
+        cost_basis=COST_BASIS_PROVIDER_REPORTED,
+    )
+    base.update(overrides)
+    return IngestedUsageRow(**base)
+
+
+async def test_the_p02_shape_partial_reconciles_to_final_at_the_database(db):
+    """P02's exact counterexample: partial 0.20/final=False stored, then
+    the 1.20 final arrives — ONE logical receipt at 1.20, final. The old
+    ``ON CONFLICT DO NOTHING`` seam left the partial standing FOREVER."""
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [_ingested(final=False, cost_usd=0.20)])
+        await session.commit()
+    assert outcome.created == 1
+    async with db() as session:
+        outcome = await persist_ingested_rows(
+            session,
+            [
+                _ingested(
+                    final=True,
+                    cost_usd=1.20,
+                    counters=normalize_counters(
+                        {"input_tokens": 19163, "output_tokens": 2463, "driver": "claude-sdk-lane"}
+                    ),
+                )
+            ],
+        )
+        await session.commit()
+    assert outcome.reconciled == 1
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert len(receipts) == 1  # ONE logical receipt — never summed
+    assert receipts[0].cost_usd == pytest.approx(1.20)
+    assert receipts[0].final is True
+    assert receipts[0].input_tokens == 19163
+
+
+async def test_a_late_partial_never_downgrades_a_final(db):
+    async with db() as session:
+        await persist_ingested_rows(session, [_ingested(final=True, cost_usd=1.20)])
+        await session.commit()
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [_ingested(final=False, cost_usd=0.20)])
+        await session.commit()
+    # not reconciled, not created — the final stands untouched
+    assert outcome.reconciled == 0 and outcome.created == 0
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert receipts[0].final is True and receipts[0].cost_usd == pytest.approx(1.20)
+
+
+async def test_a_repeated_identical_final_is_a_no_op(db):
+    async with db() as session:
+        await persist_ingested_rows(session, [_ingested(final=True)])
+        await session.commit()
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [_ingested(final=True)])
+        await session.commit()
+    assert (outcome.created, outcome.reconciled, outcome.replayed) == (0, 0, 1)
+    async with db() as session:
+        conflicts = (await session.execute(select(UsageIngestionConflict))).scalars().all()
+    assert conflicts == []
+
+
+async def test_a_conflicting_final_is_recorded_never_merged_or_dropped(db):
+    async with db() as session:
+        await persist_ingested_rows(session, [_ingested(final=True, cost_usd=1.20)])
+        await session.commit()
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [_ingested(final=True, cost_usd=0.99)])
+        await session.commit()
+    assert outcome.conflicts == 1
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+        conflicts = (await session.execute(select(UsageIngestionConflict))).scalars().all()
+    # the standing 1.20 final never moved
+    assert receipts[0].cost_usd == pytest.approx(1.20)
+    assert len(conflicts) == 1
+    assert conflicts[0].kind == "conflicting-final"
+    assert conflicts[0].detail["standing"]["cost_usd"] == pytest.approx(1.20)
+    assert conflicts[0].detail["delivered"]["cost_usd"] == pytest.approx(0.99)
+    # replaying the SAME conflicting delivery records ONE diagnostic, not N
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [_ingested(final=True, cost_usd=0.99)])
+        await session.commit()
+    assert outcome.conflicts == 1
+    async with db() as session:
+        conflicts = (await session.execute(select(UsageIngestionConflict))).scalars().all()
+    assert len(conflicts) == 1
+
+
+async def test_two_source_namespaces_same_label_stay_two_rows(db):
+    async with db() as session:
+        outcome = await persist_ingested_rows(
+            session,
+            [
+                _ingested(source="lane/.forge/usage.json"),
+                _ingested(source="sdk-receipt"),
+            ],
+        )
+        await session.commit()
+    assert outcome.created == 2  # the old 3-column identity collapsed these
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert sorted(receipt.source_namespace for receipt in receipts) == [
+        "lane/.forge/usage.json",
+        "sdk-receipt",
+    ]
+
+
+async def test_the_attribution_refused_arm_writes_no_row_to_the_claimed_work(db):
+    """The payload claims work-B; the trusted transport is work-A: no B
+    row anywhere, the refusal preserved as a durable diagnostic."""
+    store = UsageIngestStore()
+    result = ingest_usage_artifact(
+        store,
+        lane_usage_artifact(work_id="b" * 32),
+        work_id=RUN_ID,
+        source="lane/.forge/usage.json",
+    )
+    assert result.created == () and len(result.refused) == 1
+    refusal = result.refused[0]
+    assert refusal.kind == ATTRIBUTION_REFUSED
+    assert refusal.trusted_work_id == RUN_ID and refusal.claimed_work_id == "b" * 32
+    assert store.rows() == []  # nothing ingested in memory either
+
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [], refusals=result.refused)
+        await session.commit()
+    assert outcome.refusals == 1
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+        conflicts = (await session.execute(select(UsageIngestionConflict))).scalars().all()
+    assert receipts == []  # no row to work-B AND no row to work-A
+    assert len(conflicts) == 1
+    assert conflicts[0].kind == ATTRIBUTION_REFUSED
+    assert conflicts[0].run_id == RUN_ID  # keyed by the TRUSTED work
+    assert conflicts[0].detail["claimed_work_id"] == "b" * 32
+
+
+def test_a_payload_attempt_conflicting_with_the_trusted_attempt_is_refused():
+    store = UsageIngestStore()
+    result = ingest_usage_artifact(
+        store,
+        lane_usage_artifact(attempt_id="999:9"),
+        work_id=RUN_ID,
+        attempt_id="386:2",
+        source="lane/.forge/usage.json",
+    )
+    assert result.created == () and len(result.refused) == 1
+    assert result.refused[0].claimed_attempt_id == "999:9"
+    assert result.refused[0].attempt_id == "386:2"
+    # and without a trusted attempt claim the payload's own stands
+    loose = ingest_usage_artifact(store, lane_usage_artifact(attempt_id="999:9"), work_id=RUN_ID)
+    assert len(loose.created) == 1 and loose.created[0].attempt_id == "999:9"
+
+
+async def test_overlength_identities_hash_never_silently_truncate(db):
+    """Two receipt ids sharing their first 64 characters stay DISTINCT
+    (the old ``[:64]`` truncation collapsed them); the full originals
+    ride ``raw``; a work id wider than the run id column is REJECTED."""
+    shared = "r" * 64
+    first = _ingested(receipt_id=shared + "-a")
+    second = _ingested(receipt_id=shared + "-b")
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, [first, second])
+        await session.commit()
+    assert outcome.created == 2
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert len(receipts) == 2
+    assert len({receipt.receipt_id for receipt in receipts}) == 2
+    for receipt in receipts:
+        assert receipt.receipt_id.startswith("sha256:")
+    assert sorted(receipt.raw["identity_overlength"]["receipt_id"] for receipt in receipts) == [
+        shared + "-a",
+        shared + "-b",
+    ]
+
+    # an overlength attempt id hashes the same documented way
+    async with db() as session:
+        outcome = await persist_ingested_rows(
+            session, [_ingested(receipt_id="fitting", attempt_id="a" * 120)]
+        )
+        await session.commit()
+    assert outcome.created == 1
+
+    # a work id the run-id column cannot hold names NO run row — rejected
+    async with db() as session:
+        outcome = await persist_ingested_rows(
+            session, [_ingested(work_id="w" * 40, receipt_id="wide-work")]
+        )
+        await session.commit()
+    assert outcome.refusals == 1 and outcome.created == 0
+    async with db() as session:
+        conflicts = (await session.execute(select(UsageIngestionConflict))).scalars().all()
+    assert conflicts[-1].kind == IDENTITY_REJECTED
+    assert conflicts[-1].detail["full_work_id"] == "w" * 40
+
+
+async def test_array_receipts_without_ids_never_collapse(db):
+    """Missing per-call IDs key on POSITION — an array of N id-less calls
+    is N distinct receipts, never one aggregate key."""
+    store = UsageIngestStore()
+    result = ingest_usage_artifact(
+        store,
+        {
+            "provider": "claude-sdk-lane",
+            "receipts": [
+                {"input_tokens": 10, "output_tokens": 1, "total_cost_usd": 0.01},
+                {"input_tokens": 20, "output_tokens": 2, "total_cost_usd": 0.02},
+                {"input_tokens": 30, "output_tokens": 3, "total_cost_usd": 0.03},
+            ],
+        },
+        work_id=RUN_ID,
+        attempt_id="job800",
+        source="sdk-receipt",
+    )
+    assert len(result.created) == 3
+    assert len({row.receipt_id for row in result.created}) == 3
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, store.rows())
+        await session.commit()
+    assert outcome.created == 3
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert len(receipts) == 3
+
+
+async def test_reordered_and_repeated_delivery_yields_the_same_ledger(db):
+    """AC-05: reorder, repeat and resume — the final ledger is identical."""
+    final_rows = [
+        _ingested(receipt_id="a", cost_usd=0.10),
+        _ingested(receipt_id="b", cost_usd=0.20),
+        _ingested(receipt_id="c", final=False, cost_usd=0.05),
+    ]
+    async with db() as session:
+        await persist_ingested_rows(session, list(reversed(final_rows)))
+        await session.commit()
+    async with db() as session:
+        # the partial c reconciles late; everything re-delivered once
+        await persist_ingested_rows(session, final_rows)
+        await session.commit()
+    async with db() as session:
+        await persist_ingested_rows(session, [_ingested(receipt_id="c", final=True, cost_usd=0.50)])
+        await session.commit()
+
+    first = await _ledger_snapshot(db)
+
+    # a full replay of everything, reversed again — byte-identical ledger
+    async with db() as session:
+        await persist_ingested_rows(
+            session,
+            [
+                _ingested(receipt_id="c", final=True, cost_usd=0.50),
+                _ingested(receipt_id="b", cost_usd=0.20),
+                _ingested(receipt_id="a", cost_usd=0.10),
+            ],
+        )
+        await session.commit()
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    by_receipt = {receipt.receipt_id: receipt for receipt in receipts}
+    assert len(receipts) == 3
+    assert by_receipt["a"].cost_usd == pytest.approx(0.10)
+    assert by_receipt["b"].cost_usd == pytest.approx(0.20)
+    assert by_receipt["c"].cost_usd == pytest.approx(0.50) and by_receipt["c"].final is True
+    assert first == {  # the replay moved nothing
+        receipt.receipt_id: (receipt.cost_usd, receipt.final) for receipt in receipts
+    }
+
+
+async def _ledger_snapshot(db):
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    return {receipt.receipt_id: (receipt.cost_usd, receipt.final) for receipt in receipts}
+
+
+async def test_two_independent_sessions_partial_and_final_concurrently(tmp_path):
+    """Two ENGINES over one sqlite FILE (real independent sessions, a
+    barrier at the start): one side delivers the partial, the other the
+    final — the final ledger holds ONE final receipt whichever write the
+    arbiter serialized first."""
+    url = f"sqlite+aiosqlite:///{tmp_path}/two-sessions.db"
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory_a = async_sessionmaker(engine, expire_on_commit=False)
+    factory_b = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory_a() as session:
+        session.add(FlowRun(id=RUN_ID, project_id=1))
+        await session.commit()
+
+    barrier = asyncio.Barrier(2)
+
+    async def deliver(factory, row):
+        async with factory() as session:
+            await barrier.wait()  # both sessions hold open transactions
+            outcome = await persist_ingested_rows(session, [row])
+            await session.commit()
+            return outcome
+
+    partial = _ingested(final=False, cost_usd=0.20)
+    final = _ingested(final=True, cost_usd=1.20)
+    outcomes = await asyncio.gather(deliver(factory_a, partial), deliver(factory_b, final))
+    # whichever write the arbiter serialized first, exactly ONE logical
+    # receipt was landed or reconciled by the pair — partial-then-final
+    # (created + reconciled = 2) or final-first (created = 1, the late
+    # partial classifies as a replay against the standing final).
+    landed = sum(outcome.created + outcome.reconciled for outcome in outcomes)
+    assert landed in (1, 2)
+
+    async with factory_a() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    assert len(receipts) == 1
+    assert receipts[0].final is True and receipts[0].cost_usd == pytest.approx(1.20)
+
+    # a resumed delivery after "process death" reconciles whatever stood
+    async with factory_b() as session:
+        outcome = await persist_ingested_rows(session, [final])
+        await session.commit()
+    assert outcome.replayed == 1
+    await engine.dispose()
+
+
+class TestQ3905RealPostgres:
+    """The PG-gated isolation variants (the podman disposable-DB pattern —
+    same skipif convention as the checkpoint gate): REAL row-level
+    isolation, two independent sessions, a barrier between them."""
+
+    @pytest.mark.skipif(
+        not os.environ.get("FORGE_PG_TEST_URL"),
+        reason=(
+            "FORGE_PG_TEST_URL not set — the real-PostgreSQL isolation proofs "
+            "run only against a disposable real Postgres"
+        ),
+    )
+    async def test_concurrent_partial_and_final_reconcile_under_real_isolation(self):
+        engine = create_async_engine(os.environ["FORGE_PG_TEST_URL"])
+        try:
+            from forge.durable.models import CredentialRedemption
+
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(delete(UsageReceipt))
+                await conn.execute(delete(UsageIngestionConflict))
+                # the shared disposable database may hold ledger rows for
+                # this run id from a sibling PG-gated proof — clear them
+                # before the run row itself (the FK would refuse).
+                await conn.execute(
+                    delete(CredentialRedemption).where(CredentialRedemption.work_id == RUN_ID)
+                )
+                await conn.execute(delete(FlowRun).where(FlowRun.id == RUN_ID))
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            # the run row through the ORM: PG carries no server defaults
+            # for status/created_at, so a raw INSERT would violate NOT NULL
+            async with factory() as session:
+                session.add(FlowRun(id=RUN_ID, project_id=1))
+                await session.commit()
+            barrier = asyncio.Barrier(2)
+
+            async def deliver(row):
+                async with factory() as session:
+                    await barrier.wait()
+                    outcome = await persist_ingested_rows(session, [row])
+                    await session.commit()
+                    return outcome
+
+            outcomes = await asyncio.gather(
+                deliver(_ingested(final=False, cost_usd=0.20)),
+                deliver(_ingested(final=True, cost_usd=1.20)),
+            )
+            async with factory() as session:
+                receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+            assert len(receipts) == 1  # one logical receipt
+            assert receipts[0].final is True
+            assert receipts[0].cost_usd == pytest.approx(1.20)
+            assert sum(o.created + o.reconciled for o in outcomes) in (1, 2)
+        finally:
+            await engine.dispose()

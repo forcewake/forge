@@ -86,14 +86,36 @@ SUPPORTED_PROFILE_STAMP = "forge.supported.profile/1"
 #: Where the frozen manifest is committed.
 MANIFEST_PATH = ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1.json"
 
+#: The v0.37-composition archive (Q39-07/#326): the manifest the #307
+#: freeze produced stays historical, byte-identical, under this name —
+#: the CURRENT manifest is the v2 composition. Never a history rewrite.
+ARCHIVED_MANIFEST_PATH = (
+    ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1@v0.37-composition.json"
+)
+
 #: Every receipt the freeze binds, by role (repo-relative).
 PROMOTION_RECEIPT = "docs/releases/evidence/v0.37.0/promotion.json"
-ALIGNMENT_RECEIPT = "docs/evaluation/2026-09-25-useful-wip-resume/alignment-receipts.json"
-LIVE_TRACE_RECEIPT = (
-    "docs/evaluation/2026-09-25-useful-wip-resume/useful-wip-resume-2026-09-25.json"
-)
-LIVE_RUN_RECEIPT = "docs/evaluation/2026-09-25-useful-wip-resume/live-run-evidence.json"
-INVENTORY_RECEIPT = "qualification/inventory-2026-09-25.json"
+#: The v2 receipts (Q39-07/#326 — the executed-lab trace on the NEW
+#: composition): the alignment + live bundle + record live in the v2
+#: evaluation directory; the inventory is the post-alignment v2 snapshot.
+#: The #306 receipts stay historical, referenced by the archived manifest.
+ALIGNMENT_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json"
+LIVE_TRACE_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
+LIVE_RUN_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/live-run-evidence.json"
+INVENTORY_RECEIPT = "qualification/inventory-2026-09-25-v2.json"
+#: The newest promotion record (v0.38.0) — bound as the PENDING promotion:
+#: it still predates the qualified working-tree composition; the next
+#: promotion that carries the tree is the one that may retire this
+#: manifest's pending note.
+LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.38.0/promotion.json"
+#: The uv build of the working tree — the QUALIFICATION composition's
+#: wheel (the fresh cold-install target). Built by ``uv build`` from the
+#: exact tree the alignment image carried; the freeze binds its sha256
+#: (the local dist/ bytes when present, else the COMMITTED receipt — the
+#: closure pattern: CI has no dist/, and the committed copy IS the
+#: receipt).
+WORKING_TREE_WHEEL_GLOB = "dist/forge-{version}-py3-none-any.whl"
+WHEEL_RECEIPT_PATH = "qualification/profiles/receipts/working-tree-wheel-v2.json"
 
 
 #: The closure receipt: the locally built artifact when present, else the
@@ -392,6 +414,7 @@ class CaptureInputs:
     """Everything the capture reads (all fakeable in tests)."""
 
     promotion: Mapping[str, Any]
+    latest_promotion: Mapping[str, Any]
     alignment: Mapping[str, Any]
     trace: Mapping[str, Any]
     live_run: Mapping[str, Any]
@@ -400,6 +423,7 @@ class CaptureInputs:
     record: Mapping[str, Any]
     template_bytes: str
     working_tree_template_sha256: str
+    working_tree_wheel: Mapping[str, Any]
     schema_head: str
     schema_predecessor: str
     oracle_cases: tuple[tuple[str, str], ...]
@@ -412,21 +436,29 @@ class CaptureInputs:
     @classmethod
     def from_root(cls, root: Path, probe: TemplateReceiptProbe) -> CaptureInputs:
         promotion = _load_json(root, PROMOTION_RECEIPT)
+        latest_promotion = _load_json(root, LATEST_PROMOTION_RECEIPT)
         alignment = _load_json(root, ALIGNMENT_RECEIPT)
         trace = _load_json(root, LIVE_TRACE_RECEIPT)
         live_run = _load_json(root, LIVE_RUN_RECEIPT)
         inventory = _load_json(root, INVENTORY_RECEIPT)
         closure = _load_json(root, _first_existing(root, CLOSURE_RECEIPT_CANDIDATES))
         record = _load_json(root, PROFILE_RECORD_RECEIPT)
-        # The template bytes: recovered from the committed receipt and
-        # cross-checked against the traced sha below — the receipt IS the
-        # bytes' provenance, the trace is their fingerprint.
-        generated = probe.fetch_installed_ci_yaml(TEMPLATE_RECEIPT_PROJECT_ID)
+        # The template bytes: recovered from the committed receipt (the v2
+        # disposable project the live trace itself created — its id rides
+        # the evidence bundle) and cross-checked against the traced sha
+        # below — the receipt IS the bytes' provenance, the trace is their
+        # fingerprint.
+        project_id = int(
+            (live_run.get("phases", {}).get("setup", {}).get("project", {}) or {}).get("id")
+            or TEMPLATE_RECEIPT_PROJECT_ID
+        )
+        generated = probe.fetch_installed_ci_yaml(project_id)
         template_bytes = recover_template_bytes(generated)
         head, predecessor = repo_schema_heads(root)
         cases, shapes = _load_frozen_task()
         return cls(
             promotion=promotion,
+            latest_promotion=latest_promotion,
             alignment=alignment,
             trace=trace,
             live_run=live_run,
@@ -435,6 +467,7 @@ class CaptureInputs:
             record=record,
             template_bytes=template_bytes,
             working_tree_template_sha256=_sha256_bytes((root / LANE_TEMPLATE_PATH).read_bytes()),
+            working_tree_wheel=_working_tree_wheel(root),
             schema_head=head,
             schema_predecessor=predecessor,
             oracle_cases=cases,
@@ -444,6 +477,55 @@ class CaptureInputs:
             composition_row=_composition_row(),
             frozen_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
+
+
+def _working_tree_wheel(root: Path) -> dict[str, Any]:
+    """The uv build of the working tree — the QUALIFICATION composition.
+
+    Fail-closed: no built wheel AND no committed wheel receipt means the
+    freeze cannot bind the fresh cold-install target. ``uv build`` first —
+    the freeze binds receipts, never guesses. (The closure pattern: the
+    local ``dist/`` bytes when present, else the COMMITTED receipt — CI
+    has no dist/, and the committed copy IS the receipt for the frozen
+    composition.)
+    """
+    version = _repo_version(root)
+    name = f"forge-{version}-py3-none-any.whl"
+    local = root / "dist" / name
+    if local.is_file():
+        return {
+            "name": name,
+            "path": f"dist/{name}",
+            "sha256": _sha256_bytes(local.read_bytes()),
+            "source": "local-uv-build",
+            "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
+        }
+    receipt = root / WHEEL_RECEIPT_PATH
+    if receipt.is_file():
+        document = json.loads(receipt.read_text(encoding="utf-8"))
+        # the sha must parse hex64 (fail-closed on a corrupted receipt)
+        _require_hex64(
+            document.get("sha256"), "working-tree wheel receipt sha256", WHEEL_RECEIPT_PATH
+        )
+        if str(document.get("name", "")) != name:
+            raise FreezeRefused(
+                f"{WHEEL_RECEIPT_PATH} pins {document.get('name')!r} but the tree's "
+                f"version is {version} — the wheel receipt and the tree disagree"
+            )
+        return dict(document)
+    raise FreezeRefused(
+        f"neither dist/{name} nor {WHEEL_RECEIPT_PATH} exists — run `uv build` first: "
+        "the fresh cold-install target is the WORKING-TREE build (the qualification "
+        "composition), and the freeze binds its receipt"
+    )
+
+
+def _repo_version(root: Path) -> str:
+    init = root / "src" / "forge" / "__init__.py"
+    match = re.search(r"__version__\s*=\s*[\"']([^\"']+)[\"']", init.read_text(encoding="utf-8"))
+    if match is None:
+        raise FreezeRefused(f"no __version__ in {init}")
+    return match.group(1)
 
 
 def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
@@ -471,12 +553,21 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             "composition cannot be bound"
         )
     verify_obs = inputs.alignment.get("observations", {})
+    # The POST-ALIGNMENT facts: the receipts' plan-time observations read
+    # the lab BEFORE the migration ran (the deployed head there is the
+    # PRE-alignment value); the last run's own VERIFY step carries what
+    # the aligned deployment reports. Freeze THAT, falling back to the
+    # plan observations only when no verify step exists.
+    post = post_alignment_observations(inputs.alignment)
+    reported_version = post.get("reported_version") or str(verify_obs.get("repo_version", ""))
+    deployed_head = (
+        post.get("deployed_schema_head") or str(verify_obs.get("deployed_schema_head", "")) or "027"
+    )
     lab_image_digest = _require_hex64(
         inventory_stage(inputs.inventory, "control-plane", {}).get("image", {}).get("image_digest"),
         "executed_lab.image_digest",
         INVENTORY_RECEIPT,
     )
-    deployed_head = str(verify_obs.get("deployed_schema_head", "")) or "027"
 
     # -- the template bytes: the receipt must reproduce the traced sha ---
     template_sha = _sha256_bytes(inputs.template_bytes.encode("utf-8"))
@@ -500,6 +591,10 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
         raise FreezeRefused(
             f"{LIVE_TRACE_RECEIPT}#task.lane_ref is not a 40-hex git sha ({lane_ref!r})"
         )
+    template_project_id = int(
+        (inputs.live_run.get("phases", {}).get("setup", {}).get("project", {}) or {}).get("id")
+        or TEMPLATE_RECEIPT_PROJECT_ID
+    )
     closure_forge = inputs.closure.get("forge", {})
     closure_digest = _require_hex64(
         inputs.closure.get("closure_digest"), "closure_digest", CLOSURE_RECEIPT_CANDIDATES[0]
@@ -561,12 +656,14 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
         "profile": "supported-gitlab-ce-v1",
         "frozen_at": inputs.frozen_at,
         "basis": {
-            "issue": "forge#307 (external review 59ba869 §R38-06)",
+            "issue": "forge#326 (external review 6df4020 §Q39-07)",
             "defect": (
-                "the same version string 0.37.0 identified two compositions: the "
-                "promotion binds source 1ca2656… while the live trace ran the working "
-                "tree and lane git sha 59ba869… — this manifest binds BOTH identities "
-                "explicitly instead of one ambiguous version"
+                "version equality never substitutes for composition equality: the v0.37 "
+                "manifest's live pass ran one composition while installs reproduced "
+                "another — this v2 freeze binds ONLY the exact composition that "
+                "completed the end-to-end trace (the alignment image's working-tree "
+                "build + the pushed lane sha + the uv wheel of the same tree), with "
+                "the v0.37 world archived, never rewritten"
             ),
         },
         "control_plane": {
@@ -582,13 +679,48 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 ),
                 "receipt": PROMOTION_RECEIPT,
             },
+            "latest_promotion": {
+                "release_version": _require_semver(
+                    inputs.latest_promotion.get("version"),
+                    "latest_promotion.version",
+                    LATEST_PROMOTION_RECEIPT,
+                ),
+                "source_sha": _require_gitsha(
+                    inputs.latest_promotion.get("head_sha"),
+                    "latest_promotion.head_sha",
+                    LATEST_PROMOTION_RECEIPT,
+                ),
+                "image_digest": f"sha256:{_require_hex64(inputs.latest_promotion.get('image_digest'), 'latest_promotion.image_digest', LATEST_PROMOTION_RECEIPT)}",
+                "wheel_sha256": _require_hex64(
+                    inputs.latest_promotion.get("wheel_sha256"),
+                    "latest_promotion.wheel_sha256",
+                    LATEST_PROMOTION_RECEIPT,
+                ),
+                "wheel_url": str(inputs.latest_promotion.get("wheel_url", "")),
+                "status": (
+                    "promoted, STILL NOT the qualified composition — v0.38.0 predates "
+                    "the working tree this manifest qualifies; the pending promotion "
+                    "is the NEXT release built from this exact tree"
+                ),
+                "receipt": LATEST_PROMOTION_RECEIPT,
+            },
             "executed_lab": {
                 "image_name": "localhost/forge:dev",
                 "image_id": image_id,
                 "image_digest": f"sha256:{lab_image_digest}",
-                "reported_version": str(verify_obs.get("repo_version", "")),
+                "reported_version": reported_version,
                 "deployed_schema_head": str(deployed_head),
                 "rollback_tag": rollback_tag_of(inputs.alignment),
+                "qualification_composition": {
+                    "wheel": dict(inputs.working_tree_wheel),
+                    "note": (
+                        "the executed-lab section IS the qualification composition: "
+                        "the alignment image is the WORKING-TREE build and the wheel "
+                        "beside it is the uv build of the SAME tree — a cold install "
+                        "from this manifest installs THESE bytes, never a released "
+                        "artifact that predates them"
+                    ),
+                },
                 "receipts": [ALIGNMENT_RECEIPT, INVENTORY_RECEIPT],
             },
             "schema_revision": {
@@ -602,18 +734,36 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "receipt": "alembic/versions + " + ALIGNMENT_RECEIPT,
             },
             "divergence": (
-                "the promoted image digest and the executed lab digest DIFFER (the live "
-                "trace ran a working-tree build carrying #302/#303/#305 that the "
-                "promoted release predates); both are bound above, neither is silently "
-                "substituted — installs from this manifest reproduce the PROMOTED bytes"
+                "the promoted v0.37.0 image digest and the executed lab digest DIFFER "
+                "(the v2 trace ran the working-tree build carrying the #320/#321/#325 "
+                "code no release carries yet; even the newest v0.38.0 promotion "
+                "predates it); both are bound above, neither is silently substituted — "
+                "the composition being qualified IS the executed-lab build, and its "
+                "promotion is pending, never assumed"
             ),
         },
         "lane": {
-            "install_route": "promoted-wheel",
+            "install_route": "working-tree-wheel",
             "wheel": {
+                "sha256": str(inputs.working_tree_wheel.get("sha256", "")),
+                "version": str(inputs.working_tree_wheel.get("name", "")).split("-")[1]
+                if len(str(inputs.working_tree_wheel.get("name", "")).split("-")) > 1
+                else "",
+                "name": str(inputs.working_tree_wheel.get("name", "")),
+                "path": str(inputs.working_tree_wheel.get("path", "")),
+                "source": "local-uv-build",
+                "promotion_pending": (
+                    "the fresh cold install installs THIS working-tree build by "
+                    "sha256 (the qualification composition); the promoted-wheel "
+                    "section names what is released and stays behind it"
+                ),
+                "receipt": "uv build of the working tree + " + ALIGNMENT_RECEIPT,
+            },
+            "promoted_wheel": {
                 "url": str(promotion.get("wheel_url", "")),
                 "sha256": wheel_sha,
                 "version": release_version,
+                "status": "the v0.37.0 promoted wheel — the historical install pin, NOT the qualification composition",
                 "receipt": PROMOTION_RECEIPT,
             },
             "executed_live": {
@@ -629,7 +779,7 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                     "source": str(closure_forge.get("source", "")),
                 },
                 "status": (
-                    "staged closure predates the promoted wheel — the supported "
+                    "staged closure predates the working-tree build — the supported "
                     "composition is WHEEL-pinned, not closure-pinned (an honest gap, "
                     "not a defaulted axis)"
                 ),
@@ -651,7 +801,7 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                     "a moving working tree"
                 ),
                 "recovered_from": (
-                    f"the disposable project {TEMPLATE_RECEIPT_PROJECT_ID} committed "
+                    f"the disposable project {template_project_id} committed "
                     ".gitlab-ci.yml (seed commit "
                     f"{inputs.live_run.get('phases', {}).get('collect', {}).get('installed_template', {}).get('last_commit_id', '')}), "
                     f"content_sha256 {installed_content_sha} — cross-checked against "
@@ -718,21 +868,15 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             },
             "release_canary": {
                 "status": (
-                    "pass — fresh-install canary + seeded previous-head upgrade; the "
-                    "upgrade stage ran 027->027 (SAME-HEAD preservation, honestly NOT "
-                    "a schema transition)"
+                    "pass (v0.38.0) — fresh-install canary + seeded previous-head "
+                    "upgrade 027->028; the v0.37.0 canary's upgrade stage ran "
+                    "027->027 (same-head preservation) — the data-bearing N-1->head "
+                    "edge for THIS manifest is cold_install_check --mode upgrade"
                 ),
-                "receipt": f"{PROMOTION_RECEIPT}#canary",
+                "receipt": f"{LATEST_PROMOTION_RECEIPT}#canary",
             },
             "native_workflow_qualification": {
-                "status": (
-                    "green live — outcome useful-wip-continued, zero validation "
-                    "findings: useful-WIP checkpoint (all three file shapes, verified "
-                    "digests) restored exactly on a second runner, final candidate "
-                    "collected by the shipped template and verified by the "
-                    "precommitted oracle on the exact candidate sha; Draft MR left "
-                    "for human review (merge never performed)"
-                ),
+                "status": _trace_status_text(trace),
                 "receipt": LIVE_TRACE_RECEIPT,
             },
             "human_support_approval": {
@@ -746,10 +890,14 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             },
         },
         "exclusions": [
-            "the promoted v0.37.0 artifacts are NOT the bytes the green live trace "
-            "executed (working-tree build + lane git sha 59ba869…) — installs from "
-            "this manifest reproduce the PROMOTED bytes; the executed-live "
-            "composition is bound as evidence, not as the install source",
+            "the qualified composition is the WORKING-TREE build (alignment image + "
+            "the uv wheel of the same tree) — NO release carries these bytes yet "
+            "(v0.38.0 predates them); installs from this manifest install the "
+            "working-tree wheel by sha256 and the promotion is pending, never assumed",
+            "the lane of the executed trace runs the PUSHED sha named under "
+            "lane.executed_live (the working tree is never pushed — no commit, no "
+            "merge), so the lane package is one push behind the control-plane build; "
+            "the brief bytes — the revision-2 text — are the payload this binds",
             "no committed live TraceRecord under qualification/traces/ references "
             "the profile's capabilities — the supported-profiles manifest holds "
             "gitlab-ce-v1 at pending-approval (the #298 trace-tier hold)",
@@ -767,10 +915,68 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
     return document
 
 
+def _trace_status_text(trace: Mapping[str, Any]) -> str:
+    """The native-workflow evidence status, from the trace's own outcome.
+
+    Never a relabel: a reviewed-ready trace says so; anything else says
+    exactly what it was.
+    """
+    outcome = str(trace.get("outcome", ""))
+    spend = trace.get("spend") or {}
+    review = trace.get("review") or {}
+    reserve = review.get("closing_reserve_usd")
+    if outcome == "reviewed-ready":
+        return (
+            "green live — outcome reviewed-ready: the useful-WIP checkpoint (all "
+            "three file shapes, verified digests) restored exactly on a second "
+            "runner whose resumed dispatch carried the APPROVED revision-2 text "
+            "(no rescue steer), the final candidate verified by the precommitted "
+            f"oracle on the exact sha, AND the closing review completed within "
+            f"the #325 closing reserve (reserve {reserve} usd visible) — the run "
+            f"ended ready_for_human; Draft MR left for human review; spend "
+            f"{spend.get('total_usd')} usd of the {spend.get('cap_usd')} usd lane cap"
+        )
+    if outcome in ("review-non-ready", "useful-wip-continued"):
+        return (
+            f"live — outcome {outcome}: the delivery and independent verification "
+            "stand; the closing review did NOT complete within this trace "
+            f"(run {review.get('status')}; budget decision "
+            f"{(review.get('review_budget_block') or {}).get('short_reason') or 'none'}) — "
+            "recorded honestly, never relabelled reviewed-ready"
+        )
+    return f"live — outcome {outcome}: see the trace record for the honest failures"
+
+
 @dataclass(frozen=True)
 class _AlignmentStep:
     step: str
     stdout_image_id: str
+
+
+def post_alignment_observations(alignment: Mapping[str, Any]) -> dict[str, str]:
+    """The LAST run's verify-step facts — what the ALIGNED lab reports.
+
+    The receipts' top-level ``observations`` are the plan-time read
+    (BEFORE backup/build/migrate: a stale deployed head there is the
+    pre-alignment value, not the frozen composition's). Walks the runs
+    newest-first for a verify step and extracts the version + schema the
+    aligned deployment itself reported.
+    """
+    for run in reversed(alignment.get("runs", []) or []):
+        for step in run.get("steps", []) or []:
+            if str(step.get("step", "")) != "verify":
+                continue
+            checks = step.get("checks") or {}
+            schema = checks.get("schema == repo chain head") or {}
+            version = checks.get("controlplane.version == repo __version__") or {}
+            result: dict[str, str] = {}
+            if str(schema.get("observed") or "").strip():
+                result["deployed_schema_head"] = str(schema["observed"]).strip()
+            if str(version.get("observed") or "").strip():
+                result["reported_version"] = str(version["observed"]).strip()
+            if result:
+                return result
+    return {}
 
 
 def alignment_runs_of(alignment: Mapping[str, Any]) -> dict[str, _AlignmentStep]:
@@ -837,7 +1043,25 @@ def validate_manifest(document: Mapping[str, Any]) -> list[str]:
         ("control_plane.promoted.sdist_sha256", promoted.get("sdist_sha256", "")),
         ("control_plane.executed_lab.image_digest", executed.get("image_digest", "")),
         ("control_plane.executed_lab.image_id", executed.get("image_id", "")),
+        (
+            "control_plane.latest_promotion.wheel_sha256",
+            control.get("latest_promotion", {}).get("wheel_sha256", ""),
+        ),
+        (
+            "control_plane.latest_promotion.image_digest",
+            control.get("latest_promotion", {}).get("image_digest", ""),
+        ),
+        (
+            "control_plane.executed_lab.qualification_composition.wheel.sha256",
+            (executed.get("qualification_composition", {}) or {})
+            .get("wheel", {})
+            .get("sha256", ""),
+        ),
         ("lane.wheel.sha256", document.get("lane", {}).get("wheel", {}).get("sha256", "")),
+        (
+            "lane.promoted_wheel.sha256",
+            document.get("lane", {}).get("promoted_wheel", {}).get("sha256", ""),
+        ),
         (
             "lane.closure.closure_digest",
             document.get("lane", {}).get("closure", {}).get("closure_digest", ""),
@@ -894,6 +1118,19 @@ def validate_manifest(document: Mapping[str, Any]) -> list[str]:
         findings.append(
             "control_plane.divergence is empty — the two-composition defect must be named"
         )
+    latest = control.get("latest_promotion", {})
+    if not str(latest.get("status", "")).strip():
+        findings.append(
+            "control_plane.latest_promotion.status is empty — the pending promotion must "
+            "be named, never assumed"
+        )
+    if str(document.get("lane", {}).get("wheel", {}).get("source", "")) != "local-uv-build":
+        findings.append(
+            "lane.wheel.source is not 'local-uv-build' — the v2 fresh-install target is "
+            "the working-tree build (the qualification composition)"
+        )
+    if not str(document.get("lane", {}).get("wheel", {}).get("path", "")).strip():
+        findings.append("lane.wheel.path is empty — the local wheel receipt is missing")
     records = document.get("evidence_records", {})
     for name in (
         "source_review",
@@ -1000,6 +1237,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(_render(document), encoding="utf-8")
+    # the wheel receipt (the closure pattern): when the local dist/ bytes
+    # exist, publish the committed receipt beside the manifest so a
+    # dist-less checkout (CI) still reads ONE consistent bind.
+    wheel_receipt = ROOT / WHEEL_RECEIPT_PATH
+    local_wheel = ROOT / str(document["lane"]["wheel"]["path"])
+    if local_wheel.is_file():
+        receipt_body = {
+            "name": document["lane"]["wheel"]["name"],
+            "path": document["lane"]["wheel"]["path"],
+            "sha256": document["lane"]["wheel"]["sha256"],
+            "source": "local-uv-build",
+            "built_from": ("the working tree (uncommitted-ahead state recorded in the manifest)"),
+            "built_for": "the v2 qualification composition (forge#326)",
+        }
+        wheel_receipt.parent.mkdir(parents=True, exist_ok=True)
+        wheel_receipt.write_text(
+            json.dumps(receipt_body, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(f"freeze_supported_profile: wheel receipt → {wheel_receipt}")
     print(f"freeze_supported_profile: froze {args.out}")
     print(f"  manifest_digest     : {document['manifest_digest']}")
     print(f"  promoted wheel sha  : {document['control_plane']['promoted']['wheel_sha256'][:16]}…")

@@ -96,6 +96,7 @@ from forge.durable.models import (
     FLOW_STATUSES,
     ActionLog,
     BudgetReservation,
+    CredentialRedemption,
     EventInbox,
     FlowRun,
     GateApproval,
@@ -106,6 +107,7 @@ from forge.durable.models import (
     RunBudget,
     RunSpec,
     StepRun,
+    UsageIngestionConflict,
     UsageReceipt,
 )
 
@@ -124,6 +126,7 @@ __all__ = [
     "Controller",
     "ControllerError",
     "ControllerGateError",
+    "CredentialRedemption",
     "EventInbox",
     "FlowRun",
     "FlowStatus",
@@ -151,6 +154,7 @@ __all__ = [
     "TRANSITION_EVENT_TYPE",
     "StepRun",
     "StepRunNotFound",
+    "UsageIngestionConflict",
     "UsageReceipt",
     "as_aware_utc",
     "bind_claim",

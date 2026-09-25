@@ -5,7 +5,7 @@
       "objectives_achieved": 9,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -20,7 +20,7 @@
           "peak_occupied": 3
         },
         "queue_wait_s": {
-          "max": 3.277
+          "max": 5.206
         }
       },
       "tested_limits": {
@@ -37,11 +37,11 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "drained_after_s": 20.4,
+        "drained_after_s": 10.2,
         "execution.occupied_vs_limit": {
           "limit": 3,
           "occupancy_mix_at_cap": {
@@ -76,21 +76,21 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "backup_seconds": 0.208,
+        "backup_seconds": 0.211,
         "checkpoint.reachability": {
-          "checkpoints": 12,
+          "checkpoints": 14,
           "mismatch_detected": true,
           "mismatch_refused": true,
-          "pins": 6,
-          "pins_resolved": 6,
-          "works": 12,
-          "works_resolved": 12
+          "pins": 8,
+          "pins_resolved": 8,
+          "works": 13,
+          "works_resolved": 13
         },
-        "restore_seconds": 0.162
+        "restore_seconds": 0.177
       },
       "tested_limits": {
         "mismatch_shape": "metadata naming a checkpoint the blob half lacks",
@@ -104,12 +104,12 @@
       "objectives_achieved": 6,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
         "preflight.restore_gate": {
-          "expected_schema_head": "027",
+          "expected_schema_head": "028",
           "model_turns_after_consistent_restore": 1,
           "model_turns_before_refusals": 0,
           "nothing_written": true,
@@ -122,7 +122,7 @@
         }
       },
       "tested_limits": {
-        "expected_schema_head": "027",
+        "expected_schema_head": "028",
         "gate": "preflight \u2192 restore \u2192 resume dispatch (the first model turn)",
         "installations": "DISPOSABLE target roots (never the deployment's store)",
         "mismatched_schema_head": "026",
@@ -135,7 +135,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -154,7 +154,7 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -188,7 +188,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -199,7 +199,7 @@
           "pinned_wip_survives": true,
           "safety_threshold_bytes": 4096,
           "silent_writes": 0,
-          "store_bytes_at_refusal": 3241,
+          "store_bytes_at_refusal": 3242,
           "typed_refusals": 5
         }
       },
@@ -217,7 +217,7 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -231,12 +231,12 @@
             "p95_s": 0.0521
           },
           "control": {
-            "max_s": 0.0258,
-            "min_s": 0.0162,
+            "max_s": 0.0288,
+            "min_s": 0.0163,
             "n": 12,
             "objective_s": 60.0,
-            "p50_s": 0.0193,
-            "p95_s": 0.0258
+            "p50_s": 0.019,
+            "p95_s": 0.0288
           },
           "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
         }
@@ -257,7 +257,7 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+        "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -277,11 +277,11 @@
       "violations": 0
     }
   ],
-  "generated_at": "2026-09-25T01:26:14+00:00",
+  "generated_at": "2026-09-25T10:20:04+00:00",
   "issue": "R38-18 (#319) \u2014 operating limits and recovery measured on the actual supported deployment, BOUND to the frozen profile (previous: R37-20 #301)",
   "measured_limits": {
     "command_latency_under_contention": {
-      "control.received_to_applied_s": 8.504,
+      "control.received_to_applied_s": 9.684,
       "scope": "the slow-control-ACK window measured through the app's real lane-control endpoints during the occupancy load; the machinery percentiles are in pause_cancel_responsiveness"
     },
     "concurrency": {
@@ -304,21 +304,21 @@
         "p95_s": 0.0521
       },
       "control_percentiles_s": {
-        "max_s": 0.0258,
-        "min_s": 0.0162,
+        "max_s": 0.0288,
+        "min_s": 0.0163,
         "n": 12,
         "objective_s": 60.0,
-        "p50_s": 0.0193,
-        "p95_s": 0.0258
+        "p50_s": 0.019,
+        "p95_s": 0.0288
       },
       "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
     },
     "profile": {
-      "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+      "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
       "qualification": "qualified-for-profile"
     },
     "restore_time_s": {
-      "measured": 0.162,
+      "measured": 0.177,
       "scope": "the deployment's CURRENT store size \u2014 remeasure as it grows; the number does not extrapolate"
     }
   },
@@ -330,7 +330,7 @@
   "profile": {
     "bind": "matched",
     "differences": [],
-    "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
+    "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
     "profile": "supported-gitlab-ce-v1",
     "qualification": "qualified-for-profile"
   },

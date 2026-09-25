@@ -1,13 +1,18 @@
-# Delivery economics: accepted items priced by real identities (R37-13)
+# Delivery economics: accepted items priced by real identities (R37-13, Q39-11)
 
 How forge explains what an accepted work item — and the whole programme
 — actually cost, joining REAL recorded ledgers to the executions and
 acceptance decisions that produced them. Module:
 `forge.adaptive.delivery_economics`; tests:
-`tests/test_delivery_economics.py`; builder:
-`scripts/build_economics_report.py`. The executed report over the lab
-pilot's real recorded ledgers is committed at
-[`evaluation/economics/lab-economics-v1.json`](../evaluation/economics/lab-economics-v1.json).
+`tests/test_delivery_economics.py`; builders:
+`scripts/build_economics_report.py` (the economics report) and
+`scripts/build_accepted_task_ledger.py` (the accepted-task ledger,
+Q39-11). The executed report over the lab pilot's real recorded ledgers
+is committed at
+[`evaluation/economics/lab-economics-v1.json`](../evaluation/economics/lab-economics-v1.json);
+the accepted-task ledger over the useful-WIP resume trace plus the #310
+SDK receipts is committed at
+[`evaluation/economics/accepted-task-ledger-v1.json`](../evaluation/economics/accepted-task-ledger-v1.json).
 
 ## The join chain
 
@@ -151,3 +156,113 @@ The report's `observability` block carries the issue-mandated gauges
 verbatim: `usage.receipt_coverage`, `cost.lower_bound`,
 `cost.accepted_item_total`, `cost.programme_per_accepted_item`,
 `latency.stage_seconds`.
+
+## The accepted-task ledger (Q39-11 / #330)
+
+`AcceptedTaskLedgerBuilder.build()` joins the economics report (the
+spend authority) with the identity links the durable evidence carries
+and emits an `AcceptedTaskLedger` (stamp
+`forge.delivery.accepted-ledger/1`) — ONE document with the complete
+evidence chain per task:
+
+```
+run → attempt → model-call receipt → native job → candidate
+    → verification → human decision
+```
+
+- **Every link joins by stable id.** A job naming an attempt the spend
+  ledger never saw, a verification naming an unknown candidate, a human
+  decision naming an unknown work — each surfaces in `identity_gaps`,
+  never a silent drop. Duplicate deliveries collapse by identity (the
+  canonical form wins); two DIFFERING records under one identity
+  surface as a conflict, never a merge.
+- **Three cost columns, never blended** (`costs.columns`):
+  `provider_reported_usd` (the SDK's own meter), `price_card_estimate_usd`
+  (a versioned card), `billing_reconciliation_usd` (a billing export).
+  Every priced entry lands in at most ONE column; a column total is
+  exact only when EVERY attempt of the population contributed a figure
+  to THAT column — a mixed-basis population leaves every column a lower
+  bound with its coverage, and the columns are never summed together.
+  An empty column renders `null`, never a readable `0.0`.
+- **The two measures, distinct.** `costs.accepted_all_attempt` prices
+  every attempt of an accepted work — failed, paused and superseded
+  attempts stay in the total; `costs.programme_per_accepted_item`
+  divides the whole programme's column (rejected and abandoned work
+  included) by the accepted count. `costs.all_attempt_totals` keeps
+  every work's own row whatever its decision state.
+- **The human decision point is labelled, never guessed.** A delivered,
+  verified candidate still awaiting its human (a draft MR) carries
+  state `pending`: the work stays OUT of the accepted population, the
+  per-accepted economics stay undefined — never zero. CI green is
+  never acceptance.
+- **Seven time measures** (`time_measures`): model time, tool time, CI
+  queue, CI runtime, operator wait, reviewer effort and setup effort
+  each fold only their own recorded windows (the raw windows ride the
+  document); populations never mix inside a measure, an unknown window
+  degrades to a lower bound, an unmeasured measure is a named gap, and
+  `delivery.human_minutes` is `null` whenever reviewer effort is
+  unknown. No tokens/s figure exists anywhere without matched measured
+  model time and the #276 token convention —
+  `assert_no_unmatched_rates()` raises on a tampered document.
+- **Budget refusal and review-only recovery stay separately visible**
+  (`budget` per work): the #325 closing-budget five fields (exact /
+  known subtotal / lower bound / reserved liability / unknown
+  intervals), the closing reserve and the coder ceiling, the recorded
+  `budget_refusals`, and the `review_only_recovery` verdict — the #325
+  shortcut evaluated against the recorded candidate binding (a moved
+  candidate head refuses with `review_shortcut_stale`).
+- **Coverage beside every aggregate**: `receipts_expected` /
+  `receipts_received` / `receipt_coverage` / `unknown_cost_receipts` at
+  programme, accepted-population and per-work level. A streamed partial
+  receipt keeps its figures as a lower bound until the late final
+  receipt reconciles the identity (then the rebuilt ledger's totals
+  update — the #324 durable contract).
+- **Order and replay invariance**: shuffling every input list, or
+  delivering every artifact twice, changes no byte;
+  `AcceptedTaskLedger.from_document()` replays the document.
+
+### Building the ledger
+
+```
+uv run python scripts/build_accepted_task_ledger.py \
+    --out evaluation/economics/accepted-task-ledger-v1.json
+```
+
+The script reads the useful-WIP resume trace
+(`docs/evaluation/2026-09-25-useful-wip-resume/` — the #306 drill
+evidence) and the #310 live single-writer SDK receipts (ingested
+idempotently exactly as `build_economics_report.py` does), and joins
+each as its own population — never folded together.
+
+### The committed ledger's honest numbers
+
+- The primary population: 2 works / 4 attempts, receipt coverage 1.0,
+  every SDK receipt provider-reported — **$0.815235** programme
+  (exact); run `04bca389…`'s all-attempt total **$0.559887** over 3
+  attempts (2 superseded kept), the sibling run `d58082a2…` **$0.255348**.
+- The price-card column is EMPTY (no receipt lacked a figure to
+  estimate; the drill's own recorded price class rides the document as
+  the versioned card `useful-wip-priceclass-v1`, armed but unused) and
+  the billing-reconciliation column is `null` (no billing export
+  exists) — stated, never blended into the provider figure.
+- Both human decision points are **pending** (draft MRs; a human
+  merges, forge never does): 0 accepted items, per-accepted economics
+  undefined — never zero.
+- Time, from recorded timestamps only: CI runtime lower bound 254.70 s
+  (three lane-job windows across DIFFERENT clocks — the total is
+  withheld; the uninterrupted arm's 87.3 s turn exists only as README
+  prose and stays unknown), operator wait 347.05 s (two decision gaps),
+  setup effort 58.20 s (the alignment window); model/tool/CI-queue time
+  and the reviewer's effort are named gaps — the reviewer never ran
+  (the budget refused its call), so `delivery.human_minutes` is `null`.
+- The run's terminal budget refusal is recorded as a budget event; the
+  #325 review-only continuation over the unchanged, verified candidate
+  evaluates `allowed` with **zero coder dispatches, zero commits**.
+- The #310 population (separate): 3 works / 5 attempts, provider-reported
+  lower bound **$0.803749**, receipt coverage 0.8 — the killed job730
+  keeps its attempt with no receipt: spend unknown, never zero.
+
+The ledger's `observability` block carries the issue's gauges:
+`delivery.accepted_all_attempt_cost`, `delivery.programme_cost_per_accepted`,
+`cost.coverage`, `delivery.human_minutes`, plus `budget.closing_reserve`,
+`budget.phase_exhaustion` and `delivery.review_only_recovery`.

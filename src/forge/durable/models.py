@@ -20,6 +20,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -91,6 +92,11 @@ _REVIVAL_ATTEMPT_INFLIGHT = text(
 _REVIVAL_RETRYABILITY_SQL = ", ".join(f"'{value}'" for value in _REVIVAL_RETRYABILITY)
 _REVIVAL_DISPATCH_SQL = ", ".join(f"'{value}'" for value in _REVIVAL_DISPATCH_STATES)
 _LLM_STATUSES: tuple[str, ...] = ("ok", "failed", "cancelled")
+#: Q39-05 (#324): the honest completeness vocabulary INCLUDING the streamed
+#: partial state — a partial artifact is not "unknown" (counters are known)
+#: and not "aggregate" (more calls may still arrive); it is its own state,
+#: and the durable row must be able to say so.
+_USAGE_COMPLETENESS: tuple[str, ...] = ("exact", "aggregate", "partial", "unknown")
 #: ADR-0018 §5 (F22): closed set of run-budget lifecycle statuses. ``exhausted``
 #: budgets stop granting reservations; ``closed`` is terminal (run finished).
 _BUDGET_STATUSES: tuple[str, ...] = ("open", "exhausted", "closed")
@@ -601,25 +607,46 @@ class UsageReceipt(Base):
     Harness spend arrives as candidate-artifact receipts that the control
     plane polls at-least-once (a repeated reconciler tick, a crash between
     ingest and transition, a re-downloaded artifact). This table is the
-    idempotency arbiter: the unique index on ``(run_id, attempt_id,
-    receipt_id)`` — the receipt identity the lane computed over its
-    normalized usage — makes ``INSERT ... ON CONFLICT DO NOTHING``
-    (:func:`forge.durable.budgets.ingest_usage_receipt`) a no-op for every
-    replay of the same receipt while a repair re-dispatch (a new attempt id)
-    legitimately costs again.
+    idempotency arbiter. Q39-05 (#324) makes the durable identity match the
+    in-memory contract EXACTLY: the unique index on ``(run_id, attempt_id,
+    receipt_id, source_namespace)`` — the receipt identity the lane
+    computed over its normalized usage PLUS the source namespace it
+    arrived under — so the same label delivered by two sources stays two
+    rows, and a FINAL receipt can conditionally replace the stored PARTIAL
+    it reconciles (``ON CONFLICT ... DO UPDATE ... WHERE final IS NOT
+    TRUE``; a late partial NEVER downgrades a final). ``identity_digest``
+    is the stable sha256 over the FULL four-part identity recorded beside
+    the column-shaped parts — an overlength component is stored as a
+    ``sha256:``-prefixed digest of the full value (never silently
+    truncated; the full value rides ``raw`` under ``identity_overlength``),
+    and a work id longer than the run id column is REFUSED outright (no
+    run row could ever own it).
 
     The canonical counters are recorded with the honesty rules of ADR-0013:
     unknown stays ``NULL`` (never zero), cache counters stay OUT of
     ``input_tokens`` (Anthropic-shaped counters are disjoint; the spend
     total is computed at reconciliation, not folded in here), and ``raw``
-    keeps the verbatim usage block so spend stays reconstructable.
+    keeps the verbatim usage block so spend stays reconstructable. The
+    Q39-05 economics columns (``cost_usd`` / ``cost_basis`` /
+    ``rate_card_id`` / ``route_version`` / ``segment`` /
+    ``artifact_digest`` / ``final``) are the queryable projection of what
+    ``raw`` carries — the digest binds the row to the exact source bytes
+    (a changed artifact under one identity is a conflict, never a silent
+    overwrite).
     """
 
     __tablename__ = "usage_receipts"
     __table_args__ = (
-        Index("uq_usage_receipt_identity", "run_id", "attempt_id", "receipt_id", unique=True),
+        Index(
+            "uq_usage_receipt_identity",
+            "run_id",
+            "attempt_id",
+            "receipt_id",
+            "source_namespace",
+            unique=True,
+        ),
         CheckConstraint(
-            "completeness IN ('exact', 'aggregate', 'unknown')",
+            "completeness IN (" + ", ".join(f"'{value}'" for value in _USAGE_COMPLETENESS) + ")",
             name="ck_usage_receipts_completeness",
         ),
     )
@@ -639,6 +666,18 @@ class UsageReceipt(Base):
     #: sha256 over (run id, attempt id, normalized usage JSON) — computed at
     #: emit time by the lane or recomputed identically at ingest.
     receipt_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Q39-05 (#324): the source NAMESPACE — the natural key's fourth
+    #: component (the lane artifact label, the SDK-receipt label, the
+    #: planner ledger label, ...). Legacy R23 rows backfill from ``source``.
+    source_namespace: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="", server_default=""
+    )
+    #: Q39-05 (#324): the stable sha256 over the FULL four-part identity —
+    #: the canonical durable identity recorded beside its column parts, so
+    #: an overlength component hashed into its column stays joinable.
+    identity_digest: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="", server_default=""
+    )
     driver: Mapped[str | None] = mapped_column(String(50), nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -647,8 +686,149 @@ class UsageReceipt(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completeness: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
     source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: Q39-05 (#324): the streamed receipt's finality — ``False`` marks a
+    #: partial artifact accepted during streaming; a later FINAL for the
+    #: same identity replaces it, a late partial never downgrades it.
+    final: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    #: The economics projection of ``raw`` (Q39-05): the reported/estimated
+    #: cost figure and its basis, the pricing card, the route version, the
+    #: attribution segment and the source artifact digest.
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_basis: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    rate_card_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    route_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    segment: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    artifact_digest: Mapped[str | None] = mapped_column(String(128), nullable=True)
     #: The verbatim usage block as received — never normalized in place.
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class UsageIngestionConflict(Base):
+    """ONE surfaced ingestion conflict or refusal — never silently dropped
+    (Q39-05, #324).
+
+    Two shapes land here, both diagnostics (no spend row is written from
+    either):
+
+    - ``conflicting-final`` / ``conflicting-content`` — the same durable
+      identity delivered twice with DIFFERENT content while the standing
+      row is already final (or the incoming delivery is not an upgrade);
+      the FIRST row stands, the difference is preserved here — never
+      averaged, never silently merged;
+    - ``attribution-refused`` — a payload claiming work-B (or attempt-B)
+      delivered on a transport the trusted caller attributed to work-A:
+      NO row is written to the payload-claimed work; the refusal and both
+      identities are preserved here.
+
+    ``content_digest`` makes the record idempotent under replay: the same
+    conflicting delivery re-delivered any number of times leaves exactly
+    one row per (identity, delivered content) pair.
+    """
+
+    __tablename__ = "usage_ingestion_conflicts"
+    __table_args__ = (
+        Index(
+            "uq_usage_ingestion_conflict_identity",
+            "run_id",
+            "attempt_id",
+            "receipt_id",
+            "source_namespace",
+            "kind",
+            "content_digest",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    receipt_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_namespace: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    #: ``conflicting-final`` | ``conflicting-content`` | ``attribution-refused``
+    #: | ``identity-rejected``.
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    #: sha256 over the DELIVERED content (the refused claim or the
+    #: conflicting row) — the replay idempotency key's last component.
+    content_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: The delivered/claimed values beside the trusted/standing ones —
+    #: identity-only (work/attempt/receipt/source labels, digests, notes);
+    #: never a credential and never spend authority.
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class CredentialRedemption(Base):
+    """ONE append-only credential-redemption receipt (Q39-03, #322).
+
+    The audit ledger behind ``GET /lane/credentials/redeem`` — refs and
+    metadata ONLY: no value slot, no value digest, nothing from which the
+    credential could be reconstructed. The row is INSERT-only (a
+    redemption never rewrites history); a re-delivered receipt id bumps
+    ``retry_count`` on the SAME logical row (a lost-response retry never
+    inflates logical totals while each retry observation stays
+    inspectable through the counter and ``last_retry_at``).
+
+    ``grant_id`` is the join key to the operation grant that authorized
+    the redemption (the #Q39-01 grant type): a plain string the grant
+    owner populates — EMPTY (with the fact labelled in ``details``) for
+    rows backfilled from the legacy embedded evidence or redeemed before
+    grants landed; a grant identity is never invented. The bounded
+    ``run.evidence["credential_redemptions"]`` list is a VERSIONED
+    PROJECTION of this table (see
+    :func:`forge.adaptive.credential_audit.record_redemption`), never the
+    audit authority: the full history lives here regardless of the
+    projection's last-50 cap.
+    """
+
+    __tablename__ = "credential_redemptions"
+
+    receipt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    work_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: The operation grant that authorized this redemption (Q39-01's
+    # grant type; a plain string the grant owner populates). EMPTY for
+    # legacy/backfilled rows — labelled in ``details``, never invented.
+    grant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    attempt_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The delivery route label (the provider the redemption served).
+    route: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    credential_ref: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    resolver: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    binding_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The redemption outcome (``redeemed``; the refusal paths never write
+    #: a row — zero successful retrievals).
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, default="redeemed")
+    #: A DISTINCT later delivery that identifies itself as a retry of THIS
+    #: logical redemption (its own receipt id, linked back); a re-delivery
+    #: of the SAME receipt id instead bumps ``retry_count``.
+    retry_of: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: How many times this SAME receipt id was re-delivered (lost-response
+    #: retries) — the logical total stays ONE redemption.
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    broker_receipt_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    resolved_version_kind: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    credential_policy: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    #: Where the row came from: ``live`` (the redemption endpoint) or
+    #: ``legacy-embedded`` (backfilled from the pre-table evidence list).
+    provenance: Mapped[str] = mapped_column(String(30), nullable=False, default="live")
+    #: The verbatim value-free audit document (the exact entry the
+    #: endpoint built) plus retention/investigation labels.
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

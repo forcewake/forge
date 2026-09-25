@@ -23,6 +23,16 @@ Profiles (the required selection lives HERE, as data):
   ``tests/test_checkpoint_repository.py`` and
   ``tests/test_checkpoint_retry_authority.py`` on a second, fully
   migration-provisioned database that no test resets underneath the others.
+- ``accounting-races`` (Q39-08 / #327) — the new accounting contracts on
+  REQUIRED PostgreSQL, tracked by executed critical ID, not by selected
+  file alone: ``tests/test_credential_audit.py`` (the #322 CAS
+  projection: concurrent redemption + evidence writers must BOTH survive)
+  and ``tests/test_usage_ingestion.py`` (the #324 partial→final
+  reconcile under real isolation) on a third disposable database. Their
+  PG-gated arms read ``FORGE_PG_TEST_URL`` directly — a missing
+  prerequisite is a REQUIRED skip and REFUSES the gate (never a green
+  skip); the files' sqlite unit arms run beside them on the same
+  selection, so the executed-ID manifest covers the critical ids.
 
 Skip accounting is honest, not blanket: a skip whose reason mentions
 ``FORGE_PG_TEST_URL`` is a REQUIRED skip (the qualification prerequisite
@@ -146,6 +156,17 @@ PROFILES: tuple[GateProfile, ...] = (
         ),
         database_suffix="ck",
     ),
+    GateProfile(
+        # Q39-08 (#327): the accounting races on required PostgreSQL —
+        # the executed-ID manifest must cover the two critical ids below,
+        # and the sqlite unit arms of the same files run beside them.
+        name="accounting-races",
+        selection=(
+            "tests/test_credential_audit.py",
+            "tests/test_usage_ingestion.py",
+        ),
+        database_suffix="ac",
+    ),
 )
 
 
@@ -192,6 +213,22 @@ REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
             r"tests/test_checkpoint_repository\.py::TestPostgresAuthorityOverRealPostgres::"
         ),
         profile="checkpoint-lifecycle",
+    ),
+    RequiredTrace(
+        label="Q39-03 (#322) concurrent redemptions + evidence writers survive (CAS projection)",
+        pattern=re.compile(
+            r"tests/test_credential_audit\.py::TestRealPostgres"
+            r"::test_concurrent_redemptions_and_evidence_writers_survive$"
+        ),
+        profile="accounting-races",
+    ),
+    RequiredTrace(
+        label="Q39-05 (#324) concurrent partial+final reconcile under real isolation",
+        pattern=re.compile(
+            r"tests/test_usage_ingestion\.py::TestQ3905RealPostgres"
+            r"::test_concurrent_partial_and_final_reconcile_under_real_isolation$"
+        ),
+        profile="accounting-races",
     ),
 )
 

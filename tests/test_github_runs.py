@@ -39,6 +39,7 @@ from forge.durable import (
     as_aware_utc,
 )
 from forge.factory.implementer import IMPLEMENTER_TIER
+from forge.factory.llm import LLMError
 from forge.factory.reviewer import ReviewVerdict
 from forge.harness_entry import PlanBindingError, fetch_issue_context
 from forge.harnesses.brief_envelope import build_brief_envelope
@@ -4490,3 +4491,154 @@ class TestRevisionDispatchBoundary:
         assert run.status == FlowStatus.WAITING_HARNESS.value  # dispatched clean
         (dispatch,) = fake.dispatch_inputs
         assert "plan_digest" not in dispatch["inputs"]
+
+
+# ----------------------------------------------------------------------
+# Q39-06 (#325): the reviewer-leg budget decision consults the closing
+# reserve (A02 parity with the GitLab leg)
+# ----------------------------------------------------------------------
+
+
+class BudgetRefusedPRReviewer(StubPRReviewer):
+    """Refuses the first N review calls exactly like the budget guard's
+    ``LLMError("budget_exhausted")`` — the reviewer never ran (the call
+    is refused before the provider is contacted)."""
+
+    def __init__(self, refusals: int = 1) -> None:
+        super().__init__()
+        self._refusals = refusals
+        self.refused = 0
+
+    async def review(self, **kwargs):
+        if self.refused < self._refusals:
+            self.refused += 1
+            raise LLMError("budget_exhausted")
+        return await super().review(**kwargs)
+
+
+async def drive_to_review_refusal(
+    db, service: GitHubRunService, fake: FakeGitHub, reviewer: BudgetRefusedPRReviewer
+) -> tuple[str, str]:
+    """start → /go → the required check green → the review leg, where
+    the reviewer's call is refused by the budget guard."""
+    run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+    fake.seed_workflow_runs([workflow_run(candidate, "tests", "success")])
+    service._stack = make_stack(fake, reviewer=reviewer)
+    await service.evaluate_waiting_ci_one(run_id)
+    return run_id, candidate
+
+
+class TestReviewerBudgetDecisionConsultsTheClosingReserve:
+    """The live-trace shape on the GitHub lane: candidate landed, the
+    required check green, the budget guard refuses the REVIEWER's call.
+    The decision consults the closing reserve — a budget refusal is
+    never misclassified as ``review_failed``, the run ends in the
+    precise non-ready state with the reserve visible, and the explicit
+    review-only continuation completes it. Never a hidden retry."""
+
+    async def test_a_budget_refusal_is_not_a_review_failure_and_holds_the_reserve(
+        self, db, fake, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+
+        run = await get_run(db, run_id)
+        # the precise NON-READY state — never blocked(review_failed:...)
+        assert run.status == FlowStatus.REVIEWING.value
+        assert not (run.status_reason or "").startswith("review_failed")
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["budget_decision"] == "budget_exhausted"
+        assert block["stage"] == "reviewer"
+        assert block["released"] is False
+        budget = block["budget"]
+        assert budget["closing_reserve_usd"] == pytest.approx(0.60)
+        assert budget["closing_review_fits"] is True
+        for field in (
+            "exact_usd",
+            "known_subtotal_usd",
+            "lower_bound_usd",
+            "reserved_liability_usd",
+            "unknown_intervals",
+        ):
+            assert field in budget
+
+    async def test_resume_verification_never_re_attempts_the_review(self, db, fake, monkeypatch):
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+        assert reviewer.refused == 1 and reviewer.calls == []
+
+        await service.resume_verification(run_id)  # the scanner re-drive
+        await service.resume_verification(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.REVIEWING.value  # still held
+        assert reviewer.refused == 1  # NO hidden retry of the review call
+
+    async def test_review_only_continuation_completes_the_github_review(
+        self, db, fake, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+        shas_before = list((await get_run(db, run_id)).candidate_shas or [])
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,
+            top_up_reason="close the review within its reserve",
+        )
+        assert outcome["allowed"] is True
+        assert outcome["coder_dispatches"] == 0  # ZERO coder dispatches
+        assert outcome["commits"] == 0  # ZERO commits
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert list(run.candidate_shas or []) == shas_before  # SAME candidate
+        assert len(reviewer.calls) == 1  # the review ran exactly once more
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["released"]["operator"] == "human:alice"
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+        assert block["top_ups"][0]["reason"] == "close the review within its reserve"
+
+    async def test_a_moved_pr_head_invalidates_the_review_shortcut(self, db, fake, monkeypatch):
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=2)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+        # the human push lands while the run is held in reviewing
+        for pr in fake.pull_requests.get(REPO, []):
+            pr["head"]["sha"] = "9" * 40
+
+        outcome = await service.continue_review_only(run_id, operator="human:alice")
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "review_shortcut_stale"
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("review_shortcut_stale")
+        assert reviewer.calls == []  # the stale shortcut never reviewed
+
+    async def test_refusal_without_a_closing_policy_blocks_precisely(self, db, fake, monkeypatch):
+        monkeypatch.delenv("FORGE_CLOSING_RESERVE_USD", raising=False)
+        monkeypatch.delenv("FORGE_CLOSING_RESERVE_FRACTION", raising=False)
+        monkeypatch.delenv("FORGE_SPEND_CAP_USD", raising=False)
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("budget_exhausted: reviewer refused")
+        assert "no closing reserve policy" in (run.status_reason or "")
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["budget"]["closing_reserve_usd"] is None

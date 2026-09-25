@@ -1,0 +1,275 @@
+{
+  "blocked_classification": {
+    "status": "blocked",
+    "status_reason": "harness_code: harness job forge-agent-claude-sdk failed (script_failure)"
+  },
+  "candidate": {
+    "changed_paths": [
+      "src/utils/legacy.py",
+      "src/utils/text.py",
+      "src/app.py"
+    ],
+    "deleted_paths": [
+      "src/utils/legacy.py"
+    ],
+    "diff_digest": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+    "shapes_present": {
+      "src/app.py": "modified",
+      "src/utils/legacy.py": "deleted",
+      "src/utils/text.py": "new"
+    }
+  },
+  "created_at": "2026-09-25T09:31:12.391285+00:00",
+  "failures": [
+    {
+      "at": "2026-09-25T09:45:28.375205+00:00",
+      "reason": "interrupt refused: timed out after 600s waiting for a new WIP checkpoint for f0d559fd (last: None)"
+    },
+    {
+      "at": "2026-09-25T09:47:42.010882+00:00",
+      "reason": "the v2 resume requires the approved MATERIAL revision first \u2014 run `revision` (stage_pending_revision + the native /approve-revision) so the resumed dispatch carries the revision-2 text (the #321 rebind); recorded, never resumed past"
+    },
+    {
+      "at": "2026-09-25T09:47:42.019577+00:00",
+      "reason": "interrupt refused: the v2 resume requires the approved MATERIAL revision first \u2014 run `revision` (stage_pending_revision + the native /approve-revision) so the resumed dispatch carries the revision-2 text (the #321 rebind); recorded, never resumed past"
+    },
+    {
+      "at": "2026-09-25T09:47:53.626795+00:00",
+      "reason": "the activation preserved checkpoint b3fa93afd461\u2026 but the drill sampled f70244cc49d2\u2026 \u2014 a DIFFERENT WIP is about to be restored; refusing"
+    },
+    {
+      "at": "2026-09-25T09:47:53.627609+00:00",
+      "reason": "revision refused: the activation preserved checkpoint b3fa93afd461\u2026 but the drill sampled f70244cc49d2\u2026 \u2014 a DIFFERENT WIP is about to be restored; refusing"
+    }
+  ],
+  "finished_at": "2026-09-25T09:53:58.408980+00:00",
+  "issue": {
+    "iid": 1,
+    "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/work_items/1"
+  },
+  "job_cancel": {
+    "attempted_at": "2026-09-25T09:47:42.010267+00:00",
+    "http_status": 201,
+    "job_id": 838,
+    "job_status_before": "failed",
+    "moot": true,
+    "status_after": "failed"
+  },
+  "mr": {
+    "candidate_sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+    "changed_paths": [
+      "src/utils/legacy.py",
+      "src/utils/text.py",
+      "src/app.py"
+    ],
+    "deleted_paths": [
+      "src/utils/legacy.py"
+    ],
+    "diff_digest": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+    "draft": true,
+    "merged": false,
+    "mr_iid": 1,
+    "mr_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/merge_requests/1",
+    "oracle_tampering": [],
+    "pipeline_status": null,
+    "revision_marker_in_candidate": true,
+    "shapes_present": {
+      "src/app.py": "present",
+      "src/utils/legacy.py": "deleted",
+      "src/utils/text.py": "present"
+    },
+    "title": "Draft: Replace the legacy helper: slugify() in src/utils/text.py, rewire src/app.py, delete src/utils/legacy.py",
+    "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-wip-v2-2026-09-25/-/merge_requests/1",
+    "verification_pipeline_id": 495
+  },
+  "oracle": {
+    "candidate_sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+    "pipeline_id": 495,
+    "status": "success"
+  },
+  "outcome": "reviewed-ready",
+  "plan": {
+    "body_tail": "he shout() usage inside greet() with slugify() so greet() still returns a greeting string\n- Search the codebase under src/ for any remaining references to legacy or shout() and confirm none remain\n- Delete src/utils/legacy.py from the working tree; do not commit or push\n- Confirm no other files (e.g. .gitlab-ci.yml, tests/, README.md) were modified\n\n**Risks:**\n- Regex used for collapsing separators must treat consecutive non-alphanumeric characters as one run and strip edge hyphens, otherwise edge-case examples like '!!!leading and trailing!!!' fail\n- Import style in src/app.py must match how the project resolves the utils package (e.g. 'from utils.text import slugify' vs relative import), or imports may break\n- Unicode vs ASCII alphanumeric interpretation: decide whether 'alphanumeric' means [a-z0-9] after lowercasing or the broader str.isalnum semantics, matching the smoke oracle's expectations\n- Deleting src/utils/legacy.py could break other modules if any hidden reference to it exists outside src/app.py\n\n**Files (hints):** `src/utils/text.py`, `src/app.py`, `src/utils/legacy.py`\n## Implementation\n- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash\n- Fallbacks: claude-code\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `b1025a5db8a95bd37686f3e1b77d6f197cb9f85663bb7186f8e6d13e2553b639`\n\nApprove this exact plan by commenting `@forge /go f0d559fdb7f14b98b32f1946cfa577c3`.\n\nApprovers: @forcewake.\n\n*This is an automated message.*",
+    "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+    "note_id": 776,
+    "run_id": "f0d559fdb7f14b98b32f1946cfa577c3"
+  },
+  "probe_ladder": [
+    {
+      "anchor_observed_at": "2026-09-25T09:33:03.779882+00:00",
+      "checkpoint": {
+        "checkpoint_id": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+        "files": 0,
+        "sequence": 0,
+        "uploaded_at": "2026-09-25T09:33:10+00:00"
+      },
+      "driver_phase_anchor": "2026-09-25T09:32:21.361690Z",
+      "job_status_at_anchor": "running",
+      "offset_s": 45.0,
+      "pause_posted_at": "2026-09-25T09:33:08.996838+00:00",
+      "rung": "rung-1@45s",
+      "verdict": "empty"
+    },
+    {
+      "adopted_on_reentry": true,
+      "checkpoint": {
+        "checkpoint_id": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+        "files": 2,
+        "sequence": 0,
+        "uploaded_at": "2026-09-25T09:35:29+00:00"
+      },
+      "note": "a driver restart found a newer files>0 checkpoint already landed by the previous rung's pause \u2014 adopted, no new dispatch",
+      "rung": "reentry-adoption@2026-09-25T09:47:41.843767+00:00",
+      "verdict": "useful"
+    }
+  ],
+  "project": {
+    "id": 110,
+    "path": "forcewake/forge-wip-v2-2026-09-25"
+  },
+  "resume": {
+    "collector_lines": [
+      "2026-09-25T09:51:50.389349Z 01O FORGE_LANE_OUTCOME:{\"driver_exit\": \"completed\", \"collector_exit\": 0, \"candidate_state\": \"candidate\"}"
+    ],
+    "decision_id": "fe74cd758cb900f0978ac42be832494c2dcfba6eb443cd609d142bac1a886898",
+    "dispatched_checkpoint": "f70244cc49d2",
+    "envelope_attempt": "2",
+    "envelope_digest": "11a7f7fda283",
+    "lane_job_id": 839,
+    "pipeline_id": 493,
+    "restore_lines": [],
+    "restored_checkpoint_expected": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+    "workspace_generation": "/builds/forcewake/.forge-workspace-gen-f70244cc49d2"
+  },
+  "review": {
+    "closing_reserve_basis": "FORGE_CLOSING_RESERVE_USD=0.50 on forge-worker, FORGE_SPEND_CAP_USD=2.50 \u2014 the policy the closing review rode under (observed read-only after the run settled)",
+    "closing_reserve_usd": 0.5,
+    "mr_still_draft": true,
+    "review_budget_block": null,
+    "reviewed_sha": "52ddeb3f7f3b3c40689b6981313332d8f3b753d6",
+    "reviewed_sha_matches_candidate": true,
+    "settled_at": "2026-09-25T09:53:57.945127+00:00",
+    "status": "ready_for_human",
+    "status_reason": "checks passed; merge is a human decision",
+    "summary": "The diff faithfully implements the plan: slugify() in src/utils/text.py lowercases, collapses non-alphanumeric runs to a single '-', and strips edge hyphens (verified against all six examples, including '!!!leading and trailing!!!' -> 'leading-and-trailing'); src/app.py is rewired from utils.legacy.shout to utils.text.slugify with matching import style; src/utils/legacy.py is deleted and no other files were touched.",
+    "verdict": "ok"
+  },
+  "revision": {
+    "activated_by_decision": "dec-wipv2-f0d559fdb7f1",
+    "active_revision": 2,
+    "approved_input_digest": "b5c81cd74dc7aef7a0929a1848a4caa3abc6a728066482ab4b965c60e0ec5825",
+    "credential_grants": [],
+    "credential_grants_basis": "EMPTY honestly: this dispatch's credential_delivery_mode was empty \u2014 the gitlab-protected-variable route (the model token rode the project's CI variables), so NO operation grant was minted on this trace; the #320 grant machinery is exercised by its own offline suites, not by this dispatch",
+    "decision_id": "dec-wipv2-f0d559fdb7f1",
+    "executor_envelope_digest": "9ca1b0629ad3a08f02840eb61d6a6fa1c9006ba9b02e4b112c66742614c541dd",
+    "executor_input_digest": "f34f5d62b8b0f3e3af749d473fe73364d1f57e107279c1ad2736ef4d50fd7837",
+    "marker": "__all__ = [\"slugify\"]",
+    "marker_in_candidate": true,
+    "plan_digest": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+    "plan_text_carries_marker": true,
+    "preserved_artifact_named": "b3fa93afd4612b87c61ac32cfdbf47424695c022520cd8724723b375822e1fed",
+    "preserved_checkpoint_id": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+    "reuse_route": "preserve",
+    "revision1_digest": "9847dfa5f7041e8ac6c492b3aafe464e7776ee28b65c30dc51eeee7dd1987984",
+    "run_plan_digest_at_resume": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+    "source": "revision"
+  },
+  "schema": "forge.useful-wip-resume/2",
+  "spend": {
+    "cap_usd": 2.0,
+    "cost_basis": "sdk-total_cost_usd",
+    "jobs": {
+      "836": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.1281
+      },
+      "839": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "tokens": {
+          "cached_input": 0,
+          "input": 0,
+          "output": 0
+        },
+        "total_usd": 0.2751
+      }
+    },
+    "total_usd": 0.4032
+  },
+  "superseded_negative_evidence": {
+    "checkpoint_id": "3cb49a16540d08e146037d164190600961e43890e7493dc739e3fa3fb2f16d2d",
+    "files": 0,
+    "note": "kept verbatim as negative historical evidence (R38-05 scope item 5)",
+    "record": "docs/evaluation/2026-09-24-live-single-writer/README.md \u00a74",
+    "uploaded_at": "2026-09-24T12:34:49+00:00",
+    "work_id": "905194f0e4314e9aa126325b37637d1b",
+    "works_index": "data/checkpoints/works/905194f0e4314e9aa126325b37637d1b.json"
+  },
+  "task": {
+    "committed_before_run_sha": "f23e164431fc93f92e469fa84600511e26ba2598",
+    "lane_ref": "6df4020f8f1ff233d65082788a3632c0e4cd38d3",
+    "oracle": "smoke CI job: six exact slugify cases + app rewired + legacy deleted",
+    "shapes": [
+      [
+        "src/utils/text.py",
+        "new"
+      ],
+      [
+        "src/app.py",
+        "modified"
+      ],
+      [
+        "src/utils/legacy.py",
+        "deleted"
+      ]
+    ],
+    "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b"
+  },
+  "useful_checkpoint": {
+    "digest": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+    "files": 2,
+    "id": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+    "manifest_evidence": {
+      "all_shapes_present": true,
+      "deletions": [
+        "src/utils/legacy.py"
+      ],
+      "digests_hex64": true,
+      "file_count": 2,
+      "files": {
+        "src/app.py": {
+          "digest": "c9b6305a3841966a66ee3448bd6405c24fe47f4cd2a93762752debcd4d948eb5",
+          "mode": 420,
+          "role": "modified"
+        },
+        "src/utils/text.py": {
+          "digest": "a154608694557e747fafb60f18f00eec6df6f916ce0a253b8ae47a6f4b7e7fd0",
+          "mode": 420,
+          "role": "new"
+        }
+      },
+      "shape_coverage": {
+        "src/app.py": "present",
+        "src/utils/legacy.py": "deleted",
+        "src/utils/text.py": "present"
+      }
+    },
+    "sequence": 0,
+    "shape_coverage": {
+      "src/app.py": "present",
+      "src/utils/legacy.py": "deleted",
+      "src/utils/text.py": "present"
+    },
+    "source_oids": {
+      "attempt_base": "f23e164431fc93f92e469fa84600511e26ba2598"
+    },
+    "uploaded_at": "2026-09-25T09:35:29+00:00"
+  },
+  "validation_findings": []
+}

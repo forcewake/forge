@@ -537,7 +537,28 @@ The support-bundle export carries a `diagnostics` slice
   `export.raw_backups_excluded`; a sanitized RECEIPT reference (a value
   naming a receipt) is referenced at most.
 
-## 12. Diagnosing the pilot failure cases
+## 12. The operating-limits read-model (Q39-15)
+
+The detail route's `ops_limits` block (`forge.ops.limits/1`, folded by
+`forge.adaptive.ops_limits`) is the supported customer profile's one
+look at the operating limits: the six quantities (current attempt,
+native occupancy, exact checkpoint, unresolved effects, required
+checks, accounting coverage), the customer state on the six-word
+vocabulary (queued / progressing / paused / unverified / verified /
+blocked — the `wedged`/`dead` overlays re-classify to blocked), the
+four `ops.*` observability quantities as SEPARATE records
+(`ops.command_application_latency`, `ops.native_occupancy`,
+`ops.recovery_duration`, `ops.manual_intervention_minutes` — never
+blended; an unmatched window is counted, never zero-filled; an
+unselected section's measure reads `unknown`), the admission accounting
+(intake counters and execution slots as different populations, the
+capped verdict derived from occupancy only), and the review-budget
+distinction (a FAILED REVIEW BUDGET renders as exactly that — never
+lost code, never failed independent checks). The measured limits
+themselves, response ownership and the excluded failure domains live in
+the [support agreement](support-agreement.md).
+
+## 13. Diagnosing the pilot failure cases
 
 The runbook slice for the agreed pilot failure cases — each typed
 blocked reason mapped to where the operator looks and the safe next

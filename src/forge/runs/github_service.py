@@ -65,6 +65,7 @@ from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     ActionLog,
     BudgetLimits,
+    BUDGET_EXHAUSTED,
     Controller,
     DEFAULT_SETTLE_WINDOW_SECONDS,
     FlowRun,
@@ -77,6 +78,7 @@ from forge.durable import (
     RunSpec,
     SettleDecision,
     StepRun,
+    UsageReceipt,
     as_aware_utc,
     budget_block_reason,
     build_source_event_id,
@@ -4095,6 +4097,8 @@ class GitHubRunService:
                     provider_route=provider_route_for_driver(driver),
                     profile="github",
                     presented_ref=prior_credential_ref,
+                    work_id=run_id,
+                    attempt_generation=generation,
                     environ=os.environ,
                 )
             except CredentialRefusal as exc:
@@ -4117,6 +4121,46 @@ class GitHubRunService:
                     credential_delivery.mode,
                     credential_delivery.transport_ref,
                 )
+                # Q39-01 (#320): a redemption-mode dispatch PERSISTS its
+                # operation grant BEFORE the provider call — the lane that
+                # boots can then only redeem the exact ref+route+window THIS
+                # dispatch authorized. Idempotent per attempt+route+ref: a
+                # re-dispatch of the same attempt keeps the existing grant
+                # (the deadline never re-anchors). A grant that cannot be
+                # persisted parks the run — never a lane redeeming against
+                # an authorization nobody wrote.
+                if credential_delivery.operation_grant is not None:
+                    from forge.api_lane_control import (
+                        LaneAuthorityUnavailable,
+                        persist_operation_grant,
+                    )
+
+                    try:
+                        effective = await persist_operation_grant(
+                            self._session_factory, grant=credential_delivery.operation_grant
+                        )
+                    except LaneAuthorityUnavailable as exc:
+                        logger.warning(
+                            "credential.operation_grant: run %s grant persistence failed — %s",
+                            run_id[:8],
+                            exc,
+                        )
+                        await self._to_terminal(
+                            run_id,
+                            FlowStatus.BLOCKED,
+                            f"credential_refused: the operation grant could not be "
+                            f"persisted ({exc})",
+                        )
+                        return
+                    logger.info(
+                        "credential.operation_grant: run %s grant %s route %s attempt %d "
+                        "deadline %s (idempotent per attempt+route+ref)",
+                        run_id[:8],
+                        effective.grant_id[:8],
+                        effective.provider,
+                        effective.attempt_generation,
+                        effective.redemption_deadline.isoformat(),
+                    )
         branch = github_factory_branch(issue_number, run_id)
         executor = GitHubActionsExecutor(self._stack.client, self._settings)
         handle = ActionsHandle(
@@ -6023,6 +6067,214 @@ class GitHubRunService:
             verification_evidence=verification,
         )
 
+    # ------------------------------------------------------------------
+    # Q39-06 (#325): the closing budget — protect the promised review
+    # ------------------------------------------------------------------
+
+    async def _review_budget_block(self, run_id: str) -> dict | None:
+        """The standing reviewer-leg budget decision, or ``None``.
+
+        Recorded by the reviewer leg's BUDGET_EXHAUSTED arm, released
+        only by the explicit operator continuation
+        (:meth:`continue_review_only`).
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            block = (run.evidence or {}).get("review_budget_block")
+            return dict(block) if isinstance(block, dict) else None
+
+    async def _record_review_budget_block(
+        self, run_id: str, *, candidate_sha: str, tested_identity: str
+    ) -> dict:
+        """Record the reviewer-leg budget decision + its closing budget.
+
+        A02 parity with the GitLab leg: the closing policy
+        (``FORGE_CLOSING_RESERVE_USD`` / ``FORGE_CLOSING_RESERVE_FRACTION``
+        / ``FORGE_SPEND_CAP_USD``) is consulted over the run's durable
+        usage receipts; the block binds the decision to the candidate
+        sha + tested identity and carries the five-field budget report
+        with the reserve visible.
+        """
+        from forge.adaptive.closing_budget import (
+            CandidateBinding,
+            ClosingReservePolicy,
+            closing_budget_report,
+            rows_from_durable_receipts,
+        )
+
+        async with self._session_factory() as session:
+            receipts = (
+                (await session.execute(select(UsageReceipt).where(UsageReceipt.run_id == run_id)))
+                .scalars()
+                .all()
+            )
+            run = await self._get_run(session, run_id)
+            standing = (run.evidence or {}).get("review_budget_block")
+            standing = dict(standing) if isinstance(standing, dict) else {}
+        policy = ClosingReservePolicy.from_env()
+        report = closing_budget_report(
+            rows_from_durable_receipts(receipts), cap_usd=policy.cap_usd, policy=policy
+        )
+        budget = report.to_json()
+        if budget["closing_reserve_usd"] is None:
+            short_reason = (
+                "no closing reserve policy is configured — set"
+                " FORGE_CLOSING_RESERVE_USD (or FORGE_CLOSING_RESERVE_FRACTION"
+                " with FORGE_SPEND_CAP_USD) to protect the closing review"
+            )
+        elif budget["closing_review_fits"]:
+            short_reason = (
+                f"closing reserve of {budget['closing_reserve_usd']} usd is held"
+                " for the review — the review-only continuation (an explicit"
+                " operator action, zero coder dispatches) completes it"
+            )
+        else:
+            short_reason = (
+                f"closing reserve of {budget['closing_reserve_usd']} usd does not"
+                f" cover the review (known {budget['known_subtotal_usd']} usd +"
+                f" reserved liability {budget['reserved_liability_usd']} usd vs the"
+                f" {budget['coder_ceiling_usd']} usd coder ceiling) — an explicit,"
+                " auditable top-up is required"
+            )
+        block = {
+            "budget_decision": BUDGET_EXHAUSTED,
+            "stage": "reviewer",
+            "candidate": CandidateBinding(
+                candidate_sha=candidate_sha, tested_identity=tested_identity
+            ).to_json(),
+            "released": False,
+            # the applied top-up ledger SURVIVES a re-recorded refusal —
+            # a retried operator command stays a replay across refusal
+            # cycles (the idempotency key is deterministic)
+            "top_ups": list(standing.get("top_ups") or []),
+            "top_up_total_usd": standing.get("top_up_total_usd") or 0.0,
+            "short_reason": short_reason,
+            "budget": budget,
+        }
+        await self._merge_run_evidence(run_id, {"review_budget_block": block})
+        return block
+
+    async def continue_review_only(
+        self,
+        run_id: str,
+        *,
+        operator: str,
+        top_up_usd: float = 0.0,
+        top_up_reason: str = "",
+    ) -> dict[str, Any]:
+        """The explicit review-only continuation (Q39-06/#325 item 4).
+
+        After an explicit reviewer-leg budget decision, repeat ONLY the
+        review of the SAME candidate/tested identity: no coder dispatch,
+        no new commits — this path never touches the implementer or
+        pushes anything. A moved PR head (or tested identity)
+        invalidates the shortcut with the typed ``review_shortcut_stale``
+        and parks the run for the required fresh verification. A top-up
+        (amount + reason) is recorded BEFORE the re-drive and is
+        replay-idempotent. Returns the outcome document.
+        """
+        from forge.adaptive.closing_budget import (
+            OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            REVIEW_SHORTCUT_STALE,
+            BudgetTopUp,
+            CandidateBinding,
+            TopUpLedger,
+            review_only_continuation,
+        )
+
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            status = run.status
+            project_id = run.project_id
+            issue_number = run.issue_iid or 0
+            base_sha = run.base_sha or ""
+            candidate_shas = list(run.candidate_shas or [])
+            evidence = dict(run.evidence or {})
+        block = evidence.get("review_budget_block")
+        block = dict(block) if isinstance(block, dict) else None
+        if status != FlowStatus.REVIEWING.value or block is None:
+            return {
+                "allowed": False,
+                "reason": "no_review_budget_block",
+                "detail": (
+                    "the review-only continuation requires a run parked in"
+                    " reviewing with a recorded reviewer-leg budget decision"
+                ),
+                "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            }
+        recorded = block.get("candidate") or {}
+        recorded_binding = CandidateBinding(
+            candidate_sha=str(recorded.get("candidate_sha") or ""),
+            tested_identity=str(recorded.get("tested_identity") or ""),
+        )
+        candidate_sha = candidate_shas[-1] if candidate_shas else ""
+        verification = dict(evidence.get("verification") or {})
+        # Candidate FRESHNESS: the shortcut binds to the LIVE PR/branch
+        # head, re-read now — a human push that landed since the recorded
+        # decision invalidates the shortcut (the verification reruns).
+        observed_head, enforceable = await self._observed_candidate_head(run_id, issue_number)
+        current_binding = CandidateBinding(
+            candidate_sha=str(observed_head or candidate_sha) if enforceable else candidate_sha,
+            tested_identity=str(verification.get("tested_oid") or candidate_sha),
+        )
+        decision = review_only_continuation(
+            budget_decision=str(block.get("budget_decision") or ""),
+            recorded=recorded_binding,
+            current=current_binding,
+        )
+        if not decision.allowed:
+            await self._merge_run_evidence(
+                run_id, {"review_budget_block": {**block, "shortcut": decision.to_json()}}
+            )
+            if decision.reason == REVIEW_SHORTCUT_STALE:
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, f"{REVIEW_SHORTCUT_STALE}: {decision.detail}"
+                )
+            return decision.to_json()
+
+        # The explicit, auditable top-up — recorded BEFORE the re-drive,
+        # replay-idempotent by its derived key.
+        ledger = TopUpLedger(block.get("top_ups") or [])
+        if top_up_usd:
+            applied = ledger.apply(
+                BudgetTopUp(
+                    run_id=run_id,
+                    amount_usd=float(top_up_usd),
+                    reason=top_up_reason,
+                    operator=operator,
+                )
+            )
+            logger.info(
+                "GitHub run %s budget top-up of %s usd by %s (%s) — applied=%s",
+                run_id[:8],
+                applied.top_up.amount_usd,
+                operator,
+                applied.top_up.reason,
+                applied.applied,
+            )
+        block = {
+            **block,
+            "top_ups": list(ledger.records()),
+            "top_up_total_usd": ledger.total_added_usd(),
+            "released": {"operator": operator, "top_up_usd": ledger.total_added_usd()},
+        }
+        await self._merge_run_evidence(run_id, {"review_budget_block": block})
+
+        # Repeat ONLY the review of the SAME candidate/tested identity:
+        # zero coder dispatches, zero commits.
+        verified = verified_verdict(verification, candidate_sha)
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            pr_number=run.mr_iid or 0,
+            candidate_sha=candidate_sha,
+            base_sha=base_sha,
+            verified=verified,
+            verification_evidence=verification,
+        )
+        return decision.to_json()
+
     async def _review_and_ready(
         self,
         run_id: str,
@@ -6061,6 +6313,26 @@ class GitHubRunService:
         except InvalidTransition:
             # R07: a crashed pass already made the move — resume the leg.
             pass
+
+        # Q39-06 (#325): a STANDING reviewer-leg budget decision guards the
+        # leg — without the explicit operator release (the recorded top-up in
+        # review_budget_block.released), a scanner re-drive (resume_verification)
+        # stands down instead of re-attempting the paid review call: never a
+        # hidden retry.
+        standing = await self._review_budget_block(run_id)
+        if (
+            isinstance(standing, dict)
+            and not standing.get("released")
+            and str((standing.get("candidate") or {}).get("candidate_sha") or "") == candidate_sha
+        ):
+            logger.info(
+                "GitHub run %s stands in reviewing under its recorded reviewer-leg"
+                " budget decision (closing reserve %s usd) — the explicit"
+                " review-only continuation releases it",
+                run_id[:8],
+                (standing.get("budget") or {}).get("closing_reserve_usd"),
+            )
+            return
 
         # R07 bounded step ``review``: a review already persisted for THIS
         # candidate sha is replayed — the model runs exactly once per
@@ -6103,7 +6375,39 @@ class GitHubRunService:
                     flow_run_id=run_id,
                 )
             except (LLMError, LLMResponseError) as exc:
-                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+                # Q39-06 (#325): a budget refusal is not a review failure —
+                # the reviewer never ran. The refusal consults the CLOSING
+                # RESERVE before parking anything (A02 parity with the GitLab
+                # leg): when the reserve still covers the closing review, the
+                # run stays in the precise NON-READY ``reviewing`` state with
+                # the reserve visible (the explicit review-only continuation
+                # completes it); only a reserve that cannot cover the review
+                # blocks — with the shortage named. Never a hidden retry: the
+                # standing block above guards every later re-drive.
+                if str(exc) == BUDGET_EXHAUSTED:
+                    block = await self._record_review_budget_block(
+                        run_id,
+                        candidate_sha=candidate_sha,
+                        tested_identity=str(
+                            (verification_evidence or {}).get("tested_oid") or candidate_sha
+                        ),
+                    )
+                    if block["budget"].get("closing_review_fits"):
+                        logger.info(
+                            "GitHub run %s keeps reviewing within its closing"
+                            " reserve (%s usd) — the review-only continuation"
+                            " completes it",
+                            run_id[:8],
+                            block["budget"].get("closing_reserve_usd"),
+                        )
+                        return
+                    await self._to_terminal(
+                        run_id,
+                        FlowStatus.BLOCKED,
+                        f"{BUDGET_EXHAUSTED}: reviewer refused — {block['short_reason']}",
+                    )
+                else:
+                    await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
                 return
 
             verdict = str(getattr(review, "verdict", ""))

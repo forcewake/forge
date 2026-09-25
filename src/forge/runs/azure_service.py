@@ -2915,6 +2915,8 @@ class AzureRunService:
                     provider_route=provider_route_for_driver(driver),
                     profile="azure",
                     presented_ref=prior_credential_ref,
+                    work_id=run_id,
+                    attempt_generation=generation,
                     environ=os.environ,
                 )
             except CredentialRefusal as exc:
@@ -2937,6 +2939,46 @@ class AzureRunService:
                     credential_delivery.mode,
                     credential_delivery.transport_ref,
                 )
+                # Q39-01 (#320): a redemption-mode dispatch PERSISTS its
+                # operation grant BEFORE the provider call — the lane that
+                # boots can then only redeem the exact ref+route+window THIS
+                # dispatch authorized. Idempotent per attempt+route+ref: a
+                # re-dispatch of the same attempt keeps the existing grant
+                # (the deadline never re-anchors). A grant that cannot be
+                # persisted parks the run — never a lane redeeming against
+                # an authorization nobody wrote.
+                if credential_delivery.operation_grant is not None:
+                    from forge.api_lane_control import (
+                        LaneAuthorityUnavailable,
+                        persist_operation_grant,
+                    )
+
+                    try:
+                        effective = await persist_operation_grant(
+                            self._session_factory, grant=credential_delivery.operation_grant
+                        )
+                    except LaneAuthorityUnavailable as exc:
+                        logger.warning(
+                            "credential.operation_grant: run %s grant persistence failed — %s",
+                            run_id[:8],
+                            exc,
+                        )
+                        await self._to_terminal(
+                            run_id,
+                            FlowStatus.BLOCKED,
+                            f"credential_refused: the operation grant could not be "
+                            f"persisted ({exc})",
+                        )
+                        return
+                    logger.info(
+                        "credential.operation_grant: run %s grant %s route %s attempt %d "
+                        "deadline %s (idempotent per attempt+route+ref)",
+                        run_id[:8],
+                        effective.grant_id[:8],
+                        effective.provider,
+                        effective.attempt_generation,
+                        effective.redemption_deadline.isoformat(),
+                    )
         # B04: the envelope binding dispatched to the lane — the plan
         # comment's journaled id + the frozen envelope digest (both from
         # the plan leg's evidence). Absent on legacy runs: the lane then

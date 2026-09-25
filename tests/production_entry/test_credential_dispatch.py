@@ -47,6 +47,8 @@ import socket
 import subprocess
 import sys
 import threading
+import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -236,6 +238,40 @@ async def get_run(session_factory, run_id: str) -> FlowRun:
         return await session.get(FlowRun, run_id)
 
 
+async def persist_grant(
+    session_factory,
+    work_id: str,
+    *,
+    generation: int,
+    ref: str,
+    subject: CanonicalSubject | None = None,
+    provider: str = "anthropic-gateway",
+) -> str:
+    """Persist the attempt's operation grant the way the DISPATCH seam
+    does (Q39-01) — through the production :func:`persist_operation_grant`,
+    so the lab's evidence shape is the production one. Returns the id."""
+    from datetime import datetime, timedelta, timezone
+
+    from forge.adaptive.credential_broker import CredentialOperationGrant
+    from forge.api_lane_control import persist_operation_grant
+
+    now = datetime.now(timezone.utc)
+    grant = CredentialOperationGrant(
+        grant_id=uuid.uuid4().hex,
+        work_id=work_id,
+        subject=(subject or RUN_SUBJECT).subject_id(),
+        provider=provider,
+        credential_ref=ref,
+        binding_revision=1,
+        attempt_generation=generation,
+        delivery_mode="runner-redemption",
+        redemption_deadline=now + timedelta(hours=1),
+        created_at=now,
+    )
+    effective = await persist_operation_grant(session_factory, grant=grant)
+    return effective.grant_id
+
+
 async def get_run_evidence(session_factory, run_id: str) -> dict[str, Any]:
     run = await get_run(session_factory, run_id)
     return dict(run.evidence or {})
@@ -371,6 +407,9 @@ class TestCD1NativeGitHubDelivery:
         assert proof["transport_ref"] == f"FORGE_MODEL_{SEGMENT_V1}"
         assert proof["attribution"] == "bound-delivery"
         assert SECRET_V1 not in json.dumps(proof)
+        # Q39-01: a NATIVE dispatch mints NO operation grant — redemption
+        # was never authorized for this attempt.
+        assert not (await get_run_evidence(factory, run_id)).get("credential_operation_grants")
         assert native.unknown_paths() == []
 
     async def test_a_revoked_binding_means_zero_workflow_dispatches(
@@ -409,6 +448,19 @@ class TestCD1NativeGitHubDelivery:
         assert inputs["credential_ref"] == REF_V1  # the RAW ref — the lane re-checks it
         assert inputs["credential_redeem"] == "1"
         assert SECRET_V1 not in json.dumps(native.dispatches())
+        # Q39-01: the dispatch PERSISTED the attempt's operation grant
+        # (redemption mode only) — the exact ref/route the lane may redeem,
+        # with its absolute deadline, refs/metadata only.
+        grants = (await get_run_evidence(factory, run_id)).get("credential_operation_grants")
+        assert grants and "0:anthropic-gateway" in grants
+        grant = grants["0:anthropic-gateway"]
+        assert grant["schema"] == "forge.credential.operation-grant/1"
+        assert grant["credential_ref"] == REF_V1
+        assert grant["provider"] == "anthropic-gateway"
+        assert grant["attempt_generation"] == 0
+        assert grant["operation"] == "credential-redemption"
+        assert datetime.fromisoformat(grant["redemption_deadline"]).tzinfo is not None
+        assert SECRET_V1 not in json.dumps(grant)
 
 
 class TestCD1NativeConsumerProof:
@@ -496,13 +548,18 @@ class TestCD1NativeConsumerProof:
 
 class TestCD2RunnerRedemption:
     @staticmethod
-    def _lane_env(control_url: str, token: str, *, ref: str = REF_V1) -> dict[str, str]:
+    def _lane_env(
+        control_url: str, token: str, *, ref: str = REF_V1, generation: str = "0"
+    ) -> dict[str, str]:
         return {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "FORGE_WORK_ID": "run-redeem-1",
             "FORGE_RUN_ID": "run-redeem-1",
             "FORGE_LANE_DRIVER": "claude",
             "FORGE_CREDENTIAL_REF": ref,
+            # Q39-01: the dispatched attempt generation the bootstrap
+            # verifies the redemption response against.
+            "FORGE_ATTEMPT_GENERATION": generation,
             "FORGE_LANE_CONTROL_URL": control_url,
             "FORGE_LANE_CONTROL_TOKEN": token,
             # The stray same-family variable a runner image may carry —
@@ -513,8 +570,9 @@ class TestCD2RunnerRedemption:
 
     @staticmethod
     async def _lab(pe_db, monkeypatch, *, revoked=False):
-        """The control plane over real HTTP + the run row + the
-        registry/broker the redemption endpoint resolves through."""
+        """The control plane over real HTTP + the run row (with its
+        attempt-0 operation grant persisted the dispatch seam's way) +
+        the registry/broker the redemption endpoint resolves through."""
         control = await start_control_plane(pe_db.url, secret=PE_LANE_SECRET)
         monkeypatch.setenv("FORGE_LANE_LEGACY_TOKEN_DEADLINE", "2020-01-01T00:00:00+00:00")
         from forge.durable.models import FlowRun as FlowRunRow
@@ -529,6 +587,7 @@ class TestCD2RunnerRedemption:
                 )
             )
             await session.commit()
+        await persist_grant(control._session_factory, "run-redeem-1", generation=0, ref=REF_V1)
         registry, broker = _bound_lab()
         if revoked:
             registry.revoke(RUN_SUBJECT, "anthropic-gateway", revoked_by="ops@a")
@@ -717,19 +776,25 @@ class TestCD4Rotation:
                 run = await session.get(FlowRun, "run-redeem-1")
                 run.cancellation_generation = 1
                 await session.commit()
+            # The re-dispatch of the new attempt persists ITS grant (the
+            # dispatch seam's own step — Q39-01).
+            await persist_grant(control._session_factory, "run-redeem-1", generation=1, ref=REF_V2)
 
             # The OLD attempt's token is retired — zero retrievals.
             with pytest.raises(LaneCredentialRedemptionError, match="HTTP 403"):
                 redeem_lane_credential(
-                    TestCD2RunnerRedemption._lane_env(control.base_url, old, ref=REF_V2)
+                    TestCD2RunnerRedemption._lane_env(
+                        control.base_url, old, ref=REF_V2, generation="0"
+                    )
                 )
             # The NEW authorized attempt re-resolves the rotated-in ref.
             new = lane_control_token(PE_LANE_SECRET, "run-redeem-1", generation=1)
             second = redeem_lane_credential(
-                TestCD2RunnerRedemption._lane_env(control.base_url, new, ref=REF_V2)
+                TestCD2RunnerRedemption._lane_env(control.base_url, new, ref=REF_V2, generation="1")
             )
             assert second["credential_ref"] == REF_V2
             assert second["binding_revision"] == 2
+            assert second["grant_id"]
             assert broker.resolve_calls.count(REF_V2) >= 1
         finally:
             control.stop()
@@ -779,6 +844,8 @@ class TestCD5DispatchConformance:
         envelope = evidence["harness"]["dispatch_envelope"]
         assert envelope["credential_ref"] == REF_V1
         assert envelope["credential_delivery_mode"] == DELIVERY_MODE_GITLAB_PROTECTED
+        # Q39-01: a NATIVE dispatch mints NO operation grant.
+        assert not evidence.get("credential_operation_grants")
         assert gitlab_native.unknown_paths() == []
 
     async def test_a_revoked_binding_parks_the_run_with_zero_provider_dispatches(
@@ -825,6 +892,44 @@ class TestCD5DispatchConformance:
         assert "credential_refused: delivery_route_unsupported" in str(run.status_reason)
         assert gitlab_native.dispatches() == []
 
+    async def test_a_redemption_mode_dispatch_persists_the_attempt_grant(
+        self, pe_db, gitlab_native, gitlab_client, monkeypatch
+    ):
+        """Q39-01: the GitLab dispatch leg under runner-redemption mints
+        and persists the attempt's OPERATION GRANT beside the delivery
+        plan — the lane that boots may redeem exactly this ref/route,
+        inside the persisted absolute window, nothing else."""
+        registry, broker = _bound_lab()
+        service, factory, run_id = await _start_run(
+            pe_db,
+            gitlab_native,
+            gitlab_client,
+            registry=registry,
+            broker=broker,
+            monkeypatch=monkeypatch,
+            delivery=DELIVERY_MODE_RUNNER_REDEMPTION,
+        )
+        await drive_go(service, run_id)
+
+        run = await get_run(factory, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        variables = dispatched_variables(gitlab_native, 0)
+        assert variables["FORGE_CREDENTIAL_REDEEM"] == "1"
+        evidence = await get_run_evidence(factory, run_id)
+        grants = evidence.get("credential_operation_grants")
+        assert grants and set(grants) == {"0:anthropic-gateway"}
+        grant = grants["0:anthropic-gateway"]
+        assert grant["schema"] == "forge.credential.operation-grant/1"
+        assert grant["credential_ref"] == REF_V1
+        assert grant["work_id"] == run_id
+        assert grant["operation"] == "credential-redemption"
+        assert grant["delivery_mode"] == DELIVERY_MODE_RUNNER_REDEMPTION
+        deadline = datetime.fromisoformat(grant["redemption_deadline"])
+        assert deadline > datetime.now(deadline.tzinfo)
+        # Refs/metadata only — no value anywhere in the grant evidence.
+        assert SECRET_V1 not in json.dumps(grant)
+        assert SECRET_V1 not in json.dumps(evidence)
+
 
 # ----------------------------------------------------------------------
 # CD-6 — the unbound legacy lane: ambient, explicitly separable
@@ -857,6 +962,9 @@ class TestCD6UnboundLegacy:
         assert AMBIENT_VALUE not in every_value  # and still no value
         evidence = await get_run_evidence(factory, run_id)
         assert "dispatch_credential" not in (evidence.get("harness") or {})
+        # Q39-01: an unbound legacy dispatch mints NO operation grant —
+        # this lane could never redeem at the endpoint.
+        assert not evidence.get("credential_operation_grants")
         # The broker was never consulted — the attribution stays honestly
         # ambient-legacy, never promoted to a claim.
         assert broker.resolve_calls == []
@@ -962,7 +1070,8 @@ LANE_JOB_ID = "907001"  # the CI_JOB_ID the consumer receipt joins on
 
 
 async def _lane_lab(pe_db, monkeypatch):
-    """The control plane over real HTTP with the lane's run row and the
+    """The control plane over real HTTP with the lane's run row (its
+    attempt-0 operation grant persisted the dispatch seam's way) and the
     bound registry/broker its redemption endpoint resolves through."""
     control = await start_control_plane(pe_db.url, secret=PE_LANE_SECRET)
     monkeypatch.setenv("FORGE_LANE_LEGACY_TOKEN_DEADLINE", "2020-01-01T00:00:00+00:00")
@@ -978,6 +1087,7 @@ async def _lane_lab(pe_db, monkeypatch):
             )
         )
         await session.commit()
+    await persist_grant(control._session_factory, LANE_WORK_ID, generation=0, ref=REF_V1)
     registry, broker = _bound_lab()
     import forge.adaptive.credential_broker as broker_module
     import forge.adaptive.project_credentials as credentials_module
@@ -1019,6 +1129,7 @@ def _lane_job_env(
         "FORGE_LANE_BUDGET_SECONDS": "60",
         "FORGE_LANE_POLL_SECONDS": "0.05",
         "FORGE_CREDENTIAL_REF": REF_V1,
+        "FORGE_ATTEMPT_GENERATION": "0",
         "FORGE_CREDENTIAL_REDEEM": "1",
         "FORGE_LANE_CONTROL_URL": control_url,
         "FORGE_LANE_CONTROL_TOKEN": token,
@@ -1272,8 +1383,13 @@ class TestCD8RotationAtTheBoundary:
                 run = await session.get(FlowRun, LANE_WORK_ID)
                 run.cancellation_generation = 1
                 await session.commit()
+            # The re-dispatch of the new attempt persists ITS grant (the
+            # dispatch seam's own step — Q39-01).
+            await persist_grant(control._session_factory, LANE_WORK_ID, generation=1, ref=REF_V2)
             new = lane_control_token(PE_LANE_SECRET, LANE_WORK_ID, generation=1)
-            renewed_env = TestCD2RunnerRedemption._lane_env(control.base_url, new, ref=REF_V2)
+            renewed_env = TestCD2RunnerRedemption._lane_env(
+                control.base_url, new, ref=REF_V2, generation="1"
+            )
             renewed_env["FORGE_WORK_ID"] = LANE_WORK_ID
             renewed_env["FORGE_RUN_ID"] = LANE_WORK_ID
             second = redeem_lane_credential(renewed_env)
@@ -1298,3 +1414,163 @@ class TestCD8RotationAtTheBoundary:
             assert second_receipt["resolved_version_kind"] == "fixture"  # presence honesty
         finally:
             control.stop()
+
+
+# ----------------------------------------------------------------------
+# CD-9 (Q39-01 / #320) — the RUNNER's typed verification: a wrong-slot
+# or expired redemption ANSWER (HTTP 200!) never constructs the vendor
+# client — the fake model endpoint asserts ZERO calls, and the ambient
+# key never substitutes.
+# ----------------------------------------------------------------------
+
+
+class _CannedRedemptionHandler(BaseHTTPRequestHandler):
+    """Serves ONE canned redemption document (200) — a lying endpoint."""
+
+    def do_GET(self) -> None:  # noqa: N802 — the http.server contract
+        body = json.dumps(self.server.document).encode("utf-8")  # type: ignore[attr-defined]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: Any) -> None:  # silence the test log
+        return
+
+
+class CannedRedemptionEndpoint:
+    """A local HTTP server impersonating the redemption route."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _CannedRedemptionHandler)
+        self._server.document = document  # type: ignore[attr-defined]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _lying_document(**overrides: Any) -> dict[str, Any]:
+    """A redemption answer for THIS lane — every field correct except the
+    axes each CD-9 case mutates (the 200 is deliberate: the verification,
+    not the transport, is the fence under test)."""
+    from datetime import datetime, timedelta, timezone
+
+    document: dict[str, Any] = {
+        "redemption_id": "lying-1",
+        "grant_id": "lying-grant-1",
+        "work_id": LANE_WORK_ID,
+        "provider": "anthropic-gateway",
+        "credential_ref": REF_V1,
+        "env_var": "ANTHROPIC_AUTH_TOKEN",
+        "value": SECRET_V2,  # a DIFFERENT sentinel — must never be applied
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "binding_revision": 1,
+        "resolver_identity": "canned",
+        "resolved_version": "v2",
+        "resolved_version_kind": "fixture",
+        "attempt_generation": 0,
+        "credential_policy": "compat",
+    }
+    document.update(overrides)
+    return document
+
+
+class TestCD9RunnerTypedVerification:
+    """AC-06: the runner rejects expired or wrong-slot ANSWERS before any
+    vendor client is constructed — with an ambient key present."""
+
+    @staticmethod
+    def _lane_env_against(lying: CannedRedemptionEndpoint, sdk_dir: Path, endpoint_url: str):
+        env = _lane_job_env(
+            lying.base_url, "any-token-works-here", endpoint_url=endpoint_url, sdk_dir=sdk_dir
+        )
+        return env
+
+    async def test_a_wrong_slot_answer_never_constructs_the_vendor_client(
+        self, model_endpoint, tmp_path
+    ):
+        """HTTP 200 with the value bound to the WRONG env slot: the
+        bootstrap refuses before the SDK session exists — zero model
+        calls, the ambient key never presented."""
+        lying = CannedRedemptionEndpoint(_lying_document(env_var="OPENAI_API_KEY"))
+        try:
+            sdk_dir = tmp_path / "sdk"
+            sdk_dir.mkdir()
+            (sdk_dir / "claude_agent_sdk.py").write_text(_FAKE_SDK_STUB)
+            env = self._lane_env_against(lying, sdk_dir, model_endpoint.url)
+            env["FORGE_ATTEMPT_GENERATION"] = "0"
+            result = _run_lane_job(tmp_path / "lane-job", env)
+
+            assert result.returncode == 1  # the lane halts; artifacts land
+            meta = json.loads(
+                ((tmp_path / "lane-job") / ".forge" / "candidate.meta.json").read_text()
+            )
+            assert meta["exit"] == "failed"
+            assert meta["terminal_reason"] == "credential_redemption_failed"
+            assert "env_var" in meta["error"]
+            # THE vendor-client proof: the fake model endpoint saw NOTHING
+            # (the SDK session never existed), and no ambient fallback.
+            assert model_endpoint.bearers() == []
+            assert AMBIENT_VALUE not in result.stdout + result.stderr
+        finally:
+            lying.stop()
+
+    async def test_an_expired_answer_never_constructs_the_vendor_client(
+        self, model_endpoint, tmp_path
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        lying = CannedRedemptionEndpoint(_lying_document(expires_at=stale))
+        try:
+            sdk_dir = tmp_path / "sdk"
+            sdk_dir.mkdir()
+            (sdk_dir / "claude_agent_sdk.py").write_text(_FAKE_SDK_STUB)
+            env = self._lane_env_against(lying, sdk_dir, model_endpoint.url)
+            env["FORGE_ATTEMPT_GENERATION"] = "0"
+            result = _run_lane_job(tmp_path / "lane-job", env)
+
+            assert result.returncode == 1
+            meta = json.loads(
+                ((tmp_path / "lane-job") / ".forge" / "candidate.meta.json").read_text()
+            )
+            assert meta["terminal_reason"] == "credential_redemption_failed"
+            assert "expires_at" in meta["error"]
+            assert model_endpoint.bearers() == []
+            assert AMBIENT_VALUE not in result.stdout + result.stderr
+        finally:
+            lying.stop()
+
+    async def test_a_wrong_generation_answer_never_constructs_the_vendor_client(
+        self, model_endpoint, tmp_path
+    ):
+        """The envelope names attempt 0; the answer claims attempt 9 —
+        a response for a DIFFERENT attempt is not this lane's."""
+        lying = CannedRedemptionEndpoint(_lying_document(attempt_generation=9))
+        try:
+            sdk_dir = tmp_path / "sdk"
+            sdk_dir.mkdir()
+            (sdk_dir / "claude_agent_sdk.py").write_text(_FAKE_SDK_STUB)
+            env = self._lane_env_against(lying, sdk_dir, model_endpoint.url)
+            env["FORGE_ATTEMPT_GENERATION"] = "0"
+            result = _run_lane_job(tmp_path / "lane-job", env)
+
+            assert result.returncode == 1
+            meta = json.loads(
+                ((tmp_path / "lane-job") / ".forge" / "candidate.meta.json").read_text()
+            )
+            assert meta["terminal_reason"] == "credential_redemption_failed"
+            assert "attempt_generation" in meta["error"]
+            assert model_endpoint.bearers() == []
+        finally:
+            lying.stop()

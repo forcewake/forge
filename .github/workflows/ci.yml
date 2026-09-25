@@ -42,20 +42,29 @@ jobs:
       - name: Public-artifact gate (no database archives in tracked files)
         run: uv run python scripts/gate_public_artifacts.py
 
-      # R38-16 (#317): the native template + secret-consumer conformance
-      # gate, on EVERY push (the PG profiles stay on the integration job).
-      # Three checks, executed for real: (1) every shipped SDK-lane recipe
-      # YAML-parsed and its finalization shell executed VERBATIM under real
-      # bash (success/failure/no-op/restored-generation) with the #302
+      # R38-16 (#317) + #323 (Q39-04) + #327 (Q39-08): the native template,
+      # secret-consumer and consumer-contract conformance gate, on EVERY
+      # push (the PG profiles stay on the integration job). Five checks,
+      # executed for real: (1) every shipped SDK-lane recipe YAML-parsed
+      # and its finalization shell executed VERBATIM under real bash
+      # (success/failure/no-op/restored-generation) with the #302
       # unconditional-exit mutation replayed as a caught self-test; (2) the
       # templates' declared dispatch surfaces validated against the CAPTURED
       # production dispatch payloads (scripts/conformance_dispatch_captures.json
       # — recorded through the production-entry fakes, drift-pinned by
       # tests/test_gate_conformance.py); (3) the #303 credential-consumption
       # blocks executed with delivered-vs-ambient sentinels (a dropped
-      # consumer mapping fails despite a correct-looking receipt). Exit
-      # codes: 2 prerequisite · 3 recipe · 4 schema · 5 sentinel · 6 the
-      # gate proved itself insensitive (mutation escape).
+      # consumer mapping fails despite a correct-looking receipt; a
+      # comment-only marker spoof is refused); (4) the #323 collision-safe
+      # locator dimension with the installed-template digest inventory; (5)
+      # the #327 consumer contracts — the #320 grant through the REAL ASGI
+      # redemption endpoint (the sibling route refuses with zero broker
+      # calls; a DTO-preserving disconnect authorizes nothing), the
+      # runner-side typed verification as real lane subprocesses against a
+      # canned endpoint, and the #321 rebind digest through a real
+      # RunService dispatch. Exit codes: 2 prerequisite · 3 recipe · 4
+      # schema · 5 sentinel · 6 the gate proved itself insensitive
+      # (mutation escape) · 7 locator · 8 consumer contract.
       - name: Native template & secret-consumer conformance
         run: uv run python scripts/gate_conformance.py --report conformance-gate.json
 

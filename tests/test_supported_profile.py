@@ -126,9 +126,9 @@ class TestFreezeFieldSourcing:
         document = load_manifest(MANIFEST)
         promotion = _load(ROOT / "docs/releases/evidence/v0.37.0/promotion.json")
         trace = _load(
-            ROOT / "docs/evaluation/2026-09-25-useful-wip-resume/useful-wip-resume-2026-09-25.json"
+            ROOT / "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
         )
-        inventory = _load(ROOT / "qualification/inventory-2026-09-25.json")
+        inventory = _load(ROOT / "qualification/inventory-2026-09-25-v2.json")
         from scripts.freeze_supported_profile import CLOSURE_RECEIPT_CANDIDATES
 
         closure_path = next(
@@ -151,7 +151,7 @@ class TestFreezeFieldSourcing:
             executed["image_digest"]
             == inventory["stages"]["control-plane"]["image"]["image_digest"]
         )
-        assert executed["reported_version"] == "0.37.0"
+        assert executed["reported_version"] == "0.38.0"  # the v2 composition (Q39-07/#326)
 
         assert document["lane"]["executed_live"]["git_sha"] == trace["task"]["lane_ref"]
         assert document["lane"]["closure"]["closure_digest"] == closure["closure_digest"]
@@ -304,8 +304,8 @@ class TestManifestContract:
 
     def test_schema_predecessor_differs_from_head(self, manifest: dict[str, Any]) -> None:
         revision = manifest["control_plane"]["schema_revision"]
-        assert revision["head"] == "027"
-        assert revision["predecessor"] == "026"
+        assert revision["head"] == "028"  # 028_credential_receipts (Q39-03/Q39-05)
+        assert revision["predecessor"] == "027"
         assert revision["head"] != revision["predecessor"]
 
     def test_load_manifest_refuses_a_stale_manifest(self, tmp_path: Path) -> None:
@@ -363,10 +363,16 @@ class TestFreshInstallVerification:
 
     def test_mismatched_template_refuses(self, manifest: dict[str, Any]) -> None:
         """A moving working tree's template must never silently replace
-        the frozen recipe — the preflight arm fires before a model call."""
+        the frozen recipe — the preflight arm fires before a model call.
+        (The drifting bytes are a MUTATED copy: on the v2 freeze the
+        working tree legitimately equals the frozen bytes — the template
+        was recovered FROM it — so the raw tree cannot carry the
+        negative arm anymore.)"""
         working_tree = (ROOT / "ci/templates/claude-sdk-lane.gitlab-ci.yml").read_text("utf-8")
+        drifted = working_tree.replace("forge-agent-claude-sdk:", "forge-agent-claude-sdk-x:", 1)
+        assert drifted != working_tree
         findings = template_preflight_findings(
-            rendered_ci_yaml=working_tree, manifest=manifest, template_source=working_tree
+            rendered_ci_yaml=drifted, manifest=manifest, template_source=drifted
         )
         refusals = preflight_refusals(findings)
         assert refusals and any("MISMATCHED template" in r for r in refusals)

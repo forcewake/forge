@@ -154,3 +154,25 @@ module like every other owner.
 - Evolution rule: additive field changes bump
   `forge.execution.spec/N`; readers refuse mismatched versions
   explicitly until the control plane upgrades.
+
+## Amendment (Q39-17 / #336): the two authority members
+
+ADR-0033's consolidation adds two members to the spec, additively:
+`approved_input_digest` (the resolved `ApprovedInput`'s
+`plan_text_digest` — #321's executor-input identity) and `grant_id`
+(the `CredentialOperationGrant` a redemption-mode dispatch minted —
+#320's credential authorization). Both ride the document and therefore
+`spec_digest()`; both fail closed when present but malformed, and a
+`runner-redemption` spec without its `grant_id` refuses (a redemption
+the endpoint could never authorize). Empty values are the recorded
+pre-#321/#320 window, labeled by the same discipline as the unpinned
+model route.
+
+The schema word stays `forge.execution.spec/1` —
+**additive-with-version-note** rather than a `/2` bump: the members
+are optional with empty legacy values, no existing member's digest
+semantics changed, and a pre-amendment reader still refuses the new
+keys as unknown (the compatibility rule working as designed — the
+upgrade instruction names the control plane). A `/2` bump is reserved
+for a change that would alter the digest MEANING of an existing
+member.

@@ -713,12 +713,19 @@ async def ingest_usage_receipt(
         return value
 
     raw = getattr(usage, "raw", None)
+    # Q39-05 (#324): the durable identity widened to its fourth component —
+    # the SOURCE NAMESPACE (the lane label the receipt arrived under, the
+    # same value the ``source`` column carries). The R23 seam's namespace
+    # is the usage's own source label; an absent label is the empty
+    # namespace, exactly what the pre-028 backfill gave legacy rows.
+    namespace = str(getattr(usage, "source", "") or "")[:100]
     inserted = await session.execute(
         pg_insert(UsageReceipt)
         .values(
             run_id=run_id,
             attempt_id=attempt,
             receipt_id=receipt_id,
+            source_namespace=namespace,
             driver=str(getattr(usage, "driver", "") or "") or None,
             model=str(getattr(usage, "model", "") or "") or None,
             input_tokens=_int("input_tokens"),
@@ -730,9 +737,15 @@ async def ingest_usage_receipt(
             raw=raw if isinstance(raw, dict) else None,
         )
         # ON CONFLICT DO NOTHING works identically on Postgres and SQLite
-        # (tests) — the same portable arbiter as the webhook inbox.
+        # (tests) — the same portable arbiter as the webhook inbox, now
+        # against the CANONICAL four-column identity (Q39-05).
         .on_conflict_do_nothing(
-            index_elements=[UsageReceipt.run_id, UsageReceipt.attempt_id, UsageReceipt.receipt_id]
+            index_elements=[
+                UsageReceipt.run_id,
+                UsageReceipt.attempt_id,
+                UsageReceipt.receipt_id,
+                UsageReceipt.source_namespace,
+            ]
         )
     )
     # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only

@@ -1,5 +1,24 @@
 # R38-05 (#306) — useful-WIP cross-runner continuation, live (2026-09-24/25)
 
+> **The v2 trace supersedes this run's terminal state (Q39-07/#326,
+> 2026-09-25).** This record stays historical, byte-identical. The v2
+> trace — `docs/evaluation/2026-09-25-supported-composition-v2/`
+> (record schema `forge.useful-wip-resume/2`, outcome
+> **reviewed-ready**, zero validation findings) — re-ran the whole arm
+> on the NEW composition (the working-tree build carrying
+> #320/#321/#325) and closed exactly the two gaps §4/§9 name below:
+> a MATERIAL revision staged through the app's own
+> `stage_pending_revision` and approved NATIVELY rode the resumed
+> dispatch as the revision-2 TEXT (the #321 rebind — the candidate
+> itself carries the revision's `__all__ = ["slugify"]` marker, no
+> rescue steer), and the CLOSING REVIEW completed within the #325
+> closing reserve (`FORGE_CLOSING_RESERVE_USD=0.50`) so the run ended
+> **`ready_for_human`** — not `blocked (budget_exhausted)` at the
+> reviewer leg. The frozen manifest was re-frozen at that composition
+> (`qualification/profiles/supported-gitlab-ce-v1.json`; this run's
+> manifest archived at
+> `supported-gitlab-ce-v1@v0.37-composition.json`).
+
 The R37-08 (#289) interrupted arm paused BEFORE file edits existed
 (checkpoint `files=0` after a blind ~5 s pause) and its resumed real-model
 turns delivered EMPTY diffs — control/transport mechanics proven, useful-WIP

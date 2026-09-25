@@ -26,7 +26,12 @@ all read-only by construction:
   displays AS a failure — an empty resumed diff is never a successful
   resume), the five-milestone pause/resume ladder (each
   present/absent/unknown independently) and the advisory recovery hint
-  naming the guarded route that executes it. Action hints rendered from a
+  naming the guarded route that executes it — plus the Q39-15
+  ``ops_limits`` block (:func:`~forge.adaptive.ops_limits.
+  ops_limits_read_model`): the six operating-limit quantities, the
+  customer state, the four ``ops.*`` measures as separate records, the
+  admission accounting (intake counters never claimed as execution
+  slots) and the review-budget distinction. Action hints rendered from a
   snapshot whose consistency fence MOVED carry ``stale: true`` plus the
   current state's safe alternative;
 - ``GET /operator/runs/{run_id}/support-bundle?subject=<canonical>
@@ -120,6 +125,7 @@ from forge.adaptive.operator_snapshot import (
     OperatorSnapshotReader,
     subject_from_ref,
 )
+from forge.adaptive.admission import admission_report
 from forge.adaptive.operator_view import (
     action_hint_block,
     explain_blocked,
@@ -127,6 +133,7 @@ from forge.adaptive.operator_view import (
     recovery_document,
     render,
 )
+from forge.adaptive.ops_limits import admission_accounting, ops_limits_read_model
 from forge.adaptive.support_bundle import COVERAGE_SECTIONS as _SUPPORT_COVERAGE_SECTIONS
 from forge.adaptive.support_bundle import SupportBundle
 from forge.api_lane_control import _bearer, _secret, lane_control_token, verify_lane_token
@@ -531,6 +538,53 @@ def _occupancy_summary(request: Request, snapshot: OperatorSnapshot) -> dict[str
     }
 
 
+def _occupancy_limit(request: Request) -> int | None:
+    """The deployment's active-per-project bound from the mounted
+    admission policy — ``None`` when none is mounted (the read-model
+    renders the limit unknown, never an invented bound)."""
+    policy = getattr(request.app.state, OPERATOR_ADMISSION_POLICY_STATE, None)
+    if policy is None:
+        return None
+    bound = int(getattr(policy, "max_active_per_project", 0) or 0)
+    return bound if bound > 0 else None
+
+
+async def _admission_accounting_for(
+    request: Request, snapshot: OperatorSnapshot
+) -> dict[str, Any] | None:
+    """The project's admission accounting (Q39-15) — INTAKE counters and
+    EXECUTION counters as different populations, the capped verdict
+    derived from occupancy only. Read-only by construction
+    (:func:`~forge.adaptive.admission.admission_report` only SELECTs).
+    Honest unknown: no policy, no lease row naming the project, or an
+    unreadable authority → ``None`` (the read-model states why, never a
+    zeroed report)."""
+    policy = getattr(request.app.state, OPERATOR_ADMISSION_POLICY_STATE, None)
+    if policy is None or not snapshot.occupancy:
+        return None
+    raw_project = snapshot.occupancy[0].get("project_id")
+    if not isinstance(raw_project, int):
+        return None  # no readable project identity — an honest unknown
+    project_id = raw_project
+    provider = str(snapshot.occupancy[0].get("provider") or "")
+    try:
+        report = await admission_report(
+            policy, project_id, request.app.state.session_factory, provider=provider
+        )
+    except Exception:  # noqa: BLE001 — an unreadable authority renders unknown
+        logger.warning("admission accounting for project %s unreadable", project_id)
+        return None
+    attempts = report.get("execution_attempts") or {}
+    return admission_accounting(
+        rejected_requests=report.get("rejected_requests"),
+        admitted_work=report.get("admitted_work"),
+        held=attempts.get("held"),
+        draining=attempts.get("draining"),
+        completed=attempts.get("completed"),
+        limit=attempts.get("limit"),
+    )
+
+
 @operator_router.get("/operator/runs")
 async def list_operator_runs(
     request: Request,
@@ -607,6 +661,13 @@ async def get_operator_run(
     never invented). The diagnostics sections render beside the state:
     ``pending_commands``, ``occupancy_summary`` and the typed
     ``blocked_reasons`` with their evidence links and safe next actions.
+
+    Q39-15 (#334) adds the ``ops_limits`` block: the six-quantity
+    read-model (current attempt, native occupancy, exact checkpoint,
+    unresolved effects, required checks, accounting coverage), the
+    customer state, the four ``ops.*`` measures as SEPARATE records and
+    the review-budget distinction —
+    :func:`~forge.adaptive.ops_limits.ops_limits_read_model`.
     """
     started = time.perf_counter()
     scope, _ = await _authorized_subjects(request, authorization, subject, repo)
@@ -655,6 +716,21 @@ async def get_operator_run(
         coverage=snapshot.source_coverage,
         occupancy=snapshot.occupancy,
         projection_inconsistent=snapshot.projection_inconsistent,
+    )
+    # The Q39-15 read-model: the six quantities (current attempt, native
+    # occupancy, exact checkpoint, unresolved effects, required checks,
+    # accounting coverage), the customer state, the four ops.* measures as
+    # SEPARATE records and the review-budget distinction — one fold over
+    # the rows this render already read, coverage-honest (an unselected
+    # section's measure reads unknown, never an empty success).
+    document["ops_limits"] = ops_limits_read_model(
+        snapshot.rows,
+        occupancy=snapshot.occupancy,
+        coverage=snapshot.source_coverage,
+        projection=projection,
+        limit=_occupancy_limit(request),
+        as_of=snapshot.computed_at,
+        admission=await _admission_accounting_for(request, snapshot),
     )
     hints = action_hint_block(projection, snapshot_inconsistent=snapshot.projection_inconsistent)
     document["actions"] = hints["actions"]

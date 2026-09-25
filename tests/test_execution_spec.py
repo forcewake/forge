@@ -167,7 +167,11 @@ class TestDigestAndRendering:
 
     def test_the_redemption_route_renders_its_flag(self) -> None:
         rendered = render_template_variables(
-            _spec(credential_mode="runner-redemption", credential_ref="env:ANTHROPIC_AUTH_TOKEN")
+            _spec(
+                credential_mode="runner-redemption",
+                credential_ref="env:ANTHROPIC_AUTH_TOKEN",
+                grant_id="c" * 32,
+            )
         )
         assert rendered["FORGE_CREDENTIAL_REDEEM"] == "1"
 
@@ -349,6 +353,101 @@ class TestPreflightRefusals:
                 continuation_ref=_HEX64,
                 profile_digest=_HEX64_B,
             )
+
+
+class TestAuthorityMembers:
+    """Q39-17 (#336): the two AUTHORITY members ADR-0032's amendment
+    adds — the approved-input digest (#321's executor-input identity)
+    and the grant id (#320's credential authorization).
+
+    Additive-with-version-note: the schema word stays
+    ``forge.execution.spec/1``, the members ride the DOCUMENT (and its
+    digest) but not the rendered template set, and empty values are the
+    recorded pre-#321/#320 window."""
+
+    _GRANT = "c" * 32  # the broker mints uuid4().hex
+
+    def test_the_members_ride_the_document_and_the_digest(self) -> None:
+        base = _spec()
+        pinned = _spec(approved_input_digest=_HEX64, grant_id=self._GRANT)
+        assert base.approved_input_digest == ""
+        assert base.grant_id == ""
+        assert pinned.approved_input_digest == _HEX64
+        assert pinned.grant_id == self._GRANT
+        assert base.to_document()["approved_input_digest"] == ""
+        assert pinned.to_document()["grant_id"] == self._GRANT
+        # A different authority member is a DIFFERENT spec — the two
+        # members are inside the reconciliation axis.
+        assert base.spec_digest() != pinned.spec_digest()
+        assert _spec(approved_input_digest=_HEX64, grant_id=self._GRANT).spec_digest() == (
+            pinned.spec_digest()
+        )
+
+    def test_a_malformed_approved_input_digest_refuses(self) -> None:
+        with pytest.raises(CompositionRefusal, match="approved_input_digest"):
+            _spec(approved_input_digest="digest-of-vibes")
+
+    def test_a_redemption_spec_without_its_grant_id_refuses(self) -> None:
+        """The redemption authorization IS the grant: a redemption-mode
+        spec without its grant pins an operation the endpoint must
+        refuse (grant_absent_*) — the dispatch pre-check refuses first."""
+        with pytest.raises(CompositionRefusal, match="'grant_id' is empty"):
+            _spec(credential_mode="runner-redemption", grant_id="")
+
+    def test_a_grant_id_that_is_not_one_token_refuses(self) -> None:
+        with pytest.raises(CompositionRefusal, match="one token"):
+            _spec(credential_mode="runner-redemption", grant_id=f"{self._GRANT} padding")
+
+    def test_a_redemption_spec_pins_its_grant(self) -> None:
+        spec = _spec(credential_mode="runner-redemption", grant_id=self._GRANT)
+        assert spec.grant_id == self._GRANT
+        assert spec.credential_mode == "runner-redemption"
+
+    def test_every_other_route_keeps_the_empty_legacy_window(self) -> None:
+        spec = _spec(driver="claude-code", credential_mode="ambient-legacy", credential_ref="")
+        assert spec.grant_id == ""
+
+    def test_a_persisted_document_with_the_members_round_trips(self) -> None:
+        spec = _spec(approved_input_digest=_HEX64, grant_id=self._GRANT)
+        revived = read_execution_spec(spec.to_document())
+        assert revived.spec_digest() == spec.spec_digest()
+        assert revived.approved_input_digest == _HEX64
+        assert revived.grant_id == self._GRANT
+
+    def test_a_pre_amendment_document_without_the_members_round_trips(self) -> None:
+        """A document persisted BEFORE the amendment (no such keys)
+        loads through the empty legacy window — additive evolution, the
+        declared predecessor continues."""
+        document = _spec().to_document()
+        del document["approved_input_digest"], document["grant_id"]
+        revived = read_execution_spec(document)
+        assert revived.approved_input_digest == ""
+        assert revived.grant_id == ""
+
+    def test_the_rendered_template_set_is_unchanged(self) -> None:
+        """The members ride the DOCUMENT (and its digest), never the
+        template variables — the shipped templates keep consuming the
+        same small pinned set ADR-0032 §2 names."""
+        rendered = render_template_variables(_spec(grant_id=self._GRANT))
+        assert set(rendered) == {
+            "FORGE_RUN_ID",
+            "FORGE_DRIVER",
+            "FORGE_MODEL",
+            "FORGE_LANE_RESUME_MODE",
+            "FORGE_RESUME_CHECKPOINT",
+            "FORGE_CREDENTIAL_REF",
+            "FORGE_CREDENTIAL_REDEEM",
+            "FORGE_EXECUTION_SPEC",
+            "FORGE_EXECUTION_SPEC_DIGEST",
+        }
+
+    def test_the_adr_amendment_names_the_members_and_the_no_bump_rule(self) -> None:
+        amendment = (REPO_ROOT / "docs" / "adr" / "0032-versioned-execution-spec.md").read_text()
+        assert "approved_input_digest" in amendment
+        assert "grant_id" in amendment
+        assert "additive-with-version-note" in amendment.lower()
+        # The schema word itself did NOT bump.
+        assert EXECUTION_SPEC_SCHEMA == "forge.execution.spec/1"
 
 
 class TestCompatibilityRule:

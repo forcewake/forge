@@ -35,7 +35,14 @@ new framework, no extraction wave:
   refusals on the GitHub path and the SHARED core
   (``retry_rejection`` / ``why_blocked_reply`` that GitLab and Azure
   consume verbatim); the GitLab/Azure lane-resume gap (#268) is
-  asserted as the documented HONEST state, never fabricated parity.
+  asserted as the documented HONEST state, never fabricated parity;
+- **the Q39-17 consolidation rules** (#336, ADR-0033 §5): the
+  redemption endpoint loads THE persisted operation grant (a
+  registry-lookup authorization path is the pre-#320 shape); the
+  GitLab dispatch resolves ApprovedInput at every dispatch entry (a
+  direct ``spec.plan_summary`` brief is the pre-#321 shape); the
+  native locator allocation goes through the registry (a direct
+  legacy-carrier derivation bypasses the collision check).
 """
 
 from __future__ import annotations
@@ -630,6 +637,182 @@ def _check_boundary_registration(modules: dict[str, _ModuleIndex]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Rule 8 — Q39-17 (#336, ADR-0033 §5): the three consolidation rules
+# ---------------------------------------------------------------------------
+
+
+def _functions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function scope in the module (methods included)."""
+    return [
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+
+
+def _names_and_attrs(fn: ast.AST) -> tuple[set[str], set[str]]:
+    """The Name ids and Attribute attrs referenced anywhere in *fn*."""
+    names = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name)}
+    attrs = {node.attr for node in ast.walk(fn) if isinstance(node, ast.Attribute)}
+    return names, attrs
+
+
+def _check_redemption_grant_authority(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R1 (ADR-0033 §5): the redemption endpoint loads THE persisted
+    grant — a registry-lookup authorization path (the pre-#320 shape,
+    where a live binding for the subject+route was treated as
+    operation authorization) is caught, and the registered loaders must
+    still reach the broker's persisted-grant surfaces."""
+    endpoint = boundary_registry.REDEMPTION_ENDPOINT_MODULE
+    violations: list[str] = []
+    index = modules.get(endpoint)
+    if index is None:
+        return [
+            f"the redemption endpoint module {endpoint} does not exist under "
+            "src/forge — the operation grant's judge is gone; update the rule"
+        ]
+    loaders = set(boundary_registry.REDEMPTION_GRANT_LOADERS)
+    lookups = set(boundary_registry.REDEMPTION_REGISTRY_LOOKUPS)
+    for fn in _functions(index.tree):
+        calls = {_dotted(call.func) for call in ast.walk(fn) if isinstance(call, ast.Call)}
+        hit = {callee.split(".")[-1] for callee in calls} & lookups
+        if not hit:
+            continue
+        names, _attrs = _names_and_attrs(fn)
+        if not (names & loaders):
+            violations.append(
+                f"{endpoint}:{fn.lineno} {fn.name} authorizes a credential from the "
+                f"registry lookup ({sorted(hit)}) without loading the persisted "
+                "operation grant — the registry validates revocation/rotation/"
+                "staged slots, it never authorizes an operation "
+                "(grant_absent_native_only); load the grant through the "
+                f"registered loaders {sorted(loaders)} or refuse"
+            )
+    # The inverse guard: every registered loader EXISTS and reaches the
+    # broker's persisted-grant surfaces — a renamed or hollowed seam may
+    # not keep its registration.
+    defined = {fn.name: fn for fn in _functions(index.tree)}
+    surfaces = set(boundary_registry.GRANT_PERSISTED_SURFACES)
+    for loader in boundary_registry.REDEMPTION_GRANT_LOADERS:
+        fn = defined.get(loader)
+        if fn is None:
+            violations.append(
+                f"the registered redemption grant loader {loader!r} no longer "
+                f"exists in {endpoint} — the registry or the seam renamed; "
+                "update boundary_registry.REDEMPTION_GRANT_LOADERS"
+            )
+            continue
+        names, _attrs = _names_and_attrs(fn)
+        if not (names & surfaces):
+            violations.append(
+                f"{endpoint}:{fn.lineno} the registered grant loader {loader!r} "
+                "no longer reaches a persisted-grant surface "
+                f"({sorted(surfaces)}) — it loads no grant; the rule is hollow"
+            )
+    return violations
+
+
+def _check_approved_input_brief(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R2 (ADR-0033 §5): the GitLab dispatch resolves ApprovedInput at
+    EVERY dispatch entry — a function that constructs the dispatched
+    executor brief (the FORGE_PLAN digest variables) without resolving
+    the approved input, or that briefs from a direct ``spec.plan_summary``
+    read (the pre-#321 shape), is caught."""
+    violations: list[str] = []
+    brief_vars = set(boundary_registry.BRIEF_DISPATCH_VARIABLES)
+    for module_name in boundary_registry.APPROVED_INPUT_DISPATCH_MODULES:
+        index = modules.get(module_name)
+        if index is None:
+            violations.append(
+                f"the registered approved-input dispatch module {module_name} "
+                "does not exist under src/forge — a stale registration"
+            )
+            continue
+        resolved_somewhere = False
+        for fn in _functions(index.tree):
+            names, _attrs = _names_and_attrs(fn)
+            if not (names & brief_vars):
+                continue
+            calls = [_dotted(call.func) for call in ast.walk(fn) if isinstance(call, ast.Call)]
+            resolves = any(callee.endswith("resolve_approved_input") for callee in calls)
+            if resolves:
+                resolved_somewhere = True
+            else:
+                violations.append(
+                    f"{module_name}:{fn.lineno} {fn.name} constructs a dispatched "
+                    "executor brief (the FORGE_PLAN digest variables) without "
+                    "resolving ApprovedInput — the pre-#321 shape; resolve at "
+                    "every dispatch entry (revisions.resolve_approved_input) and "
+                    "brief from the record"
+                )
+            # The pre-#321 brief source itself: a spec.plan_summary read
+            # inside a brief-dispatch function that is NOT the resolver's
+            # own spec fallback parameter.
+            resolver_arg_ids: set[int] = set()
+            for call in ast.walk(fn):
+                if isinstance(call, ast.Call) and _dotted(call.func).endswith(
+                    "resolve_approved_input"
+                ):
+                    for keyword in call.keywords:
+                        for node in ast.walk(keyword.value):
+                            resolver_arg_ids.add(id(node))
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "plan_summary"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "spec"
+                    and id(node) not in resolver_arg_ids
+                ):
+                    violations.append(
+                        f"{module_name}:{node.lineno} briefs the dispatched "
+                        "executor from spec.plan_summary — the brief is "
+                        "ApprovedInput.brief() (#321: the executor obeys the "
+                        "ACTIVE revision's text, never the spec-frozen plan)"
+                    )
+        if not resolved_somewhere:
+            violations.append(
+                f"{module_name} is registered as an approved-input dispatch "
+                "module but never resolves ApprovedInput — a stale registration"
+            )
+    return violations
+
+
+def _check_native_locator_allocation(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R3 (ADR-0033 §5): the locator allocation goes through the
+    registry — a direct legacy carrier derivation
+    (credential_secret_name/segment) outside the broker bypasses the
+    collision check (Q39-04/#323: two refs sharing one native secret
+    name was a silent rotation alias)."""
+    violations: list[str] = []
+    allowed = set(boundary_registry.LEGACY_CARRIER_DERIVATION_MODULES)
+    funcs = set(boundary_registry.LEGACY_CARRIER_FUNCTIONS)
+    for index in modules.values():
+        if index.module in allowed:
+            continue
+        for call, callee in index.calls():
+            if callee.split(".")[-1] in funcs:
+                violations.append(
+                    f"{index.module}:{call.lineno} derives the legacy native "
+                    f"carrier ({callee}()) directly — the allocation goes "
+                    "through NativeLocatorRegistry.allocate (the collision "
+                    "check, Q39-04/#323); the lossy spelling is the broker's "
+                    "migration inventory's own"
+                )
+    # The inverse guard: the allocation seam itself must still exist.
+    broker = modules.get("forge.adaptive.credential_broker")
+    if broker is None:  # pragma: no cover — the broker is a registry owner
+        violations.append(
+            "forge.adaptive.credential_broker was not found under src/forge — "
+            "the native locator registry's home is gone; update the rule"
+        )
+    elif not any(fn.name == "allocate" for fn in _functions(broker.tree)):
+        violations.append(
+            "the broker no longer defines NativeLocatorRegistry.allocate — the "
+            "locator allocation seam renamed; update the rule and the registry"
+        )
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # Rule 7 — the contracts-vs-reference separation (R37-19 / #300)
 # ---------------------------------------------------------------------------
 
@@ -718,6 +901,9 @@ ALL_CHECKS = (
     ("boundary registration", _check_boundary_registration),
     ("reference separation", _check_reference_separation),
     ("reference purity", _check_reference_purity),
+    ("redemption grant authority", _check_redemption_grant_authority),
+    ("approved-input brief", _check_approved_input_brief),
+    ("native locator allocation", _check_native_locator_allocation),
 )
 
 
@@ -960,6 +1146,90 @@ class TestIntentionalViolationTraps:
         )
         violations = _check_reference_purity(modules)
         assert any("composes runtime contracts only" in text for text in violations)
+
+    # ------------------------------------------------------------------
+    # Q39-17 (#336, ADR-0033 §5) — the three consolidation traps
+    # ------------------------------------------------------------------
+
+    def test_a_registry_lookup_authorization_without_the_grant_load_is_caught(self) -> None:
+        """R1's trap: a new redemption path that treats a live registry
+        binding as operation authorization (the pre-#320 shape) — the
+        exact mutation the issue's negative tests name."""
+        modules = _synthetic(
+            "forge.api_lane_control",
+            "from forge.adaptive.credential_broker import EnvBroker\n"
+            "from forge.adaptive.project_credentials import resolve_dispatch_credential\n"
+            "\n"
+            "\n"
+            "async def _authorize_operation_grant(run, work_id, generation, provider, ref):\n"
+            "    from forge.adaptive.credential_broker import operation_grants_for_attempt\n"
+            "\n"
+            "    return operation_grants_for_attempt(run.evidence, generation)[0]\n"
+            "\n"
+            "\n"
+            "async def _legacy_redeem(registry, subject, provider, ref):\n"
+            "    dispatch_credential = resolve_dispatch_credential(\n"
+            "        registry, subject=subject, provider=provider, presented_ref=ref\n"
+            "    )\n"
+            "    return await EnvBroker().resolve(ref, grant={})\n",
+        )
+        violations = _check_redemption_grant_authority(modules)
+        assert any(
+            "_legacy_redeem" in text and "persisted operation grant" in text for text in violations
+        ), violations
+
+    def test_the_real_endpoint_is_not_flagged_by_the_grant_rule(self) -> None:
+        """The contrast arm: over the REAL tree, the redemption handler
+        that loads the grant and THEN runs the registry's data-plane
+        checks is not a violation (the rule guards the authorization
+        ORDER, not the registry's validation role)."""
+        assert not _check_redemption_grant_authority(_src_modules())
+
+    def test_a_spec_plan_summary_brief_in_the_dispatch_is_caught(self) -> None:
+        """R2's trap: a dispatched brief reconnected to the spec's
+        frozen plan (the pre-#321 shape — the resumed lane reverting to
+        the superseded plan), grafted onto the REAL service module."""
+        home = _src_modules()["forge.runs.service"]
+        extra = ast.parse(
+            "class _Trap:\n"
+            "    def _legacy_dispatch(self, run_id, spec):\n"
+            "        plan_summary = spec.plan_summary\n"
+            "        return [\n"
+            "            {'key': LANE_PLAN_DIGEST_VARIABLE, 'value': spec.plan_digest},\n"
+            "            {'key': LANE_BRIEF_ENVELOPE_DIGEST_VARIABLE, 'value': 'x'},\n"
+            "        ]\n"
+        )
+        grafted = ast.Module(body=[*home.tree.body, *extra.body], type_ignores=[])
+        modules = {home.module: _ModuleIndex(home.module, grafted)}
+        violations = _check_approved_input_brief(modules)
+        joined = "\n".join(violations)
+        assert "_legacy_dispatch" in joined and "ApprovedInput" in joined, violations
+        assert "spec.plan_summary" in joined, violations
+        # The REAL dispatch entry (which resolves at every entry and passes
+        # the spec text only as the resolver's labeled fallback) is NOT
+        # flagged — only the grafted trap is.
+        assert not _check_approved_input_brief(_src_modules())
+
+    def test_a_direct_legacy_carrier_derivation_is_caught(self) -> None:
+        """R3's trap: a dispatch leg naming the native carrier through
+        the lossy segment mapping, bypassing the registry's collision
+        check (two refs, one secret name — the silent rotation alias)."""
+        modules = _synthetic(
+            "forge.runs.new_leg",
+            "from forge.adaptive.credential_broker import credential_secret_name\n"
+            "\n"
+            "\n"
+            "def carrier(credential_ref: str) -> str:\n"
+            "    return credential_secret_name(credential_ref)\n",
+        )
+        violations = _check_native_locator_allocation(modules)
+        assert any("collision" in text and "credential_secret_name" in text for text in violations)
+
+    def test_the_broker_itself_is_not_flagged_by_the_locator_rule(self) -> None:
+        """The contrast arm: the broker's own legacy-group inventory
+        (the documented migration surface) stays legal over the real
+        tree — the rule guards the dispatch legs, not the owner."""
+        assert not _check_native_locator_allocation(_src_modules())
 
 
 # ---------------------------------------------------------------------------

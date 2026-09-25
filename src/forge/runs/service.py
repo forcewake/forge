@@ -88,6 +88,40 @@ from forge.adaptive.project_credentials import (
     provider_route_for_driver,
     registry_from_env,
 )
+from forge.adaptive.revisions import (
+    ACTIVE_PLAN_KEY,
+    APPROVED_INPUT_KEY,
+    CLARIFICATION_CLASS,
+    IN_SCOPE_CORRECTION_CLASS,
+    MATERIAL_CHANGE_CLASS,
+    REQUEST_CLARIFICATION_OPEN,
+    REQUEST_CONFLICTING,
+    REQUEST_DELETED_DISCUSSION,
+    REQUEST_DISPATCHED,
+    REQUEST_MATERIALIZED,
+    REQUEST_RECORDED,
+    REQUEST_REFUSED_UNAUTHORIZED,
+    REQUEST_STAGED,
+    REQUEST_STALE_HEAD,
+    REQUEST_WINDOW_CLOSED,
+    REVISION_EXECUTOR_DIGEST_KEY,
+    RevisionRebindRefused,
+    ReviewFeedbackRefused,
+    ReviewFeedbackRequest,
+    classify_review_feedback,
+    executor_digest_document,
+    head_binding_guard,
+    mark_review_feedback_request,
+    parse_review_feedback_note,
+    read_review_feedback_requests,
+    record_review_feedback_request,
+    referenced_paths_of,
+    refused_wip_reuse,
+    resolve_approved_input,
+    review_feedback_requests_of,
+    review_feedback_summary_section,
+    stage_review_correction,
+)
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -106,6 +140,7 @@ from forge.durable import (
     RunSpec,
     SettleDecision,
     StepRun,
+    UsageReceipt,
     as_aware_utc,
     build_source_event_id,
     classify_probe,
@@ -136,6 +171,7 @@ from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.harnesses.brief_envelope import build_brief_envelope
 from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
@@ -311,6 +347,18 @@ LANE_ATTEMPT_VARIABLE: str = "FORGE_ATTEMPT_GENERATION"
 LANE_DECISION_VARIABLE: str = "FORGE_CONTINUATION_DECISION_ID"
 LANE_CONTROL_URL_VARIABLE: str = "FORGE_LANE_CONTROL_URL"
 LANE_CONTROL_TOKEN_VARIABLE: str = "FORGE_LANE_CONTROL_TOKEN"
+#: Q39-02 (#321): the revision-rebind variables — dispatched ONLY when an
+#: approved revision is ACTIVE (a revision-bound approved input), mirroring
+#: the GitHub dispatch's conditional ``plan_digest`` input. ``FORGE_PLAN_
+#: DIGEST`` is the ACTIVE revision's canonical digest (the one the
+#: activation CAS switched), ``FORGE_SPEC_DIGEST`` the frozen RunSpec
+#: digest, ``FORGE_BRIEF_ENVELOPE_DIGEST`` the approved brief envelope
+#: built FROM the resolved approved input (run id + task bytes + the
+#: revision's brief TEXT + the spec digest) — the identity the runner
+#: re-verifies the consumed ``FORGE_PLAN`` bytes against.
+LANE_PLAN_DIGEST_VARIABLE: str = "FORGE_PLAN_DIGEST"
+LANE_SPEC_DIGEST_VARIABLE: str = "FORGE_SPEC_DIGEST"
+LANE_BRIEF_ENVELOPE_DIGEST_VARIABLE: str = "FORGE_BRIEF_ENVELOPE_DIGEST"
 
 #: The process-env name the CONTROL PLANE deployment carries its own
 #: externally-reachable lane-control URL under (the same source the app
@@ -346,6 +394,19 @@ _RETRY_RE = re.compile(r"/retry(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 
 #: The journaled kind of a /go refusal reply (one per ignored /go note).
 _GO_REFUSAL_KIND = "go_refusal_note"
+
+#: Q39-13 (#332): the journaled kind of a review-feedback reply (one per
+#: note id — the same A11 discipline as the /go refusal above).
+_REVIEW_FEEDBACK_REPLY_KIND = "review_feedback_note"
+
+#: Q39-13 (#332): the journaled kind of the held-candidate summary note
+#: (one per run + candidate sha).
+_REVIEW_FEEDBACK_SUMMARY_KIND = "review_feedback_summary"
+
+
+def _automated_footer() -> str:
+    """The closing line every forge-authored note carries."""
+    return "\n\n*This is an automated message.*"
 
 
 def _go_unknown_run_body(requested: str) -> str:
@@ -702,6 +763,11 @@ class RunService:
         self._planner = planner
         self._implementer = implementer
         self._reviewer = reviewer
+        # Q39-13 (#332): once the MR discussions surface answers 404
+        # (an older CE instance, a scoped token), the auxiliary
+        # discussion checks degrade for this process instead of
+        # hammering the endpoint every pass.
+        self._discussions_surface_down = False
 
     # ------------------------------------------------------------------
     # Entry points (called from gateway router / worker / reconciler)
@@ -2256,6 +2322,676 @@ class RunService:
     # Issue-edit replan + label-off cancel (operator busywork, event-driven)
     # ------------------------------------------------------------------
 
+    async def handle_review_feedback_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        mr_iid: int | None,
+        issue_iid: int | None = None,
+        *,
+        note_id: str | None = None,
+        discussion_id: str = "",
+    ) -> None:
+        """Q39-13 (#332): a reviewer comment on the Draft MR, classified.
+
+        The GitLab MR-note ingress region (``run_command`` → here, the
+        same dispatch every note command travels). One reviewer comment
+        produces ONE durable :class:`ReviewFeedbackRequest` — the note id
+        is the idempotency key, so a webhook replay records nothing new
+        and earns at most one reply (the /go A11 pattern). The request
+        binds to the CURRENT MR head, the originating discussion, the
+        authorized actor (``approvers_for`` — the same authority as
+        ``/go``, never authorship) and the approved work scope (the
+        frozen spec's ``allowed_paths``), then classifies:
+
+        - ``clarification`` — a question (``/ask``): routed to the
+          approvers with an operator-visible reply; NO dispatch, NO
+          staging (reviewer-only recovery consumes no implementation
+          budget).
+        - ``material_change`` — the named edit cannot be proven inside
+          the approved write scope: the request becomes a durable
+          MATERIAL PROPOSAL and the reply says so. The bounded lane never
+          widens the write surface a human approved — the way forward is
+          the existing material-revision approval route, not a permission
+          expansion.
+        - ``in-scope_correction`` — the bounded correction: staged as an
+          input revision (the referenced diff context + the head binding
+          + the permitted change) through the EXISTING approval route; a
+          human ``/approve-revision`` makes it the active revision TEXT
+          and :meth:`evaluate_review_corrections` re-dispatches the
+          correction cycle (the #321 ApprovedInput machinery briefs the
+          executor with it).
+
+        The bot never merges and never resolves the discussion — the
+        reviewer's resolve is the human decision that gates readiness.
+        """
+        parsed = parse_review_feedback_note(note_text or "")
+        if parsed is None:
+            return  # not review feedback — the ingress ignores it
+        kind, body = parsed
+        if mr_iid is None:
+            logger.info("Review feedback note without an MR — ignoring")
+            return
+        if not note_id:
+            # No delivery identity → no dedup → refusing to act is the
+            # only safe posture (one comment must be one request).
+            logger.info("Review feedback note %r without a note id — ignoring", body[:40])
+            return
+        async with self._session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(FlowRun)
+                        .where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.project_id == project_id,
+                            FlowRun.mr_iid == mr_iid,
+                        )
+                        .order_by(FlowRun.created_at.desc(), FlowRun.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if run is None:
+                logger.info("Review feedback on MR !%s matches no run — ignoring", mr_iid)
+                return
+            run_id = run.id
+            run_status = run.status
+            run_issue_iid = run.issue_iid
+            existing = review_feedback_requests_of(run.evidence or {})
+        issue_iid = issue_iid if issue_iid is not None else run_issue_iid
+
+        # A redelivery of an already-recorded note: the durable request
+        # answers, and the reply journal dedups the operator note.
+        if author_username not in self._approvers():
+            request = ReviewFeedbackRequest(
+                note_id=note_id,
+                run_id=run_id,
+                discussion_id=discussion_id,
+                mr_iid=mr_iid,
+                actor=author_username,
+                head_sha="",
+                classification=CLARIFICATION_CLASS,
+                text=body,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                status=REQUEST_REFUSED_UNAUTHORIZED,
+            )
+            if note_id not in existing:
+                await record_review_feedback_request(self._session_factory, run_id, request)
+            logger.info(
+                "Review feedback from @%s who is not in FORGE_APPROVERS — refusing",
+                author_username,
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, note_id, self._rf_unauthorized_body(author_username)
+            )
+            return
+
+        try:
+            head = await self._read_mr_head(project_id, mr_iid, issue_iid, run_id)
+        except GitLabAPIError:
+            logger.info("MR head read failed for MR !%s — the redelivery re-enters here", mr_iid)
+            return
+        # The originating discussion: the typed deleted-discussion check
+        # runs when the discussions surface is readable.
+        resolved_discussion = discussion_id
+        diff_context = ""
+        discussions = await self._discussions_or_none(project_id, mr_iid)
+        if discussions is not None and discussion_id:
+            match = next((d for d in discussions if d.id == discussion_id), None)
+            if match is None:
+                request = ReviewFeedbackRequest(
+                    note_id=note_id,
+                    run_id=run_id,
+                    discussion_id=discussion_id,
+                    mr_iid=mr_iid,
+                    actor=author_username,
+                    head_sha=head,
+                    classification=CLARIFICATION_CLASS,
+                    text=body,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    status=REQUEST_DELETED_DISCUSSION,
+                )
+                if note_id not in existing:
+                    await record_review_feedback_request(self._session_factory, run_id, request)
+                logger.info(
+                    "Review feedback note %s references deleted discussion %s — refusing",
+                    note_id,
+                    discussion_id,
+                )
+                await self._reply_review_feedback(
+                    project_id,
+                    mr_iid,
+                    run_id,
+                    note_id,
+                    self._rf_deleted_discussion_body(discussion_id),
+                )
+                return
+            resolved_discussion = match.id
+            for entry in match.notes:
+                if str(entry.id) == str(note_id) and entry.position is not None:
+                    paths = [
+                        path for path in (entry.position.old_path, entry.position.new_path) if path
+                    ]
+                    diff_context = " -> ".join(paths) if paths else ""
+                    break
+
+        try:
+            spec = await self._load_executable_spec(run_id)
+            allowed_paths = tuple(spec.allowed_paths)
+        except SpecInvalid:
+            logger.info(
+                "Review feedback on run %s without a resolvable spec — ignoring", run_id[:8]
+            )
+            return
+        classification = classify_review_feedback(kind, body, allowed_paths)
+        request = ReviewFeedbackRequest(
+            note_id=note_id,
+            run_id=run_id,
+            discussion_id=resolved_discussion,
+            mr_iid=mr_iid,
+            actor=author_username,
+            head_sha=head,
+            classification=classification,
+            text=body,
+            referenced_paths=referenced_paths_of(body),
+            diff_context=diff_context,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            recorded = await record_review_feedback_request(self._session_factory, run_id, request)
+        except ReviewFeedbackRefused as exc:
+            logger.info("Review feedback note %s refused [%s]", note_id, exc.code)
+            return
+
+        if recorded.status != REQUEST_RECORDED:
+            # A redelivery after the request already took its first
+            # lifecycle step: the durable record answers — nothing
+            # re-runs and nothing is re-staged. The reply journal dedups
+            # the operator note (re-attempting it only when the first
+            # posting failed), the /go refusal pattern.
+            replay_body = self._rf_replay_body(recorded, allowed_paths)
+            if replay_body:
+                await self._reply_review_feedback(project_id, mr_iid, run_id, note_id, replay_body)
+            return
+
+        if classification == CLARIFICATION_CLASS:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, note_id, REQUEST_CLARIFICATION_OPEN
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, note_id, self._rf_clarification_body(run_id, body)
+            )
+            return
+
+        if classification == MATERIAL_CHANGE_CLASS:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, note_id, REQUEST_MATERIALIZED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                note_id,
+                self._rf_material_body(run_id, body, allowed_paths),
+            )
+            return
+
+        # in-scope correction: the bounded lane only re-enters the
+        # delivery pipeline from the pre-ready states (ADR-0004 —
+        # ready_for_human has no outgoing edge: the human decision is
+        # final). Outside the window the request is recorded (the audit
+        # stands) and the reviewer is told the honest path.
+        if run_status not in (FlowStatus.WAITING_CI.value, FlowStatus.EVALUATING_CI.value):
+            await mark_review_feedback_request(
+                self._session_factory, run_id, note_id, REQUEST_WINDOW_CLOSED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                note_id,
+                self._rf_window_closed_body(run_id, run_status),
+            )
+            return
+        pending = [
+            other
+            for other in review_feedback_requests_of(
+                (await self._read_run_evidence(run_id)) or {}
+            ).values()
+            if other.status == REQUEST_STAGED and other.note_id != note_id
+        ]
+        if pending:
+            await mark_review_feedback_request(
+                self._session_factory,
+                run_id,
+                note_id,
+                REQUEST_CONFLICTING,
+                conflict_with=pending[0].decision_id,
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                note_id,
+                self._rf_conflicting_body(run_id, pending[0]),
+            )
+            return
+        try:
+            decision_id = await stage_review_correction(self._session_factory, run_id, request)
+        except ReviewFeedbackRefused as exc:
+            logger.info(
+                "Review correction for run %s refused [%s] — %s",
+                run_id[:8],
+                exc.code,
+                exc.detail,
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, note_id, self._rf_refused_body(run_id, exc)
+            )
+            return
+        await self._reply_review_feedback(
+            project_id,
+            mr_iid,
+            run_id,
+            note_id,
+            self._rf_staged_body(run_id, decision_id, head, request),
+        )
+
+    async def evaluate_review_corrections(self) -> None:
+        """The bounded correction re-dispatch pass (Q39-13).
+
+        A durable scan in the reconciler's own shape: every run whose
+        staged review correction a human has since APPROVED (the decision
+        the activation consumed is the correction's own) and which has
+        not yet re-dispatched, re-enters the delivery pipeline through
+        the repair edge — with the MR head re-checked first (an
+        unexpected head move is the typed ``stale_head`` conflict: human
+        edits preserved, nothing dispatched).
+        """
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(FlowRun.id).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.status.in_(
+                                [FlowStatus.WAITING_CI.value, FlowStatus.EVALUATING_CI.value]
+                            ),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run_id in rows:
+            try:
+                await self._redispatch_review_correction(run_id)
+            except Exception:
+                # One broken run must not stall the pass (the reconciler
+                # pattern every other scan here follows).
+                logger.exception("Review-correction pass failed for run %s", run_id[:8])
+
+    async def _redispatch_review_correction(self, run_id: str) -> None:
+        """Re-dispatch ONE run's approved review correction, or record why not."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            evidence = dict(run.evidence or {})
+            project_id = run.project_id
+            issue_iid = run.issue_iid
+            mr_iid = run.mr_iid
+        active = evidence.get(ACTIVE_PLAN_KEY) if isinstance(evidence, dict) else None
+        activated_by = (
+            str(active.get("activated_by_decision") or "") if isinstance(active, dict) else ""
+        )
+        for request in review_feedback_requests_of(evidence).values():
+            if request.status != REQUEST_STAGED or request.decision_id != activated_by:
+                continue
+            try:
+                await self._begin_review_correction(
+                    run_id,
+                    project_id,
+                    issue_iid,
+                    mr_iid,
+                    request,
+                )
+            except ReviewFeedbackRefused as exc:
+                if exc.code == "stale_head":
+                    await mark_review_feedback_request(
+                        self._session_factory, run_id, request.note_id, REQUEST_STALE_HEAD
+                    )
+                    await self._reply_review_feedback(
+                        project_id,
+                        mr_iid,
+                        run_id,
+                        request.note_id,
+                        self._rf_stale_head_body(run_id, request),
+                        allow_repeat=True,
+                    )
+                else:
+                    logger.info(
+                        "Review correction re-dispatch for run %s refused [%s]",
+                        run_id[:8],
+                        exc.code,
+                    )
+            return
+
+    async def _begin_review_correction(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_iid: int | None,
+        mr_iid: int | None,
+        request: ReviewFeedbackRequest,
+    ) -> None:
+        """The correction's dispatch entry: head fence, then the repair edge."""
+        head = await self._read_mr_head(project_id, request.mr_iid, issue_iid, run_id)
+        head_binding_guard(request.head_sha, head)  # typed stale_head
+        backend_name = ""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            backend_name = str((run.evidence or {}).get("backend") or "").strip()
+            cycle = run.commit_cycle or 1
+        context = self._rf_correction_context(request)
+        reason = f"review correction: discussion {request.discussion_id or request.note_id}"
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await self._get_run(session, run_id)
+            if run.status not in (FlowStatus.WAITING_CI.value, FlowStatus.EVALUATING_CI.value):
+                raise ReviewFeedbackRefused(
+                    "correction_window_closed",
+                    f"run {run_id!r} is {run.status!r} — the correction cycle only "
+                    "re-enters the delivery pipeline before the human decision",
+                )
+            run.commit_cycle = cycle + 1
+            if run.status == FlowStatus.WAITING_CI.value:
+                await controller.transition(
+                    run_id, FlowStatus.EVALUATING_CI, reason="review feedback received"
+                )
+            await controller.transition(run_id, FlowStatus.PROPOSING, reason=reason)
+            await session.commit()
+        # Durable-first: the request is marked dispatched BEFORE the
+        # advance legs run, so a crash mid-dispatch resumes through the
+        # proposing status (the repair leg's own crash-resume discipline)
+        # instead of dispatching twice.
+        await mark_review_feedback_request(
+            self._session_factory, run_id, request.note_id, REQUEST_DISPATCHED
+        )
+        logger.info(
+            "Run %s enters review correction cycle %d (head %s) — re-dispatching",
+            run_id[:8],
+            cycle + 1,
+            request.head_sha[:8],
+        )
+        if is_harness_backend(backend_name or self._backend_name()):
+            await self._advance_harness(
+                project_id, run_id, repair_context=context, repair_reason=reason
+            )
+        else:
+            await self._advance_proposal(
+                project_id, run_id, repair_context=context, repair_reason=reason
+            )
+
+    async def _read_run_evidence(self, run_id: str) -> dict | None:
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            return dict(run.evidence or {}) if run is not None else None
+
+    def _rf_correction_context(self, request: ReviewFeedbackRequest) -> str:
+        """The bounded context the correction's executor brief appends."""
+        lines = [
+            f"Reviewer correction (discussion {request.discussion_id or 'unknown'}, "
+            f"note {request.note_id}) on head {request.head_sha}:",
+            request.text.strip(),
+        ]
+        if request.referenced_paths:
+            lines.append("Permitted paths: " + ", ".join(request.referenced_paths))
+        if request.diff_context:
+            lines.append(f"Referenced diff: {request.diff_context}")
+        lines.append("Only the named correction is in scope — preserve every other human edit.")
+        return "\n".join(lines)
+
+    async def _reply_review_feedback(
+        self,
+        project_id: int,
+        mr_iid: int | None,
+        run_id: str,
+        note_id: str,
+        body: str,
+        *,
+        allow_repeat: bool = False,
+    ) -> None:
+        """Post ONE operator-visible reply on the MR — at most one per note id.
+
+        The /go refusal A11 pattern: the journaled row carries the note's
+        delivery identity in ``idempotency_key``, so a redelivered webhook
+        earns exactly one reply. ``allow_repeat`` marks the follow-ups
+        that belong to the SAME note but a later lifecycle step (the
+        stale-head conflict is reported when it is discovered, at the
+        re-dispatch — the requester already saw the staging reply).
+        """
+        if mr_iid is None:
+            return
+        key = None if allow_repeat else f"review-feedback:{project_id}:{mr_iid}:{note_id}"
+        if key is not None and await self._rf_reply_delivered(key):
+            return
+        async with self._session_factory() as session:
+            action = ActionLog(
+                flow_run_id=run_id,
+                action_kind=_REVIEW_FEEDBACK_REPLY_KIND,
+                correlation_id=f"mr-{mr_iid}",
+                idempotency_key=key,
+                status="requested",
+            )
+            session.add(action)
+            await session.commit()
+            action_id = action.id
+        try:
+            note = await self._gitlab.create_mr_note(project_id, mr_iid, body)
+        except (httpx.HTTPError, GitLabAPIError) as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"note_id": getattr(note, "id", None)})
+
+    async def _rf_reply_delivered(
+        self, key: str, *, kind: str = _REVIEW_FEEDBACK_REPLY_KIND
+    ) -> bool:
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog.id)
+                        .where(
+                            ActionLog.action_kind == kind,
+                            ActionLog.idempotency_key == key,
+                            ActionLog.status == "succeeded",
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return row is not None
+
+    async def _read_mr_head(
+        self, project_id: int, mr_iid: int, issue_iid: int | None, run_id: str
+    ) -> str:
+        """The CURRENT MR head — the LIVE source-branch head, not the MR doc.
+
+        The MR document's ``sha`` is frozen where the provider snapshotted
+        it; the head that matters (a human push moving the branch between
+        request and publication) is the branch's own head — the same read
+        the drift checks use. The MR sha is the fallback when the branch
+        read fails.
+        """
+        try:
+            head = await self._gitlab.get_branch_head(project_id, factory_branch(issue_iid, run_id))
+        except GitLabAPIError:
+            head = ""
+        if head:
+            return head
+        mr = await self._gitlab.get_merge_request(project_id, mr_iid)
+        return str(mr.sha or "").strip()
+
+    async def _discussions_or_none(self, project_id: int, mr_iid: int | None):
+        """The MR's discussions, or ``None`` when the surface is unavailable.
+
+        A 404 marks the auxiliary discussions surface unavailable for
+        this process (older CE instances, scoped tokens): the typed
+        deleted-discussion check and the resolution accounting degrade
+        honestly — logged, never fatal, and never a silent guess that a
+        LIVE discussion resolved.
+        """
+        if mr_iid is None or self._discussions_surface_down:
+            return None
+        try:
+            return await self._gitlab.list_discussions(project_id, mr_iid)
+        except GitLabAPIError as exc:
+            if getattr(exc, "status_code", None) == 404:
+                if not self._discussions_surface_down:
+                    logger.warning(
+                        "Discussions surface unavailable for MR !%s — resolution "
+                        "accounting degrades (logged, not guessed)",
+                        mr_iid,
+                    )
+                self._discussions_surface_down = True
+                return None
+            raise
+
+    def _discussion_resolution_states(self, discussions) -> dict[str, bool]:
+        """``{discussion_id: resolved}`` over the RESOLVABLE discussions only.
+
+        A plain (non-resolvable) thread can never resolve, so it is never
+        a required discussion — GitLab's own resolvable model decides
+        which threads can gate readiness, not forge.
+        """
+        states: dict[str, bool] = {}
+        for discussion in discussions or []:
+            resolvable = [note for note in discussion.notes if note.resolvable]
+            if not resolvable:
+                continue
+            states[discussion.id] = bool(resolvable[0].resolved)
+        return states
+
+    @staticmethod
+    def _rf_unauthorized_body(actor: str) -> str:
+        return (
+            f"Review feedback from @{actor} was ignored — corrections and questions "
+            "are restricted to the configured approvers (the same gate as `/go`: "
+            f"FORGE_APPROVERS).{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_deleted_discussion_body(discussion_id: str) -> str:
+        return (
+            f"The review feedback references discussion `{discussion_id}`, which no "
+            "longer exists on this merge request — the request is recorded but "
+            f"refused (`deleted_discussion`). Re-raise the comment on a live "
+            f"discussion thread.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_clarification_body(run_id: str, question: str) -> str:
+        return (
+            f"Question recorded for run `{run_id[:8]}` — a human approver answers "
+            "in this thread (forge does not answer questions with implementation "
+            "budget). No code change is dispatched for a "
+            f"clarification.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_material_body(run_id: str, text: str, allowed_paths: tuple[str, ...]) -> str:
+        scope = ", ".join(f"`{path}`" for path in allowed_paths) or "(none recorded)"
+        return (
+            f"Review feedback on run `{run_id[:8]}` is classified **material change**: "
+            "the requested edit cannot be proven inside the approved write scope "
+            f"({scope}), so it is recorded as a material proposal — the approved "
+            "permissions are never expanded by a comment. Raise the change through "
+            "the material-revision route (a revised plan/contract a human approves) "
+            f"or a new implementation request.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_window_closed_body(run_id: str, status: str) -> str:
+        return (
+            f"Review feedback on run `{run_id[:8]}` is recorded, but the run is "
+            f"`{status}` — corrections re-enter only before the human decision "
+            "(a `ready_for_human` run's decision is final). The audit stands; raise "
+            f"the change as a new request.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_conflicting_body(run_id: str, pending: ReviewFeedbackRequest) -> str:
+        return (
+            f"Review feedback on run `{run_id[:8]}` conflicts with the correction "
+            f"already staged from note `{pending.note_id}` (decision "
+            f"`{pending.decision_id}`) — one live correction at a time. Approve or "
+            f"resolve the staged one first.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_refused_body(run_id: str, exc: ReviewFeedbackRefused) -> str:
+        return (
+            f"Review feedback on run `{run_id[:8]}` was refused [`{exc.code}`]: "
+            f"{exc.detail}.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_staged_body(
+        run_id: str, decision_id: str, head: str, request: ReviewFeedbackRequest
+    ) -> str:
+        return (
+            f"**Reviewer correction staged** for run `{run_id[:8]}` — bounded to the "
+            f"named edit, bound to MR head `{head[:12]}`… (discussion "
+            f"`{request.discussion_id or 'unknown'}`).\n\n"
+            f"A human approves it with `/approve-revision {run_id} {decision_id}`; "
+            "the approved correction becomes the active revision and the next "
+            "dispatch carries it (the affected checks and the review rerun before "
+            "any readiness claim).\n\n"
+            "Forge never merges and never resolves this discussion — the reviewer's "
+            f"resolve is the decision.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_stale_head_body(run_id: str, request: ReviewFeedbackRequest) -> str:
+        return (
+            f"## 🛑 Review correction for run `{run_id[:8]}` blocked: `stale_head`\n\n"
+            f"The correction bound MR head `{request.head_sha[:12]}`…, but the head "
+            "has moved — human edits are preserved and nothing was dispatched. "
+            "Re-raise the correction against the current "
+            f"head.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_replay_body(
+        recorded: ReviewFeedbackRequest, allowed_paths: tuple[str, ...] = ()
+    ) -> str:
+        """The outcome body a REPLAYED delivery re-derives from the record.
+
+        The lifecycle states that posted a substantive reply rebuild it
+        byte-identically, so the reply journal's note-id dedup collapses
+        the repeat (and re-attempts it only when the first posting
+        failed). The terminal refusal states posted their own reply at
+        the time; a replay of those stays silent.
+        """
+        if recorded.status == REQUEST_CLARIFICATION_OPEN:
+            return RunService._rf_clarification_body(recorded.run_id, recorded.text)
+        if recorded.status == REQUEST_MATERIALIZED:
+            return RunService._rf_material_body(recorded.run_id, recorded.text, allowed_paths)
+        if recorded.status == REQUEST_WINDOW_CLOSED:
+            return RunService._rf_window_closed_body(
+                recorded.run_id, "past the pre-decision window"
+            )
+        if recorded.status == REQUEST_STAGED:
+            return RunService._rf_staged_body(
+                recorded.run_id, recorded.decision_id, recorded.head_sha, recorded
+            )
+        return ""
+
     async def handle_issue_edited(
         self,
         *,
@@ -2873,6 +3609,20 @@ class RunService:
                 metadata.get("author_username", ""),
                 metadata.get("issue_iid"),
             )
+        elif command == "review_feedback":
+            # Q39-13 (#332): a reviewer comment on the Draft MR — the
+            # GitLab MR-note ingress (the same metadata shape the note
+            # dispatch already carries for MR-bound commands like
+            # security triage: the note id, the mr_iid, the discussion).
+            await self.handle_review_feedback_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("mr_iid"),
+                metadata.get("issue_iid"),
+                note_id=str(metadata.get("note_id") or "") or None,
+                discussion_id=str(metadata.get("discussion_id") or ""),
+            )
         elif command == "issue_edited":
             # The edited text travels in the command metadata (the webhook
             # payload's issue object) — no extra API read on the hot path.
@@ -3245,6 +3995,23 @@ class RunService:
         digest is a corrupt dispatch contract: the run parks BEFORE any
         provider I/O (no branch, no intent, no pipeline — zero model
         turns).
+
+        Q39-02 (#321): the brief this leg dispatches is generated from ONE
+        immutable :class:`~forge.adaptive.revisions.ApprovedInput`
+        resolved from durable state at EVERY entry (start, retry, revival,
+        repair). An ACTIVE approved revision wins: its durable content is
+        digest-verified against the pointer the activation CAS switched
+        and its rendered TEXT becomes the ``FORGE_PLAN`` brief (rebind
+        variables ``FORGE_PLAN_DIGEST`` / ``FORGE_SPEC_DIGEST`` /
+        ``FORGE_BRIEF_ENVELOPE_DIGEST`` ride the envelope, and the
+        resolved record + ``revision.executor_input_digest`` persist
+        beside the native-start intent). No active revision keeps the
+        spec-frozen brief under an explicit ``source: spec`` label; a
+        prior-version pointer resolves through the labeled legacy adapter;
+        an unresolvable record refuses ``rebind_refused`` — never a quiet
+        fallback to superseded bytes. The same boundary refuses a
+        ``required`` resume whose checkpoint the activation's WIP reuse
+        decision routed to a fresh attempt (``checkpoint_reuse_refused``).
         """
         if resume_mode not in LANE_RESUME_MODES:
             raise ValueError(
@@ -3264,9 +4031,13 @@ class RunService:
         if block is not None:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, block)
             return
-        # R04: the brief, the task title and the dispatched driver come from
-        # the digest-verified executable spec — never live settings and never
-        # a live issue re-read. A missing/tampered spec blocks the run.
+        # R04: the brief's TASK half, the task title and the dispatched
+        # driver come from the digest-verified executable spec — never live
+        # settings and never a live issue re-read. A missing/tampered spec
+        # blocks the run. (Q39-02: the brief's PLAN half may since have
+        # been REVISED by an approved activation — the ApprovedInput
+        # resolution below decides which text wins, and the spec stays
+        # history either way.)
         try:
             spec = await self._load_executable_spec(run_id)
         except SpecInvalid as exc:
@@ -3316,6 +4087,11 @@ class RunService:
                 and int(prior_credential_generation) == generation
                 else ""
             )
+            # Q39-02 (#321): the frozen spec digest — the identity half of
+            # the approved-input envelope below (the gate-approved spec is
+            # the write authority; the ACTIVE revision is the brief text).
+            spec_digest = str(run.spec_digest or "")
+            issue_iid_for_notes = run.issue_iid
 
         if resume_mode == LANE_RESUME_MODE_REQUIRED and not continuation_ref_digest:
             # The dispatch-side half of the zero-model-turns contract: a
@@ -3336,7 +4112,93 @@ class RunService:
             )
             return
 
-        plan_summary = spec.plan_summary
+        # Q39-02 (#321), the GitLab half of the R36-13 (#272) fence: the
+        # WIP reuse decision a material revision's activation persisted is
+        # a DISPATCH-BOUNDARY fence here too — a checkpoint that revision
+        # routed to an explicit ``fresh_attempt`` must never ride a
+        # ``required`` resume silently. Refused BEFORE any provider I/O
+        # (nothing is ensured, dispatched or journaled below), naming the
+        # recorded reason (the rejected reuse, explained) and the
+        # operator's way out: the ``restart`` discard, or a fresh plan.
+        reuse_refusal = await refused_wip_reuse(
+            self._session_factory, run_id, resume_mode=resume_mode
+        )
+        if reuse_refusal is not None:
+            route_reason = str(reuse_refusal.get("route_reason") or "")
+            logger.warning(
+                "Run %s dispatch refused [checkpoint_reuse_refused] — the activation "
+                "routed the held checkpoint to a fresh attempt",
+                run_id[:8],
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"checkpoint_reuse_refused: {route_reason[:200]}",
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_iid_for_notes,
+                self._wip_reuse_refusal_body(run_id, reuse_refusal),
+                run_id,
+                "wip_reuse_refusal_note",
+            )
+            return
+
+        # Q39-02 (#321) — the rebind: the executor's brief is generated
+        # from ONE immutable ApprovedInput resolved from durable state at
+        # EVERY dispatch entry (start, retry, revival, repair). The ACTIVE
+        # revision wins — its durable content is digest-verified against
+        # the pointer the activation CAS switched, and the rendered
+        # revision TEXT becomes the brief (the live counterexample's fix:
+        # the resumed lane obeys the APPROVED direction, not the
+        # spec-frozen one, and no rescue steer is needed). No active
+        # revision keeps today's behavior under an explicit ``source:
+        # spec`` label; a prior-version pointer without content resolves
+        # through the labeled legacy adapter; anything that cannot be
+        # verified refuses ``revision.rebind_refused{reason}`` — never a
+        # quiet fallback to the superseded bytes.
+        try:
+            approved_input = await resolve_approved_input(
+                self._session_factory,
+                run_id,
+                task_title=spec.task_title,
+                task_description=spec.task_description,
+                spec_plan_text=spec.plan_summary,
+                spec_plan_digest=spec.plan_digest,
+                allowed_writes=spec.allowed_paths,
+            )
+        except RevisionRebindRefused as exc:
+            logger.warning(
+                "revision.rebind_refused: run %s dispatch refused [%s] — %s",
+                run_id[:8],
+                exc.code,
+                exc.detail,
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"rebind_refused: {exc.code}: {exc.detail[:200]}",
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_iid_for_notes,
+                self._rebind_refusal_body(run_id, exc.code, exc.detail),
+                run_id,
+                "rebind_refusal_note",
+            )
+            return
+        if approved_input.revision_bound:
+            logger.info(
+                "revision.rebind: run %s dispatch briefs under active revision %d "
+                "(digest %s, decision %s) — source %s",
+                run_id[:8],
+                approved_input.active_revision,
+                approved_input.plan_digest[:12],
+                approved_input.activated_by_decision[:12] or "unknown",
+                approved_input.source,
+            )
+
+        plan_summary = approved_input.brief()
         brief = plan_summary
         if repair_context:
             brief = (
@@ -3368,6 +4230,8 @@ class RunService:
                     provider_route=provider_route_for_driver(driver),
                     profile="gitlab",
                     presented_ref=prior_credential_ref,
+                    work_id=run_id,
+                    attempt_generation=generation,
                     environ=os.environ,
                 )
             except CredentialRefusal as exc:
@@ -3390,6 +4254,46 @@ class RunService:
                     credential_delivery.mode,
                     credential_delivery.transport_ref,
                 )
+                # Q39-01 (#320): a redemption-mode dispatch PERSISTS its
+                # operation grant BEFORE the provider call — the lane that
+                # boots can then only redeem the exact ref+route+window THIS
+                # dispatch authorized. Idempotent per attempt+route+ref: a
+                # re-dispatch of the same attempt keeps the existing grant
+                # (the deadline never re-anchors). A grant that cannot be
+                # persisted parks the run — never a lane redeeming against
+                # an authorization nobody wrote.
+                if credential_delivery.operation_grant is not None:
+                    from forge.api_lane_control import (
+                        LaneAuthorityUnavailable,
+                        persist_operation_grant,
+                    )
+
+                    try:
+                        effective = await persist_operation_grant(
+                            self._session_factory, grant=credential_delivery.operation_grant
+                        )
+                    except LaneAuthorityUnavailable as exc:
+                        logger.warning(
+                            "credential.operation_grant: run %s grant persistence failed — %s",
+                            run_id[:8],
+                            exc,
+                        )
+                        await self._to_terminal(
+                            run_id,
+                            FlowStatus.BLOCKED,
+                            f"credential_refused: the operation grant could not be "
+                            f"persisted ({exc})",
+                        )
+                        return
+                    logger.info(
+                        "credential.operation_grant: run %s grant %s route %s attempt %d "
+                        "deadline %s (idempotent per attempt+route+ref)",
+                        run_id[:8],
+                        effective.grant_id[:8],
+                        effective.provider,
+                        effective.attempt_generation,
+                        effective.redemption_deadline.isoformat(),
+                    )
         # R37-07 (#288): the dispatch ENVELOPE — the lane-resume/continuity
         # contract plus the attempt-scoped lane-control credentials, riding
         # the pipeline variables the job exports into every step's env. The
@@ -3419,6 +4323,37 @@ class RunService:
             {"key": LANE_CONTROL_URL_VARIABLE, "value": control_url},
             {"key": LANE_CONTROL_TOKEN_VARIABLE, "value": lane_token},
         ]
+        # Q39-02 (#321): the revision-rebind variables — ONLY on a
+        # revision-bound dispatch (no-revision dispatches stay
+        # byte-identical to the pre-rebind envelope, the same conditional
+        # the GitHub dispatch applies to its ``plan_digest`` input). The
+        # brief envelope is built FROM the resolved approved input: run id
+        # + the frozen task bytes + the ACTIVE revision's brief TEXT +
+        # the frozen spec digest, so the runner can re-verify the
+        # ``FORGE_PLAN`` bytes it consumes against the dispatched digest
+        # (the A03 discipline, ported to the GitLab lane).
+        brief_envelope = (
+            build_brief_envelope(
+                run_id=run_id,
+                task_title=approved_input.task_title,
+                task_description=approved_input.task_description,
+                plan_text=brief,
+                spec_digest=spec_digest,
+            )
+            if approved_input.revision_bound
+            else None
+        )
+        if brief_envelope is not None:
+            envelope_variables.extend(
+                (
+                    {"key": LANE_PLAN_DIGEST_VARIABLE, "value": approved_input.plan_digest},
+                    {"key": LANE_SPEC_DIGEST_VARIABLE, "value": spec_digest},
+                    {
+                        "key": LANE_BRIEF_ENVELOPE_DIGEST_VARIABLE,
+                        "value": str(brief_envelope.get("envelope_digest") or ""),
+                    },
+                )
+            )
         if credential_delivery is not None:
             # R38-02 (#303): the lane envelope gains ONLY the credential
             # delivery REFERENCE — the non-secret ref variable (the
@@ -3501,6 +4436,39 @@ class RunService:
             # while the pipeline runs.
             intent_ref = f"gitlab:pipeline:{project_id}@{factory_branch(run.issue_iid, run.id)}"
             await record_native_start_intent(self._session_factory, run_id, intent_ref)
+            # Q39-02 (#321): the resolved ApprovedInput and its
+            # executor-input digest persist BESIDE the native-start intent
+            # — BEFORE the provider call, so a lost start response or a
+            # worker death still leaves the exact identity this dispatch
+            # briefed under (the same window the intent marker occupies).
+            # ``revision.executor_input_digest`` is recomputable from the
+            # native ledger's recorded variables (run id + the ACTIVE plan
+            # digest + the brief envelope + the spec digest + the resume
+            # mode): the three-way digest equality — evidence == ledger ==
+            # the runner's consumed ``FORGE_PLAN`` bytes — is the rebind's
+            # artifact-level proof, not a status string.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    APPROVED_INPUT_KEY: approved_input.document(),
+                    **(
+                        {
+                            REVISION_EXECUTOR_DIGEST_KEY: executor_digest_document(
+                                run_id=run_id,
+                                plan_digest=approved_input.plan_digest,
+                                active_revision=approved_input.active_revision,
+                                envelope_digest=str(brief_envelope.get("envelope_digest") or ""),
+                                spec_digest=spec_digest,
+                                lane_resume_mode=resume_mode,
+                                revised_from_digest=approved_input.revised_from_digest,
+                                activated_by_decision=approved_input.activated_by_decision,
+                            )
+                        }
+                        if brief_envelope is not None
+                        else {}
+                    ),
+                },
+            )
             handle = await backend.start(run, issue_title, "", brief, spec=start_spec)
         except GitLabAPIError as exc:
             if definite_start_refusal(exc.status_code):
@@ -4318,6 +5286,13 @@ class RunService:
                     summary="no verification profile configured — pipeline success only",
                 )
             await self._merge_run_evidence(run_id, {"verification": verification_fragment})
+            # Q39-13 (#332): the required-discussion gate — a candidate
+            # whose review-feedback discussions are still unresolved is
+            # NOT ready, however green its pipeline is. The gate parks
+            # the run in ``evaluating_ci`` (the reconciler re-checks each
+            # pass); the reviewer's resolve is the human decision.
+            if await self._review_feedback_unresolved(run_id, project_id, mr_iid, candidate_sha):
+                return
             await self._review_and_ready(
                 run_id,
                 project_id=project_id,
@@ -4363,6 +5338,234 @@ class RunService:
             run_id, project_id, cycle, jobs, harness=is_harness_backend(backend_name)
         )
 
+    # ------------------------------------------------------------------
+    # Q39-06 (#325): the closing budget — protect the promised review
+    # ------------------------------------------------------------------
+
+    async def _review_budget_block(self, run_id: str) -> dict | None:
+        """The standing reviewer-leg budget decision, or ``None``.
+
+        Recorded by the reviewer leg's BUDGET_EXHAUSTED arm
+        (:meth:`_record_review_budget_block`), released only by the
+        explicit operator continuation (:meth:`continue_review_only`).
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            block = (run.evidence or {}).get("review_budget_block")
+            return dict(block) if isinstance(block, dict) else None
+
+    async def _record_review_budget_block(
+        self, run_id: str, *, candidate_sha: str, tested_identity: str
+    ) -> dict:
+        """Record the reviewer-leg budget decision + its closing budget.
+
+        Consults the closing policy (``FORGE_CLOSING_RESERVE_USD`` /
+        ``FORGE_CLOSING_RESERVE_FRACTION`` / ``FORGE_SPEND_CAP_USD``)
+        over the run's durable usage receipts. The recorded block binds
+        the decision to the candidate sha + tested identity — the
+        review-only continuation's binding — and carries the five-field
+        budget report (exact / known subtotal / lower bound / reserved
+        liability / unknown intervals) with the reserve visible.
+        """
+        from forge.adaptive.closing_budget import (
+            CandidateBinding,
+            ClosingReservePolicy,
+            closing_budget_report,
+            rows_from_durable_receipts,
+        )
+
+        async with self._session_factory() as session:
+            receipts = (
+                (await session.execute(select(UsageReceipt).where(UsageReceipt.run_id == run_id)))
+                .scalars()
+                .all()
+            )
+            run = await self._get_run(session, run_id)
+            standing = (run.evidence or {}).get("review_budget_block")
+            standing = dict(standing) if isinstance(standing, dict) else {}
+        policy = ClosingReservePolicy.from_env()
+        report = closing_budget_report(
+            rows_from_durable_receipts(receipts), cap_usd=policy.cap_usd, policy=policy
+        )
+        budget = report.to_json()
+        if budget["closing_reserve_usd"] is None:
+            short_reason = (
+                "no closing reserve policy is configured — set"
+                " FORGE_CLOSING_RESERVE_USD (or FORGE_CLOSING_RESERVE_FRACTION"
+                " with FORGE_SPEND_CAP_USD) to protect the closing review"
+            )
+        elif budget["closing_review_fits"]:
+            short_reason = (
+                f"closing reserve of {budget['closing_reserve_usd']} usd is held"
+                " for the review — the review-only continuation (an explicit"
+                " operator action, zero coder dispatches) completes it"
+            )
+        else:
+            short_reason = (
+                f"closing reserve of {budget['closing_reserve_usd']} usd does not"
+                f" cover the review (known {budget['known_subtotal_usd']} usd +"
+                f" reserved liability {budget['reserved_liability_usd']} usd vs the"
+                f" {budget['coder_ceiling_usd']} usd coder ceiling) — an explicit,"
+                " auditable top-up is required"
+            )
+        block = {
+            "budget_decision": BUDGET_EXHAUSTED,
+            "stage": "reviewer",
+            "candidate": CandidateBinding(
+                candidate_sha=candidate_sha, tested_identity=tested_identity
+            ).to_json(),
+            "released": False,
+            # the applied top-up ledger SURVIVES a re-recorded refusal —
+            # a retried operator command stays a replay across refusal
+            # cycles (the idempotency key is deterministic)
+            "top_ups": list(standing.get("top_ups") or []),
+            "top_up_total_usd": standing.get("top_up_total_usd") or 0.0,
+            "short_reason": short_reason,
+            "budget": budget,
+        }
+        await self._merge_run_evidence(run_id, {"review_budget_block": block})
+        return block
+
+    async def continue_review_only(
+        self,
+        run_id: str,
+        *,
+        operator: str,
+        top_up_usd: float = 0.0,
+        top_up_reason: str = "",
+    ) -> dict[str, Any]:
+        """The explicit review-only continuation (Q39-06/#325 item 4).
+
+        After an explicit reviewer-leg budget decision, repeat ONLY the
+        review of the SAME candidate/tested identity: no coder dispatch,
+        no new commits — the re-drive never touches the implementer or
+        the writer. The candidate binding is re-checked first: a moved
+        head (or tested identity) invalidates the shortcut with the
+        typed ``review_shortcut_stale`` and the run parks for the
+        required fresh verification. A top-up (amount + reason, both
+        required) is recorded BEFORE the re-drive and is
+        replay-idempotent — the same command retried adds its amount
+        exactly once.
+
+        Returns the outcome document (``allowed`` / typed ``reason``).
+        """
+        from forge.adaptive.closing_budget import (
+            OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            REVIEW_SHORTCUT_STALE,
+            BudgetTopUp,
+            CandidateBinding,
+            TopUpLedger,
+            review_only_continuation,
+        )
+
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            status = run.status
+            project_id = run.project_id
+            issue_iid = run.issue_iid
+            mr_iid = run.mr_iid
+            base_sha = run.base_sha or ""
+            candidate_shas = list(run.candidate_shas or [])
+            plan_digest = run.plan_digest or ""
+            evidence = dict(run.evidence or {})
+        block = evidence.get("review_budget_block")
+        block = dict(block) if isinstance(block, dict) else None
+        if status != FlowStatus.REVIEWING.value or block is None:
+            return {
+                "allowed": False,
+                "reason": "no_review_budget_block",
+                "detail": (
+                    "the review-only continuation requires a run parked in"
+                    " reviewing with a recorded reviewer-leg budget decision"
+                ),
+                "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            }
+        recorded = block.get("candidate") or {}
+        recorded_binding = CandidateBinding(
+            candidate_sha=str(recorded.get("candidate_sha") or ""),
+            tested_identity=str(recorded.get("tested_identity") or ""),
+        )
+        candidate_sha = candidate_shas[-1] if candidate_shas else ""
+        verification = dict(evidence.get("verification") or {})
+        # Candidate FRESHNESS: the shortcut binds to the LIVE branch head,
+        # re-read now — a push that landed since the recorded decision
+        # invalidates the shortcut (the required verification reruns).
+        head = await self._gitlab.get_branch_head(project_id, factory_branch(issue_iid, run_id))
+        current_binding = CandidateBinding(
+            candidate_sha=str(head or candidate_sha),
+            tested_identity=str(verification.get("tested_oid") or candidate_sha),
+        )
+        decision = review_only_continuation(
+            budget_decision=str(block.get("budget_decision") or ""),
+            recorded=recorded_binding,
+            current=current_binding,
+        )
+        if not decision.allowed:
+            await self._merge_run_evidence(
+                run_id, {"review_budget_block": {**block, "shortcut": decision.to_json()}}
+            )
+            if decision.reason == REVIEW_SHORTCUT_STALE:
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, f"{REVIEW_SHORTCUT_STALE}: {decision.detail}"
+                )
+            return decision.to_json()
+
+        # The explicit, auditable top-up — recorded BEFORE the re-drive,
+        # replay-idempotent by its derived key.
+        ledger = TopUpLedger(block.get("top_ups") or [])
+        if top_up_usd:
+            applied = ledger.apply(
+                BudgetTopUp(
+                    run_id=run_id,
+                    amount_usd=float(top_up_usd),
+                    reason=top_up_reason,
+                    operator=operator,
+                )
+            )
+            logger.info(
+                "Run %s budget top-up of %s usd by %s (%s) — applied=%s",
+                run_id[:8],
+                applied.top_up.amount_usd,
+                operator,
+                applied.top_up.reason,
+                applied.applied,
+            )
+        block = {
+            **block,
+            "top_ups": list(ledger.records()),
+            "top_up_total_usd": ledger.total_added_usd(),
+            "released": {"operator": operator, "top_up_usd": ledger.total_added_usd()},
+        }
+        await self._merge_run_evidence(run_id, {"review_budget_block": block})
+
+        # Repeat ONLY the review of the SAME candidate/tested identity:
+        # zero coder dispatches, zero commits (this path never touches
+        # the implementer or the writer).
+        pipeline_evidence = dict(evidence.get("pipeline") or {})
+        pipeline = SimpleNamespace(
+            id=pipeline_evidence.get("id"),
+            status=str(pipeline_evidence.get("status") or "unknown"),
+            web_url=pipeline_evidence.get("url"),
+        )
+        verified = verified_verdict(verification, candidate_sha)
+        warnings = (
+            [] if verified else ["No verification profile configured — pipeline success only."]
+        )
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_iid=issue_iid,
+            mr_iid=mr_iid,
+            candidate_sha=candidate_sha,
+            base_sha=base_sha,
+            pipeline=pipeline,
+            plan_digest=plan_digest,
+            verified=verified,
+            verification_warnings=warnings,
+            verification_evidence=verification,
+        )
+        return decision.to_json()
+
     async def _review_and_ready(
         self,
         run_id: str,
@@ -4401,6 +5604,26 @@ class RunService:
         # fresh; see _advance_proposal).
         await self._apply_run_budget(run_id)
 
+        # Q39-06 (#325): a STANDING reviewer-leg budget decision guards the
+        # leg — without the explicit operator release (the recorded top-up in
+        # review_budget_block.released), a scanner re-drive stands down
+        # instead of re-attempting the paid review call: never a hidden
+        # retry. The block itself is only written by the budget arm below.
+        standing = await self._review_budget_block(run_id)
+        if (
+            isinstance(standing, dict)
+            and not standing.get("released")
+            and str((standing.get("candidate") or {}).get("candidate_sha") or "") == candidate_sha
+        ):
+            logger.info(
+                "Run %s stands in reviewing under its recorded reviewer-leg"
+                " budget decision (closing reserve %s usd) — the explicit"
+                " review-only continuation releases it",
+                run_id[:8],
+                (standing.get("budget") or {}).get("closing_reserve_usd"),
+            )
+            return
+
         # R07 bounded step ``review``: a review already persisted for THIS
         # candidate sha is replayed — the reviewer (a paid model call) runs
         # exactly once per (run, cycle, candidate). A different sha (a new
@@ -4432,12 +5655,34 @@ class RunService:
                 )
             except (LLMError, LLMResponseError, GitLabAPIError) as exc:
                 # R13: a budget refusal is not a review failure — the reviewer
-                # never ran, and the run parks visibly blocked(budget_exhausted).
+                # never ran. Q39-06 (#325): the refusal now consults the
+                # CLOSING RESERVE before parking anything: when the reserve
+                # still covers the closing review, the run stays in the
+                # precise NON-READY ``reviewing`` state with the reserve
+                # visible (the explicit review-only continuation completes
+                # it); only a reserve that cannot cover the review blocks —
+                # with the shortage named. Never a hidden retry: the standing
+                # block above guards every later re-drive.
                 if str(exc) == BUDGET_EXHAUSTED:
+                    block = await self._record_review_budget_block(
+                        run_id,
+                        candidate_sha=candidate_sha,
+                        tested_identity=str(
+                            (verification_evidence or {}).get("tested_oid") or candidate_sha
+                        ),
+                    )
+                    if block["budget"].get("closing_review_fits"):
+                        logger.info(
+                            "Run %s keeps reviewing within its closing reserve"
+                            " (%s usd) — the review-only continuation completes it",
+                            run_id[:8],
+                            block["budget"].get("closing_reserve_usd"),
+                        )
+                        return
                     await self._to_terminal(
                         run_id,
                         FlowStatus.BLOCKED,
-                        f"{BUDGET_EXHAUSTED}: reviewer refused — run budget cannot grant a call",
+                        f"{BUDGET_EXHAUSTED}: reviewer refused — {block['short_reason']}",
                     )
                 else:
                     await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
@@ -4493,6 +5738,26 @@ class RunService:
         if drift is not None:
             warnings.append(drift)
 
+        # Q39-13 (#332): the required-discussion gate, re-checked at the
+        # review boundary too — a note can land while the review runs.
+        # The run stays in ``reviewing``; the reconciler re-drives this
+        # leg and the review above replays from the persisted evidence
+        # (no second model call).
+        if await self._review_feedback_unresolved(run_id, project_id, mr_iid, candidate_sha):
+            return
+
+        # Q39-13 (#332): the final summary names the resolved and the
+        # still-open discussions and the tested candidate (the section
+        # renders empty — byte-identical legacy comment — for runs that
+        # never recorded review feedback).
+        feedback_section = ""
+        requests = await read_review_feedback_requests(self._session_factory, run_id)
+        if requests:
+            states = self._discussion_resolution_states(
+                await self._discussions_or_none(project_id, mr_iid)
+            )
+            feedback_section = review_feedback_summary_section(requests, states, candidate_sha)
+
         # ADR-0027: the reason and the finalization iron checks have ONE
         # shared source (forge.runs.consistency) across GitLab/GitHub/Azure.
         reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
@@ -4522,11 +5787,96 @@ class RunService:
                 review_summary=summary,
                 warnings=warnings,
                 verified=verified,
+                review_feedback=feedback_section,
             ),
             run_id,
             "post_evidence_note",
         )
         logger.info("Run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
+
+    async def _review_feedback_unresolved(
+        self, run_id: str, project_id: int, mr_iid: int | None, candidate_sha: str
+    ) -> bool:
+        """Whether a REQUIRED review-feedback discussion still blocks readiness.
+
+        Q39-13: only the code-requesting corrections whose staged cycle
+        entered the delivery pipeline gate the tested candidate — a
+        repair that passes its tests while a required discussion stays
+        unresolved is NOT ready. The resolution signal is GitLab's own
+        resolvable-discussion model (the REVIEWER resolves the thread;
+        forge never resolves, never merges, never marks the human
+        decision complete). A plain non-resolvable thread can never
+        resolve and therefore never gates; an unreadable discussions
+        surface degrades with a logged warning rather than deadlocking
+        the run. When discussions are still open, ONE summary note (per
+        candidate — the A11 dedup) names the resolved and still-open
+        threads so the reviewer knows exactly what blocks readiness.
+        """
+        requests = await read_review_feedback_requests(self._session_factory, run_id)
+        required = [
+            request
+            for request in requests.values()
+            if request.classification == IN_SCOPE_CORRECTION_CLASS
+            and request.status in (REQUEST_STAGED, REQUEST_DISPATCHED)
+        ]
+        if not required or mr_iid is None:
+            return False
+        discussions = await self._discussions_or_none(project_id, mr_iid)
+        if discussions is None:
+            return False  # degraded honestly — logged at the read
+        states = self._discussion_resolution_states(discussions)
+        unresolved = [
+            request
+            for request in required
+            if request.discussion_id in states and not states[request.discussion_id]
+        ]
+        if not unresolved:
+            return False
+        logger.info(
+            "Run %s holds a green candidate at %s but %d required review "
+            "discussion(s) stay unresolved — not ready",
+            run_id[:8],
+            candidate_sha[:8],
+            len(unresolved),
+        )
+        section = review_feedback_summary_section(requests, states, candidate_sha)
+        await self._post_deduped_mr_note(
+            project_id,
+            mr_iid,
+            run_id,
+            f"review-feedback-summary:{run_id}:{candidate_sha}",
+            "## Candidate held for human review feedback\n\n"
+            f"{section}\n\n"
+            "The pipeline is green, but the correction discussions above are "
+            "still open — resolve them in this merge request and the run "
+            f"continues to readiness on its next pass.{_automated_footer()}",
+        )
+        return True
+
+    async def _post_deduped_mr_note(
+        self, project_id: int, mr_iid: int, run_id: str, key: str, body: str
+    ) -> None:
+        """Post ONE MR note per *key* — intent/outcome journaled (ADR-0005)."""
+        if await self._rf_reply_delivered(key, kind=_REVIEW_FEEDBACK_SUMMARY_KIND):
+            return
+        async with self._session_factory() as session:
+            action = ActionLog(
+                flow_run_id=run_id,
+                action_kind=_REVIEW_FEEDBACK_SUMMARY_KIND,
+                correlation_id=f"mr-{mr_iid}",
+                idempotency_key=key,
+                status="requested",
+            )
+            session.add(action)
+            await session.commit()
+            action_id = action.id
+        try:
+            note = await self._gitlab.create_mr_note(project_id, mr_iid, body)
+        except (httpx.HTTPError, GitLabAPIError) as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            logger.warning("Review-feedback summary note failed for run %s", run_id[:8])
+            return
+        await self._complete_action(action_id, "succeeded", {"note_id": getattr(note, "id", None)})
 
     async def _begin_repair(
         self,
@@ -6289,6 +7639,7 @@ class RunService:
         review_summary: str | None = None,
         warnings: list[str] | None = None,
         verified: bool = True,
+        review_feedback: str = "",
     ) -> str:
         pipeline_url = pipeline.web_url or "(pipeline url unavailable)"
         review_line = ""
@@ -6298,6 +7649,10 @@ class RunService:
         # R02 honesty: an unverified run is labeled as such, never implied
         # green — the closing pair has one shared source (ADR-0027).
         closing = ready_closing_line(verified)
+        # Q39-13 (#332): the review-feedback section names the resolved
+        # and still-open discussions and the tested candidate — empty for
+        # runs that never recorded feedback (the legacy bytes unchanged).
+        feedback_block = f"{review_feedback}\n\n" if review_feedback else ""
         return (
             "## Forge run ready for human review\n\n"
             f"- **Merge request:** {mr_url}\n"
@@ -6306,6 +7661,7 @@ class RunService:
             f"{review_line}"
             f"- **Plan digest:** `{plan_digest}`\n\n"
             f"{warning_lines}"
+            f"{feedback_block}"
             f"{closing}\n\n"
             "*This is an automated message.*"
         )
@@ -6346,6 +7702,46 @@ class RunService:
             return mr.web_url or f"!{mr_iid}"
         except GitLabAPIError:
             return f"!{mr_iid}"
+
+    @staticmethod
+    def _wip_reuse_refusal_body(run_id: str, document: Mapping[str, Any]) -> str:
+        """The actionable refusal for a required resume the activation routed away.
+
+        Names the recorded reason verbatim (the rejected reuse, explained)
+        and the operator's two ways out — the explicit ``restart`` discard
+        or a fresh plan. Nothing was dispatched.
+        """
+        reason = str(
+            document.get("route_reason")
+            or "the activation routed the held checkpoint to a fresh attempt"
+        )
+        revision = str(document.get("activated_revision") or "the activated revision")
+        return (
+            f"## 🛑 Run `{run_id[:8]}` blocked: `checkpoint_reuse_refused`\n\n"
+            f"Revision {revision} invalidated the held checkpoint's WIP:\n\n"
+            f"> {reason}\n\n"
+            "A `required` resume cannot silently restore WIP the approved revision "
+            "rejected. Re-issue with an explicit discard (`/retry <run-id> restart`) "
+            "or plan the remaining work fresh.\n\n"
+            "*This is an automated message.*"
+        )
+
+    @staticmethod
+    def _rebind_refusal_body(run_id: str, code: str, detail: str) -> str:
+        """The actionable refusal for an approved input that failed to verify.
+
+        The dispatch never fell back to the superseded brief — the run
+        parks until the durable revision record and its digest agree
+        again (a re-approval re-stages clean content).
+        """
+        return (
+            f"## 🛑 Run `{run_id[:8]}` blocked: `rebind_refused` ({code})\n\n"
+            f"> {detail}\n\n"
+            "The dispatch briefs ONLY from a digest-verified active revision — "
+            "it never falls back to the superseded plan. Resolve the revision "
+            "record (re-approve the revision) and re-dispatch.\n\n"
+            "*This is an automated message.*"
+        )
 
     async def _post_journaled_note(
         self, project_id: int, issue_iid: int | None, body: str, run_id: str | None, kind: str

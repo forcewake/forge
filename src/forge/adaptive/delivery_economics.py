@@ -1,4 +1,4 @@
-"""R37-13 + R38-09 — accepted-delivery economics over REAL attempt/usage identities.
+"""R37-13 + R38-09 + Q39-11 — accepted-delivery economics over REAL identities.
 
 ``delivery_measurement`` (R36-17 / #276) links the recorded facts by
 identity and folds them with honest unknowns; this module is the next
@@ -16,6 +16,26 @@ attribution SEGMENT (route + route version + rate card; a change is a new
 segment, history never rewritten), and the report adds the
 successful-attempt cost as its OWN measure beside the accepted-item
 all-attempt total and programme-per-accepted.
+
+Q39-11 (#330) adds the ONE complete evidence chain: the
+:class:`AcceptedTaskLedgerBuilder` joins the economics report with the
+native-job / candidate / verification / human-decision identities the
+durable evidence carries and emits an :class:`AcceptedTaskLedger`
+(stamp ``forge.delivery.accepted-ledger/1``) — run → attempt →
+model-call → native-job → candidate → verification → human-decision,
+every link explicit, a broken link surfaced as an identity gap and
+never dropped. Its folds keep the issue's separations: the THREE cost
+columns (provider-reported SDK figures vs versioned price-card
+estimates vs billing-reconciliation — never blended), the TWO measures
+(accepted-task all-attempt cost including failed/paused/superseded
+attempts vs programme-per-accepted including rejected/abandoned work),
+the SEVEN time measures (model / tool / CI queue / CI runtime /
+operator wait / reviewer effort / setup effort — each over its own
+recorded windows, never unmatched output ÷ unmatched durations, the
+decode guard extended by :func:`assert_no_unmatched_rates`), coverage
+beside every aggregate, and the #325 closing-budget shapes (the
+closing reserve, budget refusals and the review-only recovery)
+separately visible per work.
 
 The honesty rules, all pinned by ``tests/test_delivery_economics.py``:
 
@@ -57,13 +77,19 @@ The honesty rules, all pinned by ``tests/test_delivery_economics.py``:
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from forge.adaptive.closing_budget import (
+    CandidateBinding,
+    ClosingReservePolicy,
+    closing_budget_report,
+    review_only_continuation,
+)
 from forge.adaptive.delivery_measurement import (
-    LATENCY_SPAN_TYPES,
     RATE_LABEL_SPACE,
     DeliveryLedger,
     ProviderRoute,
@@ -74,9 +100,25 @@ from forge.adaptive.delivery_measurement import (
     _text,
     measured_rate,
 )
+from forge.adaptive.usage_ingestion import (
+    COST_BASIS_BILLING,
+    COST_BASIS_ESTIMATED,
+    COST_BASIS_PROVIDER_REPORTED,
+    IngestedUsageRow,
+)
 
 __all__ = [
+    "ACCEPTED_COST_COLUMNS",
+    "ACCEPTED_LEDGER_SCHEMA",
     "AcceptanceRecord",
+    "AcceptedTaskLedger",
+    "AcceptedTaskLedgerBuilder",
+    "AttemptChain",
+    "BudgetEventLink",
+    "COST_COLUMN_BILLING",
+    "COST_COLUMN_PRICE_CARD",
+    "COST_COLUMN_PROVIDER_REPORTED",
+    "CandidateLink",
     "CrossRunJoin",
     "ECONOMICS_SCHEMA",
     "EVIDENCE_CLASSES",
@@ -87,10 +129,19 @@ __all__ = [
     "EconomicsLinker",
     "EconomicsReport",
     "EvidenceClassError",
+    "HumanDecisionLink",
+    "IDENTITY_CHAIN",
     "ModelRate",
+    "NativeJobLink",
     "RateCard",
+    "ReviewRecoveryInput",
     "STAGE_SECONDS_KEYS",
+    "TIME_MEASURES",
+    "TimeWindow",
+    "VerificationLink",
+    "WorkChain",
     "assert_latency_guards",
+    "assert_no_unmatched_rates",
     "classify_receipt",
     "decode_throughput",
     "operator_summary",
@@ -338,6 +389,11 @@ class PricedEntry:
     output_tokens: int | None = None
     cost_basis: str = ""
     segment: str = ""
+    #: Q39-11 (#330): the claim's completeness — a streamed ``partial``
+    #: receipt keeps its counters and cost as a LOWER BOUND only; the
+    #: accepted-task ledger's columns stay inexact until a final receipt
+    #: reconciles the identity (the #324 durable partial→final contract).
+    completeness: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -355,6 +411,7 @@ class PricedEntry:
             "output_tokens": self.output_tokens,
             "cost_basis": self.cost_basis,
             "segment": self.segment,
+            "completeness": self.completeness,
         }
 
 
@@ -557,7 +614,10 @@ def classify_receipt(claim: Any, *, provenance: str = "") -> str:
 # ----------------------------------------------------------------------
 
 
-def _fold_stage_seconds(spans: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _fold_stage_seconds(
+    spans: Sequence[Mapping[str, Any]],
+    keys: Sequence[str] = STAGE_SECONDS_KEYS,
+) -> dict[str, Any]:
     """Fold typed span rows into ``stage_seconds`` — populations named.
 
     Every stage appears, measured or not; an unmeasured stage carries
@@ -566,14 +626,15 @@ def _fold_stage_seconds(spans: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     stage total is emitted only when the stage has exactly ONE
     population and that population is fully observed. Spans fold by
     identity (span id when present, content otherwise) in sorted order,
-    so input reordering changes no byte.
+    so input reordering changes no byte. ``keys`` generalizes the fold
+    beyond the latency vocabulary (Q39-11's time measures reuse it).
     """
     grouped: dict[str, dict[str, dict[str, Any]]] = {}
     seen: set[Any] = set()
     ordered: list[tuple[Any, Mapping[str, Any]]] = []
     for record in spans:
         span_type = _text(record.get("span_type"))
-        if span_type not in LATENCY_SPAN_TYPES:
+        if span_type not in keys:
             continue
         origin = _text(record.get("origin")) or "harness"
         span_id = _text(record.get("span_id"))
@@ -607,7 +668,7 @@ def _fold_stage_seconds(spans: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             population["known_seconds"] += seconds
     stages: dict[str, Any] = {}
-    for stage in STAGE_SECONDS_KEYS:
+    for stage in keys:
         populations = grouped.get(stage, {})
         if not populations:
             stages[stage] = {
@@ -831,6 +892,7 @@ class EconomicsLinker:
                                 output_tokens=claim.output_tokens,
                                 cost_basis=claim.cost_basis,
                                 segment=claim.segment,
+                                completeness=claim.completeness,
                             )
                         )
                         continue
@@ -866,6 +928,7 @@ class EconomicsLinker:
                             output_tokens=claim.output_tokens,
                             cost_basis=claim.cost_basis,
                             segment=claim.segment,
+                            completeness=claim.completeness,
                         )
                     )
                 attempts.append(
@@ -1051,7 +1114,7 @@ class EconomicsReport:
         """Measured / lower-bound / unknown completeness per population."""
         populations: dict[str, dict[str, int]] = {}
         for population, accepted_only in (("programme", False), ("accepted_items", True)):
-            rows: dict[str, int] = {
+            counts: dict[str, int] = {
                 "attempts": 0,
                 "receipts_expected": 0,
                 "receipts_received": 0,
@@ -1063,32 +1126,34 @@ class EconomicsReport:
                 if accepted_only and work.outcome != "accepted":
                     continue
                 for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
-                    rows["attempts"] += 1
-                    rows["receipts_expected"] += 1
+                    counts["attempts"] += 1
+                    counts["receipts_expected"] += 1
                     received = [entry for entry in attempt.receipts if entry.basis != "refused"]
                     if received:
-                        rows["receipts_received"] += 1
+                        counts["receipts_received"] += 1
                         if any(
                             entry.input_tokens_inclusive is not None
                             or entry.output_tokens is not None
                             for entry in received
                         ):
-                            rows["measured_receipts"] += 1
+                            counts["measured_receipts"] += 1
                         if any(entry.billed_usd is not None for entry in received):
-                            rows["cost_known_receipts"] += 1
+                            counts["cost_known_receipts"] += 1
                         else:
-                            rows["unknown_cost_receipts"] += 1
-                rows["receipts_expected"] += len(work.unobserved_attempt_ids)
-            populations[population] = rows
+                            counts["unknown_cost_receipts"] += 1
+                counts["receipts_expected"] += len(work.unobserved_attempt_ids)
+            populations[population] = counts
         block: dict[str, Any] = {}
         for population in sorted(populations):
-            rows = populations[population]
-            expected = rows["receipts_expected"]
-            received = rows["receipts_received"]
+            counts = populations[population]
+            expected_count = counts["receipts_expected"]
+            received_count = counts["receipts_received"]
             block[population] = {
-                **rows,
-                "receipt_coverage": (received / expected) if expected else None,
-                "cost_coverage": (rows["cost_known_receipts"] / expected) if expected else None,
+                **counts,
+                "receipt_coverage": (received_count / expected_count) if expected_count else None,
+                "cost_coverage": (
+                    (counts["cost_known_receipts"] / expected_count) if expected_count else None
+                ),
                 "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero",
             }
         return block
@@ -1403,6 +1468,7 @@ class EconomicsReport:
                         output_tokens=_nn_int(row.get("output_tokens")),
                         cost_basis=_text(row.get("cost_basis")),
                         segment=_text(row.get("segment")),
+                        completeness=_text(row.get("completeness")),
                     )
                     for row in receipts_raw
                     if isinstance(row, Mapping)
@@ -1776,3 +1842,1405 @@ def reconcile_with_budget(
             " shape — ids, numbers and reasons only; no code, prompts or secrets"
         ),
     }
+
+
+# ----------------------------------------------------------------------
+# Q39-11 (#330) — the accepted-task ledger: ONE complete evidence chain
+# ----------------------------------------------------------------------
+
+
+#: The versioned stamp of the accepted-task ledger document.
+ACCEPTED_LEDGER_SCHEMA = "forge.delivery.accepted-ledger/1"
+
+#: The identity chain every accepted task is joined over, in join order
+#: (the issue's scope item 1): the run (work) → its execution attempts →
+#: the model-call receipts that metered them → the native jobs that ran
+#: them → the published candidates → the verification that tested the
+#: candidate → the human decision that accepted or rejected it.
+IDENTITY_CHAIN: tuple[str, ...] = (
+    "run",
+    "attempt",
+    "model_call",
+    "native_job",
+    "candidate",
+    "verification",
+    "human_decision",
+)
+
+#: The time measures the issue names as DIFFERENT quantities — never
+#: folded into one another, never divided across populations (Q39-11
+#: scope item 4). Each measure folds only its own recorded windows.
+TIME_MEASURES: tuple[str, ...] = (
+    "model_time",
+    "tool_time",
+    "ci_queue",
+    "ci_runtime",
+    "operator_wait",
+    "reviewer_effort",
+    "setup_effort",
+)
+
+#: The three cost columns of the accepted-task ledger — the issue's
+#: scope item 2, kept as LABELED columns that never blend: the provider's
+#: own SDK meter, the versioned price card's estimate, and a billing
+#: reconciliation. Every priced entry lands in AT MOST one column.
+COST_COLUMN_PROVIDER_REPORTED = "provider_reported_usd"
+COST_COLUMN_PRICE_CARD = "price_card_estimate_usd"
+COST_COLUMN_BILLING = "billing_reconciliation_usd"
+ACCEPTED_COST_COLUMNS: tuple[str, ...] = (
+    COST_COLUMN_PROVIDER_REPORTED,
+    COST_COLUMN_PRICE_CARD,
+    COST_COLUMN_BILLING,
+)
+
+#: The human-decision states the ledger admits. ``pending`` is a REAL
+#: state (a draft MR awaiting its human), never coerced to a neighbour;
+#: only ``accepted``/``rejected`` close a work's economics.
+HUMAN_DECISION_STATES = ("accepted", "rejected", "pending", "unknown")
+
+#: The budget-event kinds (Q39-11 scope item 6 — visible separately).
+BUDGET_EVENT_KINDS = ("budget_refusal", "review_only_recovery")
+
+
+def _canonical_row(row: Mapping[str, Any]) -> str:
+    return json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _entry_cost_basis(entry: PricedEntry) -> str:
+    """The entry's cost origin — the census mapping, ONE spelling.
+
+    An explicit ``cost_basis`` wins (the ingested lane receipts carry
+    one); a historical billed figure without a stated origin groups as
+    ``billing-reconciliation`` (the conservative reading); everything
+    else is an estimate.
+    """
+    if entry.cost_basis:
+        return entry.cost_basis
+    if entry.basis == "billing":
+        return COST_BASIS_BILLING
+    return COST_BASIS_ESTIMATED
+
+
+def _entry_column(entry: PricedEntry) -> str | None:
+    """The ONE column an entry's figure belongs to — or ``None``.
+
+    ``None`` means the entry carries no figure for any column (an
+    unknown-cost receipt: counted in coverage, never summed) or was
+    refused by the cross-run guard. An entry NEVER lands in two columns.
+    """
+    if entry.basis == "refused":
+        return None
+    basis = _entry_cost_basis(entry)
+    if basis == COST_BASIS_PROVIDER_REPORTED and entry.billed_usd is not None:
+        return COST_COLUMN_PROVIDER_REPORTED
+    if basis == COST_BASIS_BILLING and entry.billed_usd is not None:
+        return COST_COLUMN_BILLING
+    if basis == COST_BASIS_ESTIMATED and entry.estimate_usd is not None:
+        return COST_COLUMN_PRICE_CARD
+    return None
+
+
+def _entry_figure(entry: PricedEntry, column: str) -> float | None:
+    """The entry's figure for *column* — ``None`` when it has none there."""
+    if _entry_column(entry) != column:
+        return None
+    if column == COST_COLUMN_PRICE_CARD:
+        return entry.estimate_usd
+    return entry.billed_usd
+
+
+@dataclass(frozen=True)
+class NativeJobLink:
+    """The native CI job one attempt ran as — the chain's job identity."""
+
+    job_id: str
+    work_id: str = ""
+    attempt_id: str = ""
+    pipeline_id: str = ""
+    status: str = ""
+    began_at: str = ""
+    ended_at: str = ""
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "work_id": self.work_id,
+            "attempt_id": self.attempt_id,
+            "pipeline_id": self.pipeline_id,
+            "status": self.status,
+            "began_at": self.began_at,
+            "ended_at": self.ended_at,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> NativeJobLink:
+        return cls(
+            job_id=_text(block.get("job_id")),
+            work_id=_text(block.get("work_id")),
+            attempt_id=_text(block.get("attempt_id")),
+            pipeline_id=_text(block.get("pipeline_id")),
+            status=_text(block.get("status")),
+            began_at=_text(block.get("began_at")),
+            ended_at=_text(block.get("ended_at")),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class CandidateLink:
+    """The published candidate one attempt produced.
+
+    ``identity_state`` is ``exact`` (a full recorded sha) or ``partial``
+    (a recorded prefix — honest, never padded to a sha it is not).
+    """
+
+    candidate_sha: str
+    work_id: str = ""
+    attempt_id: str = ""
+    base_sha: str = ""
+    entries: int = 0
+    identity_state: str = "exact"
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "candidate_sha": self.candidate_sha,
+            "work_id": self.work_id,
+            "attempt_id": self.attempt_id,
+            "base_sha": self.base_sha,
+            "entries": self.entries,
+            "identity_state": self.identity_state,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> CandidateLink:
+        state = _text(block.get("identity_state")) or "exact"
+        return cls(
+            candidate_sha=_text(block.get("candidate_sha")),
+            work_id=_text(block.get("work_id")),
+            attempt_id=_text(block.get("attempt_id")),
+            base_sha=_text(block.get("base_sha")),
+            entries=_nn_int(block.get("entries")) or 0,
+            identity_state=state if state in ("exact", "partial") else "exact",
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class VerificationLink:
+    """The verification that tested a candidate — its own identity.
+
+    Joins the chain by the candidate sha it names (``tested_oid``); the
+    producer (an independent pipeline, a check surface) and its verdict
+    ride along. Verification is NEVER acceptance: a green pipeline is a
+    fact about the candidate, not a human decision.
+    """
+
+    verification_id: str
+    work_id: str = ""
+    candidate_sha: str = ""
+    producer: str = ""
+    status: str = ""
+    tested_oid: str = ""
+    observed_at: str = ""
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "verification_id": self.verification_id,
+            "work_id": self.work_id,
+            "candidate_sha": self.candidate_sha,
+            "producer": self.producer,
+            "status": self.status,
+            "tested_oid": self.tested_oid,
+            "observed_at": self.observed_at,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> VerificationLink:
+        return cls(
+            verification_id=_text(block.get("verification_id")),
+            work_id=_text(block.get("work_id")),
+            candidate_sha=_text(block.get("candidate_sha")),
+            producer=_text(block.get("producer")),
+            status=_text(block.get("status")),
+            tested_oid=_text(block.get("tested_oid")),
+            observed_at=_text(block.get("observed_at")),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class HumanDecisionLink:
+    """The human decision point — labelled, never guessed.
+
+    ``state`` is one of :data:`HUMAN_DECISION_STATES`; ``pending`` names
+    the real state of a delivered candidate still awaiting its human
+    (a draft MR). Only the human decision closes a work into the
+    accepted or rejected population — CI green never does.
+    """
+
+    work_id: str
+    state: str
+    decided_by: str = ""
+    decided_at: str = ""
+    channel: str = ""
+    note: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "state": self.state,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at,
+            "channel": self.channel,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> HumanDecisionLink:
+        state = _text(block.get("state")) or "unknown"
+        return cls(
+            work_id=_text(block.get("work_id")),
+            state=state if state in HUMAN_DECISION_STATES else "unknown",
+            decided_by=_text(block.get("decided_by")),
+            decided_at=_text(block.get("decided_at")),
+            channel=_text(block.get("channel")),
+            note=_text(block.get("note")),
+        )
+
+
+@dataclass(frozen=True)
+class BudgetEventLink:
+    """One recorded budget event — refusals and recoveries stay visible.
+
+    Q39-11 scope item 6: a budget refusal (the reviewer leg the guard
+    blocked) and a review-only recovery (the #325 shortcut that repeated
+    ONLY the review) are DIFFERENT events, listed separately with the
+    observable each feeds.
+    """
+
+    work_id: str
+    kind: str
+    at: str = ""
+    reason: str = ""
+    detail: str = ""
+    observable: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "kind": self.kind,
+            "at": self.at,
+            "reason": self.reason,
+            "detail": self.detail,
+            "observable": self.observable,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> BudgetEventLink:
+        kind = _text(block.get("kind"))
+        return cls(
+            work_id=_text(block.get("work_id")),
+            kind=kind if kind in BUDGET_EVENT_KINDS else "budget_refusal",
+            at=_text(block.get("at")),
+            reason=_text(block.get("reason")),
+            detail=_text(block.get("detail")),
+            observable=_text(block.get("observable")),
+        )
+
+
+@dataclass(frozen=True)
+class ReviewRecoveryInput:
+    """The #325 review-only-continuation evaluation input for one work.
+
+    ``budget_decision`` is the recorded decision text at the reviewer
+    leg (only an explicit budget decision opens the shortcut); the
+    recorded binding is what the decision named, the current binding is
+    what the ledger sees now — a moved candidate or tested identity
+    invalidates the shortcut (#325's ``review_shortcut_stale``).
+    """
+
+    work_id: str
+    budget_decision: str
+    candidate_sha: str
+    tested_identity: str
+    current_candidate_sha: str = ""
+    current_tested_identity: str = ""
+
+
+@dataclass(frozen=True)
+class TimeWindow:
+    """One measured (or explicitly unmeasured) window of ONE measure.
+
+    ``measure`` is one of :data:`TIME_MEASURES`; ``population`` names
+    the clock the window was read from (a lane-job window, an operator
+    decision gap — populations never mix inside a measure). ``seconds
+    is None`` is an honest unknown, never a zero; an empty ``work_id``
+    is a cohort-level window (a setup effort that served every work,
+    named as its own population).
+    """
+
+    window_id: str
+    work_id: str
+    attempt_id: str
+    measure: str
+    population: str
+    seconds: float | None
+    began_at: str = ""
+    ended_at: str = ""
+    note: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "window_id": self.window_id,
+            "work_id": self.work_id,
+            "attempt_id": self.attempt_id,
+            "measure": self.measure,
+            "population": self.population,
+            "seconds": _round6(self.seconds),
+            "began_at": self.began_at,
+            "ended_at": self.ended_at,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> TimeWindow:
+        return cls(
+            window_id=_text(block.get("window_id")),
+            work_id=_text(block.get("work_id")),
+            attempt_id=_text(block.get("attempt_id")),
+            measure=_text(block.get("measure")),
+            population=_text(block.get("population")) or "unlabelled",
+            seconds=_nn_float(block.get("seconds")),
+            began_at=_text(block.get("began_at")),
+            ended_at=_text(block.get("ended_at")),
+            note=_text(block.get("note")),
+        )
+
+
+@dataclass(frozen=True)
+class AttemptChain:
+    """One attempt's stretch of the chain — every link named."""
+
+    attempt_id: str
+    work_id: str
+    outcome: str
+    native_job: NativeJobLink | None = None
+    receipt_ids: tuple[str, ...] = ()
+    candidate: CandidateLink | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "attempt_id": self.attempt_id,
+            "work_id": self.work_id,
+            "outcome": self.outcome,
+            "native_job": self.native_job.to_json() if self.native_job else None,
+            "model_call_receipt_ids": list(self.receipt_ids),
+            "candidate": self.candidate.to_json() if self.candidate else None,
+        }
+
+
+@dataclass(frozen=True)
+class WorkChain:
+    """One work's complete chain with the human decision point labelled."""
+
+    work_id: str
+    outcome: str
+    report_outcome: str
+    human_decision: HumanDecisionLink | None = None
+    attempts: tuple[AttemptChain, ...] = ()
+    unobserved_attempt_ids: tuple[str, ...] = ()
+    verification: VerificationLink | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "outcome": self.outcome,
+            "report_outcome": self.report_outcome,
+            "human_decision": (self.human_decision.to_json() if self.human_decision else None),
+            "attempts": [attempt.to_json() for attempt in self.attempts],
+            "unobserved_attempt_ids": list(self.unobserved_attempt_ids),
+            "verification": self.verification.to_json() if self.verification else None,
+        }
+
+
+@dataclass(frozen=True)
+class DuplicateCallRow:
+    """A model-call id delivered under more than one attribution.
+
+    The Q39-11 negative fixture: the same call id on two attempts never
+    false-joins — the identity is counted once (the measurement ledger's
+    collapse) and the row stays visible here.
+    """
+
+    call_id: str
+    attributions: tuple[str, ...] = ()
+    note: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "call_id": self.call_id,
+            "attributions": list(self.attributions),
+            "note": self.note,
+        }
+
+
+def _route_from_key(route_key: str) -> ProviderRoute:
+    provider, _, model = route_key.partition("/")
+    return ProviderRoute(provider=provider, model=model)
+
+
+class AcceptedTaskLedgerBuilder:
+    """Join the economics report into the ONE complete evidence chain.
+
+    ``build`` takes the :class:`EconomicsReport` (the SPEND authority —
+    every priced receipt with its cost basis) and the identity links the
+    durable evidence carries — native jobs, candidates, verifications,
+    human decisions, budget events, review-recovery inputs, time
+    windows — and returns the cohort's :class:`AcceptedTaskLedger`.
+    Every link joins by STABLE ID; a link that cannot join (a job
+    naming an attempt the ledger never saw, a verification naming an
+    unknown candidate) surfaces as an identity gap, never a silent
+    drop. Duplicate deliveries collapse by identity (the
+    canonical-greatest form wins); two DIFFERING records under one
+    identity surface as a conflict, never a merge.
+    """
+
+    def build(
+        self,
+        report: EconomicsReport | Mapping[str, Any],
+        *,
+        native_jobs: Sequence[Mapping[str, Any]] = (),
+        candidates: Sequence[Mapping[str, Any]] = (),
+        verifications: Sequence[Mapping[str, Any]] = (),
+        human_decisions: Sequence[Mapping[str, Any]] = (),
+        budget_events: Sequence[Mapping[str, Any]] = (),
+        review_recoveries: Sequence[ReviewRecoveryInput | Mapping[str, Any]] = (),
+        time_windows: Sequence[Mapping[str, Any]] = (),
+        budgets: Mapping[str, Mapping[str, Any]] | None = None,
+        measurement_ledger: DeliveryLedger | Mapping[str, Any] | None = None,
+        pilot: Mapping[str, str] | None = None,
+    ) -> AcceptedTaskLedger:
+        if not isinstance(report, EconomicsReport):
+            report = EconomicsReport.from_document(report)
+        gaps: list[EconomicsConflict] = []
+        notes: list[str] = []
+
+        def _collapse(
+            rows: Sequence[Mapping[str, Any]],
+            key_of: Any,
+            *,
+            gap_identity: str = "",
+        ) -> dict[str, Mapping[str, Any]]:
+            """Collapse by identity — canonical-greatest wins, order-free.
+
+            Two DIFFERING records under one identity surface as a
+            conflict (``gap_identity`` names the link kind) instead of a
+            silent merge; identical re-delivery collapses quietly.
+            """
+            by_key: dict[str, Mapping[str, Any]] = {}
+            for row in rows:
+                key = key_of(row)
+                if not key:
+                    continue
+                existing = by_key.get(key)
+                if existing is None:
+                    by_key[key] = dict(row)
+                elif _canonical_row(dict(row)) != _canonical_row(dict(existing)):
+                    by_key[key] = max(
+                        (dict(row), dict(existing)),
+                        key=_canonical_row,
+                    )
+                    if gap_identity:
+                        gaps.append(
+                            EconomicsConflict(
+                                kind="identity",
+                                identity=f"{gap_identity}:{key}",
+                                detail=(
+                                    f"two differing {gap_identity} records claim one"
+                                    f" identity ({key}) — the canonical form is kept,"
+                                    " never merged"
+                                ),
+                            )
+                        )
+            return by_key
+
+        # -- native jobs (identity: job id) -------------------------------
+        jobs = {
+            key: NativeJobLink.from_json(row)
+            for key, row in _collapse(
+                native_jobs,
+                lambda row: _text(row.get("job_id") or row.get("id")),
+                gap_identity="native_job",
+            ).items()
+        }
+
+        # -- candidates (identity: sha + work + attempt) ------------------
+        candidate_links: dict[tuple[str, str], CandidateLink] = {}
+        for _key, row in _collapse(
+            candidates,
+            lambda row: "\x1f".join(
+                (
+                    _text(row.get("candidate_sha")),
+                    _text(row.get("work_id")),
+                    _text(row.get("attempt_id")),
+                )
+            ),
+        ).items():
+            candidate_link = CandidateLink.from_json(row)
+            if not candidate_link.candidate_sha:
+                continue
+            scope = (candidate_link.work_id, candidate_link.attempt_id)
+            if scope in candidate_links:
+                gaps.append(
+                    EconomicsConflict(
+                        kind="identity",
+                        identity=f"candidate:{candidate_link.candidate_sha}",
+                        detail=(
+                            f"two candidates claim attempt {candidate_link.work_id}/"
+                            f"{candidate_link.attempt_id} — the canonical form is kept,"
+                            " the attempt's exact candidate set stays unknown"
+                        ),
+                    )
+                )
+            candidate_links[scope] = candidate_link
+
+        # -- verifications (identity: verification id) --------------------
+        verification_links: dict[str, VerificationLink] = {
+            key: VerificationLink.from_json(row)
+            for key, row in _collapse(
+                verifications,
+                lambda row: _text(row.get("verification_id")),
+                gap_identity="verification",
+            ).items()
+        }
+
+        # -- human decisions (identity: work id) --------------------------
+        decisions = {
+            key: HumanDecisionLink.from_json(row)
+            for key, row in _collapse(
+                human_decisions,
+                lambda row: _text(row.get("work_id")),
+                gap_identity="human_decision",
+            ).items()
+        }
+
+        # -- budget events + review recoveries ----------------------------
+        events = [
+            BudgetEventLink.from_json(row)
+            for _key, row in _collapse(
+                budget_events,
+                lambda row: "\x1f".join(
+                    (
+                        _text(row.get("work_id")),
+                        _text(row.get("kind")),
+                        _text(row.get("at")),
+                    )
+                ),
+            ).items()
+        ]
+        recoveries: dict[str, ReviewRecoveryInput] = {}
+        for item in review_recoveries:
+            parsed = (
+                item
+                if isinstance(item, ReviewRecoveryInput)
+                else ReviewRecoveryInput(
+                    work_id=_text(item.get("work_id")),
+                    budget_decision=_text(item.get("budget_decision")),
+                    candidate_sha=_text(item.get("candidate_sha")),
+                    tested_identity=_text(item.get("tested_identity")),
+                    current_candidate_sha=_text(item.get("current_candidate_sha")),
+                    current_tested_identity=_text(item.get("current_tested_identity")),
+                )
+            )
+            if parsed.work_id:
+                recoveries[parsed.work_id] = parsed
+
+        # -- time windows (identity: window id) ---------------------------
+        windows: list[TimeWindow] = []
+        for _key, row in _collapse(time_windows, lambda row: _text(row.get("window_id"))).items():
+            measure = _text(row.get("measure"))
+            if measure not in TIME_MEASURES:
+                if measure:
+                    notes.append(
+                        f"a time window carries measure {measure!r} outside"
+                        f" {TIME_MEASURES} — skipped, never re-typed"
+                    )
+                continue
+            windows.append(TimeWindow.from_json(row))
+
+        # -- join to the report's works -----------------------------------
+        chains: list[WorkChain] = []
+        for work in sorted(report.works, key=lambda row: row.work_id):
+            work_id = work.work_id
+            decision = decisions.pop(work_id, None)
+            attempts: list[AttemptChain] = []
+            for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
+                attempt_id = attempt.attempt_id
+                matched = [
+                    jobs.pop(key)
+                    for key in sorted(jobs)
+                    if jobs[key].work_id == work_id and jobs[key].attempt_id == attempt_id
+                ]
+                native_job = matched[0] if matched else None
+                if len(matched) > 1:
+                    gaps.append(
+                        EconomicsConflict(
+                            kind="identity",
+                            identity=f"native_job:{work_id}/{attempt_id}",
+                            detail=(
+                                f"{len(matched)} native jobs claim one attempt —"
+                                " the first sorted identity is kept, the rest"
+                                " surface here, never silently merged"
+                            ),
+                        )
+                    )
+                attempts.append(
+                    AttemptChain(
+                        attempt_id=attempt_id,
+                        work_id=work_id,
+                        outcome=attempt.outcome,
+                        native_job=native_job,
+                        receipt_ids=tuple(
+                            sorted(
+                                entry.receipt_id
+                                for entry in attempt.receipts
+                                if entry.basis != "refused"
+                            )
+                        ),
+                        candidate=candidate_links.pop((work_id, attempt_id), None),
+                    )
+                )
+            verification: VerificationLink | None = None
+            for vid in sorted(verification_links):
+                verification_link = verification_links[vid]
+                if verification_link.work_id and verification_link.work_id != work_id:
+                    continue
+                named = verification_link.candidate_sha or verification_link.tested_oid
+                if named and named in {
+                    attempt.candidate.candidate_sha if attempt.candidate else ""
+                    for attempt in attempts
+                }:
+                    verification = verification_links.pop(vid)
+                    break
+            # the effective outcome: the human decision is the authority.
+            # A pending decision is a REAL state — the work stays OUT of
+            # the accepted population (never coerced to its neighbour).
+            effective = work.outcome
+            if decision is not None and decision.state in ("accepted", "rejected"):
+                effective = decision.state
+                if work.outcome and work.outcome != decision.state:
+                    gaps.append(
+                        EconomicsConflict(
+                            kind="human_decision",
+                            identity=work_id,
+                            detail=(
+                                f"the report's acceptance says {work.outcome!r},"
+                                f" the human decision record says {decision.state!r}"
+                                " — the human decision governs the ledger's"
+                                " accepted population"
+                            ),
+                        )
+                    )
+            elif decision is not None and decision.state == "pending":
+                effective = "pending"
+                if work.outcome:
+                    gaps.append(
+                        EconomicsConflict(
+                            kind="human_decision",
+                            identity=work_id,
+                            detail=(
+                                f"the report's acceptance says {work.outcome!r} but"
+                                " the human decision record says 'pending' — the"
+                                " decision point is still open, no accepted item"
+                                " is claimed"
+                            ),
+                        )
+                    )
+            chains.append(
+                WorkChain(
+                    work_id=work_id,
+                    outcome=effective,
+                    report_outcome=work.outcome,
+                    human_decision=decision,
+                    attempts=tuple(attempts),
+                    unobserved_attempt_ids=tuple(work.unobserved_attempt_ids),
+                    verification=verification,
+                )
+            )
+            if decision is None:
+                notes.append(
+                    f"work {work_id}: no human decision record — the decision"
+                    " point stays unknown, the work never enters the accepted"
+                    " population"
+                )
+
+        # -- links that could not join (surfaced, never dropped) ----------
+        for job_id in sorted(jobs):
+            job = jobs[job_id]
+            gaps.append(
+                EconomicsConflict(
+                    kind="identity",
+                    identity=f"native_job:{job.job_id}",
+                    detail=(
+                        f"native job {job.job_id} names attempt"
+                        f" {job.work_id}/{job.attempt_id!r} which the spend"
+                        " ledger never saw — the job stays visible here, its"
+                        " spend is unknown, never zero"
+                    ),
+                )
+            )
+        for _scope, candidate_link in sorted(candidate_links.items()):
+            gaps.append(
+                EconomicsConflict(
+                    kind="identity",
+                    identity=f"candidate:{candidate_link.candidate_sha}",
+                    detail=(
+                        f"candidate {candidate_link.candidate_sha} names attempt"
+                        f" {candidate_link.work_id}/{candidate_link.attempt_id!r} which"
+                        " the spend ledger never saw — kept here, never dropped"
+                    ),
+                )
+            )
+        for vid in sorted(verification_links):
+            verification_link = verification_links[vid]
+            gaps.append(
+                EconomicsConflict(
+                    kind="identity",
+                    identity=f"verification:{vid}",
+                    detail=(
+                        f"verification {vid} names candidate"
+                        f" {(verification_link.candidate_sha or verification_link.tested_oid or '?')!r}"
+                        " which no attempt of this ledger published — kept"
+                        " here, never dropped"
+                    ),
+                )
+            )
+        for work_id in sorted(decisions):
+            gaps.append(
+                EconomicsConflict(
+                    kind="identity",
+                    identity=f"human_decision:{work_id}",
+                    detail=(
+                        f"a human decision names work {work_id!r} which the spend"
+                        " ledger never saw — the decision stays visible, no"
+                        " spend is joined to it"
+                    ),
+                )
+            )
+        for work_id in sorted(set(recoveries) - {chain.work_id for chain in chains}):
+            gaps.append(
+                EconomicsConflict(
+                    kind="identity",
+                    identity=f"review_only_recovery:{work_id}",
+                    detail=(
+                        f"a review-only recovery names work {work_id!r} which the"
+                        " ledger never saw — kept here, never dropped"
+                    ),
+                )
+            )
+
+        # -- the measurement ledger's identity guards ride along ----------
+        duplicates: list[DuplicateCallRow] = []
+        if measurement_ledger is not None:
+            measurement = (
+                measurement_ledger
+                if isinstance(measurement_ledger, DeliveryLedger)
+                else DeliveryLedger.from_document(measurement_ledger)
+            )
+            duplicates = [
+                DuplicateCallRow(call_id=row.call_id, attributions=row.attributions, note=row.note)
+                for row in measurement.duplicate_calls
+            ]
+            for conflict in measurement.conflicts:
+                gaps.append(
+                    EconomicsConflict(
+                        kind="receipt_conflict",
+                        identity=conflict.identity,
+                        detail=(
+                            f"the measurement ledger holds a {conflict.identity_kind}"
+                            f" conflict ({conflict.source_a} vs {conflict.source_b} on"
+                            f" {', '.join(conflict.fields)}) — exactness degrades to"
+                            " unknown, never averaged"
+                        ),
+                    )
+                )
+
+        ledger = AcceptedTaskLedger(
+            report=report,
+            chains=tuple(chains),
+            budget_events=tuple(sorted(events, key=lambda row: (row.work_id, row.kind, row.at))),
+            review_recoveries=dict(sorted(recoveries.items())),
+            time_windows=tuple(sorted(windows, key=lambda row: row.window_id)),
+            budgets=dict(budgets or {}),
+            duplicate_calls=tuple(sorted(duplicates, key=lambda row: row.call_id)),
+            identity_gaps=tuple(sorted(gaps, key=lambda row: (row.kind, row.identity))),
+            notes=tuple(sorted(set(notes))),
+            pilot=dict(pilot or {}),
+        )
+        # The budget sections are computed ONCE at build time and ride the
+        # ledger verbatim — a replay re-emits the stored sections instead of
+        # re-deriving them from a reconstructed policy input (the document
+        # is the store; there is no second truth to drift from).
+        return replace(
+            ledger,
+            budget_sections={
+                chain.work_id: ledger._budget_section(chain) for chain in ledger.chains
+            },
+        )
+
+
+@dataclass(frozen=True)
+class AcceptedTaskLedger:
+    """The ONE exported document: the complete evidence chain per task.
+
+    A pure fold of the builder's joined rows: the economics report (the
+    spend authority, embedded verbatim), the per-work chains, the three
+    cost columns, the two measures, the seven time measures, the budget
+    section and the observability gauges. Everything is sorted by
+    identity and summed in sorted order — the document is byte-stable
+    under any input ordering, and :meth:`from_document` replays it.
+    """
+
+    report: EconomicsReport
+    chains: tuple[WorkChain, ...] = ()
+    budget_events: tuple[BudgetEventLink, ...] = ()
+    review_recoveries: Mapping[str, ReviewRecoveryInput] = field(default_factory=dict)
+    time_windows: tuple[TimeWindow, ...] = ()
+    budgets: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    budget_sections: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    duplicate_calls: tuple[DuplicateCallRow, ...] = ()
+    identity_gaps: tuple[EconomicsConflict, ...] = ()
+    notes: tuple[str, ...] = ()
+    pilot: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def schema(self) -> str:
+        return ACCEPTED_LEDGER_SCHEMA
+
+    def chain_by_id(self, work_id: str) -> WorkChain | None:
+        for chain in self.chains:
+            if chain.work_id == work_id:
+                return chain
+        return None
+
+    # -- the folds (pure, order-invariant) --------------------------------
+
+    def _attempt_rows(self, chain: WorkChain) -> list[tuple[Any, list[PricedEntry]]]:
+        """The chain's attempts with their non-refused priced entries."""
+        work = self.report.work_by_id(chain.work_id)
+        if work is None:
+            return []
+        rows: list[tuple[Any, list[PricedEntry]]] = []
+        for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
+            entries = [entry for entry in attempt.receipts if entry.basis != "refused"]
+            rows.append((attempt, sorted(entries, key=lambda row: row.receipt_id)))
+        return rows
+
+    def _fold_columns(self, chains: Sequence[WorkChain]) -> dict[str, Any]:
+        """Fold the three cost columns over a population of works.
+
+        A column total is EXACT only when the population is non-empty,
+        nothing is unobserved, nothing was cross-joined, conflicted or
+        duplicated, and EVERY attempt of the population contributed a
+        receipt whose figure landed in THAT column — a mixed-basis
+        population (some provider-reported, some estimated) makes every
+        column a partial view, so every column renders a lower bound
+        with its coverage, and the columns are NEVER summed together.
+        """
+        attempts = sum(len(chain.attempts) for chain in chains)
+        unobserved = sum(len(chain.unobserved_attempt_ids) for chain in chains)
+        per_attempt: list[list[PricedEntry]] = []
+        for chain in sorted(chains, key=lambda row: row.work_id):
+            per_attempt.extend(rows for _attempt, rows in self._attempt_rows(chain))
+        conflicted = {row.identity for row in self.report.conflicts}
+        columns: dict[str, Any] = {}
+        for column in ACCEPTED_COST_COLUMNS:
+            contributing = [
+                entry for rows in per_attempt for entry in rows if _entry_column(entry) == column
+            ]
+            values = [
+                figure
+                for entry in contributing
+                if (figure := _entry_figure(entry, column)) is not None
+            ]
+            attempts_covered = sum(
+                1 for rows in per_attempt if any(_entry_column(entry) == column for entry in rows)
+            )
+            exact = bool(
+                chains
+                and attempts > 0
+                and unobserved == 0
+                and not self.report.cross_joins
+                and not conflicted
+                and not self.duplicate_calls
+                and attempts_covered == attempts
+                # a streamed partial receipt is a lower bound only — the
+                # column stays inexact until a final receipt reconciles it
+                and not any(entry.completeness == "partial" for entry in contributing)
+            )
+            columns[column] = {
+                "usd": _round6(_sum(values)) if exact else None,
+                "exact": exact,
+                # an EMPTY column (no figure of this basis exists at all)
+                # renders null — never a readable 0.0 that mimics a cost
+                "known_lower_bound_usd": _round6(_sum(values)) if values else None,
+                "receipts": len(values),
+                "attempts_covered": attempts_covered,
+                "attempts": attempts,
+            }
+        return columns
+
+    def _coverage_block(self, chains: Sequence[WorkChain]) -> dict[str, Any]:
+        attempts = sum(len(chain.attempts) for chain in chains)
+        unobserved = sum(len(chain.unobserved_attempt_ids) for chain in chains)
+        received = 0
+        cost_known = 0
+        for chain in chains:
+            for attempt, rows in self._attempt_rows(chain):
+                if rows:
+                    received += 1
+                if any(_entry_column(entry) is not None for entry in rows):
+                    cost_known += 1
+        expected = attempts + unobserved
+        return {
+            "attempts": attempts,
+            "unobserved_attempts": unobserved,
+            "receipts_expected": expected,
+            "receipts_received": received,
+            "receipt_coverage": (received / expected) if expected else None,
+            "cost_known_receipts": cost_known,
+            "unknown_cost_receipts": max(attempts - cost_known, 0),
+            "cost_coverage": (cost_known / expected) if expected else None,
+            "unknown_costs_rendered_as": "known lower bound + coverage, never zero",
+        }
+
+    def _all_attempt_totals(self) -> dict[str, Any]:
+        """Every work's OWN all-attempt totals — failed attempts kept.
+
+        Computed for EVERY work (accepted, rejected, pending alike): the
+        accepted-task all-attempt COST is the accepted subset of these
+        rows, and a pending work's row stands beside them honestly.
+        """
+        totals: dict[str, dict[str, Any]] = {}
+        for chain in sorted(self.chains, key=lambda row: row.work_id):
+            totals[chain.work_id] = {
+                "outcome": chain.outcome,
+                "attempts": len(chain.attempts),
+                "failed_or_superseded_attempts_kept": sum(
+                    1 for attempt in chain.attempts if attempt.outcome in _REJECTED_OUTCOMES
+                ),
+                "columns": self._fold_columns([chain]),
+                "coverage": self._coverage_block([chain]),
+            }
+        return dict(sorted(totals.items()))
+
+    def _budget_section(self, chain: WorkChain) -> dict[str, Any]:
+        """The work's budget section — #325's shapes, surfaced verbatim.
+
+        The closing budget folds the work's own receipts into the five
+        distinguishable fields (exact / known subtotal / lower bound /
+        reserved liability / unknown intervals) under the work's cap and
+        the closing-reserve policy; the recorded budget events (refusals)
+        and the review-only-recovery verdict stay SEPARATE lists beside
+        it. An unpriced receipt is an UNKNOWN interval — never a zero.
+        """
+        work_id = chain.work_id
+        budget = dict(self.budgets.get(work_id) or {})
+        cap = _nn_float(budget.get("cap_usd"))
+        policy_raw = budget.get("policy")
+        policy_block = policy_raw if isinstance(policy_raw, Mapping) else {}
+        policy = ClosingReservePolicy(
+            reserve_usd=_nn_float(policy_block.get("reserve_usd")),
+            fraction=_nn_float(policy_block.get("fraction")),
+            cap_usd=_nn_float(policy_block.get("cap_usd")),
+            source=_text(policy_block.get("source")) or "default",
+        )
+        rows: list[IngestedUsageRow] = []
+        for _attempt, entries in self._attempt_rows(chain):
+            for entry in entries:
+                rows.append(
+                    IngestedUsageRow(
+                        work_id=work_id,
+                        attempt_id=entry.attempt_id,
+                        receipt_id=entry.receipt_id,
+                        source=entry.source,
+                        route=_route_from_key(entry.route_key),
+                        cost_usd=entry.billed_usd,
+                        cost_basis=(
+                            _entry_cost_basis(entry) if entry.billed_usd is not None else ""
+                        ),
+                        cost_lower_bound_usd=(
+                            entry.billed_usd if entry.billed_usd is not None else 0.0
+                        ),
+                        completeness="aggregate",
+                    )
+                )
+        closing = closing_budget_report(rows, cap_usd=cap, policy=policy)
+        refusals = [
+            event.to_json()
+            for event in self.budget_events
+            if event.work_id == work_id and event.kind == "budget_refusal"
+        ]
+        recoveries = [
+            event.to_json()
+            for event in self.budget_events
+            if event.work_id == work_id and event.kind == "review_only_recovery"
+        ]
+        recovery_input = self.review_recoveries.get(work_id)
+        review_only: dict[str, Any]
+        if recovery_input is not None:
+            verdict = review_only_continuation(
+                budget_decision=recovery_input.budget_decision,
+                recorded=CandidateBinding(
+                    candidate_sha=recovery_input.candidate_sha,
+                    tested_identity=recovery_input.tested_identity,
+                ),
+                current=CandidateBinding(
+                    candidate_sha=(
+                        recovery_input.current_candidate_sha or recovery_input.candidate_sha
+                    ),
+                    tested_identity=(
+                        recovery_input.current_tested_identity or recovery_input.tested_identity
+                    ),
+                ),
+            )
+            review_only = {"evaluated": True, **verdict.to_json()}
+        else:
+            review_only = {
+                "evaluated": False,
+                "recorded": bool(recoveries),
+                "note": (
+                    "no review-only continuation was recorded or requested for"
+                    " this work — absent, stated, never silently zero"
+                ),
+            }
+        return {
+            "cap_usd": _round6(cap),
+            "currency": _text(budget.get("currency")) or "usd",
+            "closing_budget": closing.to_json(),
+            "budget_refusals": refusals,
+            "review_only_recovery": review_only,
+            "recorded_recovery_events": recoveries,
+        }
+
+    def _time_measures(self) -> dict[str, Any]:
+        """Fold the time windows per measure — populations never mix."""
+        rows = [
+            {
+                "span_id": window.window_id,
+                "span_type": window.measure,
+                "origin": window.population,
+                "work_id": window.work_id,
+                "attempt_id": window.attempt_id,
+                "seconds": window.seconds,
+            }
+            for window in self.time_windows
+        ]
+        return _fold_stage_seconds(rows, keys=TIME_MEASURES)
+
+    def _human_minutes(self) -> float | None:
+        """Measured reviewer effort in minutes — or ``None`` (never zero)."""
+        windows = [
+            window.seconds for window in self.time_windows if window.measure == "reviewer_effort"
+        ]
+        if not windows or any(seconds is None for seconds in windows):
+            return None
+        return _round6(_sum([seconds or 0.0 for seconds in windows]) / 60.0)
+
+    def to_document(self) -> dict[str, Any]:
+        """The stored artifact: the complete chain, one document."""
+        accepted_chains = [chain for chain in self.chains if chain.outcome == "accepted"]
+        programme_columns = self._fold_columns(self.chains)
+        accepted_columns = self._fold_columns(accepted_chains)
+        accepted_count = len(accepted_chains)
+        per_accepted: dict[str, Any] = {}
+        for column in ACCEPTED_COST_COLUMNS:
+            row = programme_columns[column]
+            per_accepted[column] = {
+                "usd": _round6(row["usd"] / accepted_count)
+                if row["usd"] is not None and accepted_count
+                else None,
+                "known_lower_bound_usd_per_accepted": _round6(
+                    row["known_lower_bound_usd"] / accepted_count
+                )
+                if accepted_count and row["known_lower_bound_usd"] is not None
+                else None,
+            }
+        all_attempt = self._all_attempt_totals()
+        notes = list(self.notes)
+        notes.extend(
+            (
+                "the human decision point is labelled per work — a pending draft"
+                " MR is a REAL state: the work stays out of the accepted"
+                " population and its per-accepted economics stay undefined,"
+                " never zero",
+                "time measures are separate quantities over their own recorded"
+                " windows — never unmatched output divided by unmatched"
+                " durations",
+            )
+        )
+        if not accepted_count:
+            notes.append(
+                "no work carries a closed human decision — accepted measures are"
+                " undefined, never zero; every work's all-attempt totals and"
+                " coverage stand beside them"
+            )
+        document = {
+            "schema": ACCEPTED_LEDGER_SCHEMA,
+            "pilot": dict(sorted(self.pilot.items())),
+            "identity_chain": list(IDENTITY_CHAIN),
+            "economics": self.report.to_document(),
+            "chains": [
+                chain.to_json() for chain in sorted(self.chains, key=lambda row: row.work_id)
+            ],
+            "identity_gaps": [row.to_json() for row in self.identity_gaps],
+            "duplicate_calls": [row.to_json() for row in self.duplicate_calls],
+            "costs": {
+                "columns": list(ACCEPTED_COST_COLUMNS),
+                "basis_note": (
+                    "three labeled columns, never blended: provider-reported (the"
+                    " SDK's own meter), price-card estimate (a versioned card),"
+                    " billing-reconciliation (a billing export) — each entry lands"
+                    " in at most one column and no column ever sums another"
+                ),
+                "programme": {
+                    "works": len(self.chains),
+                    "columns": programme_columns,
+                    "coverage": self._coverage_block(self.chains),
+                },
+                "accepted_items": {
+                    "works": accepted_count,
+                    "columns": accepted_columns,
+                    "coverage": self._coverage_block(accepted_chains),
+                },
+                "accepted_all_attempt": {
+                    work_id: row
+                    for work_id, row in all_attempt.items()
+                    if row["outcome"] == "accepted"
+                },
+                "all_attempt_totals": all_attempt,
+                "programme_per_accepted_item": per_accepted,
+            },
+            "time_measures": dict(sorted(self._time_measures().items())),
+            "time_windows": [
+                window.to_json()
+                for window in sorted(self.time_windows, key=lambda row: row.window_id)
+            ],
+            "throughput": {
+                "rows": [],
+                "rule": (
+                    "no tokens/s figure exists without matched measured model time"
+                    " and the #276 token convention — none is emitted otherwise"
+                    " (the decode guard extends to this ledger)"
+                ),
+            },
+            "budget": dict(sorted(self.budget_sections.items())),
+            "human_decision_points": {
+                chain.work_id: (chain.human_decision.to_json() if chain.human_decision else None)
+                for chain in sorted(self.chains, key=lambda row: row.work_id)
+            },
+            "notes": sorted(set(notes)),
+            "observability": {
+                "delivery.accepted_all_attempt_cost": {
+                    work_id: {
+                        column: row["columns"][column]["usd"] for column in ACCEPTED_COST_COLUMNS
+                    }
+                    for work_id, row in all_attempt.items()
+                    if row["outcome"] == "accepted"
+                },
+                "delivery.programme_cost_per_accepted": {
+                    column: per_accepted[column]["usd"] for column in ACCEPTED_COST_COLUMNS
+                },
+                "cost.coverage": self._coverage_block(self.chains)["receipt_coverage"],
+                "delivery.human_minutes": self._human_minutes(),
+                "budget.closing_reserve": {
+                    work_id: row["closing_budget"]["closing_reserve_usd"]
+                    for work_id, row in sorted(self.budget_sections.items())
+                },
+                "budget.phase_exhaustion": {
+                    work_id: row["closing_budget"]["phase_exhaustion"]
+                    for work_id, row in sorted(self.budget_sections.items())
+                },
+                "delivery.review_only_recovery": {
+                    work_id: {
+                        "evaluated": row["review_only_recovery"].get("evaluated"),
+                        "allowed": row["review_only_recovery"].get("allowed"),
+                        "coder_dispatches": row["review_only_recovery"].get("coder_dispatches"),
+                    }
+                    for work_id, row in sorted(self.budget_sections.items())
+                },
+            },
+        }
+        assert_latency_guards(document)
+        assert_no_unmatched_rates(document)
+        return document
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> AcceptedTaskLedger:
+        """Rebuild from the stored document — the replay path's parser.
+
+        The chains, windows, budget events and duplicate-call rows are
+        re-read from their stored forms; the folds re-run over them, so
+        a replayed document reproduces every aggregate byte-identically
+        with no second truth store.
+        """
+        stamp = _text(document.get("schema")) or ACCEPTED_LEDGER_SCHEMA
+        if stamp != ACCEPTED_LEDGER_SCHEMA:
+            raise ValueError(
+                f"accepted-task ledger carries schema {stamp!r},"
+                f" expected {ACCEPTED_LEDGER_SCHEMA!r}"
+            )
+        report = EconomicsReport.from_document(document.get("economics") or {})
+
+        def _attempt(block: Mapping[str, Any]) -> AttemptChain:
+            job = block.get("native_job")
+            candidate = block.get("candidate")
+            return AttemptChain(
+                attempt_id=_text(block.get("attempt_id")),
+                work_id=_text(block.get("work_id")),
+                outcome=_text(block.get("outcome")),
+                native_job=(NativeJobLink.from_json(job) if isinstance(job, Mapping) else None),
+                receipt_ids=tuple(
+                    _text(receipt_id) for receipt_id in block.get("model_call_receipt_ids") or ()
+                ),
+                candidate=(
+                    CandidateLink.from_json(candidate) if isinstance(candidate, Mapping) else None
+                ),
+            )
+
+        def _chain(block: Mapping[str, Any]) -> WorkChain:
+            decision = block.get("human_decision")
+            verification = block.get("verification")
+            return WorkChain(
+                work_id=_text(block.get("work_id")),
+                outcome=_text(block.get("outcome")),
+                report_outcome=_text(block.get("report_outcome")),
+                human_decision=(
+                    HumanDecisionLink.from_json(decision) if isinstance(decision, Mapping) else None
+                ),
+                attempts=tuple(
+                    _attempt(row) for row in block.get("attempts") or () if isinstance(row, Mapping)
+                ),
+                unobserved_attempt_ids=tuple(
+                    _text(attempt_id) for attempt_id in block.get("unobserved_attempt_ids") or ()
+                ),
+                verification=(
+                    VerificationLink.from_json(verification)
+                    if isinstance(verification, Mapping)
+                    else None
+                ),
+            )
+
+        budget_raw = document.get("budget")
+        budget_sections = (
+            {str(key): dict(row) for key, row in budget_raw.items()}
+            if isinstance(budget_raw, Mapping)
+            else {}
+        )
+        events: list[Mapping[str, Any]] = []
+        for work_id in sorted(budget_sections):
+            row = budget_sections[work_id]
+            if isinstance(row, Mapping):
+                events.extend(row.get("budget_refusals") or [])
+                events.extend(row.get("recorded_recovery_events") or [])
+        pilot_raw = document.get("pilot")
+        return cls(
+            report=report,
+            chains=tuple(
+                _chain(row) for row in document.get("chains") or () if isinstance(row, Mapping)
+            ),
+            budget_events=tuple(
+                BudgetEventLink.from_json(event) for event in events if isinstance(event, Mapping)
+            ),
+            review_recoveries={},
+            time_windows=tuple(
+                TimeWindow.from_json(window)
+                for window in document.get("time_windows") or ()
+                if isinstance(window, Mapping)
+            ),
+            budgets={},
+            budget_sections=budget_sections,
+            duplicate_calls=tuple(
+                DuplicateCallRow(
+                    call_id=_text(row.get("call_id")),
+                    attributions=tuple(_text(item) for item in row.get("attributions") or ()),
+                    note=_text(row.get("note")),
+                )
+                for row in document.get("duplicate_calls") or ()
+                if isinstance(row, Mapping)
+            ),
+            identity_gaps=tuple(
+                EconomicsConflict(
+                    kind=_text(row.get("kind")),
+                    identity=_text(row.get("identity")),
+                    detail=_text(row.get("detail")),
+                )
+                for row in document.get("identity_gaps") or ()
+                if isinstance(row, Mapping)
+            ),
+            notes=tuple(str(note) for note in document.get("notes") or ()),
+            pilot=(
+                {_text(key): _text(value) for key, value in pilot_raw.items()}
+                if isinstance(pilot_raw, Mapping)
+                else {}
+            ),
+        )
+
+
+def assert_no_unmatched_rates(document: Mapping[str, Any]) -> None:
+    """The decode guard, extended to the accepted-task ledger document.
+
+    Any rate figure (a ``tokens_per_second`` / ``*_per_second`` key)
+    found ANYWHERE in the document must sit in a guarded throughput row:
+    the sanctioned decode label, a model-span population and live-model
+    evidence (the #276 :data:`RATE_LABEL_SPACE` rule — output over
+    unmatched or mixed durations is never a decode rate). A tampered
+    ledger — a tokens/s figure pasted next to a cost column or inside a
+    time measure — raises :class:`RateLabelError`.
+    """
+    latency = document.get("latency")
+    guarded: list[Mapping[str, Any]] = []
+    if isinstance(latency, Mapping):
+        rows = latency.get("throughput")
+        guarded = (
+            [row for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
+        )
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, Mapping):
+            keys = {str(key) for key in node}
+            if "tokens_per_second" in keys or any(key.endswith("_per_second") for key in keys):
+                if node not in guarded:
+                    label = _text(node.get("label")) or "<unlabelled>"
+                    raise RateLabelError(
+                        f"a rate figure at {path or 'document root'} carries label"
+                        f" {label!r} outside the guarded throughput rows — no"
+                        " tokens/s figure without matched measured model time"
+                        " and the defined token convention (Q39-11)"
+                    )
+                row_label = _text(node.get("label"))
+                allowed = RATE_LABEL_SPACE.get(row_label)
+                population_identity = _text(node.get("population_identity"))
+                if (
+                    allowed is None
+                    or population_identity.removeprefix("latency.").split(":works=")[0]
+                    not in allowed
+                ):
+                    raise RateLabelError(
+                        f"a ledger throughput row rides population"
+                        f" {population_identity!r} — only model-span populations"
+                        " carry decode rates (RATE_LABEL_SPACE)"
+                    )
+            for key, value in node.items():
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, (list, tuple)):
+            for index, item in enumerate(node):
+                _walk(item, f"{path}[{index}]")
+
+    _walk(document, "")

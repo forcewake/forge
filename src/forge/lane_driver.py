@@ -151,6 +151,7 @@ import contextlib
 import functools
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -190,6 +191,7 @@ from forge.adaptive.lane_supervisor import (
 from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
+    "ATTEMPT_GENERATION_ENV",
     "CODEX_LANE_DRIVER_ID",
     "CONSUMPTION_STATUS_CONSUMED",
     "CONSUMPTION_STATUS_UNRESOLVED",
@@ -220,6 +222,7 @@ __all__ = [
     "drive_codex_lane",
     "drive_copilot_lane",
     "drive_lane",
+    "expected_redemption_identity",
     "main",
     "native_delivery_requested",
     "opencode_usage_receipt",
@@ -230,6 +233,7 @@ __all__ = [
     "steering_enabled",
     "steering_service_from_env",
     "usage_receipt",
+    "verify_redemption_response",
     "write_artifacts",
 ]
 
@@ -352,6 +356,13 @@ _RESUME_RESTART = "restart"
 # R38-02 (#303) — runner-time model-credential redemption (profile b):
 # the lane exchanges its EXISTING attempt-scoped lane-control token for
 # the bound model credential at startup and sets EXACTLY ONE env var.
+#
+# Q39-01 (#320) — the typed response verification: the bootstrap proves
+# the redemption answered THIS work, THIS attempt, THIS route, THIS ref,
+# THIS env slot, THIS grant and an unexpired instant BEFORE the value
+# may touch the environment — a wrong-slot or expired response fails
+# closed (``credential_redemption_failed``) and the vendor client is
+# never constructed, ambient keys included.
 # ---------------------------------------------------------------------------
 
 #: The dispatch's redemption-mode flag (``FORGE_CREDENTIAL_REDEEM=1`` —
@@ -362,6 +373,14 @@ REDEEM_FLAG_ENV = "FORGE_CREDENTIAL_REDEEM"
 #: resolved — the redemption endpoint re-checks it against the work's
 #: own live binding).
 CREDENTIAL_REF_ENV = "FORGE_CREDENTIAL_REF"
+
+#: The dispatched attempt generation (Q39-01) — the envelope variable
+#: the dispatch sets beside the token (``FORGE_ATTEMPT_GENERATION``; the
+#: GitLab envelope always carries it). The bootstrap verifies the
+#: redemption's ``attempt_generation`` against it; a lane whose envelope
+#: lacks it only checks that the response CARRIES one (fail-closed on
+#: shape, equal on identity wherever the dispatch named it).
+ATTEMPT_GENERATION_ENV = "FORGE_ATTEMPT_GENERATION"
 
 #: The redemption route on the lane-control router (mirror of
 #: :data:`forge.api_lane_control.LANE_CREDENTIAL_REDEEM_ROUTE` — mirrored
@@ -409,6 +428,93 @@ def _lane_provider_route(env: Mapping[str, str]) -> str:
     return provider_route_for_driver(LANE_DRIVER_IDS.get(raw, raw) or "claude")
 
 
+def expected_redemption_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """WHAT THIS LANE may be handed (Q39-01) — the expected redemption
+    identity derived from the dispatch envelope: the work id, the
+    provider route the dispatched driver consumes, the dispatched
+    credential ref, the route's env slot, and the attempt generation
+    (``None`` when the envelope never named one — the verification then
+    checks the response CARRIES a generation instead of matching it)."""
+    from forge.adaptive.project_credentials import PROVIDER_ENV_VARS
+
+    source = os.environ if env is None else env
+    work_id = (source.get("FORGE_WORK_ID") or source.get("FORGE_RUN_ID") or "").strip()
+    route = _lane_provider_route(source)
+    raw_generation = (source.get(ATTEMPT_GENERATION_ENV) or "").strip()
+    try:
+        generation: int | None = int(raw_generation) if raw_generation else None
+    except ValueError:
+        generation = None
+    return {
+        "work_id": work_id,
+        "provider": route,
+        "credential_ref": (source.get(CREDENTIAL_REF_ENV) or "").strip(),
+        "env_var": PROVIDER_ENV_VARS.get(route, ""),
+        "attempt_generation": generation,
+    }
+
+
+def verify_redemption_response(
+    document: Mapping[str, Any],
+    *,
+    expected: Mapping[str, Any],
+    now: datetime | None = None,
+) -> None:
+    """Prove the redemption answered THIS attempt before anything applies
+    (Q39-01) — every axis the dispatch envelope can name:
+
+    - ``work_id`` / ``provider`` / ``credential_ref`` / ``env_var`` must
+      EQUAL the expected identity (a response for another work, another
+      route, another ref or — the wrong-slot shape — another env slot
+      never touches the environment);
+    - ``attempt_generation`` must equal the dispatched generation when
+      the envelope named one, and must be an integer regardless;
+    - ``grant_id`` must be present (the join every receipt keys on);
+    - ``expires_at`` must parse to a timezone-aware FUTURE instant.
+
+    Any mismatch or expiry raises ``LaneCredentialRedemptionError`` with
+    the ``credential_redemption_failed`` marker — the caller halts the
+    lane BEFORE the vendor client exists; an ambient key never
+    substitutes. The message names the failed axis ONLY (never a value).
+    """
+    moment = now or datetime.now(timezone.utc)
+
+    def _fail(axis: str, why: str) -> LaneCredentialRedemptionError:
+        return LaneCredentialRedemptionError(
+            f"credential_redemption_failed: the redemption response failed the "
+            f"{axis} verification ({why}) — no credential was applied and no "
+            "vendor client is constructed; an ambient credential never substitutes"
+        )
+
+    for axis in ("value", "env_var", "expires_at", "redemption_id", "grant_id"):
+        if not str(document.get(axis) or "").strip():
+            raise _fail(axis, f"the {axis!r} field is missing or empty")
+    for axis in ("work_id", "provider", "credential_ref", "env_var"):
+        want = str(expected.get(axis) or "")
+        got = str(document.get(axis) or "")
+        if want and got != want:
+            raise _fail(axis, f"the response names {got!r}, this attempt expects {want!r}")
+    try:
+        responded_generation = int(document.get("attempt_generation"))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise _fail("attempt_generation", "the response carries no integer generation") from exc
+    wanted_generation = expected.get("attempt_generation")
+    if wanted_generation is not None and responded_generation != int(wanted_generation):
+        raise _fail(
+            "attempt_generation",
+            f"the response names attempt {responded_generation}, this attempt is "
+            f"{int(wanted_generation)}",
+        )
+    try:
+        expires = datetime.fromisoformat(str(document.get("expires_at")))
+    except ValueError as exc:
+        raise _fail("expires_at", "the expiry is not a readable instant") from exc
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= moment:
+        raise _fail("expires_at", f"the redeemed value already expired at {expires.isoformat()}")
+
+
 def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[str, Any]:
     """Redeem the attempt's model credential over the lane-control channel.
 
@@ -417,11 +523,16 @@ def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[
     attempt-scoped HMAC the dispatch minted) plus the dispatched
     ``FORGE_CREDENTIAL_REF``, and exchanges them at
     :data:`LANE_CREDENTIAL_REDEEM_ROUTE` for the bound credential,
-    TTL-bounded to the attempt. On success the credential is APPLIED
-    (:func:`apply_redeemed_credential` — exactly one env var, strays
-    scrubbed) and the VALUE-FREE redemption record is returned for the
-    lane's evidence. Any failure raises :class:`LaneCredentialRedemptionError`
-    — the caller halts the lane; an ambient credential is NEVER used.
+    TTL-bounded to the attempt. The response is VERIFIED against the
+    dispatch envelope's expected identity (:func:`verify_redemption_response`
+    — Q39-01: work, route, ref, env slot, attempt generation, grant id
+    and an unexpired instant; a wrong or expired answer fails closed
+    before any vendor client exists). On success the credential is
+    APPLIED (:func:`apply_redeemed_credential` — exactly one env var,
+    strays scrubbed) and the VALUE-FREE redemption record is returned
+    for the lane's evidence. Any failure raises
+    :class:`LaneCredentialRedemptionError` — the caller halts the lane;
+    an ambient credential is NEVER used.
     """
     import httpx
 
@@ -478,11 +589,7 @@ def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[
         raise LaneCredentialRedemptionError(
             "the redemption response was not a JSON document — no credential was applied"
         ) from exc
-    for field in ("value", "env_var", "expires_at", "redemption_id"):
-        if not str(document.get(field) or "").strip():
-            raise LaneCredentialRedemptionError(
-                f"the redemption response is missing the {field!r} field — no credential was applied"
-            )
+    verify_redemption_response(document, expected=expected_redemption_identity(source))
     return apply_redeemed_credential(document, env=source)
 
 
@@ -501,7 +608,9 @@ def apply_redeemed_credential(
     (``broker_receipt_id``, ``resolved_version``/``_kind``,
     ``attempt_generation``, ``credential_policy``) — absent on pre-#305
     documents, echoed empty — so the consumer receipt can join broker
-    id ↔ redemption id ↔ attempt ↔ consumer without another call."""
+    id ↔ redemption id ↔ attempt ↔ consumer without another call.
+    Q39-01 (#320) adds ``grant_id`` — the operation-grant foreign key
+    every receipt join keys on."""
     target = os.environ if env is None else env
     env_var = str(document["env_var"])
     value = str(document["value"])
@@ -514,6 +623,7 @@ def apply_redeemed_credential(
         "credential_ref": str(document.get("credential_ref") or ""),
         "provider": str(document.get("provider") or ""),
         "redemption_id": str(document.get("redemption_id") or ""),
+        "grant_id": str(document.get("grant_id") or ""),
         "expires_at": str(document.get("expires_at") or ""),
         "binding_revision": document.get("binding_revision"),
         "resolver_identity": str(document.get("resolver_identity") or ""),
@@ -640,6 +750,7 @@ def credential_consumption_record(
                 attempt_generation=_optional_int(redemption_record.get("attempt_generation")),
                 redemption_id=str(redemption_record.get("redemption_id") or ""),
                 broker_receipt_id=str(redemption_record.get("broker_receipt_id") or ""),
+                grant_id=str(redemption_record.get("grant_id") or ""),
                 resolved_version=str(redemption_record.get("resolved_version") or ""),
                 resolved_version_kind=str(redemption_record.get("resolved_version_kind") or ""),
             ),

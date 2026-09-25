@@ -167,6 +167,22 @@ class TestConsumerReceiptJoin:
         assert CANARY_VALUE not in json.dumps(record)
         assert ADVERSARIAL_VALUE not in json.dumps(record)
 
+    def test_the_receipt_carries_the_operation_grant_foreign_key(self):
+        """Q39-01 (#320): the grant_id is the FK the consumer receipt
+        joins on — echoed from the redemption record when present (and
+        honestly empty on pre-grant records, never guessed)."""
+        record = credential_consumption_record(
+            redemption_record={**self._redemption_record(), "grant_id": "grant-abc"},
+            env={"FORGE_WORK_ID": "work-90"},
+        )
+        assert record is not None
+        assert record["grant_id"] == "grant-abc"
+        legacy = credential_consumption_record(
+            redemption_record=self._redemption_record(), env={"FORGE_WORK_ID": "work-90"}
+        )
+        assert legacy is not None
+        assert legacy["grant_id"] == ""
+
     def test_the_native_receipt_records_an_unknown_binding_revision_honestly(self):
         record = credential_consumption_record(
             env={

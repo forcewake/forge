@@ -1,0 +1,116 @@
+{
+ "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem'; the pause/checkpoint arm ran entirely on that authority — observed 2026-09-25, the v2 trace restored the exact content-addressed checkpoint f70244cc49d2… through it)",
+ "capabilities": [
+  "real-provider-e2e",
+  "useful-wip-cross-runner-resume",
+  "approved-revision-rebind",
+  "closing-review-within-reserve"
+ ],
+ "closure_digest": "",
+ "control_capabilities": [
+  "interrupt",
+  "steer",
+  "approve-revision"
+ ],
+ "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential rode the gitlab-protected-variable route on this trace (the dispatch's credential_delivery_mode was empty — NO operation grant was minted; the #320 grant machinery is exercised by its own offline suites, not by this dispatch, recorded honestly in the trace's revision.credential_grants_basis)",
+ "evidence": [
+  {
+   "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+   "capability": "real-provider-e2e",
+   "class": "live-provider",
+   "covers": "Q39-07 (#326) v2 trace (executed 2026-09-25, disposable project forge-wip-v2-2026-09-25 id 110, deleted after capture): native issue #1 -> approver /implement -> evidence-backed plan (run f0d559fdb7f14b98b32f1946cfa577c3, harness claude-sdk-lane, model glm-5.3-flash) -> /go -> pipeline 490 lane job 836 -> the adaptive probe ladder: rung-1@45s sampled the R37-08 EMPTY failure mode (checkpoint b3fa93afd461…, files=0), the native /retry re-entered (pipeline 492, job 838, a REQUIRED resume over the empty checkpoint), rung-2's pause landed the USEFUL checkpoint f70244cc49d2… (files=2, ALL THREE shapes: src/utils/text.py new + src/app.py modified + src/utils/legacy.py deleted, digests are 64-hex content addresses) -> job-level cancel (moot — the pause fence had ended the job) -> the honest blocked classification -> the MATERIAL revision staged through the app's own stage_pending_revision INSIDE forge-app and approved NATIVELY (@forge /approve-revision, decision dec-wipv2-f0d559fdb7f1; the activation CAS switched the durable plan digest to revision 2's b8547d0d4133… and routed the checkpoint preserve) -> /retry -> the resumed dispatch (pipeline 493, job 839, required-resume envelope 11a7f7fda283, decision fe74cd758cb9…) restored the EXACT useful checkpoint (workspace generation .forge-workspace-gen-f70244cc49d2) under the revision-2 BRIEF: the persisted approved_input is source=revision, its plan TEXT carries the operator's material addition __all__ = [\"slugify\"] and the FINAL CANDIDATE carries it too (52ddeb3f7f3b…) — the executor obeyed the NEW brief with ZERO rescue steers -> FORGE_LANE_OUTCOME driver_exit=completed, collector_exit=0, candidate_state=candidate -> Draft MR !1 (draft, never merged) green on verification pipeline 495 -> the CLOSING REVIEW completed on the run's own budget under the configured #325 closing reserve (FORGE_CLOSING_RESERVE_USD=0.50, FORGE_SPEND_CAP_USD=2.50 on both consumers): verdict 'ok' bound to the exact candidate sha -> run terminal ready_for_human ('checks passed; merge is a human decision') — the state the #306 trace never reached (it ended blocked budget_exhausted at the reviewer leg). Lane spend $0.4032 SDK receipts (job 836 $0.1281, job 839 $0.2751). Trace: docs/evaluation/2026-09-25-supported-composition-v2/ (live-run-evidence.json + useful-wip-resume-v2.json, schema forge.useful-wip-resume/2, ZERO validation findings, outcome reviewed-ready)",
+   "executed_at": "2026-09-25T09:53:57+00:00",
+   "outcome": "pass"
+  },
+  {
+   "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+   "capability": "useful-wip-cross-runner-resume",
+   "class": "live-provider",
+   "covers": "the useful-WIP checkpoint f70244cc49d2… (files=2, ALL THREE shapes with verified digests) restored EXACTLY on a second runner (pipeline 493 job 839, required-resume envelope 11a7f7fda283, workspace generation .forge-workspace-gen-f70244cc49d2); the same trace's run-1 sampled the R37-08 EMPTY failure mode (b3fa93afd461…, files=0) and re-entered through the native /retry — the adaptive ladder measured both",
+   "executed_at": "2026-09-25T09:53:57+00:00",
+   "outcome": "pass"
+  },
+  {
+   "artifact_sha256": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+   "capability": "approved-revision-rebind",
+   "class": "live-provider",
+   "covers": "the MATERIAL revision staged through the app's own stage_pending_revision INSIDE forge-app, approved NATIVELY (@forge /approve-revision, decision dec-wipv2-f0d559fdb7f1; the activation CAS switched the durable plan digest to revision 2's b8547d0d4133…, route preserve); the RESUMED dispatch carried the revision-2 TEXT (approved_input source=revision, plan_text carries the material addition __all__ = [\"slugify\"], executor_input_digest f34f5d62b8b0… beside it) and the FINAL CANDIDATE 52ddeb3f7f3b… carries the marker — the executor obeyed the NEW brief with ZERO rescue steers (continuation.manual_guidance_repeated stays absent)",
+   "executed_at": "2026-09-25T09:53:57+00:00",
+   "outcome": "pass"
+  },
+  {
+   "artifact_sha256": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+   "capability": "closing-review-within-reserve",
+   "class": "live-provider",
+   "covers": "the closing review completed on the run's own budget under the configured #325 closing reserve (FORGE_CLOSING_RESERVE_USD=0.50, FORGE_SPEND_CAP_USD=2.50 pinned on BOTH consumers at alignment; the standard profile's token ceiling raised to 480000 so the coder cannot eat the review's allowance): verdict 'ok' bound to the exact candidate sha 52ddeb3f7f3b… — run terminal ready_for_human ('checks passed; merge is a human decision'), the state the #306 trace never reached (blocked budget_exhausted at the reviewer leg); no review_budget_block was ever written — the reserve stayed intact and the review fit",
+   "executed_at": "2026-09-25T09:53:57+00:00",
+   "outcome": "pass"
+  },
+  {
+   "artifact_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd",
+   "capability": "cold-install-from-immutable-bytes",
+   "class": "offline-operational",
+   "covers": "the three cold-install modes re-executed on the re-frozen composition (2026-09-25): fresh — a clean venv installed the WORKING-TREE wheel (forge-0.38.0-py3-none-any.whl, sha256 37fb5b0a9b4e…, the bytes reproduce the manifest pin BEFORE anything executes) with the execution-spec composition preflight green ON THE INSTALLED PACKAGE (no source-checkout seam — the qualification composition's wheel carries forge.adaptive.execution_spec) and the disposable smoke pipeline 496 GREEN on jobs [smoke] with ZERO model calls; verify — the live lab matched every axis (app+worker image digests sha256:33eb4622ae0b… == the executed-lab bind, /health 0.38.0 == the executed-lab bind, schema head 028, numerical caps on both consumers, the shared /app/data mount on both, runner id 4 'unraid' online, the trace's disposable template reproduced) with the integration project's own template the one named divergence; upgrade — a disposable seeded Postgres ran the ACTUAL transition 027 -> 028 (028_credential_receipts) with all five seeded tables preserved EXACTLY (row counts + sha256 fingerprints)",
+   "executed_at": "2026-09-25T09:58:00+00:00",
+   "outcome": "pass"
+  }
+ ],
+ "evidence_refs": [
+  "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json",
+  "docs/evaluation/2026-09-25-supported-composition-v2/live-run-evidence.json",
+  "docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
+  "qualification/inventory-2026-09-25-v2.json",
+  "qualification/profiles/supported-gitlab-ce-v1.json",
+  "qualification/profiles/supported-gitlab-ce-v1@v0.37-composition.json"
+ ],
+ "harness_binary": "claude-code",
+ "harness_version": "2.1.273",
+ "image_digest": "sha256:33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+ "legacy": false,
+ "note": "Q39-07 (#326) — the supported-composition v2 record: the EXACT composition that completed the end-to-end trace, frozen as qualification evidence. The composition is the WORKING TREE at version 0.38.0: the control plane is the alignment build localhost/forge:dev @ sha256:33eb4622ae0b… (image id 587e339268ad…, rollback tag pre-r3708-20260925T092917Z, built from the tree 2026-09-25T09:29Z, deployed schema head 028) carrying this cycle's uncommitted #320/#321/#325 code, and the lane wheel is the uv build of the SAME tree (dist/forge-0.38.0-py3-none-any.whl @ 37fb5b0a9b4e…, receipt qualification/profiles/receipts/working-tree-wheel-v2.json). The lane of the executed trace runs the PUSHED sha 6df4020f8f1f… (main at the v0.38.0 evidence archive) — the working tree is never pushed (no commit, no merge), so the lane package is one push behind the control-plane build; the brief bytes — the revision-2 TEXT — are the payload (the divergence is named in the manifest, never merged). NO release carries these bytes: the promoted v0.37.0 and the newest promotion v0.38.0 BOTH predate the working tree; the promotion is PENDING, never assumed — version equality never substitutes for composition equality. The v0.37-composition manifest stays historical, byte-identical, at qualification/profiles/supported-gitlab-ce-v1@v0.37-composition.json. The probe ladder measured the R37-08 EMPTY failure mode live (rung-1 files=0) before rung-2's pause landed the useful three-shape checkpoint; one drill-side waiter defect (a sequence-tie in latest_checkpoint_entry hid the landed rung-2 checkpoint from the poller — root-caused, fixed with the (sequence, uploaded_at, position) tie-break, and the checkpoint ADOPTED on re-entry without a new paid dispatch) and one over-strict drill guard (the reuse document's artifact name vs the checkpoint AUTHORITY's active entry — the dispatch restores the authority's entry, which WAS the useful checkpoint; verified and recorded) are in the trace's failures list, never retried into a green. Human approval on the support decision: PENDING (approvals live in qualification/profile-approvals.json — this record claims none). Spend: $0.4032 lane (SDK receipts) + planner/reviewer via the litellm gateway within the run budget, under the $2.50 session cap.",
+ "profile": "gitlab-ce-v1",
+ "provider": "gitlab",
+ "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-25",
+ "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-25",
+ "record_id": "gitlab-ce-v1-composition-v2-2026-09-25",
+ "refusal_resolution": [
+  {
+   "action": "fixed in the drill driver (scripts/run_useful_wip_resume.py): the (sequence, uploaded_at, position) tie-break in latest_checkpoint_entry, plus the re-entry ADOPTION path that observes an already-landed files>0 checkpoint instead of re-paying a dispatch; pinned by the existing offline suite",
+   "owner": "forge maintainers (scripts/run_useful_wip_resume.py)",
+   "refusal": "the rung-2 sample poll timed out after 600s although the useful checkpoint HAD landed — the works index carried two sequence-0 entries and the waiter's highest-sequence tie kept selecting the older empty one",
+   "status": "resolved"
+  },
+  {
+   "action": "the guard was corrected to verify the checkpoint AUTHORITY's active entry (the repository protocol's own (sequence, checkpoint_id) rule — which named the useful checkpoint) while RECORDING the reuse document's older artifact name as a named divergence; the product's activation transaction is untouched",
+   "owner": "forge maintainers (scripts/run_useful_wip_resume.py)",
+   "refusal": "the drill's post-activation guard refused because the activation's reuse document named the OLDER rung-1 (empty) checkpoint as its preserved artifact",
+   "status": "resolved"
+  },
+  {
+   "action": "none taken — the reserve was configured on BOTH consumers at alignment time (FORGE_CLOSING_RESERVE_USD=0.50, FORGE_SPEND_CAP_USD=2.50) and the standard budget profile's token ceiling was raised to 480000 so the reviewer's call fit; the review completed and no block was ever written",
+   "owner": "forge maintainers (docs/operations/closing-budget.md — the documented policy fields)",
+   "refusal": "the #306 trace's known terminal gap: the run-level reviewer was refused by the run budget (budget_exhausted) AFTER the candidate and verification stood",
+   "status": "resolved"
+  }
+ ],
+ "release_version": "0.38.0",
+ "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@6df4020f8f1ff233d65082788a3632c0e4cd38d3 (forge[interactive]; immutable sha pinned as the project CI variable FORGE_LANE_REF; claude-code CLI 2.1.273; uv python 3.13); control plane = the working-tree alignment build carrying forge 0.38.0 (wheel sha256 37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd, built from the same tree) — observed in the lane job traces and the alignment receipts 2026-09-25",
+ "runtime_recipe": "python-3.13 (uv standalone in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker from localhost/forge:dev (the working-tree build)",
+ "stamp": "forge.profile.qualification/1",
+ "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+ "upgrade": {
+  "claim": "",
+  "evidence_ref": "cold_install_check --mode upgrade receipt (2026-09-25): alembic downgrade 027 -> seed -> upgrade head on a disposable postgres:17-alpine",
+  "preservation_checks": [
+   "per-table row counts",
+   "per-table sha256 fingerprints over ordered identity strings"
+  ],
+  "seeded_records": [
+   "the canary seed set (a run mid-flight, its spec, steps, a control command, a publication intent)"
+  ],
+  "source_schema": "027",
+  "target_schema": "028"
+ },
+ "verification_contract": "one required job named smoke asserting six exact slugify cases + app rewired + legacy deleted on the CURRENT candidate sha (committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/); PLUS the v2 revision marker (__all__ = [\"slugify\"] in src/utils/text.py) proving the resumed executor consumed the approved revision-2 brief",
+ "wheel_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd"
+}

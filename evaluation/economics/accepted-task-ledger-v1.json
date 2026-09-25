@@ -1,0 +1,2405 @@
+{
+  "schema": "forge.delivery.accepted-ledger/1",
+  "pilot": {
+    "issue": "Q39-11 / #330 (the #306 useful-WIP resume trace)",
+    "population": "useful_wip_resume",
+    "recorded_cap_usd": 2.0,
+    "artifact": "evaluation/economics/accepted-task-ledger-v1.json"
+  },
+  "identity_chain": [
+    "run",
+    "attempt",
+    "model_call",
+    "native_job",
+    "candidate",
+    "verification",
+    "human_decision"
+  ],
+  "economics": {
+    "schema": "forge.delivery.economics/1",
+    "pilot": {
+      "evidence": "docs/evaluation/2026-09-25-useful-wip-resume/",
+      "issue": "Q39-11 / #330 (the #306 useful-WIP resume trace)",
+      "population": "useful_wip_resume",
+      "profile_version": "claude-sdk-lane@59ba869 / glm-5.3-flash",
+      "recorded_cap_usd": 2.0
+    },
+    "rate_card": {
+      "version": "useful-wip-priceclass-v1",
+      "currency": "usd",
+      "rates": [
+        {
+          "provider": "claude-sdk-lane",
+          "model": "glm-5.3-flash",
+          "input_per_mtok_usd": 0.6,
+          "cached_input_per_mtok_usd": 0.07,
+          "cache_write_per_mtok_usd": null,
+          "output_per_mtok_usd": 2.2,
+          "basis": "estimate"
+        }
+      ],
+      "note": "versioned price assumptions \u2014 every figure priced from this card is an ESTIMATE, never a billing record"
+    },
+    "works": [
+      {
+        "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+        "outcome": "",
+        "ledger_outcome": "",
+        "accepted": null,
+        "decided_by": "",
+        "decided_at": "",
+        "acceptance_contract": "verification:smoke-oracle (precommitted before any run)",
+        "profile_version": "glm-5.3-flash",
+        "harness_version": "claude-sdk-lane@59ba869",
+        "attempts": [
+          {
+            "attempt_id": "job767",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "superseded",
+            "joined_to_acceptance": false,
+            "receipts": [
+              {
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job767",
+                "receipt_id": "useful-wip:job767",
+                "source": "claude-sdk-lane/usage-receipt",
+                "route": "claude-sdk-lane/glm-5.3-flash",
+                "evidence_class": "live-model",
+                "basis": "billing",
+                "billed_usd": 0.160819,
+                "estimate_usd": null,
+                "rate_card_version": "useful-wip-priceclass-v1",
+                "input_tokens_inclusive": 25583,
+                "output_tokens": 1549,
+                "cost_basis": "provider-reported",
+                "segment": "",
+                "completeness": "aggregate"
+              }
+            ]
+          },
+          {
+            "attempt_id": "job768",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "superseded",
+            "joined_to_acceptance": false,
+            "receipts": [
+              {
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job768",
+                "receipt_id": "useful-wip:job768",
+                "source": "claude-agent-sdk",
+                "route": "claude-sdk-lane/glm-5.3-flash",
+                "evidence_class": "live-model",
+                "basis": "billing",
+                "billed_usd": 0.142373,
+                "estimate_usd": null,
+                "rate_card_version": "useful-wip-priceclass-v1",
+                "input_tokens_inclusive": 148080,
+                "output_tokens": 2686,
+                "cost_basis": "provider-reported",
+                "segment": "",
+                "completeness": "aggregate"
+              }
+            ]
+          },
+          {
+            "attempt_id": "job769",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "accepted",
+            "joined_to_acceptance": false,
+            "receipts": [
+              {
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job769",
+                "receipt_id": "useful-wip:job769",
+                "source": "claude-agent-sdk",
+                "route": "claude-sdk-lane/glm-5.3-flash",
+                "evidence_class": "live-model",
+                "basis": "billing",
+                "billed_usd": 0.256695,
+                "estimate_usd": null,
+                "rate_card_version": "useful-wip-priceclass-v1",
+                "input_tokens_inclusive": 198754,
+                "output_tokens": 3107,
+                "cost_basis": "provider-reported",
+                "segment": "",
+                "completeness": "aggregate"
+              }
+            ]
+          }
+        ],
+        "unobserved_attempt_ids": [],
+        "joined_to_acceptance": false
+      },
+      {
+        "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+        "outcome": "",
+        "ledger_outcome": "",
+        "accepted": null,
+        "decided_by": "",
+        "decided_at": "",
+        "acceptance_contract": "verification:smoke-oracle (precommitted before any run)",
+        "profile_version": "glm-5.3-flash",
+        "harness_version": "claude-sdk-lane@59ba869",
+        "attempts": [
+          {
+            "attempt_id": "job762",
+            "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+            "outcome": "accepted",
+            "joined_to_acceptance": false,
+            "receipts": [
+              {
+                "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+                "attempt_id": "job762",
+                "receipt_id": "useful-wip:job762",
+                "source": "claude-sdk-lane/usage-receipt",
+                "route": "claude-sdk-lane/glm-5.3-flash",
+                "evidence_class": "live-model",
+                "basis": "billing",
+                "billed_usd": 0.255348,
+                "estimate_usd": null,
+                "rate_card_version": "useful-wip-priceclass-v1",
+                "input_tokens_inclusive": 39292,
+                "output_tokens": 2877,
+                "cost_basis": "provider-reported",
+                "segment": "",
+                "completeness": "aggregate"
+              }
+            ]
+          }
+        ],
+        "unobserved_attempt_ids": [],
+        "joined_to_acceptance": false
+      }
+    ],
+    "costs": {
+      "programme": {
+        "works": 2,
+        "attempts": 4,
+        "unobserved_attempts": 0,
+        "receipts": 4,
+        "billed_usd": 0.815235,
+        "billed_exact": true,
+        "billed_known_lower_bound_usd": 0.815235,
+        "provider_reported_usd": 0.815235,
+        "estimate_usd": null,
+        "estimate_basis": "estimate",
+        "estimate_rate_card_version": "useful-wip-priceclass-v1",
+        "receipt_coverage": 1.0
+      },
+      "accepted_items": {
+        "works": 0,
+        "attempts": 0,
+        "unobserved_attempts": 0,
+        "receipts": 0,
+        "billed_usd": null,
+        "billed_exact": false,
+        "billed_known_lower_bound_usd": 0.0,
+        "provider_reported_usd": null,
+        "estimate_usd": null,
+        "estimate_basis": "estimate",
+        "estimate_rate_card_version": "useful-wip-priceclass-v1",
+        "receipt_coverage": null
+      },
+      "programme_per_accepted_item": {
+        "programme_billed_per_accepted_usd": null,
+        "programme_billed_lower_bound_per_accepted_usd": null,
+        "programme_estimate_per_accepted_usd": null
+      },
+      "accepted_item_totals": {},
+      "successful_attempt_costs": {
+        "04bca389d69e4d4c9ef0ee223a0ed65e": {
+          "job769": {
+            "cost_usd": 0.256695,
+            "known_cost_lower_bound_usd": 0.256695,
+            "receipts": 1,
+            "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+          }
+        },
+        "d58082a2ee9a4973a3cf567bc93c18d8": {
+          "job762": {
+            "cost_usd": 0.255348,
+            "known_cost_lower_bound_usd": 0.255348,
+            "receipts": 1,
+            "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+          }
+        }
+      },
+      "cost_basis_census": {
+        "bases": {
+          "provider-reported": {
+            "receipts": 4,
+            "usd": 0.815235
+          }
+        },
+        "note": "cost figures are separated by origin: provider-reported (the SDK's own meter), estimated (a versioned rate card), billing-reconciliation (a billing export) \u2014 never summed into one column (R38-09)"
+      },
+      "attribution_segments": [
+        {
+          "segment": "route:claude-sdk-lane/glm-5.3-flash",
+          "route": "claude-sdk-lane/glm-5.3-flash",
+          "rate_card_versions": [
+            "useful-wip-priceclass-v1"
+          ],
+          "receipts": 4,
+          "cost_usd": 0.815235,
+          "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+        }
+      ],
+      "coverage": {
+        "accepted_items": {
+          "attempts": 0,
+          "receipts_expected": 0,
+          "receipts_received": 0,
+          "measured_receipts": 0,
+          "cost_known_receipts": 0,
+          "unknown_cost_receipts": 0,
+          "receipt_coverage": null,
+          "cost_coverage": null,
+          "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+        },
+        "programme": {
+          "attempts": 4,
+          "receipts_expected": 4,
+          "receipts_received": 4,
+          "measured_receipts": 4,
+          "cost_known_receipts": 4,
+          "unknown_cost_receipts": 0,
+          "receipt_coverage": 1.0,
+          "cost_coverage": 1.0,
+          "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+        }
+      }
+    },
+    "evidence": {
+      "classes": {
+        "live-model": 4
+      },
+      "synthetic_counters_labelled": 0,
+      "synthetic_excluded_from": [
+        "throughput comparisons",
+        "decode rate labels"
+      ],
+      "note": "scripted-vendor counters are wire observations, not measured inference \u2014 labelled synthetic-vendor-counter and excluded from every throughput comparison (R37-13)"
+    },
+    "latency": {
+      "stage_seconds": {
+        "human_wait": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "model": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "queue": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "restore_collection": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "tool": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "verification": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        }
+      },
+      "decode_label_guard": "no decode label rides a request-latency population: decode throughput requires live-model receipts over a model-span population (RATE_LABEL_SPACE, extended by R37-13)"
+    },
+    "cross_joins": [],
+    "conflicts": [],
+    "notes": [
+      "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
+      "no accepted items \u2014 per-accepted economics are undefined, never zero",
+      "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend",
+      "work 04bca389d69e4d4c9ef0ee223a0ed65e: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+      "work d58082a2ee9a4973a3cf567bc93c18d8: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit"
+    ],
+    "observability": {
+      "usage.receipt_coverage": 1.0,
+      "cost.lower_bound": 0.815235,
+      "cost.accepted_item_total": {},
+      "cost.programme_per_accepted_item": null,
+      "latency.stage_seconds": {
+        "human_wait": null,
+        "model": null,
+        "queue": null,
+        "restore_collection": null,
+        "tool": null,
+        "verification": null
+      }
+    }
+  },
+  "chains": [
+    {
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "outcome": "pending",
+      "report_outcome": "",
+      "human_decision": {
+        "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+        "state": "pending",
+        "decided_by": "",
+        "decided_at": "",
+        "channel": "draft-mr-awaiting-human",
+        "note": "Draft MR !2 on the verified candidate \u2014 a human merges, forge never does; the run-level reviewer was refused by the budget before any review ran"
+      },
+      "attempts": [
+        {
+          "attempt_id": "job767",
+          "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+          "outcome": "superseded",
+          "native_job": {
+            "job_id": "job767",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "attempt_id": "job767",
+            "pipeline_id": "421",
+            "status": "failed",
+            "began_at": "2026-09-24T22:55:57.780238Z",
+            "ended_at": "2026-09-24T22:56:57.548455+00:00",
+            "recorded_in": "phases.interrupt.probe_ladder[0] + job_cancel"
+          },
+          "model_call_receipt_ids": [
+            "useful-wip:job767"
+          ],
+          "candidate": null
+        },
+        {
+          "attempt_id": "job768",
+          "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+          "outcome": "superseded",
+          "native_job": {
+            "job_id": "job768",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "attempt_id": "job768",
+            "pipeline_id": "422",
+            "status": "failed",
+            "began_at": "2026-09-24T22:57:39.046712Z",
+            "ended_at": "2026-09-24T22:58:58.647598Z",
+            "recorded_in": "phases.interrupt.probe_ladder[1] + dispatches[job768].collector_lines"
+          },
+          "model_call_receipt_ids": [
+            "useful-wip:job768"
+          ],
+          "candidate": null
+        },
+        {
+          "attempt_id": "job769",
+          "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+          "outcome": "accepted",
+          "native_job": {
+            "job_id": "job769",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "attempt_id": "job769",
+            "pipeline_id": "423",
+            "status": "success",
+            "began_at": "2026-09-24T23:04:55.645549+00:00",
+            "ended_at": "2026-09-24T23:06:50.977454Z",
+            "recorded_in": "evidence_full.harness.handle.started_at + dispatches[job769].collector_lines"
+          },
+          "model_call_receipt_ids": [
+            "useful-wip:job769"
+          ],
+          "candidate": {
+            "candidate_sha": "5a994503e62d8d2397514534837e68b625452da1",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "attempt_id": "job769",
+            "base_sha": "319210bef009bec864bc083fdba61b736450af05",
+            "entries": 3,
+            "identity_state": "exact",
+            "recorded_in": "evidence_full.published_candidate"
+          }
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "verification": {
+        "verification_id": "useful-wip:pipeline-425",
+        "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+        "candidate_sha": "5a994503e62d8d2397514534837e68b625452da1",
+        "producer": "gitlab-pipeline",
+        "status": "passed",
+        "tested_oid": "5a994503e62d8d2397514534837e68b625452da1",
+        "observed_at": "2026-09-24T23:07:19.113148+00:00",
+        "recorded_in": "evidence_full.verification + record.oracle"
+      }
+    },
+    {
+      "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+      "outcome": "pending",
+      "report_outcome": "",
+      "human_decision": {
+        "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+        "state": "pending",
+        "decided_by": "",
+        "decided_at": "",
+        "channel": "draft-mr-awaiting-human",
+        "note": "Draft MR !1 delivered end-to-end by the shipped finalization"
+      },
+      "attempts": [
+        {
+          "attempt_id": "job762",
+          "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+          "outcome": "accepted",
+          "native_job": {
+            "job_id": "job762",
+            "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+            "attempt_id": "job762",
+            "pipeline_id": "416",
+            "status": "success",
+            "began_at": "",
+            "ended_at": "",
+            "recorded_in": "phases.uninterrupted-attempt-1.dispatches[0]"
+          },
+          "model_call_receipt_ids": [
+            "useful-wip:job762"
+          ],
+          "candidate": {
+            "candidate_sha": "62906e1f",
+            "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+            "attempt_id": "job762",
+            "base_sha": "",
+            "entries": 0,
+            "identity_state": "partial",
+            "recorded_in": "record.failures[2] (sha prefix only)"
+          }
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "verification": {
+        "verification_id": "useful-wip:issue1-oracle",
+        "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+        "candidate_sha": "62906e1f",
+        "producer": "gitlab-pipeline",
+        "status": "passed",
+        "tested_oid": "62906e1f",
+        "observed_at": "",
+        "recorded_in": "record.failures[2] (oracle pipeline green on the prefix)"
+      }
+    }
+  ],
+  "identity_gaps": [],
+  "duplicate_calls": [],
+  "costs": {
+    "columns": [
+      "provider_reported_usd",
+      "price_card_estimate_usd",
+      "billing_reconciliation_usd"
+    ],
+    "basis_note": "three labeled columns, never blended: provider-reported (the SDK's own meter), price-card estimate (a versioned card), billing-reconciliation (a billing export) \u2014 each entry lands in at most one column and no column ever sums another",
+    "programme": {
+      "works": 2,
+      "columns": {
+        "provider_reported_usd": {
+          "usd": 0.815235,
+          "exact": true,
+          "known_lower_bound_usd": 0.815235,
+          "receipts": 4,
+          "attempts_covered": 4,
+          "attempts": 4
+        },
+        "price_card_estimate_usd": {
+          "usd": null,
+          "exact": false,
+          "known_lower_bound_usd": null,
+          "receipts": 0,
+          "attempts_covered": 0,
+          "attempts": 4
+        },
+        "billing_reconciliation_usd": {
+          "usd": null,
+          "exact": false,
+          "known_lower_bound_usd": null,
+          "receipts": 0,
+          "attempts_covered": 0,
+          "attempts": 4
+        }
+      },
+      "coverage": {
+        "attempts": 4,
+        "unobserved_attempts": 0,
+        "receipts_expected": 4,
+        "receipts_received": 4,
+        "receipt_coverage": 1.0,
+        "cost_known_receipts": 4,
+        "unknown_cost_receipts": 0,
+        "cost_coverage": 1.0,
+        "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+      }
+    },
+    "accepted_items": {
+      "works": 0,
+      "columns": {
+        "provider_reported_usd": {
+          "usd": null,
+          "exact": false,
+          "known_lower_bound_usd": null,
+          "receipts": 0,
+          "attempts_covered": 0,
+          "attempts": 0
+        },
+        "price_card_estimate_usd": {
+          "usd": null,
+          "exact": false,
+          "known_lower_bound_usd": null,
+          "receipts": 0,
+          "attempts_covered": 0,
+          "attempts": 0
+        },
+        "billing_reconciliation_usd": {
+          "usd": null,
+          "exact": false,
+          "known_lower_bound_usd": null,
+          "receipts": 0,
+          "attempts_covered": 0,
+          "attempts": 0
+        }
+      },
+      "coverage": {
+        "attempts": 0,
+        "unobserved_attempts": 0,
+        "receipts_expected": 0,
+        "receipts_received": 0,
+        "receipt_coverage": null,
+        "cost_known_receipts": 0,
+        "unknown_cost_receipts": 0,
+        "cost_coverage": null,
+        "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+      }
+    },
+    "accepted_all_attempt": {},
+    "all_attempt_totals": {
+      "04bca389d69e4d4c9ef0ee223a0ed65e": {
+        "outcome": "pending",
+        "attempts": 3,
+        "failed_or_superseded_attempts_kept": 2,
+        "columns": {
+          "provider_reported_usd": {
+            "usd": 0.559887,
+            "exact": true,
+            "known_lower_bound_usd": 0.559887,
+            "receipts": 3,
+            "attempts_covered": 3,
+            "attempts": 3
+          },
+          "price_card_estimate_usd": {
+            "usd": null,
+            "exact": false,
+            "known_lower_bound_usd": null,
+            "receipts": 0,
+            "attempts_covered": 0,
+            "attempts": 3
+          },
+          "billing_reconciliation_usd": {
+            "usd": null,
+            "exact": false,
+            "known_lower_bound_usd": null,
+            "receipts": 0,
+            "attempts_covered": 0,
+            "attempts": 3
+          }
+        },
+        "coverage": {
+          "attempts": 3,
+          "unobserved_attempts": 0,
+          "receipts_expected": 3,
+          "receipts_received": 3,
+          "receipt_coverage": 1.0,
+          "cost_known_receipts": 3,
+          "unknown_cost_receipts": 0,
+          "cost_coverage": 1.0,
+          "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+        }
+      },
+      "d58082a2ee9a4973a3cf567bc93c18d8": {
+        "outcome": "pending",
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "columns": {
+          "provider_reported_usd": {
+            "usd": 0.255348,
+            "exact": true,
+            "known_lower_bound_usd": 0.255348,
+            "receipts": 1,
+            "attempts_covered": 1,
+            "attempts": 1
+          },
+          "price_card_estimate_usd": {
+            "usd": null,
+            "exact": false,
+            "known_lower_bound_usd": null,
+            "receipts": 0,
+            "attempts_covered": 0,
+            "attempts": 1
+          },
+          "billing_reconciliation_usd": {
+            "usd": null,
+            "exact": false,
+            "known_lower_bound_usd": null,
+            "receipts": 0,
+            "attempts_covered": 0,
+            "attempts": 1
+          }
+        },
+        "coverage": {
+          "attempts": 1,
+          "unobserved_attempts": 0,
+          "receipts_expected": 1,
+          "receipts_received": 1,
+          "receipt_coverage": 1.0,
+          "cost_known_receipts": 1,
+          "unknown_cost_receipts": 0,
+          "cost_coverage": 1.0,
+          "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+        }
+      }
+    },
+    "programme_per_accepted_item": {
+      "provider_reported_usd": {
+        "usd": null,
+        "known_lower_bound_usd_per_accepted": null
+      },
+      "price_card_estimate_usd": {
+        "usd": null,
+        "known_lower_bound_usd_per_accepted": null
+      },
+      "billing_reconciliation_usd": {
+        "usd": null,
+        "known_lower_bound_usd_per_accepted": null
+      }
+    }
+  },
+  "time_measures": {
+    "ci_queue": {
+      "measured": false,
+      "populations": {},
+      "stage_total_seconds": null,
+      "stage_lower_bound_seconds": null,
+      "note": "no recorded windows \u2014 unknown, never zero"
+    },
+    "ci_runtime": {
+      "measured": true,
+      "populations": {
+        "ci_runtime:lane-job:driver-anchor\u2192failed-observed": {
+          "spans": 1,
+          "unknown_spans": 0,
+          "total_seconds": 59.768217,
+          "lower_bound_seconds": 59.768217
+        },
+        "ci_runtime:lane-job:driver-envelope\u2192collector": {
+          "spans": 1,
+          "unknown_spans": 0,
+          "total_seconds": 79.600886,
+          "lower_bound_seconds": 79.600886
+        },
+        "ci_runtime:lane-job:job-start\u2192collector": {
+          "spans": 1,
+          "unknown_spans": 0,
+          "total_seconds": 115.331905,
+          "lower_bound_seconds": 115.331905
+        },
+        "ci_runtime:lane-job:unrecorded": {
+          "spans": 1,
+          "unknown_spans": 1,
+          "total_seconds": null,
+          "lower_bound_seconds": 0.0
+        }
+      },
+      "stage_total_seconds": null,
+      "stage_lower_bound_seconds": 254.701008,
+      "note": "stage total withheld: multiple origins \u2014 populations never mix into one number"
+    },
+    "model_time": {
+      "measured": false,
+      "populations": {},
+      "stage_total_seconds": null,
+      "stage_lower_bound_seconds": null,
+      "note": "no recorded windows \u2014 unknown, never zero"
+    },
+    "operator_wait": {
+      "measured": true,
+      "populations": {
+        "operator_wait:operator:failure-observed\u2192continuation-decision": {
+          "spans": 2,
+          "unknown_spans": 0,
+          "total_seconds": 347.049255,
+          "lower_bound_seconds": 347.049255
+        }
+      },
+      "stage_total_seconds": 347.049255,
+      "stage_lower_bound_seconds": 347.049255,
+      "note": ""
+    },
+    "reviewer_effort": {
+      "measured": true,
+      "populations": {
+        "reviewer_effort:operator:run-reviewer": {
+          "spans": 1,
+          "unknown_spans": 1,
+          "total_seconds": null,
+          "lower_bound_seconds": 0.0
+        }
+      },
+      "stage_total_seconds": null,
+      "stage_lower_bound_seconds": 0.0,
+      "note": "unknown windows present \u2014 lower bound only"
+    },
+    "setup_effort": {
+      "measured": true,
+      "populations": {
+        "setup_effort:operator:lab-alignment": {
+          "spans": 1,
+          "unknown_spans": 0,
+          "total_seconds": 58.202923,
+          "lower_bound_seconds": 58.202923
+        }
+      },
+      "stage_total_seconds": 58.202923,
+      "stage_lower_bound_seconds": 58.202923,
+      "note": ""
+    },
+    "tool_time": {
+      "measured": false,
+      "populations": {},
+      "stage_total_seconds": null,
+      "stage_lower_bound_seconds": null,
+      "note": "no recorded windows \u2014 unknown, never zero"
+    }
+  },
+  "time_windows": [
+    {
+      "window_id": "useful-wip:alignment:setup",
+      "work_id": "",
+      "attempt_id": "",
+      "measure": "setup_effort",
+      "population": "operator:lab-alignment",
+      "seconds": 58.202923,
+      "began_at": "2026-09-24T22:48:49.136937+00:00",
+      "ended_at": "2026-09-24T22:49:47.339860+00:00",
+      "note": "the lab alignment before any paid call (cohort-level window)"
+    },
+    {
+      "window_id": "useful-wip:job762:ci-runtime",
+      "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+      "attempt_id": "job762",
+      "measure": "ci_runtime",
+      "population": "lane-job:unrecorded",
+      "seconds": null,
+      "began_at": "",
+      "ended_at": "",
+      "note": "the uninterrupted turn measured 87.3 s in the drill README's prose \u2014 no trace window reached the evidence, so the runtime is unknown here, never the prose figure"
+    },
+    {
+      "window_id": "useful-wip:job767:ci-runtime",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job767",
+      "measure": "ci_runtime",
+      "population": "lane-job:driver-anchor\u2192failed-observed",
+      "seconds": 59.768217,
+      "began_at": "2026-09-24T22:55:57.780238Z",
+      "ended_at": "2026-09-24T22:56:57.548455+00:00",
+      "note": "driver-phase anchor \u2192 the job-level cancel observation (status already failed)"
+    },
+    {
+      "window_id": "useful-wip:job768:ci-runtime",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job768",
+      "measure": "ci_runtime",
+      "population": "lane-job:driver-envelope\u2192collector",
+      "seconds": 79.600886,
+      "began_at": "2026-09-24T22:57:39.046712Z",
+      "ended_at": "2026-09-24T22:58:58.647598Z",
+      "note": "resume leg 1: driver envelope echo \u2192 collector outcome line"
+    },
+    {
+      "window_id": "useful-wip:job769:ci-runtime",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job769",
+      "measure": "ci_runtime",
+      "population": "lane-job:job-start\u2192collector",
+      "seconds": 115.331905,
+      "began_at": "2026-09-24T23:04:55.645549+00:00",
+      "ended_at": "2026-09-24T23:06:50.977454Z",
+      "note": "resume leg 2: the harness handle's own job start \u2192 collector outcome line"
+    },
+    {
+      "window_id": "useful-wip:leg1-decision:operator-wait",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job767",
+      "measure": "operator_wait",
+      "population": "operator:failure-observed\u2192continuation-decision",
+      "seconds": 20.390575,
+      "began_at": "2026-09-24T22:56:57.548455+00:00",
+      "ended_at": "2026-09-24T22:57:17.939030+00:00",
+      "note": ""
+    },
+    {
+      "window_id": "useful-wip:leg2-decision:operator-wait",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job768",
+      "measure": "operator_wait",
+      "population": "operator:failure-observed\u2192continuation-decision",
+      "seconds": 326.65868,
+      "began_at": "2026-09-24T22:59:27.949535+00:00",
+      "ended_at": "2026-09-24T23:04:54.608215+00:00",
+      "note": "the /retry gap between leg 1's honest refusal and leg 2's continuation decision"
+    },
+    {
+      "window_id": "useful-wip:reviewer-effort",
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "attempt_id": "job769",
+      "measure": "reviewer_effort",
+      "population": "operator:run-reviewer",
+      "seconds": null,
+      "began_at": "",
+      "ended_at": "",
+      "note": "the run-level reviewer could not run \u2014 the budget refused its call (budget_exhausted); reviewer effort is unknown, never zero"
+    }
+  ],
+  "throughput": {
+    "rows": [],
+    "rule": "no tokens/s figure exists without matched measured model time and the #276 token convention \u2014 none is emitted otherwise (the decode guard extends to this ledger)"
+  },
+  "budget": {
+    "04bca389d69e4d4c9ef0ee223a0ed65e": {
+      "cap_usd": 2.0,
+      "currency": "usd",
+      "closing_budget": {
+        "schema": "forge.usage.ingestion/1",
+        "cap_usd": 2.0,
+        "closing_reserve_usd": 0.3,
+        "coder_ceiling_usd": 1.7,
+        "exact_usd": 0.559887,
+        "known_subtotal_usd": 0.559887,
+        "lower_bound_usd": 0.0,
+        "reserved_liability_usd": 0.0,
+        "unknown_intervals": 0,
+        "closing_review_fits": true,
+        "reserve_intact": true,
+        "closing_reserve": 0.3,
+        "unresolved_upper_bound": 0,
+        "phase_exhaustion": false,
+        "requires_bounded_policy": false,
+        "cap_check": {
+          "schema": "forge.usage.ingestion/1",
+          "allowed": true,
+          "cap_usd": 2.0,
+          "projection_usd": 0.0,
+          "known_spend": 0.5598872,
+          "unknown_lower_bound": 0.0,
+          "reserved_liability": 0.0,
+          "unknown_intervals": 0,
+          "unbounded_intervals": 0,
+          "requires_bounded_policy": false,
+          "reserved_usd": 0.5598872,
+          "known_cost_usd": 0.5598872,
+          "headroom_usd": 1.4401128,
+          "notes": [
+            "hard cap consults known_spend + reserved_liability + projection (a lower bound can never bound spend from above \u2014 Q39-06/P03)"
+          ]
+        },
+        "policy": {
+          "reserve_usd": null,
+          "fraction": null,
+          "cap_usd": null,
+          "default_fraction": 0.15,
+          "source": "default",
+          "provisional": false
+        }
+      },
+      "budget_refusals": [
+        {
+          "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+          "kind": "budget_refusal",
+          "at": "2026-09-24T23:07:03.368823+00:00",
+          "reason": "budget_exhausted: reviewer refused \u2014 run budget cannot grant a call",
+          "detail": "run budget exhausted: 2/40 calls, 202949/200000 tokens consumed \u2014 the run-level reviewer could not run",
+          "observable": "budget.phase_exhaustion"
+        }
+      ],
+      "review_only_recovery": {
+        "evaluated": true,
+        "allowed": true,
+        "reason": "",
+        "detail": "review-only continuation on the unchanged, tested candidate \u2014 zero coder dispatches, zero commits",
+        "candidate": {
+          "candidate_sha": "5a994503e62d8d2397514534837e68b625452da1",
+          "tested_identity": "5a994503e62d8d2397514534837e68b625452da1"
+        },
+        "coder_dispatches": 0,
+        "commits": 0,
+        "observable": "delivery.review_only_recovery"
+      },
+      "recorded_recovery_events": []
+    },
+    "d58082a2ee9a4973a3cf567bc93c18d8": {
+      "cap_usd": 2.0,
+      "currency": "usd",
+      "closing_budget": {
+        "schema": "forge.usage.ingestion/1",
+        "cap_usd": 2.0,
+        "closing_reserve_usd": 0.3,
+        "coder_ceiling_usd": 1.7,
+        "exact_usd": 0.255348,
+        "known_subtotal_usd": 0.255348,
+        "lower_bound_usd": 0.0,
+        "reserved_liability_usd": 0.0,
+        "unknown_intervals": 0,
+        "closing_review_fits": true,
+        "reserve_intact": true,
+        "closing_reserve": 0.3,
+        "unresolved_upper_bound": 0,
+        "phase_exhaustion": false,
+        "requires_bounded_policy": false,
+        "cap_check": {
+          "schema": "forge.usage.ingestion/1",
+          "allowed": true,
+          "cap_usd": 2.0,
+          "projection_usd": 0.0,
+          "known_spend": 0.255348,
+          "unknown_lower_bound": 0.0,
+          "reserved_liability": 0.0,
+          "unknown_intervals": 0,
+          "unbounded_intervals": 0,
+          "requires_bounded_policy": false,
+          "reserved_usd": 0.255348,
+          "known_cost_usd": 0.255348,
+          "headroom_usd": 1.7446519999999999,
+          "notes": [
+            "hard cap consults known_spend + reserved_liability + projection (a lower bound can never bound spend from above \u2014 Q39-06/P03)"
+          ]
+        },
+        "policy": {
+          "reserve_usd": null,
+          "fraction": null,
+          "cap_usd": null,
+          "default_fraction": 0.15,
+          "source": "default",
+          "provisional": false
+        }
+      },
+      "budget_refusals": [],
+      "review_only_recovery": {
+        "evaluated": false,
+        "recorded": false,
+        "note": "no review-only continuation was recorded or requested for this work \u2014 absent, stated, never silently zero"
+      },
+      "recorded_recovery_events": []
+    }
+  },
+  "human_decision_points": {
+    "04bca389d69e4d4c9ef0ee223a0ed65e": {
+      "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+      "state": "pending",
+      "decided_by": "",
+      "decided_at": "",
+      "channel": "draft-mr-awaiting-human",
+      "note": "Draft MR !2 on the verified candidate \u2014 a human merges, forge never does; the run-level reviewer was refused by the budget before any review ran"
+    },
+    "d58082a2ee9a4973a3cf567bc93c18d8": {
+      "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+      "state": "pending",
+      "decided_by": "",
+      "decided_at": "",
+      "channel": "draft-mr-awaiting-human",
+      "note": "Draft MR !1 delivered end-to-end by the shipped finalization"
+    }
+  },
+  "notes": [
+    "combined-steering (the #313 trace) is NOT folded in: its five lane jobs are a different drill's population \u2014 noted, never blended",
+    "live-single-writer (the #310 SDK receipts) joined as their OWN population: 3 works / 5 attempts, provider-reported lower bound 0.803749 usd \u2014 qualification runs, no human decision points, never folded into the useful-WIP aggregates",
+    "no work carries a closed human decision \u2014 accepted measures are undefined, never zero; every work's all-attempt totals and coverage stand beside them",
+    "the human decision point is labelled per work \u2014 a pending draft MR is a REAL state: the work stays out of the accepted population and its per-accepted economics stay undefined, never zero",
+    "time measures are separate quantities over their own recorded windows \u2014 never unmatched output divided by unmatched durations"
+  ],
+  "observability": {
+    "delivery.accepted_all_attempt_cost": {},
+    "delivery.programme_cost_per_accepted": {
+      "provider_reported_usd": null,
+      "price_card_estimate_usd": null,
+      "billing_reconciliation_usd": null
+    },
+    "cost.coverage": 1.0,
+    "delivery.human_minutes": null,
+    "budget.closing_reserve": {
+      "04bca389d69e4d4c9ef0ee223a0ed65e": 0.3,
+      "d58082a2ee9a4973a3cf567bc93c18d8": 0.3
+    },
+    "budget.phase_exhaustion": {
+      "04bca389d69e4d4c9ef0ee223a0ed65e": false,
+      "d58082a2ee9a4973a3cf567bc93c18d8": false
+    },
+    "delivery.review_only_recovery": {
+      "04bca389d69e4d4c9ef0ee223a0ed65e": {
+        "evaluated": true,
+        "allowed": true,
+        "coder_dispatches": 0
+      },
+      "d58082a2ee9a4973a3cf567bc93c18d8": {
+        "evaluated": false,
+        "allowed": null,
+        "coder_dispatches": null
+      }
+    }
+  },
+  "measurement_ledger": {
+    "schema": "forge.delivery.measurement/1",
+    "works": [
+      {
+        "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+        "outcome": "",
+        "attempts": [
+          {
+            "attempt_id": "job767",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "superseded",
+            "sources": [
+              "claude-sdk-lane/usage-receipt"
+            ],
+            "routes": [
+              {
+                "provider": "claude-sdk-lane",
+                "model": "glm-5.3-flash"
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "useful-wip:job767",
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job767",
+                "source": "claude-sdk-lane/usage-receipt",
+                "route": {
+                  "provider": "claude-sdk-lane",
+                  "model": "glm-5.3-flash"
+                },
+                "input_tokens": 25583,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 1549,
+                "reasoning_tokens": null,
+                "cost_usd": 0.1608192,
+                "completeness": "aggregate",
+                "cost_basis": "provider-reported",
+                "segment": ""
+              }
+            ],
+            "call_ids": [],
+            "spans": [],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.1608192,
+              "known_cost_lower_bound_usd": 0.1608192,
+              "input_tokens_inclusive": 25583,
+              "input_tokens_inclusive_lower_bound": 25583,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 1549,
+              "output_tokens_lower_bound": 1549,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "job768",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "superseded",
+            "sources": [
+              "claude-agent-sdk"
+            ],
+            "routes": [
+              {
+                "provider": "claude-sdk-lane",
+                "model": "glm-5.3-flash"
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "useful-wip:job768",
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job768",
+                "source": "claude-agent-sdk",
+                "route": {
+                  "provider": "claude-sdk-lane",
+                  "model": "glm-5.3-flash"
+                },
+                "input_tokens": 15536,
+                "cached_input_tokens": 132544,
+                "cache_write_tokens": 0,
+                "output_tokens": 2686,
+                "reasoning_tokens": null,
+                "cost_usd": 0.14237280000000002,
+                "completeness": "aggregate",
+                "cost_basis": "provider-reported",
+                "segment": ""
+              }
+            ],
+            "call_ids": [],
+            "spans": [],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.14237280000000002,
+              "known_cost_lower_bound_usd": 0.14237280000000002,
+              "input_tokens_inclusive": 148080,
+              "input_tokens_inclusive_lower_bound": 148080,
+              "cached_input_tokens": 132544,
+              "cache_write_tokens": 0,
+              "output_tokens": 2686,
+              "output_tokens_lower_bound": 2686,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "job769",
+            "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+            "outcome": "accepted",
+            "sources": [
+              "claude-agent-sdk"
+            ],
+            "routes": [
+              {
+                "provider": "claude-sdk-lane",
+                "model": "glm-5.3-flash"
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "useful-wip:job769",
+                "work_id": "04bca389d69e4d4c9ef0ee223a0ed65e",
+                "attempt_id": "job769",
+                "source": "claude-agent-sdk",
+                "route": {
+                  "provider": "claude-sdk-lane",
+                  "model": "glm-5.3-flash"
+                },
+                "input_tokens": 40738,
+                "cached_input_tokens": 158016,
+                "cache_write_tokens": 0,
+                "output_tokens": 3107,
+                "reasoning_tokens": null,
+                "cost_usd": 0.2566952,
+                "completeness": "aggregate",
+                "cost_basis": "provider-reported",
+                "segment": ""
+              }
+            ],
+            "call_ids": [],
+            "spans": [],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.2566952,
+              "known_cost_lower_bound_usd": 0.2566952,
+              "input_tokens_inclusive": 198754,
+              "input_tokens_inclusive_lower_bound": 198754,
+              "cached_input_tokens": 158016,
+              "cache_write_tokens": 0,
+              "output_tokens": 3107,
+              "output_tokens_lower_bound": 3107,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 3,
+          "receipts_expected": 3,
+          "exact": true,
+          "cost_usd": 0.5598872,
+          "known_cost_lower_bound_usd": 0.5598872,
+          "input_tokens_inclusive": 372417,
+          "input_tokens_inclusive_lower_bound": 372417,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": 7342,
+          "output_tokens_lower_bound": 7342,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "glm-5.3-flash",
+        "harness_version": "claude-sdk-lane@59ba869",
+        "acceptance_contract": "verification:smoke-oracle (precommitted before any run)",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": [
+          "outcome unknown \u2014 programme spend yes, accepted unit no"
+        ]
+      },
+      {
+        "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+        "outcome": "",
+        "attempts": [
+          {
+            "attempt_id": "job762",
+            "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+            "outcome": "accepted",
+            "sources": [
+              "claude-sdk-lane/usage-receipt"
+            ],
+            "routes": [
+              {
+                "provider": "claude-sdk-lane",
+                "model": "glm-5.3-flash"
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "useful-wip:job762",
+                "work_id": "d58082a2ee9a4973a3cf567bc93c18d8",
+                "attempt_id": "job762",
+                "source": "claude-sdk-lane/usage-receipt",
+                "route": {
+                  "provider": "claude-sdk-lane",
+                  "model": "glm-5.3-flash"
+                },
+                "input_tokens": 39292,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 2877,
+                "reasoning_tokens": null,
+                "cost_usd": 0.255348,
+                "completeness": "aggregate",
+                "cost_basis": "provider-reported",
+                "segment": ""
+              }
+            ],
+            "call_ids": [],
+            "spans": [],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": 0.255348,
+              "known_cost_lower_bound_usd": 0.255348,
+              "input_tokens_inclusive": 39292,
+              "input_tokens_inclusive_lower_bound": 39292,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 2877,
+              "output_tokens_lower_bound": 2877,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": true,
+          "cost_usd": 0.255348,
+          "known_cost_lower_bound_usd": 0.255348,
+          "input_tokens_inclusive": 39292,
+          "input_tokens_inclusive_lower_bound": 39292,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": 2877,
+          "output_tokens_lower_bound": 2877,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "glm-5.3-flash",
+        "harness_version": "claude-sdk-lane@59ba869",
+        "acceptance_contract": "verification:smoke-oracle (precommitted before any run)",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": [
+          "outcome unknown \u2014 programme spend yes, accepted unit no"
+        ]
+      }
+    ],
+    "conflicts": [],
+    "duplicate_calls": [],
+    "counter_resets": [],
+    "notes": []
+  },
+  "populations": {
+    "live_single_writer": {
+      "schema": "forge.delivery.accepted-ledger/1",
+      "pilot": {
+        "issue": "R38-09 / #310 (the SDK receipts, read-only join)",
+        "population": "live_single_writer",
+        "recorded_cap_usd": 2.0
+      },
+      "identity_chain": [
+        "run",
+        "attempt",
+        "model_call",
+        "native_job",
+        "candidate",
+        "verification",
+        "human_decision"
+      ],
+      "economics": {
+        "schema": "forge.delivery.economics/1",
+        "pilot": {
+          "durable_usage_receipts_rows_at_capture": "",
+          "issue": "R38-09 / #310 (the recorded usage-ingestion gap, closed by ingest)",
+          "population": "live_single_writer",
+          "recorded_cap_usd": "2.0"
+        },
+        "rate_card": null,
+        "works": [
+          {
+            "work_id": "60b9de7f",
+            "outcome": "",
+            "ledger_outcome": "",
+            "accepted": null,
+            "decided_by": "",
+            "decided_at": "",
+            "acceptance_contract": "",
+            "profile_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "attempts": [
+              {
+                "attempt_id": "job726",
+                "work_id": "60b9de7f",
+                "outcome": "accepted",
+                "joined_to_acceptance": false,
+                "receipts": [
+                  {
+                    "work_id": "60b9de7f",
+                    "attempt_id": "job726",
+                    "receipt_id": "live-evidence:job726",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": "claude-sdk-lane/glm-5.3-flash",
+                    "evidence_class": "live-model",
+                    "basis": "billing",
+                    "billed_usd": 0.217954,
+                    "estimate_usd": null,
+                    "rate_card_version": "",
+                    "input_tokens_inclusive": null,
+                    "output_tokens": null,
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07",
+                    "completeness": "aggregate"
+                  }
+                ]
+              }
+            ],
+            "unobserved_attempt_ids": [],
+            "joined_to_acceptance": false
+          },
+          {
+            "work_id": "905194f0",
+            "outcome": "",
+            "ledger_outcome": "",
+            "accepted": null,
+            "decided_by": "",
+            "decided_at": "",
+            "acceptance_contract": "",
+            "profile_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "attempts": [
+              {
+                "attempt_id": "job730",
+                "work_id": "905194f0",
+                "outcome": "cancelled",
+                "joined_to_acceptance": false,
+                "receipts": []
+              },
+              {
+                "attempt_id": "job731",
+                "work_id": "905194f0",
+                "outcome": "rejected",
+                "joined_to_acceptance": false,
+                "receipts": [
+                  {
+                    "work_id": "905194f0",
+                    "attempt_id": "job731",
+                    "receipt_id": "live-evidence:job731",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": "claude-sdk-lane/glm-5.3-flash",
+                    "evidence_class": "live-model",
+                    "basis": "billing",
+                    "billed_usd": 0.200525,
+                    "estimate_usd": null,
+                    "rate_card_version": "",
+                    "input_tokens_inclusive": 172888,
+                    "output_tokens": null,
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07",
+                    "completeness": "aggregate"
+                  }
+                ]
+              },
+              {
+                "attempt_id": "job732",
+                "work_id": "905194f0",
+                "outcome": "rejected",
+                "joined_to_acceptance": false,
+                "receipts": [
+                  {
+                    "work_id": "905194f0",
+                    "attempt_id": "job732",
+                    "receipt_id": "live-evidence:job732",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": "claude-sdk-lane/glm-5.3-flash",
+                    "evidence_class": "live-model",
+                    "basis": "billing",
+                    "billed_usd": 0.149899,
+                    "estimate_usd": null,
+                    "rate_card_version": "",
+                    "input_tokens_inclusive": 139099,
+                    "output_tokens": 2463,
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07",
+                    "completeness": "aggregate"
+                  }
+                ]
+              }
+            ],
+            "unobserved_attempt_ids": [],
+            "joined_to_acceptance": false
+          },
+          {
+            "work_id": "ca78cda2",
+            "outcome": "",
+            "ledger_outcome": "",
+            "accepted": null,
+            "decided_by": "",
+            "decided_at": "",
+            "acceptance_contract": "",
+            "profile_version": "glm-5.3-flash",
+            "harness_version": "claude-sdk-lane@2.1.273",
+            "attempts": [
+              {
+                "attempt_id": "job723",
+                "work_id": "ca78cda2",
+                "outcome": "rejected",
+                "joined_to_acceptance": false,
+                "receipts": [
+                  {
+                    "work_id": "ca78cda2",
+                    "attempt_id": "job723",
+                    "receipt_id": "live-evidence:job723",
+                    "source": "live-evidence/sdk-receipt",
+                    "route": "claude-sdk-lane/glm-5.3-flash",
+                    "evidence_class": "live-model",
+                    "basis": "billing",
+                    "billed_usd": 0.235371,
+                    "estimate_usd": null,
+                    "rate_card_version": "",
+                    "input_tokens_inclusive": null,
+                    "output_tokens": null,
+                    "cost_basis": "provider-reported",
+                    "segment": "segment:884c8f4215a88e07",
+                    "completeness": "aggregate"
+                  }
+                ]
+              }
+            ],
+            "unobserved_attempt_ids": [],
+            "joined_to_acceptance": false
+          }
+        ],
+        "costs": {
+          "programme": {
+            "works": 3,
+            "attempts": 5,
+            "unobserved_attempts": 0,
+            "receipts": 4,
+            "billed_usd": null,
+            "billed_exact": false,
+            "billed_known_lower_bound_usd": 0.803749,
+            "provider_reported_usd": 0.803749,
+            "estimate_usd": null,
+            "estimate_basis": "estimate",
+            "estimate_rate_card_version": "",
+            "receipt_coverage": 0.8
+          },
+          "accepted_items": {
+            "works": 0,
+            "attempts": 0,
+            "unobserved_attempts": 0,
+            "receipts": 0,
+            "billed_usd": null,
+            "billed_exact": false,
+            "billed_known_lower_bound_usd": 0.0,
+            "provider_reported_usd": null,
+            "estimate_usd": null,
+            "estimate_basis": "estimate",
+            "estimate_rate_card_version": "",
+            "receipt_coverage": null
+          },
+          "programme_per_accepted_item": {
+            "programme_billed_per_accepted_usd": null,
+            "programme_billed_lower_bound_per_accepted_usd": null,
+            "programme_estimate_per_accepted_usd": null
+          },
+          "accepted_item_totals": {},
+          "successful_attempt_costs": {
+            "60b9de7f": {
+              "job726": {
+                "cost_usd": 0.217954,
+                "known_cost_lower_bound_usd": 0.217954,
+                "receipts": 1,
+                "note": "the successful attempt's OWN receipts \u2014 a different measure from the accepted item's all-attempt total and from programme spend per accepted item (R38-09)"
+              }
+            }
+          },
+          "cost_basis_census": {
+            "bases": {
+              "provider-reported": {
+                "receipts": 4,
+                "usd": 0.803749
+              }
+            },
+            "note": "cost figures are separated by origin: provider-reported (the SDK's own meter), estimated (a versioned rate card), billing-reconciliation (a billing export) \u2014 never summed into one column (R38-09)"
+          },
+          "attribution_segments": [
+            {
+              "segment": "segment:884c8f4215a88e07",
+              "route": "claude-sdk-lane/glm-5.3-flash",
+              "rate_card_versions": [],
+              "receipts": 4,
+              "cost_usd": 0.803749,
+              "note": "cost figures grouped by attribution segment \u2014 a route, route-version or rate-card change is a NEW segment; historical segments are never rewritten (R38-09)"
+            }
+          ],
+          "coverage": {
+            "accepted_items": {
+              "attempts": 0,
+              "receipts_expected": 0,
+              "receipts_received": 0,
+              "measured_receipts": 0,
+              "cost_known_receipts": 0,
+              "unknown_cost_receipts": 0,
+              "receipt_coverage": null,
+              "cost_coverage": null,
+              "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+            },
+            "programme": {
+              "attempts": 5,
+              "receipts_expected": 5,
+              "receipts_received": 4,
+              "measured_receipts": 2,
+              "cost_known_receipts": 4,
+              "unknown_cost_receipts": 0,
+              "receipt_coverage": 0.8,
+              "cost_coverage": 0.8,
+              "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+            }
+          }
+        },
+        "evidence": {
+          "classes": {
+            "live-model": 4
+          },
+          "synthetic_counters_labelled": 0,
+          "synthetic_excluded_from": [
+            "throughput comparisons",
+            "decode rate labels"
+          ],
+          "note": "scripted-vendor counters are wire observations, not measured inference \u2014 labelled synthetic-vendor-counter and excluded from every throughput comparison (R37-13)"
+        },
+        "latency": {
+          "stage_seconds": {
+            "human_wait": {
+              "measured": true,
+              "populations": {
+                "human_wait:operator": {
+                  "spans": 1,
+                  "unknown_spans": 1,
+                  "total_seconds": null,
+                  "lower_bound_seconds": 0.0
+                }
+              },
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": 0.0,
+              "note": "unknown windows present \u2014 lower bound only"
+            },
+            "model": {
+              "measured": false,
+              "populations": {},
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": null,
+              "note": "no recorded windows \u2014 unknown, never zero"
+            },
+            "queue": {
+              "measured": false,
+              "populations": {},
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": null,
+              "note": "no recorded windows \u2014 unknown, never zero"
+            },
+            "restore_collection": {
+              "measured": false,
+              "populations": {},
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": null,
+              "note": "no recorded windows \u2014 unknown, never zero"
+            },
+            "tool": {
+              "measured": false,
+              "populations": {},
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": null,
+              "note": "no recorded windows \u2014 unknown, never zero"
+            },
+            "verification": {
+              "measured": false,
+              "populations": {},
+              "stage_total_seconds": null,
+              "stage_lower_bound_seconds": null,
+              "note": "no recorded windows \u2014 unknown, never zero"
+            }
+          },
+          "decode_label_guard": "no decode label rides a request-latency population: decode throughput requires live-model receipts over a model-span population (RATE_LABEL_SPACE, extended by R37-13)"
+        },
+        "cross_joins": [],
+        "conflicts": [],
+        "notes": [
+          "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
+          "no accepted items \u2014 per-accepted economics are undefined, never zero",
+          "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend",
+          "work 60b9de7f: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+          "work 905194f0: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+          "work ca78cda2: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit"
+        ],
+        "observability": {
+          "usage.receipt_coverage": 0.8,
+          "cost.lower_bound": 0.803749,
+          "cost.accepted_item_total": {},
+          "cost.programme_per_accepted_item": null,
+          "latency.stage_seconds": {
+            "human_wait": 0.0,
+            "model": null,
+            "queue": null,
+            "restore_collection": null,
+            "tool": null,
+            "verification": null
+          }
+        }
+      },
+      "chains": [
+        {
+          "work_id": "60b9de7f",
+          "outcome": "",
+          "report_outcome": "",
+          "human_decision": null,
+          "attempts": [
+            {
+              "attempt_id": "job726",
+              "work_id": "60b9de7f",
+              "outcome": "accepted",
+              "native_job": {
+                "job_id": "job726",
+                "work_id": "60b9de7f",
+                "attempt_id": "job726",
+                "pipeline_id": "",
+                "status": "accepted",
+                "began_at": "",
+                "ended_at": "",
+                "recorded_in": "scripts/build_economics_report.py::_LIVE_LANE_JOBS"
+              },
+              "model_call_receipt_ids": [
+                "live-evidence:job726"
+              ],
+              "candidate": null
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "verification": null
+        },
+        {
+          "work_id": "905194f0",
+          "outcome": "",
+          "report_outcome": "",
+          "human_decision": null,
+          "attempts": [
+            {
+              "attempt_id": "job730",
+              "work_id": "905194f0",
+              "outcome": "cancelled",
+              "native_job": {
+                "job_id": "job730",
+                "work_id": "905194f0",
+                "attempt_id": "job730",
+                "pipeline_id": "",
+                "status": "cancelled",
+                "began_at": "",
+                "ended_at": "",
+                "recorded_in": "scripts/build_economics_report.py::_LIVE_LANE_JOBS"
+              },
+              "model_call_receipt_ids": [],
+              "candidate": null
+            },
+            {
+              "attempt_id": "job731",
+              "work_id": "905194f0",
+              "outcome": "rejected",
+              "native_job": {
+                "job_id": "job731",
+                "work_id": "905194f0",
+                "attempt_id": "job731",
+                "pipeline_id": "",
+                "status": "rejected",
+                "began_at": "",
+                "ended_at": "",
+                "recorded_in": "scripts/build_economics_report.py::_LIVE_LANE_JOBS"
+              },
+              "model_call_receipt_ids": [
+                "live-evidence:job731"
+              ],
+              "candidate": null
+            },
+            {
+              "attempt_id": "job732",
+              "work_id": "905194f0",
+              "outcome": "rejected",
+              "native_job": {
+                "job_id": "job732",
+                "work_id": "905194f0",
+                "attempt_id": "job732",
+                "pipeline_id": "",
+                "status": "rejected",
+                "began_at": "",
+                "ended_at": "",
+                "recorded_in": "scripts/build_economics_report.py::_LIVE_LANE_JOBS"
+              },
+              "model_call_receipt_ids": [
+                "live-evidence:job732"
+              ],
+              "candidate": null
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "verification": null
+        },
+        {
+          "work_id": "ca78cda2",
+          "outcome": "",
+          "report_outcome": "",
+          "human_decision": null,
+          "attempts": [
+            {
+              "attempt_id": "job723",
+              "work_id": "ca78cda2",
+              "outcome": "rejected",
+              "native_job": {
+                "job_id": "job723",
+                "work_id": "ca78cda2",
+                "attempt_id": "job723",
+                "pipeline_id": "",
+                "status": "rejected",
+                "began_at": "",
+                "ended_at": "",
+                "recorded_in": "scripts/build_economics_report.py::_LIVE_LANE_JOBS"
+              },
+              "model_call_receipt_ids": [
+                "live-evidence:job723"
+              ],
+              "candidate": null
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "verification": null
+        }
+      ],
+      "identity_gaps": [],
+      "duplicate_calls": [],
+      "costs": {
+        "columns": [
+          "provider_reported_usd",
+          "price_card_estimate_usd",
+          "billing_reconciliation_usd"
+        ],
+        "basis_note": "three labeled columns, never blended: provider-reported (the SDK's own meter), price-card estimate (a versioned card), billing-reconciliation (a billing export) \u2014 each entry lands in at most one column and no column ever sums another",
+        "programme": {
+          "works": 3,
+          "columns": {
+            "provider_reported_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": 0.803749,
+              "receipts": 4,
+              "attempts_covered": 4,
+              "attempts": 5
+            },
+            "price_card_estimate_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": null,
+              "receipts": 0,
+              "attempts_covered": 0,
+              "attempts": 5
+            },
+            "billing_reconciliation_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": null,
+              "receipts": 0,
+              "attempts_covered": 0,
+              "attempts": 5
+            }
+          },
+          "coverage": {
+            "attempts": 5,
+            "unobserved_attempts": 0,
+            "receipts_expected": 5,
+            "receipts_received": 4,
+            "receipt_coverage": 0.8,
+            "cost_known_receipts": 4,
+            "unknown_cost_receipts": 1,
+            "cost_coverage": 0.8,
+            "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+          }
+        },
+        "accepted_items": {
+          "works": 0,
+          "columns": {
+            "provider_reported_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": null,
+              "receipts": 0,
+              "attempts_covered": 0,
+              "attempts": 0
+            },
+            "price_card_estimate_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": null,
+              "receipts": 0,
+              "attempts_covered": 0,
+              "attempts": 0
+            },
+            "billing_reconciliation_usd": {
+              "usd": null,
+              "exact": false,
+              "known_lower_bound_usd": null,
+              "receipts": 0,
+              "attempts_covered": 0,
+              "attempts": 0
+            }
+          },
+          "coverage": {
+            "attempts": 0,
+            "unobserved_attempts": 0,
+            "receipts_expected": 0,
+            "receipts_received": 0,
+            "receipt_coverage": null,
+            "cost_known_receipts": 0,
+            "unknown_cost_receipts": 0,
+            "cost_coverage": null,
+            "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+          }
+        },
+        "accepted_all_attempt": {},
+        "all_attempt_totals": {
+          "60b9de7f": {
+            "outcome": "",
+            "attempts": 1,
+            "failed_or_superseded_attempts_kept": 0,
+            "columns": {
+              "provider_reported_usd": {
+                "usd": 0.217954,
+                "exact": true,
+                "known_lower_bound_usd": 0.217954,
+                "receipts": 1,
+                "attempts_covered": 1,
+                "attempts": 1
+              },
+              "price_card_estimate_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 1
+              },
+              "billing_reconciliation_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 1
+              }
+            },
+            "coverage": {
+              "attempts": 1,
+              "unobserved_attempts": 0,
+              "receipts_expected": 1,
+              "receipts_received": 1,
+              "receipt_coverage": 1.0,
+              "cost_known_receipts": 1,
+              "unknown_cost_receipts": 0,
+              "cost_coverage": 1.0,
+              "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+            }
+          },
+          "905194f0": {
+            "outcome": "",
+            "attempts": 3,
+            "failed_or_superseded_attempts_kept": 3,
+            "columns": {
+              "provider_reported_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": 0.350424,
+                "receipts": 2,
+                "attempts_covered": 2,
+                "attempts": 3
+              },
+              "price_card_estimate_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 3
+              },
+              "billing_reconciliation_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 3
+              }
+            },
+            "coverage": {
+              "attempts": 3,
+              "unobserved_attempts": 0,
+              "receipts_expected": 3,
+              "receipts_received": 2,
+              "receipt_coverage": 0.6666666666666666,
+              "cost_known_receipts": 2,
+              "unknown_cost_receipts": 1,
+              "cost_coverage": 0.6666666666666666,
+              "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+            }
+          },
+          "ca78cda2": {
+            "outcome": "",
+            "attempts": 1,
+            "failed_or_superseded_attempts_kept": 1,
+            "columns": {
+              "provider_reported_usd": {
+                "usd": 0.235371,
+                "exact": true,
+                "known_lower_bound_usd": 0.235371,
+                "receipts": 1,
+                "attempts_covered": 1,
+                "attempts": 1
+              },
+              "price_card_estimate_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 1
+              },
+              "billing_reconciliation_usd": {
+                "usd": null,
+                "exact": false,
+                "known_lower_bound_usd": null,
+                "receipts": 0,
+                "attempts_covered": 0,
+                "attempts": 1
+              }
+            },
+            "coverage": {
+              "attempts": 1,
+              "unobserved_attempts": 0,
+              "receipts_expected": 1,
+              "receipts_received": 1,
+              "receipt_coverage": 1.0,
+              "cost_known_receipts": 1,
+              "unknown_cost_receipts": 0,
+              "cost_coverage": 1.0,
+              "unknown_costs_rendered_as": "known lower bound + coverage, never zero"
+            }
+          }
+        },
+        "programme_per_accepted_item": {
+          "provider_reported_usd": {
+            "usd": null,
+            "known_lower_bound_usd_per_accepted": null
+          },
+          "price_card_estimate_usd": {
+            "usd": null,
+            "known_lower_bound_usd_per_accepted": null
+          },
+          "billing_reconciliation_usd": {
+            "usd": null,
+            "known_lower_bound_usd_per_accepted": null
+          }
+        }
+      },
+      "time_measures": {
+        "ci_queue": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "ci_runtime": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "model_time": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "operator_wait": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "reviewer_effort": {
+          "measured": true,
+          "populations": {
+            "reviewer_effort:operator:review": {
+              "spans": 1,
+              "unknown_spans": 1,
+              "total_seconds": null,
+              "lower_bound_seconds": 0.0
+            }
+          },
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": 0.0,
+          "note": "unknown windows present \u2014 lower bound only"
+        },
+        "setup_effort": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        },
+        "tool_time": {
+          "measured": false,
+          "populations": {},
+          "stage_total_seconds": null,
+          "stage_lower_bound_seconds": null,
+          "note": "no recorded windows \u2014 unknown, never zero"
+        }
+      },
+      "time_windows": [
+        {
+          "window_id": "live-evidence:job726:review",
+          "work_id": "60b9de7f",
+          "attempt_id": "job726",
+          "measure": "reviewer_effort",
+          "population": "operator:review",
+          "seconds": null,
+          "began_at": "",
+          "ended_at": "",
+          "note": "the review happened (findings + a 'concerns' verdict are recorded) but its duration never reached the record \u2014 an unknown operator-side window, never zero"
+        }
+      ],
+      "throughput": {
+        "rows": [],
+        "rule": "no tokens/s figure exists without matched measured model time and the #276 token convention \u2014 none is emitted otherwise (the decode guard extends to this ledger)"
+      },
+      "budget": {
+        "60b9de7f": {
+          "cap_usd": 2.0,
+          "currency": "usd",
+          "closing_budget": {
+            "schema": "forge.usage.ingestion/1",
+            "cap_usd": 2.0,
+            "closing_reserve_usd": 0.3,
+            "coder_ceiling_usd": 1.7,
+            "exact_usd": 0.217954,
+            "known_subtotal_usd": 0.217954,
+            "lower_bound_usd": 0.0,
+            "reserved_liability_usd": 0.0,
+            "unknown_intervals": 0,
+            "closing_review_fits": true,
+            "reserve_intact": true,
+            "closing_reserve": 0.3,
+            "unresolved_upper_bound": 0,
+            "phase_exhaustion": false,
+            "requires_bounded_policy": false,
+            "cap_check": {
+              "schema": "forge.usage.ingestion/1",
+              "allowed": true,
+              "cap_usd": 2.0,
+              "projection_usd": 0.0,
+              "known_spend": 0.217954,
+              "unknown_lower_bound": 0.0,
+              "reserved_liability": 0.0,
+              "unknown_intervals": 0,
+              "unbounded_intervals": 0,
+              "requires_bounded_policy": false,
+              "reserved_usd": 0.217954,
+              "known_cost_usd": 0.217954,
+              "headroom_usd": 1.782046,
+              "notes": [
+                "hard cap consults known_spend + reserved_liability + projection (a lower bound can never bound spend from above \u2014 Q39-06/P03)"
+              ]
+            },
+            "policy": {
+              "reserve_usd": null,
+              "fraction": null,
+              "cap_usd": null,
+              "default_fraction": 0.15,
+              "source": "default",
+              "provisional": false
+            }
+          },
+          "budget_refusals": [],
+          "review_only_recovery": {
+            "evaluated": false,
+            "recorded": false,
+            "note": "no review-only continuation was recorded or requested for this work \u2014 absent, stated, never silently zero"
+          },
+          "recorded_recovery_events": []
+        },
+        "905194f0": {
+          "cap_usd": 2.0,
+          "currency": "usd",
+          "closing_budget": {
+            "schema": "forge.usage.ingestion/1",
+            "cap_usd": 2.0,
+            "closing_reserve_usd": 0.3,
+            "coder_ceiling_usd": 1.7,
+            "exact_usd": 0.350424,
+            "known_subtotal_usd": 0.350424,
+            "lower_bound_usd": 0.0,
+            "reserved_liability_usd": 0.0,
+            "unknown_intervals": 0,
+            "closing_review_fits": true,
+            "reserve_intact": true,
+            "closing_reserve": 0.3,
+            "unresolved_upper_bound": 0,
+            "phase_exhaustion": false,
+            "requires_bounded_policy": false,
+            "cap_check": {
+              "schema": "forge.usage.ingestion/1",
+              "allowed": true,
+              "cap_usd": 2.0,
+              "projection_usd": 0.0,
+              "known_spend": 0.350424,
+              "unknown_lower_bound": 0.0,
+              "reserved_liability": 0.0,
+              "unknown_intervals": 0,
+              "unbounded_intervals": 0,
+              "requires_bounded_policy": false,
+              "reserved_usd": 0.350424,
+              "known_cost_usd": 0.350424,
+              "headroom_usd": 1.649576,
+              "notes": [
+                "hard cap consults known_spend + reserved_liability + projection (a lower bound can never bound spend from above \u2014 Q39-06/P03)"
+              ]
+            },
+            "policy": {
+              "reserve_usd": null,
+              "fraction": null,
+              "cap_usd": null,
+              "default_fraction": 0.15,
+              "source": "default",
+              "provisional": false
+            }
+          },
+          "budget_refusals": [],
+          "review_only_recovery": {
+            "evaluated": false,
+            "recorded": false,
+            "note": "no review-only continuation was recorded or requested for this work \u2014 absent, stated, never silently zero"
+          },
+          "recorded_recovery_events": []
+        },
+        "ca78cda2": {
+          "cap_usd": 2.0,
+          "currency": "usd",
+          "closing_budget": {
+            "schema": "forge.usage.ingestion/1",
+            "cap_usd": 2.0,
+            "closing_reserve_usd": 0.3,
+            "coder_ceiling_usd": 1.7,
+            "exact_usd": 0.235371,
+            "known_subtotal_usd": 0.235371,
+            "lower_bound_usd": 0.0,
+            "reserved_liability_usd": 0.0,
+            "unknown_intervals": 0,
+            "closing_review_fits": true,
+            "reserve_intact": true,
+            "closing_reserve": 0.3,
+            "unresolved_upper_bound": 0,
+            "phase_exhaustion": false,
+            "requires_bounded_policy": false,
+            "cap_check": {
+              "schema": "forge.usage.ingestion/1",
+              "allowed": true,
+              "cap_usd": 2.0,
+              "projection_usd": 0.0,
+              "known_spend": 0.235371,
+              "unknown_lower_bound": 0.0,
+              "reserved_liability": 0.0,
+              "unknown_intervals": 0,
+              "unbounded_intervals": 0,
+              "requires_bounded_policy": false,
+              "reserved_usd": 0.235371,
+              "known_cost_usd": 0.235371,
+              "headroom_usd": 1.764629,
+              "notes": [
+                "hard cap consults known_spend + reserved_liability + projection (a lower bound can never bound spend from above \u2014 Q39-06/P03)"
+              ]
+            },
+            "policy": {
+              "reserve_usd": null,
+              "fraction": null,
+              "cap_usd": null,
+              "default_fraction": 0.15,
+              "source": "default",
+              "provisional": false
+            }
+          },
+          "budget_refusals": [],
+          "review_only_recovery": {
+            "evaluated": false,
+            "recorded": false,
+            "note": "no review-only continuation was recorded or requested for this work \u2014 absent, stated, never silently zero"
+          },
+          "recorded_recovery_events": []
+        }
+      },
+      "human_decision_points": {
+        "60b9de7f": null,
+        "905194f0": null,
+        "ca78cda2": null
+      },
+      "notes": [
+        "no work carries a closed human decision \u2014 accepted measures are undefined, never zero; every work's all-attempt totals and coverage stand beside them",
+        "the human decision point is labelled per work \u2014 a pending draft MR is a REAL state: the work stays out of the accepted population and its per-accepted economics stay undefined, never zero",
+        "time measures are separate quantities over their own recorded windows \u2014 never unmatched output divided by unmatched durations",
+        "work 60b9de7f: no human decision record \u2014 the decision point stays unknown, the work never enters the accepted population",
+        "work 905194f0: no human decision record \u2014 the decision point stays unknown, the work never enters the accepted population",
+        "work ca78cda2: no human decision record \u2014 the decision point stays unknown, the work never enters the accepted population"
+      ],
+      "observability": {
+        "delivery.accepted_all_attempt_cost": {},
+        "delivery.programme_cost_per_accepted": {
+          "provider_reported_usd": null,
+          "price_card_estimate_usd": null,
+          "billing_reconciliation_usd": null
+        },
+        "cost.coverage": 0.8,
+        "delivery.human_minutes": null,
+        "budget.closing_reserve": {
+          "60b9de7f": 0.3,
+          "905194f0": 0.3,
+          "ca78cda2": 0.3
+        },
+        "budget.phase_exhaustion": {
+          "60b9de7f": false,
+          "905194f0": false,
+          "ca78cda2": false
+        },
+        "delivery.review_only_recovery": {
+          "60b9de7f": {
+            "evaluated": false,
+            "allowed": null,
+            "coder_dispatches": null
+          },
+          "905194f0": {
+            "evaluated": false,
+            "allowed": null,
+            "coder_dispatches": null
+          },
+          "ca78cda2": {
+            "evaluated": false,
+            "allowed": null,
+            "coder_dispatches": null
+          }
+        }
+      }
+    }
+  }
+}

@@ -44,7 +44,14 @@ Two routes, both mounted unconditionally and FAIL-CLOSED (the
   leaves. The registry's fail-closed checks re-run against the WORK's
   own canonical subject; a revoked binding, a rotated-away ref, a
   foreign ref or a superseded generation each refuse with 403 and zero
-  successful retrievals.
+  successful retrievals. Since Q39-01 (#320) the request is authorized
+  against the attempt's persisted **operation grant** — the exact ref +
+  route THIS attempt's dispatch authorized, an absolute redemption
+  deadline fixed at dispatch (never ``now + TTL`` per request), and a
+  terminal attempt or a sibling binding of the same project refuse
+  typed with ZERO broker calls; authority is re-validated across the
+  awaited broker resolution (a cancel/rotation during the await never
+  emits under retired authority).
 
 Auth is a lane token: ``HMAC-SHA256(secret, work_id)`` under the
 server-side ``FORGE_LANE_CONTROL_SECRET``, injected into the lane job
@@ -134,6 +141,7 @@ __all__ = [
     "lane_control_token",
     "legacy_token_deadline",
     "legacy_token_start",
+    "persist_operation_grant",
     "redemption_ttl_seconds",
     "resolve_legacy_window",
     "verify_lane_token",
@@ -1061,25 +1069,182 @@ async def _record_redemption_audit(
 ) -> None:
     """Persist the redemption audit row BEFORE the value is returned.
 
-    The audit appends to the run's durable evidence under
-    ``credential_redemptions`` — refs and metadata ONLY (redemption id,
-    binding revision, resolver identity, attempt generation, expiry);
-    there is no value slot and no value digest. A failed audit write
-    REFUSES the redemption (the broker-audit doctrine: every redemption
-    is centrally auditable or it does not happen).
+    Q39-03 (#322): the audit lands in the APPEND-ONLY
+    ``credential_redemptions`` ledger — refs and metadata ONLY
+    (redemption id, grant id, binding revision, resolver identity,
+    attempt generation, expiry); there is no value slot and no value
+    digest. The bounded ``credential_redemptions`` evidence list becomes
+    a VERSIONED PROJECTION of that ledger, rewritten through an
+    optimistic compare-and-swap that re-reads on conflict — a concurrent
+    native-handle / checkpoint / continuation / grant write between the
+    projection's read and write is PRESERVED, never lost to the audit
+    (the old whole-document overwrite was exactly that loss). A failed
+    audit write REFUSES the redemption (the broker-audit doctrine: every
+    redemption is centrally auditable or it does not happen); a
+    re-delivered receipt id is a counted retry observation on the SAME
+    logical row, never a second redemption.
     """
+    from forge.adaptive.credential_audit import RedemptionReceipt, record_redemption
+
+    try:
+        await record_redemption(session_factory, RedemptionReceipt.from_audit_entry(work_id, entry))
+    except LaneAuthorityUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — ANY audit failure refuses the
+        # redemption (typed conflict, malformed receipt, projection loss or
+        # an unreachable ledger): centrally auditable or it does not happen.
+        logger.warning("redemption audit for work %s failed", work_id[:8], exc_info=True)
+        raise LaneAuthorityUnavailable(
+            f"the redemption audit could not be persisted ({exc.__class__.__name__})"
+        ) from exc
+
+
+async def persist_operation_grant(session_factory: Any, *, grant: Any) -> Any:
+    """Persist the dispatch's operation grant into the run evidence
+    (Q39-01/#320) — idempotently, BEFORE the provider call.
+
+    The grant lives under ``credential_operation_grants`` keyed by
+    attempt+route; :func:`forge.adaptive.credential_broker.
+    merge_operation_grant` keeps the EXISTING document when this
+    attempt+route already authorized the SAME ref (a re-dispatch neither
+    widens nor re-anchors the redemption window), so the returned
+    EFFECTIVE grant is the one a redemption under this attempt will
+    load. Raises :class:`LaneAuthorityUnavailable` when the run row
+    cannot be read or written — the dispatch caller parks the run: a
+    lane must never boot able to dial a redemption endpoint that would
+    refuse it for a grant nobody persisted.
+    """
+    from forge.adaptive.credential_broker import merge_operation_grant
     from forge.durable.models import FlowRun
 
     async with session_factory() as session:
-        run = await session.get(FlowRun, work_id)
+        run = await session.get(FlowRun, grant.work_id)
         if run is None:
-            raise LaneAuthorityUnavailable(f"work {work_id!r} disappeared before the audit write")
-        evidence = dict(run.evidence or {})
-        redemptions = list(evidence.get("credential_redemptions") or [])
-        redemptions.append(dict(entry))
-        evidence["credential_redemptions"] = redemptions[-50:]  # bounded audit trail
-        run.evidence = evidence
+            raise LaneAuthorityUnavailable(
+                f"work {grant.work_id!r} is unknown — the operation grant cannot be persisted"
+            )
+        merged, effective = merge_operation_grant(dict(run.evidence or {}), grant)
+        run.evidence = merged
         await session.commit()
+        return effective
+
+
+def _redemption_refusal(reason: str, detail: str, *, work_id: str = "") -> HTTPException:
+    """One typed redemption refusal (Q39-01) — the observability seam
+    (``credential.redemption_refused{reason}``) and the 403 the lane
+    sees, carrying refs ONLY, never a value."""
+    logger.warning(
+        "credential.redemption_refused reason=%s work=%s %s", reason, work_id[:8], detail
+    )
+    return HTTPException(status_code=403, detail=f"{reason}: {detail}")
+
+
+def _run_is_terminal(status: Any) -> bool:
+    """Whether the run's status is terminal (ADR-0004: no outgoing
+    transitions) — a finished attempt redeems nothing (Q39-01)."""
+    from forge.durable.controller import TERMINAL_STATUSES
+
+    return str(status or "") in {member.value for member in TERMINAL_STATUSES}
+
+
+async def _authorize_operation_grant(
+    run: Any,
+    *,
+    work_id: str,
+    generation: int | None,
+    provider: str,
+    credential_ref: str,
+) -> Any:
+    """Load and judge the attempt's persisted OPERATION GRANT (Q39-01).
+
+    THE authorization decision, in fail-closed order, every arm ZERO
+    broker calls:
+
+    - ``attempt_terminal`` — the run reached a terminal status; a
+      finished attempt redeems nothing, no matter what it holds;
+    - ``grant_route_mismatch`` — the attempt holds grants, but none for
+      the REQUESTED provider route: the sibling binding of the same
+      project is exactly the confused-deputy shape this closes (project
+      membership ≠ operation authorization);
+    - ``grant_ref_mismatch`` — the route matches but the requested ref
+      is not the grant's EXACT ref;
+    - ``grant_absent_native_only`` — this attempt's dispatch selected a
+      NATIVE delivery mode: redemption was never authorized for it, and
+      a registry entry alone grants nothing;
+    - ``grant_absent_legacy`` — no grant and no delivery plan for the
+      attempt: an unbound/legacy run (the credential policy in force is
+      named in the refusal — under ``compat`` this is the labeled
+      ambient-legacy boundary, under ``strict-broker`` a configuration
+      defect; either way THIS endpoint authorizes nothing without a
+      grant);
+    - ``grant_expired`` — the request is at/past the grant's ABSOLUTE
+      deadline (a fixed instant persisted at dispatch authorization —
+      frozen across requests and restarts alike, never re-derived).
+
+    Returns the surviving grant; raises the typed 403 otherwise.
+    """
+    from forge.adaptive.credential_broker import (
+        DELIVERY_MODE_RUNNER_REDEMPTION,
+        attempt_delivery_mode,
+        operation_grants_for_attempt,
+    )
+
+    evidence = dict(run.evidence or {})
+    grants = operation_grants_for_attempt(evidence, generation)
+    if not grants:
+        mode = attempt_delivery_mode(evidence, generation)
+        if mode and mode != DELIVERY_MODE_RUNNER_REDEMPTION:
+            raise _redemption_refusal(
+                "grant_absent_native_only",
+                (
+                    f"this attempt's dispatch selected the {mode} delivery mode — "
+                    "no runner-time redemption was authorized for it; a project "
+                    "registry entry alone is not an operation grant"
+                ),
+                work_id=work_id,
+            )
+        raise _redemption_refusal(
+            "grant_absent_legacy",
+            (
+                "this attempt carries no operation grant (an unbound or pre-grant "
+                "legacy dispatch) — no credential is redeemed without the grant "
+                "its dispatch persisted"
+            ),
+            work_id=work_id,
+        )
+    matching = [grant for grant in grants if grant.provider == provider]
+    if not matching:
+        granted = ", ".join(sorted(grant.provider for grant in grants))
+        raise _redemption_refusal(
+            "grant_route_mismatch",
+            (
+                f"the requested provider route {provider!r} is not this attempt's "
+                f"authorized route (granted: {granted}) — a sibling binding of "
+                "the same project is not an authorization for THIS operation"
+            ),
+            work_id=work_id,
+        )
+    grant = matching[0]
+    if grant.credential_ref != credential_ref:
+        raise _redemption_refusal(
+            "grant_ref_mismatch",
+            (
+                "the requested credential ref is not the exact ref this attempt's "
+                f"grant authorized (granted route {grant.provider!r})"
+            ),
+            work_id=work_id,
+        )
+    if grant.expired_at(datetime.now(timezone.utc)):
+        raise _redemption_refusal(
+            "grant_expired",
+            (
+                "the attempt's operation grant expired at its absolute deadline "
+                f"{grant.redemption_deadline.isoformat()} — the deadline was fixed "
+                "at dispatch authorization and never re-derives"
+            ),
+            work_id=work_id,
+        )
+    return grant
 
 
 @lane_control_router.get(LANE_CREDENTIAL_REDEEM_ROUTE)
@@ -1090,21 +1255,38 @@ async def redeem_lane_credential(
     provider: str = Query(min_length=1),
     authorization: str | None = Header(None),
 ) -> Any:
-    """Redeem THIS attempt's model credential (R38-02 delivery profile b).
+    """Redeem THIS attempt's model credential (R38-02 profile b, Q39-01).
 
     Auth is the EXISTING attempt-scoped lane token — the same
     ``HMAC(secret, work_id:generation)`` the dispatch minted for this
     attempt (the ladder :func:`authorize_work_credential` owns: 503 no
     secret, 401 no bearer, 403 wrong work / superseded generation, 503
-    authority outage). The redemption then re-runs the registry's
-    fail-closed checks against the WORK's OWN canonical subject — the
-    requested ref must be the subject's live binding for the provider
-    route (a revoked binding, a rotated-away ref, a foreign ref or a
-    changed reference from an old attempt each refuse with zero
-    successful retrievals) — resolves the value through the broker, and
-    answers over the authenticated channel with the value plus the
-    consumer receipt fields, TTL-bounded to the attempt. The audit row
-    (no value) is durable BEFORE the value leaves.
+    authority outage). The redemption is then authorized against the
+    attempt's persisted **operation grant**
+    (:func:`_authorize_operation_grant`): the requested route and ref
+    must EQUAL the grant's, the run must not be terminal, and the
+    grant's ABSOLUTE deadline (fixed at dispatch authorization, frozen
+    across requests and restarts) must not have passed — a sibling
+    binding of the same project, a native-only dispatch, an unbound
+    legacy run and an expired window each refuse typed with ZERO broker
+    calls. The registry's fail-closed checks re-run against the WORK's
+    OWN canonical subject (a revoked binding or a rotated-away ref
+    refuses as ever); the broker resolves; and AUTHORITY IS RE-VALIDATED
+    after the awaited resolution and before the response publishes — a
+    cancellation, supersede, rotation or expiry that lands during the
+    await refuses typed, never emitting a value under retired authority.
+
+    The lost-response retry window is the grant's own lifetime: a
+    repeated request under the SAME grant inside the deadline is
+    idempotent (the audit trail records separate observations, the
+    receipts all join on the same ``grant_id``); past the deadline the
+    grant is expired, absolutely.
+
+    NOTE (Q39-01): the HMAC lane token stays THE authentication for this
+    fix; a workload-OIDC ``id_token`` (Free-tier GitLab CE documented)
+    is a LATER authentication ADAPTER that must still present this same
+    operation grant — authentication may change bearer, authorization
+    never widens.
     """
     import uuid
 
@@ -1140,12 +1322,28 @@ async def redeem_lane_credential(
         run = await session.get(FlowRun, work_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"unknown work {work_id!r}")
+    if _run_is_terminal(run.status):
+        raise _redemption_refusal(
+            "attempt_terminal",
+            (
+                "the run reached a terminal status — a finished attempt redeems "
+                "nothing and refreshes no window"
+            ),
+            work_id=work_id,
+        )
     subject = binding_subject_of_run(run)
     if subject is None:
         raise HTTPException(
             status_code=403,
             detail="the work names no credential binding subject — no credential is redeemed",
         )
+    grant = await _authorize_operation_grant(
+        run,
+        work_id=work_id,
+        generation=generation,
+        provider=provider,
+        credential_ref=credential_ref,
+    )
     registry = getattr(request.app.state, "credential_registry", None) or registry_from_env()
     broker = getattr(request.app.state, "credential_broker", None) or EnvBroker()
     try:
@@ -1153,11 +1351,12 @@ async def redeem_lane_credential(
             registry, subject=subject, provider=provider, presented_ref=credential_ref
         )
         resolved = await broker.resolve(
-            dispatch_credential.credential_ref,
+            grant.credential_ref,
             grant={
                 "work_id": work_id,
                 "attempt_generation": generation,
                 "operation": "credential-redemption",
+                "grant_id": grant.grant_id,
             },
         )
         staged_keys = set(resolved.staged_env)
@@ -1177,19 +1376,85 @@ async def redeem_lane_credential(
         logger.warning("credential redemption for work %s refused (%s)", work_id[:8], exc.reason)
         raise HTTPException(status_code=403, detail=f"{exc.reason}: {exc.detail}") from exc
 
+    # Q39-01 — THE AUTHORITY FENCE across the awaited broker resolution:
+    # the grant, the run's state and the binding are re-loaded AFTER the
+    # broker answers and BEFORE anything publishes. A cancellation, a
+    # superseding generation, a rotation or an expiry that landed during
+    # the await refuses typed here — no value is emitted (and no audit
+    # row pretends one was) under retired authority.
+    async with session_factory() as session:
+        fresh = await session.get(FlowRun, work_id)
+    if fresh is None:
+        raise LaneAuthorityUnavailable(f"work {work_id!r} disappeared during resolution")
+    fence_refusals: HTTPException | None = None
+    try:
+        if _run_is_terminal(fresh.status):
+            raise CredentialRefusal(
+                "attempt_terminal",
+                {
+                    "fence": "authority retired during the broker resolution",
+                    "status": str(fresh.status or ""),
+                },
+            )
+        if int(fresh.cancellation_generation or 0) != int(grant.attempt_generation):
+            raise CredentialRefusal(
+                "attempt_superseded",
+                {
+                    "fence": "the attempt generation moved during the broker resolution",
+                    "grant_generation": grant.attempt_generation,
+                    "current_generation": int(fresh.cancellation_generation or 0),
+                },
+            )
+        if grant.expired_at(datetime.now(timezone.utc)):
+            raise CredentialRefusal(
+                "grant_expired",
+                {
+                    "fence": "the grant's absolute deadline passed during the broker resolution",
+                    "redemption_deadline": grant.redemption_deadline.isoformat(),
+                },
+            )
+        # The binding, too: a rotation/revocation that landed while the
+        # broker was resolving refuses exactly as it would have before.
+        resolve_dispatch_credential(
+            registry, subject=subject, provider=provider, presented_ref=grant.credential_ref
+        )
+    except CredentialRefusal as exc:
+        logger.warning(
+            "credential.redemption_refused reason=%s work=%s the authority fence refused "
+            "after the broker resolved (no value was emitted)",
+            exc.reason,
+            work_id[:8],
+        )
+        fence_refusals = HTTPException(status_code=403, detail=f"{exc.reason}: {exc.detail}")
+    if fence_refusals is not None:
+        raise fence_refusals
+
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=ttl)
+    # The response's expiry is the redemption TTL CAPPED at the grant's
+    # absolute deadline: the value is never presented as current beyond
+    # the authorization window that produced it (Q39-01 — the TTL alone
+    # was response metadata, not a bound).
+    expires_at = min(now + timedelta(seconds=ttl), grant.redemption_deadline)
     redemption_id = uuid.uuid4().hex
     # R38-04 (#305) — the consumer-receipt correlation join, durable in
     # the audit row BEFORE the value leaves: the broker's own receipt id,
     # the resolved version's KIND (a presence stamp displays as one) and
-    # the credential policy in force. Refs/metadata only, as ever.
+    # the credential policy in force. Q39-01 (#320) adds the GRANT id —
+    # the foreign key into the operation grant (and #Q39-03's receipt
+    # store when it lands) — plus the grant's age for observability.
+    # Refs/metadata only, as ever.
     broker_receipt_id = str(resolved.receipt.get("receipt_id") or "")
     resolved_version_kind = str(resolved.version_kind or "")
     policy = credential_policy()
+    prior_under_grant = sum(
+        1
+        for row in (run.evidence or {}).get("credential_redemptions") or []
+        if isinstance(row, dict) and row.get("grant_id") == grant.grant_id
+    )
     audit = {
         "at": now.isoformat(),
         "redemption_id": redemption_id,
+        "grant_id": grant.grant_id,
         "subject": dispatch_credential.subject,
         "provider": dispatch_credential.provider,
         "credential_ref": dispatch_credential.credential_ref,
@@ -1200,6 +1465,11 @@ async def redeem_lane_credential(
         "broker_receipt_id": broker_receipt_id,
         "resolved_version_kind": resolved_version_kind,
         "credential_policy": policy,
+        # The lost-response retry observation: a repeated request under
+        # the SAME grant is idempotent — this counts the earlier
+        # observations under it (0 on the first).
+        "grant_retry_observation": prior_under_grant,
+        "grant_age_seconds": max(0, int((now - grant.created_at).total_seconds())),
     }
     try:
         await _record_redemption_audit(session_factory, work_id, audit)
@@ -1211,6 +1481,7 @@ async def redeem_lane_credential(
         ) from exc
     return {
         "redemption_id": redemption_id,
+        "grant_id": grant.grant_id,
         "work_id": work_id,
         "provider": dispatch_credential.provider,
         "credential_ref": dispatch_credential.credential_ref,
@@ -1222,7 +1493,8 @@ async def redeem_lane_credential(
         "resolved_version": resolved.version,
         # The consumer-receipt correlation fields (R38-04): the lane's
         # bootstrap echoes these into its value-free consumer receipt,
-        # joining broker id ↔ redemption id ↔ attempt ↔ consumer.
+        # joining broker id ↔ redemption id ↔ attempt ↔ consumer — and,
+        # since Q39-01, the grant id every join keys on.
         "broker_receipt_id": broker_receipt_id,
         "resolved_version_kind": resolved_version_kind,
         "attempt_generation": generation,

@@ -1,4 +1,4 @@
-"""R38-05 (#306) — qualify useful-WIP cross-runner continuation, live.
+"""R38-05 (#306) + Q39-07 (#326) — qualify useful-WIP cross-runner continuation, live.
 
 The R37-08 (#289) interrupted arm paused BEFORE file edits existed
 (checkpoint ``files=0`` after a ~5 s blind pause), so the resumed real-model
@@ -44,6 +44,18 @@ evidence — never overwritten.
 Phases are resumable; the evidence bundle on disk is the state. Default
 mode for every phase is a REFUSAL on any precondition failure — a failure
 is recorded honestly, never retried into a green.
+
+Q39-07 (#326) — the v2 legs on the NEW composition (this cycle's
+#320/#321/#325 machinery): the interrupted arm stops after the honest
+blocked classification; a MATERIAL revision is staged through the app's
+own ``stage_pending_revision`` and approved NATIVELY (``/approve-revision``
+through the real ingress); the resumed dispatch carries the revision-2
+TEXT (the #321 ``ApprovedInput`` rebind — proven three ways: the persisted
+``evidence.approved_input`` document, the worker journal's envelope
+digest, and the candidate's own content); and the CLOSING REVIEW completes
+within the #325 closing reserve so the run ends ``ready_for_human`` — or
+the precise non-ready state, recorded honestly. Record schema
+``forge.useful-wip-resume/2`` adds the revision + review identities.
 """
 
 from __future__ import annotations
@@ -87,6 +99,15 @@ TEMPLATE_SOURCE = REPO_ROOT / "ci" / "templates" / "claude-sdk-lane.gitlab-ci.ym
 #: carries the R36 generation-aware collector (``--require-generation``)
 #: and the R37-07 dispatch envelope the shipped template drives.
 LANE_REF_SHA = "59ba869a312e9c13c120b82034b90f669a894ce6"
+
+#: The v2 lane install pin (Q39-07/#326): the NEWEST sha pushed to origin
+#: (main at ``6df4020`` — the v0.38.0 evidence archive). The v2
+#: composition's CONTROL PLANE is the working-tree build (the alignment
+#: image carries this cycle's uncommitted #320/#321/#325 code); the lane
+#: installs from a pushed sha because the working tree is never pushed
+#: (no commit, no merge) — the two identities are bound separately,
+#: never merged into one ambiguous version (the R38-06 discipline).
+LANE_REF_SHA_V2 = "6df4020f8f1ff233d65082788a3632c0e4cd38d3"
 
 #: The R37-08 empty-WIP trace — SUPERSEDED NEGATIVE EVIDENCE, referenced
 #: verbatim, never overwritten by this run.
@@ -154,6 +175,11 @@ _DRIVER_PHASE_MARKERS: tuple[str, ...] = (
 
 MANIFEST_SCHEMA = "forge.wip.manifest/2"
 RECORD_SCHEMA = "forge.useful-wip-resume/1"
+#: The v2 record (Q39-07/#326): the #306 identities PLUS the revision
+#: leg (the decision id, the revision-2 digest, the activation, the
+#: approved-input digest) and the closing-review outcome (the state #306
+#: never reached — reviewed-ready, or the precise non-ready).
+RECORD_SCHEMA_V2 = "forge.useful-wip-resume/2"
 
 #: The per-token price class of the lane route (glm-5.3-flash through the
 #: customer gateway) — ONLY used to FLAG spend when the SDK receipt
@@ -452,11 +478,25 @@ def read_works_index(store_root: Path, work_id: str) -> dict[str, Any] | None:
 
 
 def latest_checkpoint_entry(index: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The works index's highest-sequence checkpoint entry, or None."""
+    """The works index's highest-sequence checkpoint entry, or None.
+
+    LIVE-found (v2 rung-2): a resumed lane's pause drain can land a NEW
+    checkpoint at the SAME sequence the restored one carried (both ``0``
+    on this trace) — the tie breaks by ``uploaded_at`` and finally by
+    list position, so the LATEST observation always wins and the
+    newer-than predicate stays monotonic.
+    """
     entries = [dict(e) for e in (index.get("checkpoints") or []) if isinstance(e, Mapping)]
     if not entries:
         return None
-    return max(entries, key=lambda e: int(e.get("sequence") or 0))
+    return max(
+        enumerate(entries),
+        key=lambda pair: (
+            int(pair[1].get("sequence") or 0),
+            str(pair[1].get("uploaded_at") or ""),
+            pair[0],
+        ),
+    )[1]
 
 
 def manifest_path(store_root: Path, checkpoint_id: str) -> Path:
@@ -626,6 +666,21 @@ REQUIRED_IDENTITIES = (
     "mr.url",
 )
 
+#: The v2 additions (issue #326's list): the revision leg's identities,
+#: the approved-input digest, the consumed-brief proof and the
+#: closing-review outcome + budget evidence.
+REQUIRED_IDENTITIES_V2 = REQUIRED_IDENTITIES + (
+    "revision.decision_id",
+    "revision.plan_digest",
+    "revision.activated_by_decision",
+    "revision.preserved_checkpoint_id",
+    "revision.approved_input_digest",
+    "revision.plan_text_carries_marker",
+    "review.status",
+    "review.verdict",
+    "review.reviewed_sha",
+)
+
 
 def _dig(document: Mapping[str, Any], dotted: str) -> Any:
     node: Any = document
@@ -639,11 +694,14 @@ def _dig(document: Mapping[str, Any], dotted: str) -> Any:
 def validate_record(record: Mapping[str, Any]) -> list[str]:
     """Findings, never exceptions: an empty list is a valid record."""
     findings: list[str] = []
-    if record.get("schema") != RECORD_SCHEMA:
-        findings.append(f"schema is {record.get('schema')!r}, expected {RECORD_SCHEMA}")
+    schema = record.get("schema")
+    if schema not in (RECORD_SCHEMA, RECORD_SCHEMA_V2):
+        findings.append(f"schema is {schema!r}, expected {RECORD_SCHEMA!r} or {RECORD_SCHEMA_V2!r}")
+    v2 = schema == RECORD_SCHEMA_V2
     outcome = record.get("outcome")
-    if outcome == "useful-wip-continued":
-        for field in REQUIRED_IDENTITIES:
+    if outcome in ("useful-wip-continued", "reviewed-ready"):
+        identities = REQUIRED_IDENTITIES_V2 if v2 else REQUIRED_IDENTITIES
+        for field in identities:
             if _dig(record, field) in (None, ""):
                 findings.append(f"missing identity: {field}")
         spend = record.get("spend") or {}
@@ -670,11 +728,74 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
         checkpoint_shapes = _dig(record, "useful_checkpoint.shape_coverage") or {}
         if not checkpoint_shapes:
             findings.append("useful_checkpoint.shape_coverage missing")
+        if v2:
+            # the #321 rebind proof: the persisted approved-input document
+            # must be revision-bound (source: revision), its plan TEXT must
+            # carry the material marker, the executor-input digest must
+            # exist beside it (a DIFFERENT digest over the dispatch identity
+            # — plan_text_digest and executor_input_digest hash different
+            # material and are never equal), the dispatch must have bound
+            # the ACTIVE revision's digest, and the candidate itself must
+            # show the marker (the executor obeyed the NEW brief — no
+            # rescue steer).
+            revision = record.get("revision") or {}
+            if revision.get("source") != "revision":
+                findings.append(
+                    f"revision.source is {revision.get('source')!r} — the resumed brief must "
+                    "be bound to the ACTIVE revision (#321)"
+                )
+            for field in ("revision.approved_input_digest", "revision.executor_input_digest"):
+                if _dig(record, field) in (None, ""):
+                    findings.append(f"missing identity: {field}")
+            if (
+                revision.get("run_plan_digest_at_resume")
+                and revision.get("plan_digest")
+                and revision.get("run_plan_digest_at_resume") != revision.get("plan_digest")
+            ):
+                findings.append(
+                    "revision.run_plan_digest_at_resume != revision.plan_digest — the "
+                    "dispatch did not bind the ACTIVE revision's digest"
+                )
+            if revision.get("plan_text_carries_marker") is not True:
+                findings.append(
+                    "revision.plan_text_carries_marker is not True — the approved-input TEXT "
+                    "does not carry the material revision marker"
+                )
+            if revision.get("marker_in_candidate") is False:
+                findings.append(
+                    "the final candidate does not carry the revision marker — the resumed "
+                    "executor did not obey the revision-2 brief (a rescue steer would be "
+                    "required; none exists)"
+                )
+            review = record.get("review") or {}
+            if outcome == "reviewed-ready":
+                if review.get("status") != "ready_for_human":
+                    findings.append(
+                        f"review.status {review.get('status')!r} is not ready_for_human"
+                    )
+                if not review.get("verdict"):
+                    findings.append("review.verdict missing — reviewed-ready demands one")
+                if review.get("reviewed_sha") != _dig(record, "oracle.candidate_sha"):
+                    findings.append(
+                        "review.reviewed_sha is not the verified candidate sha (ADR-0008)"
+                    )
+                if review.get("mr_still_draft") is False:
+                    findings.append("the MR left its Draft state — a human decides, never the run")
+            if review.get("review_budget_block") is None and outcome == "reviewed-ready":
+                # the reserve EVIDENCE is part of the reviewed-ready claim
+                # only when a budget decision existed at all; a review that
+                # never hit the guard records `closing_reserve_usd` instead
+                if review.get("closing_reserve_usd") in (None, ""):
+                    findings.append(
+                        "review carries neither a review_budget_block nor a visible closing "
+                        "reserve — the #325 evidence is mandatory"
+                    )
     elif outcome in (
         "empty-wip-exhausted",
         "restore-failed",
         "model-no-op",
         "resumed-turn-failed",
+        "review-non-ready",
         "refused",
     ):
         if not record.get("failures"):
@@ -827,9 +948,15 @@ class Bundle:
 
 
 def phase_setup(bundle: Bundle, gitlab: GitLab, name: str, settings: Settings) -> int:
+    return _phase_setup_lane(bundle, gitlab, name, settings, LANE_REF_SHA_V2)
+
+
+def _phase_setup_lane(
+    bundle: Bundle, gitlab: GitLab, name: str, settings: Settings, lane_ref: str
+) -> int:
     record = bundle.phase("setup")
     if record.get("project", {}).get("id") is None:
-        _create_project_and_seed(bundle, gitlab, name)
+        _create_project_and_seed(bundle, gitlab, name, lane_ref)
     _ensure_bot_member(bundle, gitlab, settings)
     if record.get("labels_created"):
         print("setup: complete (resumed)")
@@ -846,7 +973,9 @@ def phase_setup(bundle: Bundle, gitlab: GitLab, name: str, settings: Settings) -
     return 0
 
 
-def _create_project_and_seed(bundle: Bundle, gitlab: GitLab, name: str) -> None:
+def _create_project_and_seed(
+    bundle: Bundle, gitlab: GitLab, name: str, lane_ref: str = LANE_REF_SHA_V2
+) -> None:
     who = gitlab.get("/user")
     created = gitlab.post(
         "/projects",
@@ -912,7 +1041,7 @@ def _create_project_and_seed(bundle: Bundle, gitlab: GitLab, name: str) -> None:
             raise Refused(f"variable {key} copy failed: {response.text[:200]}")
         copied.append(key)
     for key, value in (
-        ("FORGE_LANE_REF", LANE_REF_SHA),  # immutable lane identity (collector-capable)
+        ("FORGE_LANE_REF", lane_ref),  # immutable lane identity (collector-capable)
         ("FORGE_STEERING_ENABLED", "1"),  # the lane-side pause consumer
     ):
         response = gitlab.post(
@@ -921,6 +1050,7 @@ def _create_project_and_seed(bundle: Bundle, gitlab: GitLab, name: str) -> None:
         if response.status_code not in (201, 200):
             raise Refused(f"variable {key} set failed: {response.text[:200]}")
         copied.append(f"{key}={value[:12]}…")
+    bundle.record("setup", "lane_ref", lane_ref)
     bundle.record("setup", "variables", copied)
 
     lab_hooks = gitlab.get("/projects/68/hooks")
@@ -1461,6 +1591,34 @@ def phase_interrupt(bundle: Bundle, gitlab: GitLab) -> int:
         if sampled.get("checkpoint_id"):
             previous_checkpoint_id = str(sampled["checkpoint_id"])
 
+    # RE-ENTRY ADOPTION (LIVE-found, v2 rung-2): a driver restart after a
+    # waiter timeout can sit beside an ALREADY-LANDED useful checkpoint
+    # (its pause landed; the sample poll was the thing that died). The
+    # ladder's purpose is to OBSERVE useful WIP — a newer files>0 entry in
+    # the works index IS that observation; re-sampling it through another
+    # paid dispatch would buy nothing. Adopted, labelled, never re-paused.
+    if useful_checkpoint is None and arc:
+        adopted = _newer_checkpoint(arc["run_id"], previous_checkpoint_id)
+        if adopted is not None and useful_wip(adopted):
+            ladder.append(
+                {
+                    "rung": f"reentry-adoption@{_now()}",
+                    "verdict": "useful",
+                    "adopted_on_reentry": True,
+                    "checkpoint": dict(adopted),
+                    "note": (
+                        "a driver restart found a newer files>0 checkpoint already "
+                        "landed by the previous rung's pause — adopted, no new dispatch"
+                    ),
+                }
+            )
+            useful_checkpoint = dict(adopted)
+            bundle.save()
+            print(
+                f"interrupt: RE-ENTRY ADOPTED checkpoint "
+                f"{str(adopted.get('checkpoint_id'))[:12]} files={adopted.get('files')}"
+            )
+
     while useful_checkpoint is None:
         rung_index = len(ladder)
         if rung_index >= len(rungs):
@@ -1597,6 +1755,10 @@ def phase_interrupt(bundle: Bundle, gitlab: GitLab) -> int:
         print(f"interrupt: run blocked ({blocked.get('status_reason')})")
 
     # -- the REAL resume: /retry → the second lane restores the exact WIP -----
+    # Q39-07 v2 gate: the resumed dispatch must carry the APPROVED
+    # revision-2 text (the #321 rebind) — the drill refuses to resume
+    # before the revision leg staged + activated one. A driver resuming
+    # PAST this point (a resume_dispatch already recorded) never re-gates.
     # BOUNDED legs: a resumed lane that ended failed WITHOUT a restore
     # refusal is an honest iteration point (the run is blocked again; the
     # same authorized checkpoint re-binds) — the operator may /retry once
@@ -1606,6 +1768,30 @@ def phase_interrupt(bundle: Bundle, gitlab: GitLab) -> int:
     legs_used = len(record.get("resume_legs", []))
     while True:
         if not record.get("resume_dispatch"):
+            revision_phase = bundle.document["phases"].get("revision", {})
+            if revision_phase.get("result") != "green":
+                reason = (
+                    "the v2 resume requires the approved MATERIAL revision first — run "
+                    "`revision` (stage_pending_revision + the native /approve-revision) "
+                    "so the resumed dispatch carries the revision-2 text (the #321 "
+                    "rebind); recorded, never resumed past"
+                )
+                _record_failure(bundle, reason)
+                record["result"] = "awaiting-revision"
+                bundle.save()
+                raise Refused(reason)
+            revision_record = dict(revision_phase.get("after") or {})
+            bundle.record(
+                phase,
+                "revision_at_resume",
+                {
+                    "plan_digest": revision_record.get("run_plan_digest"),
+                    "active_revision": revision_record.get("active_plan_revision"),
+                    "decision_id": revision_phase.get("staged", {}).get("decision_id"),
+                    "activated_by_decision": revision_record.get("activated_by_decision"),
+                    "reuse_route": revision_record.get("reuse_route"),
+                },
+            )
             retried = gitlab.post(
                 f"/projects/{project_id}/issues/{arc['issue_iid']}/notes",
                 json={"body": "@forge /retry"},
@@ -1759,6 +1945,547 @@ def phase_interrupt(bundle: Bundle, gitlab: GitLab) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Q39-07 (#326) — the MATERIAL revision leg: staged via the app's own
+# module, approved NATIVELY, its TEXT re-bound into the resumed dispatch
+# ---------------------------------------------------------------------------
+
+#: The observable revision-2 content effect: the operator's material
+#: addition — the new module must ALSO export its public API through
+#: ``__all__``. The issue body and the revision-1 world never mention it,
+#: so its appearance in the final candidate proves the resumed executor
+#: consumed the revision-2 BRIEF (the #321 identity → content join), not
+#: the superseded spec bytes.
+REVISION_MARKER = '__all__ = ["slugify"]'
+
+#: The revision staging program, executed INSIDE the forge-app container
+#: (the app's own code + DB — the #313/#332 disclosure pattern): revision 1
+#: becomes the durable ACTIVE plan carrying the run's REAL /go plan digest
+#: (the world the live GitLab flow froze at /go), then revision 2 — the
+#: operator's material addition, S1/S2 byte-identical so the useful WIP
+#: stays compatible — is staged PENDING through the REAL
+#: ``stage_pending_revision``. The printed JSON is the evidence.
+_STAGE_REVISION_PROGRAM = """
+import asyncio, json, os, sys
+from datetime import datetime, timezone
+
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from forge.adaptive.models import PlanRevision, PlanStep
+from forge.adaptive.revisions import (
+    ACTIVE_PLAN_KEY,
+    ActivePlanState,
+    RevisionDecision,
+    plan_digest,
+    proposed_revision_identity,
+    stage_pending_revision,
+)
+
+RUN_ID = sys.argv[1]
+DECISION_ID = sys.argv[2]
+WORK = RUN_ID
+PLAN_ID = "plan-wipv2-" + RUN_ID[:8]
+CONTRACT = sys.argv[3]
+ACTIVE_DIGEST = sys.argv[4]
+EPOCH = 1
+MARKER = '__all__ = ["slugify"]'
+
+
+def step(step_id, objective, writes=None):
+    return PlanStep(
+        step_id=step_id,
+        objective=objective,
+        write_repository_id=writes,
+        impact=["internal"],
+        acceptance_refs=["AC-1"],
+    )
+
+
+S1 = step("S1", "Inspect the repository and the frozen oracle contract.")
+S2 = step(
+    "S2",
+    "Implement the slugify helper in src/utils/text.py and rewire src/app.py "
+    "onto it; delete src/utils/legacy.py.",
+    writes="wip-v2/project",
+)
+S3 = step(
+    "S3",
+    "The operator's approved addition: src/utils/text.py must ALSO export its "
+    "public API through " + MARKER + " (the exact line, a module-level list "
+    "after the import).",
+    writes="wip-v2/project",
+)
+
+revision1 = PlanRevision(
+    plan_id=PLAN_ID, work_id=WORK, revision=1, parent_revision=None,
+    work_contract_digest=CONTRACT, snapshot_set_digest="0" * 64,
+    summary="The three-shape slugify task (revision 1 — the /go world).",
+    steps=[S1, S2],
+)
+revision2 = PlanRevision(
+    plan_id=PLAN_ID, work_id=WORK, revision=2, parent_revision=1,
+    work_contract_digest=CONTRACT, snapshot_set_digest="0" * 64,
+    summary=(
+        "MATERIAL revision 2 (the operator's approved addition): everything in "
+        "revision 1 PLUS the public-export requirement — src/utils/text.py must "
+        "define " + MARKER + " as a module-level list. S1/S2 stay byte-identical "
+        "so the preserved WIP remains compatible."
+    ),
+    steps=[S1, S2, S3],
+)
+decision = RevisionDecision(
+    decision_id=DECISION_ID, work_id=WORK, parent_revision=1,
+    proposed_revision_id=proposed_revision_identity(revision2),
+    proposed_digest=plan_digest(revision2), work_contract_digest=CONTRACT,
+    authorization_epoch=EPOCH,
+)
+current = ActivePlanState(
+    work_id=WORK, plan_id=PLAN_ID, active_revision=1,
+    work_contract_digest=CONTRACT, authorization_epoch=EPOCH, publication_epoch=1,
+)
+
+
+async def main():
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    from forge.durable import FlowRun
+    async with factory() as session:
+        run = await session.get(FlowRun, RUN_ID)
+        if run is None:
+            raise SystemExit("run_not_found")
+        spec_digest = str(run.spec_digest or "")
+        merged = dict(run.evidence or {})
+        merged[ACTIVE_PLAN_KEY] = {
+            "schema": "forge.revision.active-plan/1",
+            "work_id": WORK, "plan_id": PLAN_ID, "active_revision": 1,
+            "plan_digest": ACTIVE_DIGEST, "revised_from_digest": "",
+            "work_contract_digest": CONTRACT, "authorization_epoch": EPOCH,
+            "publication_epoch": 1, "activated_by_decision": "",
+        }
+        run.evidence = merged
+        await session.commit()
+    await stage_pending_revision(
+        factory, RUN_ID, decision, revision2, current, old=revision1
+    )
+    await engine.dispose()
+    print(json.dumps({
+        "decision_id": DECISION_ID,
+        "active_digest_seeded": ACTIVE_DIGEST,
+        "revision1_digest": plan_digest(revision1),
+        "revision2_digest": plan_digest(revision2),
+        "staged_digest": decision.proposed_digest,
+        "spec_digest": spec_digest,
+        "contract_digest": CONTRACT,
+        "revision_marker": MARKER,
+        "work_id": WORK,
+        "staged_at": datetime.now(timezone.utc).isoformat(),
+    }))
+
+
+asyncio.run(main())
+"""
+
+
+def run_row(work_id: str) -> dict[str, Any]:
+    raw = psql(
+        "SELECT row_to_json(t)::text FROM (SELECT id, status, status_reason, "
+        f"plan_digest, spec_digest, evidence FROM flow_runs WHERE id = '{work_id}') t"
+    )
+    return json.loads(raw.strip()) if raw.strip() else {}
+
+
+def phase_revision(bundle: Bundle, gitlab: GitLab) -> int:
+    """Stage + NATIVELY approve the material revision mid-run (#321 path).
+
+    Preconditions (fail-closed): the interrupted arm already holds its
+    useful checkpoint and the honest blocked classification; the run
+    carries a plan digest (the revision world's anchor). The staging runs
+    through the app's own ``stage_pending_revision`` INSIDE forge-app; the
+    approval is the native ``/approve-revision`` note through the real
+    ingress; the activation CAS must switch the durable plan digest to
+    revision 2's digest and route the checkpoint ``preserve`` (the exact
+    useful checkpoint this drill sampled).
+    """
+    phase = "revision"
+    record = bundle.phase(phase)
+    if record.get("result") == "green":
+        print("revision: already complete")
+        return 0
+    project_id = bundle.document["phases"]["setup"]["project"]["id"]
+    interrupt = bundle.document["phases"].get("interrupt", {})
+    plan = interrupt.get("plan") or {}
+    run_id = str(plan.get("run_id") or "")
+    issue_iid = interrupt.get("issue", {}).get("iid")
+    useful = interrupt.get("useful_checkpoint") or {}
+    useful_id = str(useful.get("id") or "")
+    if not run_id or issue_iid is None:
+        raise Refused("the interrupt phase has no recorded arc — run it first")
+    if not useful_id:
+        raise Refused("the interrupt phase recorded no useful checkpoint — nothing to preserve")
+    if interrupt.get("result") not in (None, "awaiting-revision"):
+        raise Refused(
+            f"the interrupt phase's result is {interrupt.get('result')!r} — the revision "
+            "leg belongs between the blocked classification and the resume"
+        )
+
+    before = run_row(run_id)
+    if not before:
+        raise Refused(f"run {run_id} is not in the durable store")
+    active_before = str(before.get("plan_digest") or "")
+    if not active_before:
+        raise Refused("the run carries no plan digest — the revision world has no anchor")
+    staged_prior = record.get("staged") if isinstance(record.get("staged"), Mapping) else None
+    already_active = bool(
+        staged_prior and active_before == str(staged_prior.get("revision2_digest"))
+    )
+    decision_id = (
+        str(staged_prior.get("decision_id")) if already_active else f"dec-wipv2-{run_id[:12]}"
+    )
+    if already_active:
+        # A previous attempt staged + NATIVELY activated revision 2 and
+        # refused only in the POST-activation verification — the CAS is
+        # consumed (one switch, one continuation); re-staging would mint a
+        # second revision. Skip to the verification below.
+        record["result"] = None
+        bundle.save()
+        staged = dict(staged_prior)
+        print(
+            "revision: activation already landed (digest "
+            f"{active_before[:12]}…) — verifying the post-activation state"
+        )
+    contract = str(before.get("spec_digest") or "c" * 64)
+    record["before"] = {
+        "run_status": before.get("status"),
+        "run_plan_digest": active_before,
+        "spec_digest": before.get("spec_digest"),
+        "useful_checkpoint": useful_id,
+    }
+    bundle.save()
+
+    if not already_active:
+        staged_raw = subprocess.run(
+            [
+                "podman",
+                "exec",
+                "forge-app",
+                "python",
+                "-c",
+                _STAGE_REVISION_PROGRAM,
+                run_id,
+                decision_id,
+                contract,
+                active_before,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if staged_raw.returncode != 0:
+            raise Refused(f"revision staging failed: {staged_raw.stderr[-500:]}")
+        staged = json.loads(staged_raw.stdout.strip().splitlines()[-1])
+        record["staged"] = staged
+        bundle.save()
+        print(
+            f"revision: staged decision {decision_id[:20]}… rev2 digest "
+            f"{staged['revision2_digest'][:12]}… (marker {staged['revision_marker']!r})"
+        )
+
+        # THE NATIVE APPROVAL through the real ingress — never a DB write.
+        approve_note = gitlab.post(
+            f"/projects/{project_id}/issues/{issue_iid}/notes",
+            json={"body": f"@forge /approve-revision {run_id} {decision_id}"},
+        )
+        if approve_note.status_code not in (201, 200):
+            raise Refused(f"/approve-revision note failed: {approve_note.text[:200]}")
+        record["approve_note"] = {"note_id": approve_note.json().get("id"), "at": _now()}
+        bundle.save()
+
+    def activated() -> dict[str, Any] | None:
+        row = run_row(run_id)
+        after = row.get("plan_digest") or ""
+        return row if after and after == staged["revision2_digest"] else None
+
+    row = poll(
+        activated, "the activation switching the durable plan digest", timeout=300, interval=5
+    )
+    evidence = row.get("evidence") or {}
+    active_plan = evidence.get("active_plan") or {}
+    reuse = evidence.get("checkpoint_reuse_decision") or {}
+    preserved = next(
+        (
+            entry.get("artifact_id")
+            for entry in reuse.get("artifacts", [])
+            if entry.get("kind") == "checkpoint" and entry.get("decision") == "preserve"
+        ),
+        "",
+    )
+    record["after"] = {
+        "run_status": row.get("status"),
+        "run_plan_digest": row.get("plan_digest"),
+        "active_plan_digest": active_plan.get("plan_digest"),
+        "active_plan_revision": active_plan.get("active_revision"),
+        "activated_by_decision": active_plan.get("activated_by_decision"),
+        "reuse_route": reuse.get("route"),
+        "reuse_route_reason": reuse.get("route_reason"),
+        "preserved_checkpoint_id": preserved,
+        "authority_active_entry": _authority_active_entry(run_id),
+    }
+    bundle.save()
+    print(
+        f"revision: ACTIVATED — digest {str(row.get('plan_digest'))[:12]}… route "
+        f"{reuse.get('route')} preserved {(preserved or 'NONE')[:12]}… "
+        f"authority entry {str(record['after']['authority_active_entry'] or 'NONE')[:12]}…"
+    )
+    if reuse.get("route") != "preserve":
+        reason = (
+            f"the activation routed the checkpoint {reuse.get('route')!r} "
+            f"({reuse.get('route_reason')}) — the useful WIP was not preserved"
+        )
+        _record_failure(bundle, reason)
+        record["result"] = "reuse-refused"
+        bundle.save()
+        raise Refused(reason)
+    # WHAT THE DISPATCH RESTORES is the checkpoint AUTHORITY's active entry
+    # (highest ``(sequence, checkpoint_id)`` — the repository protocol's own
+    # rule), not the reuse document's artifact name (the activation
+    # evaluated the evidence-pinned artifact, which on this trace named the
+    # OLDER rung-1 checkpoint). The restored checkpoint must be the USEFUL
+    # one — that is the WIP this drill qualified.
+    authority_entry = str(record["after"]["authority_active_entry"] or "")
+    if authority_entry != useful_id:
+        reason = (
+            f"the checkpoint authority's active entry is {authority_entry[:12]}… but the "
+            f"drill's useful WIP is {useful_id[:12]}… — the resumed dispatch would restore "
+            "a DIFFERENT (older) checkpoint; refusing (the reuse artifact list also names: "
+            f"{(preserved or 'NONE')[:12]}…)"
+        )
+        _record_failure(bundle, reason)
+        record["result"] = "reuse-mismatch"
+        bundle.save()
+        raise Refused(reason)
+    if preserved and preserved != useful_id:
+        record["after"]["reuse_artifact_names_older_checkpoint"] = (
+            f"the activation's reuse document named {preserved[:12]}… (the evidence-pinned "
+            "rung-1 artifact) while the authority's active entry — what the dispatch "
+            f"actually restores — is {useful_id[:12]}… (the useful WIP); named, never merged"
+        )
+        bundle.save()
+    record["result"] = "green"
+    record["finished_at"] = _now()
+    bundle.save()
+    return 0
+
+
+def _authority_active_entry(work_id: str) -> str:
+    """The checkpoint authority's ACTIVE entry for the work (read-only).
+
+    Applies the repository protocol's own rule — highest
+    ``(sequence, checkpoint_id)`` — to the works index, so the drill
+    verifies the checkpoint the NEXT dispatch will restore, not a name
+    any document carries.
+    """
+    index = read_works_index(checkpoint_store_root(), work_id)
+    if index is None:
+        return ""
+    entries = [e for e in (index.get("checkpoints") or []) if isinstance(e, Mapping)]
+    if not entries:
+        return ""
+    return str(
+        max(
+            entries, key=lambda e: (int(e.get("sequence") or 0), str(e.get("checkpoint_id") or ""))
+        ).get("checkpoint_id")
+        or ""
+    )
+
+
+# ---------------------------------------------------------------------------
+# Q39-07 (#326) — the closing-review leg: reviewed-ready within the #325
+# closing reserve, or the precise non-ready state — never a hidden retry
+# ---------------------------------------------------------------------------
+
+
+def phase_review(bundle: Bundle, gitlab: GitLab) -> int:
+    """Wait the run's closing review out and record its honest outcome.
+
+    Preconditions (fail-c): the interrupted arm is green (the candidate is
+    verified on the exact sha). The reviewer leg is the RUN's own machinery
+    (the worker drives it; the drill only OBSERVES — it never re-drives a
+    paid review): the run ends ``ready_for_human`` with the review verdict
+    bound to the candidate sha, or parks in the precise non-ready state
+    (``reviewing`` with the #325 closing reserve visible, or ``blocked``
+    with the shortage named) — each recorded with the review-budget
+    evidence, never retried into a green by this driver.
+    """
+    phase = "review"
+    record = bundle.phase(phase)
+    if record.get("configured_closing_reserve_usd") is None and not record.get(
+        "closing_reserve_basis"
+    ):
+        pass  # the capture below backfills the policy observation
+    if (
+        record.get("result") in ("reviewed-ready", "review-non-ready")
+        and record.get("configured_closing_reserve_usd") is not None
+    ):
+        print(f"review: already complete ({record.get('result')})")
+        return 0
+    interrupt = bundle.document["phases"].get("interrupt", {})
+    if interrupt.get("result") != "green":
+        raise Refused("the interrupt phase is not green — no verified candidate to review")
+    run_id = str(interrupt.get("plan", {}).get("run_id") or "")
+    candidate_sha = str((interrupt.get("mr") or {}).get("candidate_sha") or "")
+    if not run_id or not candidate_sha:
+        raise Refused("the arc carries no run id / candidate sha")
+    record["candidate_sha"] = candidate_sha
+    record["paid"] = True  # the reviewer leg's model call runs on the run's budget
+    # the CONFIGURED closing-reserve policy (the #325 posture the run rode
+    # under), observed read-only from the worker's env — the honest basis
+    # when no budget decision was ever needed (the review fit the budget;
+    # the reserve stayed intact and un-consumed).
+    try:
+        env_raw = subprocess.run(
+            ["podman", "inspect", "forge-worker", "--format", "{{json .Config.Env}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
+        env = {
+            str(entry).partition("=")[0]: str(entry).partition("=")[2]
+            for entry in json.loads(env_raw)
+        }
+        reserve = env.get("FORGE_CLOSING_RESERVE_USD", "")
+        cap = env.get("FORGE_SPEND_CAP_USD", "")
+        record["configured_closing_reserve_usd"] = float(reserve) if reserve else None
+        record["closing_reserve_basis"] = (
+            f"FORGE_CLOSING_RESERVE_USD={reserve or '(unset)'} on forge-worker, "
+            f"FORGE_SPEND_CAP_USD={cap or '(unset)'} — the policy the closing review "
+            "rode under (observed read-only after the run settled)"
+        )
+    except (subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
+        record["closing_reserve_basis"] = f"the configured reserve is unobservable ({exc})"
+    bundle.save()
+
+    def settled() -> dict[str, Any] | None:
+        detail = app_get(f"/runs/{run_id}")
+        status = str(detail.get("status") or "")
+        if status == "ready_for_human":
+            return {"status": status, "detail": detail}
+        if (
+            status in ("blocked", "failed", "canceled")
+            and str(detail.get("status_reason") or "").strip()
+        ):
+            return {"status": status, "detail": detail}
+        # the precise NON-READY state (#325): reviewing with a recorded
+        # review-budget decision whose reserve does not cover the review
+        # is terminal for THIS observation; a reserve that still covers it
+        # stays honestly `reviewing` (the review-only continuation owns it)
+        if status == "reviewing":
+            evidence = dict(detail.get("evidence") or {})
+            block = evidence.get("review_budget_block")
+            if isinstance(block, dict) and not block.get("released"):
+                budget = dict(block.get("budget") or {})
+                if not budget.get("closing_review_fits"):
+                    return {"status": status, "detail": detail}
+        return None
+
+    try:
+        verdict = poll(
+            settled,
+            "the closing review settling (ready_for_human or the precise non-ready)",
+            timeout=2100,
+            interval=20,
+        )
+    except Refused:
+        # The bounded wait expired while the run still sits in the #325
+        # NON-READY `reviewing` state under a standing, unreleased budget
+        # decision whose reserve still covers the review — the precise
+        # honest partial (the explicit review-only continuation owns the
+        # completion; this driver never re-drives a paid review).
+        final = app_get(f"/runs/{run_id}")
+        final_evidence = dict(final.get("evidence") or {})
+        final_block = dict(final_evidence.get("review_budget_block") or {})
+        if (
+            str(final.get("status")) == "reviewing"
+            and final_block
+            and not final_block.get("released")
+            and (final_block.get("budget") or {}).get("closing_review_fits")
+        ):
+            verdict = {"status": "reviewing", "detail": final}
+        else:
+            raise
+    detail = verdict["detail"]
+    status = verdict["status"]
+    evidence = dict(detail.get("evidence") or {})
+    review = dict(evidence.get("review") or {})
+    block = dict(evidence.get("review_budget_block") or {})
+    approved_input = dict(evidence.get("approved_input") or {})
+    executor_digest = dict(evidence.get("revision_executor_digest") or {})
+    outcome = {
+        "status": status,
+        "status_reason": detail.get("status_reason"),
+        "review": {
+            "verdict": review.get("verdict"),
+            "sha": review.get("sha"),
+            "summary": review.get("summary"),
+            "reviewed_sha_matches_candidate": str(review.get("sha") or "") == candidate_sha,
+        },
+        "review_budget_block": (
+            {
+                "budget_decision": block.get("budget_decision"),
+                "short_reason": block.get("short_reason"),
+                "released": block.get("released"),
+                "closing_reserve_usd": (block.get("budget") or {}).get("closing_reserve_usd"),
+                "closing_review_fits": (block.get("budget") or {}).get("closing_review_fits"),
+                "top_up_total_usd": block.get("top_up_total_usd"),
+            }
+            if block
+            else None
+        ),
+        "approved_input": (
+            {
+                "source": approved_input.get("source"),
+                "active_revision": approved_input.get("active_revision"),
+                "plan_digest": approved_input.get("plan_digest"),
+                "plan_text_digest": hashlib.sha256(
+                    str(approved_input.get("plan_text") or "").encode()
+                ).hexdigest(),
+                "plan_text_carries_revision_marker": REVISION_MARKER
+                in str(approved_input.get("plan_text") or ""),
+            }
+            if approved_input
+            else None
+        ),
+        "executor_input_digest": executor_digest.get("executor_input_digest")
+        if executor_digest
+        else None,
+        "settled_at": _now(),
+    }
+    record["outcome"] = outcome
+    bundle.save()
+    capture_run_evidence(bundle, "review", run_id)
+    if status == "ready_for_human" and outcome["review"]["reviewed_sha_matches_candidate"]:
+        record["result"] = "reviewed-ready"
+        record["finished_at"] = _now()
+        bundle.save()
+        print(
+            f"review: REVIEWED-READY — run ready_for_human, review verdict "
+            f"{review.get('verdict')!r} bound to candidate {candidate_sha[:12]}…"
+        )
+        return 0
+    reason = (
+        f"the closing review did not reach reviewed-ready: run {status} "
+        f"({detail.get('status_reason')}); review bound "
+        f"{str(review.get('sha') or 'nothing')[:12]}… vs candidate {candidate_sha[:12]}…; "
+        f"budget decision: {outcome['review_budget_block'] or 'none recorded'}"
+    )
+    _record_failure(bundle, reason)
+    record["result"] = "review-non-ready"
+    bundle.save()
+    print(f"review: NON-READY — {reason}")
+    return 2
+
+
 def _record_failure(bundle: Bundle, reason: str) -> None:
     bundle.document.setdefault("failures", []).append({"at": _now(), "reason": reason})
     bundle.save()
@@ -1807,6 +2534,8 @@ def wait_mr_and_verify(
     current = gitlab.get(f"/projects/{project_id}/merge_requests/{mr_iid}")
 
     diff_text = "\n".join(str(d.get("diff") or "") for d in diffs)
+    text_entry = next((d for d in diffs if d.get("new_path") == "src/utils/text.py"), None)
+    marker_in_candidate = bool(text_entry) and REVISION_MARKER in str(text_entry.get("diff") or "")
     result = {
         "mr_iid": mr_iid,
         "mr_url": merge_request.get("web_url"),
@@ -1824,6 +2553,7 @@ def wait_mr_and_verify(
         "oracle_tampering": forbidden,
         "diff_digest": hashlib.sha256(diff_text.encode()).hexdigest(),
         "pipeline_status": current.get("pipeline_status"),
+        "revision_marker_in_candidate": marker_in_candidate,
     }
     if forbidden:
         _record_failure(bundle, f"the candidate touched the oracle files: {forbidden}")
@@ -1860,6 +2590,15 @@ def capture_run_evidence(bundle: Bundle, phase: str, run_id: str) -> dict[str, A
         ).splitlines()
         if line.strip()
     ]
+    redemptions = [
+        json.loads(line)
+        for line in psql(
+            "SELECT row_to_json(t)::text FROM (SELECT receipt_id, work_id, provider, route, "
+            "credential_ref, grant_id, attempt_generation, outcome, created_at FROM "
+            f"credential_redemptions WHERE work_id = '{run_id}' ORDER BY created_at) t"
+        ).splitlines()
+        if line.strip()
+    ]
     captured = {
         "run": {
             "id": detail.get("id"),
@@ -1873,6 +2612,7 @@ def capture_run_evidence(bundle: Bundle, phase: str, run_id: str) -> dict[str, A
         "usage_receipts": usage,
         "run_budgets": budgets,
         "checkpoint_metadata": checkpoints,
+        "credential_redemptions": redemptions,
     }
     bundle.record(f"{phase}-state", run_id[:8], captured)
     print(
@@ -1886,7 +2626,7 @@ def capture_run_evidence(bundle: Bundle, phase: str, run_id: str) -> dict[str, A
 # ---------------------------------------------------------------------------
 
 
-def phase_collect(bundle: Bundle, gitlab: GitLab) -> int:
+def phase_collect(bundle: Bundle, gitlab: GitLab, record_path: Path = RECORD_PATH) -> int:
     project_id = bundle.document["phases"]["setup"]["project"]["id"]
     record = bundle.phase("collect")
     interrupt = bundle.document["phases"].get("interrupt", {})
@@ -1923,8 +2663,8 @@ def phase_collect(bundle: Bundle, gitlab: GitLab) -> int:
     record["finished_at"] = _now()
     bundle.save()
 
-    write_record(build_record(bundle.document))
-    print(f"collect: evidence record written → {RECORD_PATH}")
+    write_record(build_record(bundle.document), record_path)
+    print(f"collect: evidence record written → {record_path}")
     return 0
 
 
@@ -2022,18 +2762,115 @@ def build_record(bundle: Mapping[str, Any]) -> dict[str, Any]:
     elif interrupt.get("result") in ("no-anchor", "turn-completed", "spend-guard"):
         outcome = "refused"
 
+    # the v2 legs (Q39-07/#326): the revision + the closing review -------
+    revision_phase = phases.get("revision", {})
+    review_phase = phases.get("review", {})
+    v2 = bool(revision_phase.get("result") or review_phase.get("result"))
+    revision: dict[str, Any] | None = None
+    review: dict[str, Any] | None = None
+    grants: list[dict[str, Any]] = []
+    run_key = str((interrupt.get("plan") or {}).get("run_id", ""))[:8]
+    # the evidence captures land as their OWN phase keys (``review-state``,
+    # ``interrupt-state`` — the capture phase's f"{phase}-state" spelling),
+    # never under ``collect``.
+    review_state = (phases.get("review-state") or {}).get(run_key) or {}
+    run_state = (phases.get("interrupt-state") or {}).get(run_key) or {}
+    # the APPROVED-INPUT + executor digest read from the FULL durable
+    # evidence (the psql capture) — the app's run detail projects a
+    # summary that omits them.
+    full_evidence = dict(review_state.get("evidence_full") or run_state.get("evidence_full") or {})
+    approved_input_doc = dict(full_evidence.get("approved_input") or {})
+    executor_digest_doc = dict(full_evidence.get("revision_executor_digest") or {})
+    for state in (review_state, run_state):
+        for row in (state or {}).get("credential_redemptions") or []:
+            if isinstance(row, Mapping) and row.get("grant_id"):
+                grants.append(
+                    {
+                        "grant_id": row.get("grant_id"),
+                        "provider": row.get("provider"),
+                        "route": row.get("route"),
+                        "credential_ref": row.get("credential_ref"),
+                        "attempt_generation": row.get("attempt_generation"),
+                        "outcome": row.get("outcome"),
+                    }
+                )
+    if v2:
+        staged = dict(revision_phase.get("staged") or {})
+        after = dict(revision_phase.get("after") or {})
+        at_resume = dict(interrupt.get("revision_at_resume") or {})
+        plan_text = str(approved_input_doc.get("plan_text") or "")
+        revision = {
+            "decision_id": staged.get("decision_id"),
+            "revision1_digest": staged.get("revision1_digest"),
+            "plan_digest": staged.get("revision2_digest"),
+            "activated_by_decision": after.get("activated_by_decision"),
+            "reuse_route": after.get("reuse_route"),
+            "preserved_checkpoint_id": after.get("authority_active_entry")
+            or after.get("preserved_checkpoint_id"),
+            "preserved_artifact_named": after.get("preserved_checkpoint_id"),
+            "run_plan_digest_at_resume": at_resume.get("plan_digest"),
+            "active_revision": approved_input_doc.get("active_revision")
+            or after.get("active_plan_revision"),
+            "source": approved_input_doc.get("source"),
+            "approved_input_digest": approved_input_doc.get("plan_text_digest")
+            or hashlib.sha256(plan_text.encode()).hexdigest()
+            if plan_text
+            else None,
+            "plan_text_carries_marker": REVISION_MARKER in plan_text if plan_text else None,
+            "executor_input_digest": executor_digest_doc.get("executor_input_digest"),
+            "executor_envelope_digest": executor_digest_doc.get("envelope_digest"),
+            "marker_in_candidate": mr.get("revision_marker_in_candidate"),
+            "marker": REVISION_MARKER,
+            "credential_grants": grants,
+            "credential_grants_basis": (
+                "the audit ledger rows (credential_redemptions) for this run"
+                if grants
+                else (
+                    "EMPTY honestly: this dispatch's credential_delivery_mode was empty — "
+                    "the gitlab-protected-variable route (the model token rode the "
+                    "project's CI variables), so NO operation grant was minted on this "
+                    "trace; the #320 grant machinery is exercised by its own offline "
+                    "suites, not by this dispatch"
+                )
+            ),
+        }
+        if review_phase.get("result") == "reviewed-ready":
+            outcome = "reviewed-ready"
+        elif review_phase.get("result") == "review-non-ready" and outcome == "useful-wip-continued":
+            outcome = "review-non-ready"
+        review_outcome = dict(review_phase.get("outcome") or {})
+        if review_outcome:
+            review = {
+                "status": review_outcome.get("status"),
+                "status_reason": review_outcome.get("status_reason"),
+                "verdict": (review_outcome.get("review") or {}).get("verdict"),
+                "summary": (review_outcome.get("review") or {}).get("summary"),
+                "reviewed_sha": (review_outcome.get("review") or {}).get("sha"),
+                "reviewed_sha_matches_candidate": (review_outcome.get("review") or {}).get(
+                    "reviewed_sha_matches_candidate"
+                ),
+                "review_budget_block": review_outcome.get("review_budget_block"),
+                "closing_reserve_usd": review_phase.get("configured_closing_reserve_usd"),
+                "closing_reserve_basis": review_phase.get("closing_reserve_basis"),
+                "settled_at": review_outcome.get("settled_at"),
+                "mr_still_draft": bool(mr.get("draft")) and not mr.get("merged"),
+            }
+
     record = new_record(
         str(setup.get("project", {}).get("path") or ""), str(bundle.get("created_at") or "")
     )
+    if v2:
+        record["schema"] = RECORD_SCHEMA_V2
+        record["issue"] = "Q39-07 (#326) useful-WIP resume + approved revision + closing review"
     record.update(
         {
-            "finished_at": interrupt.get("finished_at"),
+            "finished_at": (review_phase or {}).get("finished_at") or interrupt.get("finished_at"),
             "project": setup.get("project", {}),
             "task": {
                 "shapes": [list(shape) for shape in task_shapes()],
                 "oracle": "smoke CI job: six exact slugify cases + app rewired + legacy deleted",
                 "committed_before_run_sha": setup.get("seed_commit_sha"),
-                "lane_ref": LANE_REF_SHA,
+                "lane_ref": setup.get("lane_ref") or LANE_REF_SHA,
                 "template_sha256": setup.get("template_sha256"),
             },
             "issue": interrupt.get("issue"),
@@ -2052,6 +2889,8 @@ def build_record(bundle: Mapping[str, Any]) -> dict[str, Any]:
                 else None
             ),
             "resume": resume or None,
+            "revision": revision,
+            "review": review,
             "mr": mr or None,
             "candidate": (
                 {
@@ -2114,8 +2953,26 @@ def main(argv: list[str] | None = None) -> int:
             "the evidence bundle on disk is the state."
         ),
     )
-    parser.add_argument("phase", choices=["setup", "preflight", "interrupt", "collect", "teardown"])
+    parser.add_argument(
+        "phase",
+        choices=[
+            "setup",
+            "preflight",
+            "interrupt",
+            "revision",
+            "review",
+            "collect",
+            "teardown",
+        ],
+    )
     parser.add_argument("--evidence", type=Path, default=EVIDENCE_PATH)
+    parser.add_argument(
+        "--record",
+        type=Path,
+        default=RECORD_PATH,
+        help="where the folded evidence record is written (default: the #306 location)",
+    )
+    parser.add_argument("--lane-ref", default=LANE_REF_SHA_V2, help="the pinned lane install sha")
     parser.add_argument(
         "--project-name", default=f"forge-wip-{datetime.now(timezone.utc):%Y-%m-%d}"
     )
@@ -2125,10 +2982,14 @@ def main(argv: list[str] | None = None) -> int:
     gitlab = GitLab(settings)
     bundle = Bundle(args.evidence)
     handlers: dict[str, Callable[..., int]] = {
-        "setup": lambda: phase_setup(bundle, gitlab, args.project_name, settings),
+        "setup": lambda: _phase_setup_lane(
+            bundle, gitlab, args.project_name, settings, args.lane_ref
+        ),
         "preflight": lambda: phase_preflight(bundle, gitlab),
         "interrupt": lambda: phase_interrupt(bundle, gitlab),
-        "collect": lambda: phase_collect(bundle, gitlab),
+        "revision": lambda: phase_revision(bundle, gitlab),
+        "review": lambda: phase_review(bundle, gitlab),
+        "collect": lambda: phase_collect(bundle, gitlab, args.record),
         "teardown": lambda: phase_teardown(bundle, gitlab),
     }
     try:

@@ -375,11 +375,29 @@ class TestReportAndCli:
             "failures": [],
             "mutation_escapes": [],
         }
-        return recipes, schema, sentinels
+        locators = {
+            "status": "pass",
+            "driver_templates": [{"driver": "claude-code", "status": "pass"}],
+            "self_tests": {"legacy_encoder_flagged": {"status": "caught"}},
+            "failures": [],
+            "mutation_escapes": [],
+        }
+        consumers = {
+            "status": "pass",
+            "arms": [
+                {"arm": "grant:redeem_granted_route", "status": "pass"},
+                {"arm": "rebind:three_way_digest_equality", "status": "pass"},
+            ],
+            "failures": [],
+            "mutation_escapes": [],
+        }
+        return recipes, schema, sentinels, locators, consumers
 
     def test_the_report_carries_the_executed_id_manifest(self, gate: ModuleType):
-        recipes, schema, sentinels = self._checks(gate)
-        report = gate.build_report(recipes, schema, sentinels, "2026-09-24T00:00:00+00:00", 1.5, [])
+        recipes, schema, sentinels, locators, consumers = self._checks(gate)
+        report = gate.build_report(
+            recipes, schema, sentinels, locators, consumers, "2026-09-24T00:00:00+00:00", 1.5, []
+        )
         assert report["qualification"]["result"] == "green"
         assert report["executed_ids"] == [
             "shipped-recipes/t.gitlab-ci.yml/success",
@@ -387,16 +405,66 @@ class TestReportAndCli:
             "dispatch-schema/azure",
             "dispatch-schema/gitlab",
             "secret-consumers/t.gitlab-ci.yml/sentinel",
+            "native-locators/encoding",
+            "native-locators/driver/claude-code",
+            "native-locators/self-test/legacy_encoder_flagged",
+            "consumer-contracts/grant:redeem_granted_route",
+            "consumer-contracts/rebind:three_way_digest_equality",
         ]
-        assert report["gate"]["issue"] == "#317 (R38-16)"
+        assert (
+            report["gate"]["issue"]
+            == "#317 (R38-16); native-locators #323 (Q39-04); consumer-contracts #327 (Q39-08)"
+        )
+        # Q39-08: the identity stamping distinguishes the execution classes
+        identities = report["identities"]
+        assert identities["checks"]["consumer_contracts"]["source"].endswith(
+            "run_consumer_contracts"
+        )
+        assert set(identities["execution_classes"]) == {"offline", "native", "paid"}
+        # Q39-08: the observability counters
+        assert report["observability"]["conformance.executed_case_count"] == len(
+            report["executed_ids"]
+        )
+        assert report["observability"]["ci.critical_path_seconds"] == 1.5
+        # the required consumer cases that did NOT execute are named — a
+        # report from a partial run can never pose as a complete green.
+        missing = report["observability"]["conformance.required_case_missing"]
+        assert "consumer-contracts/grant:redeem_granted_route" not in missing
+        assert "consumer-contracts/grant:sibling_route_refused_zero_broker" in missing
+        assert "consumer-contracts/rebind:mutation:source_identity_swapped" in missing
 
     def test_a_refusal_is_recorded_with_its_exit_code(self, gate: ModuleType):
         report = gate.build_report(
-            None, None, None, "2026-09-24T00:00:00+00:00", 0.1, [gate.MutationEscapeError("boom")]
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2026-09-24T00:00:00+00:00",
+            0.1,
+            [gate.MutationEscapeError("boom")],
         )
         assert report["qualification"]["result"] == "refused"
         assert report["qualification"]["refusals"][0]["exit_code"] == 6
         assert report["executed_ids"] == []
+        assert report["observability"]["conformance.executed_case_count"] == 0
+
+    def test_a_locator_failure_exits_seven(self, gate: ModuleType):
+        recipes, schema, sentinels, locators, consumers = self._checks(gate)
+        locators = {**locators, "status": "fail", "failures": ["encoding:collision:a~b"]}
+        report = gate.build_report(
+            recipes, schema, sentinels, locators, consumers, "2026-09-24T00:00:00+00:00", 0.2, []
+        )
+        assert report["checks"]["native_locators"] is locators
+
+    def test_a_consumer_failure_exits_eight(self, gate: ModuleType):
+        recipes, schema, sentinels, locators, consumers = self._checks(gate)
+        consumers = {**consumers, "status": "fail", "failures": ["grant:redeem_granted_route"]}
+        report = gate.build_report(
+            recipes, schema, sentinels, locators, consumers, "2026-09-24T00:00:00+00:00", 0.2, []
+        )
+        assert report["checks"]["consumer_contracts"] is consumers
+        assert gate.ConsumerContractError.exit_code == 8
 
     def test_a_broken_prerequisite_exits_two_with_the_report_written(
         self, gate: ModuleType, tmp_path: Path, monkeypatch
@@ -431,6 +499,139 @@ class TestReportAndCli:
             in executed
         )
         assert "dispatch-schema/gitlab" in executed
+        # Q39-04 (#323): the locator arms executed — the per-driver
+        # template conformance, the self-tests, and the sentinel arms on
+        # the collision-safe spelling.
+        assert "native-locators/encoding" in executed
+        assert "native-locators/driver/claude-code" in executed
+        assert "native-locators/self-test/legacy_encoder_flagged" in executed
+        assert "secret-consumers/claude-code.gitlab-ci.yml/sentinel_locator" in executed
+        assert "secret-consumers/forge-harness.github.yml/sentinel_locator" in executed
+        assert "secret-consumers/forge-lane.azure-pipelines.yml/fail_closed_locator" in executed
+        # Q39-08 (#327): the consumer-contract arms executed — the grant
+        # through the real ASGI endpoint, the runner-side typed
+        # verification, the rebind digest, every mutation caught, and the
+        # report's identity/observability blocks are populated.
+        assert "consumer-contracts/grant:redeem_granted_route" in executed
+        assert "consumer-contracts/grant:sibling_route_refused_zero_broker" in executed
+        assert "consumer-contracts/grant:mutation:dto_preserved_caller_disconnected" in executed
+        assert "consumer-contracts/runner-verification:baseline_applies_delivered" in executed
+        assert "consumer-contracts/runner-verification:env_var_answer_halts_zero_calls" in executed
+        assert "consumer-contracts/rebind:three_way_digest_equality" in executed
+        assert "consumer-contracts/rebind:mutation:plan_binding_removed" in executed
+        assert "consumer-contracts/rebind:mutation:source_identity_swapped" in executed
+        # the comment-only marker spoof ran on every blocked recipe
+        assert (
+            "secret-consumers/claude-code.gitlab-ci.yml/mutation:comment_only_marker_spoof"
+            in executed
+        )
+        consumers = document["checks"]["consumer_contracts"]
+        assert consumers["status"] == "pass"
+        assert consumers["failures"] == [] and consumers["mutation_escapes"] == []
+        statuses = {arm["arm"]: arm["status"] for arm in consumers["arms"]}
+        assert statuses["grant:mutation:dto_preserved_caller_disconnected"] == "caught"
+        assert statuses["rebind:mutation:plan_binding_removed"] == "caught"
+        assert statuses["rebind:mutation:source_identity_swapped"] == "caught"
+        identities = document["identities"]
+        assert identities["checks"]["consumer_contracts"]["arm_classes"]
+        assert identities["runtime"]["python"]
+        observability = document["observability"]
+        assert observability["conformance.executed_case_count"] == len(executed)
+        assert observability["conformance.required_case_missing"] == []
+
+
+# ---------------------------------------------------------------------------
+# The native-locator dimension (Q39-04 / #323): the collision-safe
+# encoding, the per-driver template route, the digest inventory.
+# ---------------------------------------------------------------------------
+
+
+class TestLocatorEncodingFindings:
+    def test_the_shipped_locator_encoder_produces_zero_findings(self, gate: ModuleType):
+        findings = gate._locator_encoding_findings(
+            gate._load_seams()["native_locator"], gate.LOCATOR_PROBE_REFS
+        )
+        assert findings == []
+
+    def test_the_legacy_lossy_encoder_is_flagged(self, gate: ModuleType):
+        """The sensitivity proof (P05): the pre-#323 segment encoder
+        collapses the whole probe family onto ONE legacy segment — the
+        gate's encoding check MUST flag every aliasing pair."""
+        findings = gate._locator_encoding_findings(
+            gate._load_seams()["credential_secret_segment"], gate.LOCATOR_PROBE_REFS
+        )
+        # every slash/dash/underscore/case/dot variant aliases to the ONE
+        # legacy segment VAULT_KV_TEAM_A (the first sorted ref holds it,
+        # every other variant is flagged against it)
+        assert len(findings) >= 4
+        assert all("->VAULT_KV_TEAM_A" in finding for finding in findings)
+
+
+class TestLocatorConformance:
+    def test_green_on_this_tree_with_the_inventory_recorded(
+        self, gate: ModuleType, seams: dict[str, Any]
+    ):
+        report = gate.run_locator_conformance(seams)
+        assert report["status"] == "pass", report["failures"]
+        assert report["failures"] == [] and report["mutation_escapes"] == []
+        by_driver = {entry["driver"]: entry for entry in report["driver_templates"]}
+        # the anthropic-route recipes implement the native route and pass
+        # the conformance named with THEIR driver
+        assert by_driver["claude-code"]["status"] == "pass"
+        assert by_driver["claude-sdk-lane"]["status"] == "pass"
+        # the not-yet-rolled-out lanes are RECORDED, never silently green
+        assert by_driver["codex-sdk-lane"]["status"] == "route_absent"
+        assert by_driver["grok-build"]["status"] == "route_absent"
+        # the digest inventory: every validated template's identity digest
+        assert "claude-code.gitlab-ci.yml" in report["digest_inventory"]
+        assert "forge-harness.github.yml" in report["digest_inventory"]
+        assert "forge-lane.azure-pipelines.yml" in report["digest_inventory"]
+        for digest in report["digest_inventory"].values():
+            assert len(digest) == 16 and digest == digest.lower()
+
+    def test_every_self_test_is_caught(self, gate: ModuleType, seams: dict[str, Any]):
+        report = gate.run_locator_conformance(seams)
+        statuses = {name: arm["status"] for name, arm in report["self_tests"].items()}
+        assert statuses["legacy_encoder_flagged"] == "caught"
+        assert statuses["wrong_driver_template_refused"] == "caught"
+        assert statuses["digest_mismatch_refused"] == "caught"
+        assert statuses["unknown_driver_refused"] == "caught"
+
+    def test_a_required_driver_without_the_route_fails_the_check(
+        self, gate: ModuleType, seams: dict[str, Any], monkeypatch
+    ):
+        """A shipped anthropic-route recipe that LOST its consumption
+        block must fail the check — the required set is not advisory."""
+        monkeypatch.setitem(
+            seams,
+            "native_route_structural_gaps",
+            lambda text, env_var: ["consumer_mapping:ANTHROPIC_AUTH_TOKEN"],
+        )
+        report = gate.run_locator_conformance(seams)
+        assert report["status"] == "fail"
+        assert any("driver_route_missing:claude-code" in f for f in report["failures"])
+
+
+class TestSentinelLocatorArms:
+    def test_every_recipe_with_a_block_passes_the_locator_arms(
+        self, gate: ModuleType, seams: dict[str, Any]
+    ):
+        """The #317 sentinel arms on the collision-safe spelling (#323):
+        the shipped blocks consume a LOCATOR-shaped ref + carrier — the
+        delivered sentinel is the consumed one, the ambient never, and
+        an empty locator carrier fails CLOSED."""
+        report = gate.run_secret_consumers(seams)
+        assert report["status"] == "pass", report["failures"]
+        by_template = {recipe["template"]: recipe for recipe in report["recipes"]}
+        for name in (
+            "claude-code.gitlab-ci.yml",
+            "claude-sdk-lane.gitlab-ci.yml",
+            "forge-harness.github.yml",
+            "forge-lane.azure-pipelines.yml",
+        ):
+            arms = {arm["arm"]: arm for arm in by_template[name]["arms"]}
+            assert arms["sentinel_locator"]["status"] == "pass", name
+            assert arms["fail_closed_locator"]["status"] == "pass", name
 
 
 # ---------------------------------------------------------------------------

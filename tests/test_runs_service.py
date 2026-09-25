@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from forge.adaptive.models import PlanRevision, PlanStep
 from forge.config import Settings
 from forge.durable import (
     ActionLog,
@@ -21,6 +22,7 @@ from forge.durable import (
     RunSpec,
 )
 from forge.durable.controller import Controller
+from forge.factory.llm import LLMError
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import WriteOutcome, WriteResult
@@ -1143,3 +1145,498 @@ class TestBoundedMrIoC08:
                 .all()
             )
         assert rows[-1].status == "unknown_outcome"
+
+
+# ----------------------------------------------------------------------
+# Q39-02 (#321) — the GitLab dispatch briefs from the ACTIVE revision's
+# TEXT. The production entry traces (tests/production_entry/
+# test_gitlab_revision_rebind.py) prove the whole live-counterexample
+# shape; these unit tests pin the dispatch-boundary rules over fakes.
+# ----------------------------------------------------------------------
+
+
+def _rebind_revision(revision: int, parent: int | None, summary: str) -> PlanRevision:
+    step = PlanStep(
+        step_id="S1",
+        objective="Implement the entrypoint change.",
+        write_repository_id="acme/forge",
+        impact=["internal"],
+        acceptance_refs=["AC-1"],
+    )
+    return PlanRevision(
+        plan_id="plan-rebind",
+        work_id="wp-rebind",
+        revision=revision,
+        parent_revision=parent,
+        work_contract_digest="4" * 64,
+        snapshot_set_digest="6" * 64,
+        summary=summary,
+        steps=[step],
+    )
+
+
+async def _activate_revision(db, run_id: str, first: PlanRevision, second: PlanRevision) -> None:
+    """Revision 1 active, revision 2 staged + activated — the app's own
+    durable transaction (the #313 staging precedent), never a hand-built
+    pointer."""
+    from forge.adaptive.revisions import (
+        ActivePlanState,
+        RevisionDecision,
+        activate_pending_revision,
+        plan_digest as rev_plan_digest,
+        proposed_revision_identity,
+        stage_pending_revision,
+    )
+
+    current = ActivePlanState(
+        work_id=first.work_id,
+        plan_id=first.plan_id,
+        active_revision=first.revision,
+        work_contract_digest=first.work_contract_digest,
+        authorization_epoch=1,
+        publication_epoch=1,
+    )
+    async with db() as session:
+        run = await session.get(FlowRun, run_id)
+        evidence = dict(run.evidence or {})
+        evidence["active_plan"] = {
+            "schema": "forge.revision.active-plan/1",
+            "work_id": first.work_id,
+            "plan_id": first.plan_id,
+            "active_revision": first.revision,
+            "plan_digest": rev_plan_digest(first),
+            "revised_from_digest": "",
+            "work_contract_digest": first.work_contract_digest,
+            "authorization_epoch": 1,
+            "publication_epoch": 1,
+            "activated_by_decision": "",
+        }
+        run.evidence = evidence
+        await session.commit()
+    decision = RevisionDecision(
+        decision_id=f"rd-rebind-{second.revision}",
+        work_id=second.work_id,
+        parent_revision=first.revision,
+        proposed_revision_id=proposed_revision_identity(second),
+        proposed_digest=rev_plan_digest(second),
+        work_contract_digest=second.work_contract_digest,
+        authorization_epoch=1,
+    )
+    await stage_pending_revision(db, run_id, decision, second, current, old=first)
+    outcome = await activate_pending_revision(db, run_id, decision.decision_id, decided_by="alice")
+    assert outcome.status == "activated", outcome.reason
+
+
+def _harness_service(db, fake_gitlab) -> RunService:
+    from forge.repository import ChangesetWriter
+
+    return make_service(
+        db,
+        fake_gitlab,
+        settings=make_settings(FORGE_IMPLEMENTER_BACKEND="ci_harness:claude-code"),
+        writer_class=ChangesetWriter,
+    )
+
+
+async def _dispatches_of(fake_gitlab: FakeGitLab) -> list[dict]:
+    return [
+        {entry["key"]: entry["value"] for entry in call["variables"]}
+        for call in fake_gitlab.pipeline_variables
+    ]
+
+
+class TestGitlabRevisionRebind:
+    async def test_no_revision_dispatch_keeps_the_spec_brief_byte_identical(self, db, fake_gitlab):
+        service = _harness_service(db, fake_gitlab)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        (variables,) = await _dispatches_of(fake_gitlab)
+        async with db() as session:
+            row = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .first()
+            )
+        spec_summary = row.document["plan"]["summary"]
+        # Today's behavior, unchanged and labeled: the spec's plan text is
+        # the brief, and NO rebind variable rides the envelope.
+        assert variables["FORGE_PLAN"] == spec_summary
+        assert "FORGE_PLAN_DIGEST" not in variables
+        assert "FORGE_SPEC_DIGEST" not in variables
+        assert "FORGE_BRIEF_ENVELOPE_DIGEST" not in variables
+        run = await get_run(db, run_id)
+        assert run.evidence["approved_input"]["source"] == "spec"
+
+    async def test_an_activated_revision_rebinds_the_dispatch_brief(self, db, fake_gitlab):
+        from forge.adaptive.revisions import (
+            APPROVED_INPUT_KEY,
+            REVISION_EXECUTOR_DIGEST_KEY,
+            executor_input_digest,
+            plan_digest as rev_plan_digest,
+        )
+        from forge.harnesses.brief_envelope import verify_brief_envelope
+
+        service = _harness_service(db, fake_gitlab)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        first = _rebind_revision(1, None, "Approach X: the entrypoint is check.")
+        second = _rebind_revision(2, 1, "Approach Y: the entrypoint is validate_email.")
+        await _activate_revision(db, run_id, first, second)
+
+        # A repair re-dispatch: the same production leg every retry,
+        # revival and repair funnel through.
+        await service._advance_harness(
+            PROJECT_ID, run_id, repair_context="verify job failed", repair_reason="code failure"
+        )
+        spec_dispatch, rebind_dispatch = await _dispatches_of(fake_gitlab)
+        # AC-01: the brief carries revision 2's TEXT; the superseded spec
+        # brief survives only in the FIRST dispatch (history) and
+        # revision-1's text is nowhere in the new attempt's bytes.
+        assert "validate_email" in rebind_dispatch["FORGE_PLAN"]
+        assert "Approach X" not in rebind_dispatch["FORGE_PLAN"]
+        assert "Implementation plan" in spec_dispatch["FORGE_PLAN"]
+        assert "validate_email" not in spec_dispatch["FORGE_PLAN"]
+        assert rebind_dispatch["FORGE_PLAN_DIGEST"] == rev_plan_digest(second)
+        assert rebind_dispatch["FORGE_SPEC_DIGEST"] == (await get_run(db, run_id)).spec_digest
+
+        # The brief envelope verifies over the dispatched bytes (the
+        # runner-side re-verification shape).
+        verify_brief_envelope(
+            rebind_dispatch["FORGE_BRIEF_ENVELOPE_DIGEST"],
+            run_id=run_id,
+            task_title=ISSUE_TITLE,
+            task_description=ISSUE_DESC,
+            plan_text=rebind_dispatch["FORGE_PLAN"],
+            spec_digest=rebind_dispatch["FORGE_SPEC_DIGEST"],
+        )
+
+        # THREE-WAY digest equality: the evidence document == a
+        # recomputation from what the provider actually received.
+        run = await get_run(db, run_id)
+        approved = run.evidence[APPROVED_INPUT_KEY]
+        executor = run.evidence[REVISION_EXECUTOR_DIGEST_KEY]
+        assert approved["source"] == "revision"
+        assert approved["plan_digest"] == rev_plan_digest(second)
+        # The dispatched brief IS the approved plan text (the repair
+        # context follows it, bounded, as before).
+        assert rebind_dispatch["FORGE_PLAN"].startswith(approved["plan_text"])
+        assert "## Repair context" in rebind_dispatch["FORGE_PLAN"]
+        identity = {
+            "run_id": rebind_dispatch["FORGE_RUN_ID"],
+            "plan_digest": rebind_dispatch["FORGE_PLAN_DIGEST"],
+            "envelope_digest": rebind_dispatch["FORGE_BRIEF_ENVELOPE_DIGEST"],
+            "spec_digest": rebind_dispatch["FORGE_SPEC_DIGEST"],
+            "lane_resume_mode": rebind_dispatch["FORGE_LANE_RESUME_MODE"],
+        }
+        assert executor["executor_input_digest"] == executor_input_digest(identity)
+        assert executor["activated_by_decision"] == "rd-rebind-2"
+
+    async def test_a_tampered_active_revision_blocks_the_dispatch(self, db, fake_gitlab):
+        from forge.adaptive.revisions import REVISION_CONTENT_KEY
+
+        service = _harness_service(db, fake_gitlab)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        first = _rebind_revision(1, None, "Approach X.")
+        second = _rebind_revision(2, 1, "Approach Y: validate_email.")
+        await _activate_revision(db, run_id, first, second)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            evidence = dict(run.evidence or {})
+            active = dict(evidence["active_plan"])
+            content = dict(active[REVISION_CONTENT_KEY])
+            content["summary"] = "TAMPERED"
+            active[REVISION_CONTENT_KEY] = content
+            evidence["active_plan"] = active
+            run.evidence = evidence
+            await session.commit()
+
+        await service._advance_harness(PROJECT_ID, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "rebind_refused" in (run.status_reason or "")
+        assert "content_digest_mismatch" in (run.status_reason or "")
+        assert len(fake_gitlab.pipelines) == 1  # ZERO new provider dispatches
+        bodies = [note["body"] for note in fake_gitlab.notes]
+        assert any("rebind_refused" in body for body in bodies)
+
+    async def test_a_required_resume_the_activation_routed_away_is_refused(self, db, fake_gitlab):
+        service = _harness_service(db, fake_gitlab)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        # A material revision that CHANGED the write-carrying step: the
+        # activation's reuse decision routes the held checkpoint to an
+        # explicit fresh attempt, and the persisted continuation decision
+        # pins that checkpoint for a required resume.
+        from forge.adaptive.revisions import CHECKPOINT_REUSE_DECISION_KEY
+
+        first = _rebind_revision(1, None, "Approach X.")
+        changed_step = PlanStep(
+            step_id="S1",
+            objective="REWRITTEN under the restrictive revision.",
+            write_repository_id="acme/forge",
+            impact=["internal"],
+            acceptance_refs=["AC-1"],
+        )
+        second = PlanRevision(
+            plan_id="plan-rebind",
+            work_id="wp-rebind",
+            revision=2,
+            parent_revision=1,
+            work_contract_digest="4" * 64,
+            snapshot_set_digest="6" * 64,
+            summary="Restrictive revision: the WIP no longer applies.",
+            steps=[changed_step],
+        )
+        await _activate_revision(db, run_id, first, second)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            evidence = dict(run.evidence or {})
+            evidence[CHECKPOINT_REUSE_DECISION_KEY] = {
+                "schema": "forge.checkpoint.reuse-decision/1",
+                "activated_revision": 2,
+                "plan_digest": evidence["active_plan"]["plan_digest"],
+                "route": "fresh_attempt",
+                "route_reason": (
+                    "write-carrying step(s) the checkpoint's WIP anchors on changed "
+                    "or were invalidated by revision 2: ['S1'] — the restored bytes "
+                    "cannot stand under the new plan"
+                ),
+                "artifacts": [
+                    {"artifact_id": "ckpt-9", "kind": "checkpoint", "decision": "invalidate"}
+                ],
+            }
+            evidence["continuation"] = {"checkpoint_digest": "ckpt-9", "decision_id": "cd-1"}
+            run.evidence = evidence
+            await session.commit()
+
+        await service._advance_harness(PROJECT_ID, run_id, resume_mode="required")
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "checkpoint_reuse_refused" in (run.status_reason or "")
+        assert "S1" in (run.status_reason or "")  # the rejected reuse, explained
+        assert len(fake_gitlab.pipelines) == 1  # refused BEFORE any provider I/O
+        bodies = [note["body"] for note in fake_gitlab.notes]
+        assert any("checkpoint_reuse_refused" in body for body in bodies)
+
+
+# ----------------------------------------------------------------------
+# Q39-06 (#325): the reviewer-leg budget decision consults the closing
+# reserve — the promised closing review is protected
+# ----------------------------------------------------------------------
+
+
+class BudgetRefusedReviewer(StubReviewer):
+    """Refuses the first N review calls exactly like the budget guard's
+    ``LLMError("budget_exhausted")`` (the reviewer never ran: the call is
+    refused BEFORE the provider is contacted, so the stub records
+    nothing)."""
+
+    def __init__(self, refusals: int = 1) -> None:
+        super().__init__()
+        self._refusals = refusals
+        self.refused = 0
+
+    async def review(self, **kwargs):
+        if self.refused < self._refusals:
+            self.refused += 1
+            raise LLMError("budget_exhausted")
+        return await super().review(**kwargs)
+
+
+async def drive_to_review_refusal(db, service, fake_gitlab) -> str:
+    """start → /go → green pipeline on the candidate → the review leg,
+    where the reviewer's call is refused by the budget guard."""
+    run_id = await start_issue_run(service)
+    await service.handle_command_note(
+        PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+    )
+    sha = "fake-sha-1"
+    branch = factory_branch(ISSUE_IID, run_id)
+    pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
+    fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)
+    fake_gitlab.seed_commit(branch, sha, "forge commit")  # head == candidate
+    await service.evaluate_waiting_ci()
+    return run_id
+
+
+class TestReviewerBudgetDecisionConsultsTheClosingReserve:
+    """The live-trace shape: candidate landed, independent CI green, the
+    budget guard refuses the REVIEWER's call. The decision now consults
+    the closing reserve — the run either completes its closing review
+    within the reserve (via the explicit review-only continuation) or
+    ends in the precise non-ready state with the reserve visible. Never
+    a hidden retry."""
+
+    async def test_refusal_with_an_intact_reserve_keeps_the_run_reviewing(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=1)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        run = await get_run(db, run_id)
+        # the precise NON-READY state — not a terminal budget block
+        assert run.status == FlowStatus.REVIEWING.value
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["budget_decision"] == "budget_exhausted"
+        assert block["stage"] == "reviewer"
+        assert block["released"] is False
+        budget = block["budget"]
+        assert budget["closing_reserve_usd"] == pytest.approx(0.60)
+        assert budget["closing_review_fits"] is True  # the reserve is intact
+        assert budget["coder_ceiling_usd"] == pytest.approx(1.40)
+        # the five distinguishable report fields ride the evidence
+        for field in (
+            "exact_usd",
+            "known_subtotal_usd",
+            "lower_bound_usd",
+            "reserved_liability_usd",
+            "unknown_intervals",
+        ):
+            assert field in budget
+
+    async def test_a_scanner_re_drive_never_re_attempts_the_review(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """The standing decision guards the leg: the reconciler's review
+        resume stands down while the block is unreleased — the paid
+        review call is never retried behind the operator's back."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=1)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+        assert reviewer.calls == []  # the refused call never recorded
+
+        await service.evaluate_waiting_ci()  # the scanner re-drive
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.REVIEWING.value  # still held
+        assert reviewer.calls == []  # NO hidden retry of the review
+
+    async def test_refusal_without_a_closing_policy_blocks_precisely(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        monkeypatch.delenv("FORGE_CLOSING_RESERVE_USD", raising=False)
+        monkeypatch.delenv("FORGE_CLOSING_RESERVE_FRACTION", raising=False)
+        monkeypatch.delenv("FORGE_SPEND_CAP_USD", raising=False)
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=1)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("budget_exhausted: reviewer refused")
+        assert "no closing reserve policy" in (run.status_reason or "")
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["budget"]["closing_reserve_usd"] is None  # honest unknown
+
+    async def test_review_only_continuation_completes_the_review(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """AC-04: after the explicit budget decision + an explicit,
+        auditable top-up, the continuation repeats ONLY the review of the
+        SAME candidate — zero coder dispatches, zero new commits."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=1)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+        writer_calls_before = len(FakeWriter.instances[0].calls)
+        shas_before = list((await get_run(db, run_id)).candidate_shas or [])
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,
+            top_up_reason="close the review within its reserve",
+        )
+        assert outcome["allowed"] is True
+        assert outcome["coder_dispatches"] == 0  # ZERO coder dispatches
+        assert outcome["commits"] == 0  # ZERO commits
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert list(run.candidate_shas or []) == shas_before  # SAME candidate
+        assert len(FakeWriter.instances[0].calls) == writer_calls_before  # no commit
+        assert len(reviewer.calls) == 1  # the review ran exactly once more
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["released"]["operator"] == "human:alice"
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+        assert len(block["top_ups"]) == 1
+        assert block["top_ups"][0]["reason"] == "close the review within its reserve"
+
+    async def test_a_moved_head_invalidates_the_review_shortcut(self, db, fake_gitlab, monkeypatch):
+        """AC-05: a human push past the reviewed candidate invalidates
+        the review-only shortcut with the TYPED staleness — the required
+        verification reruns (the run parks, never a stale ready)."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=2)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+        # the human push lands while the run is held in reviewing
+        branch = factory_branch(ISSUE_IID, run_id)
+        fake_gitlab.seed_commit(branch, "9" * 40, "human push")
+
+        outcome = await service.continue_review_only(run_id, operator="human:alice")
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "review_shortcut_stale"
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("review_shortcut_stale")
+        assert reviewer.calls == []  # the stale shortcut never reviewed
+
+    async def test_the_service_top_up_is_replay_idempotent(self, db, fake_gitlab, monkeypatch):
+        """A still-refusing guard (the top-up did not reach the call
+        axis yet): the SAME operator command retried adds its amount
+        exactly once across refusal cycles."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=99)
+        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        first = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,
+            top_up_reason="explicit closing allowance",
+        )
+        assert first["allowed"] is True  # the shortcut itself is sound
+        replay = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,
+            top_up_reason="explicit closing allowance",
+        )
+        assert replay["allowed"] is True
+
+        run = await get_run(db, run_id)
+        # the reviewer kept refusing, so the run is held again — but the
+        # retried command added its amount EXACTLY ONCE
+        assert run.status == FlowStatus.REVIEWING.value
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+        assert len(block["top_ups"]) == 1

@@ -61,6 +61,24 @@ Import boundary (ADR-0027 §3): core, import-light — only
 :func:`forge.runs.spec.canonical_json_digest`. It imports no
 ``forge.integrations.*`` and no ``forge.gateway.*``.
 
+Q39-17 (#336, ADR-0033's amendment to ADR-0032) adds the two AUTHORITY
+members — ``approved_input_digest`` (the resolved
+:class:`~forge.adaptive.revisions.ApprovedInput`'s ``plan_text_digest``
+— #321's executor-input identity) and ``grant_id`` (the
+:class:`~forge.adaptive.credential_broker.CredentialOperationGrant` a
+redemption-mode dispatch minted — #320's credential authorization).
+Both ride the document and therefore ``spec_digest()``; both fail
+closed when present but malformed, and a ``runner-redemption`` spec
+without its ``grant_id`` refuses (a redemption the endpoint could never
+authorize). Empty values are the recorded pre-#321/#320 window. The
+schema word stays ``forge.execution.spec/1`` —
+ADDITIVE-WITH-VERSION-NOTE, not a ``/2`` bump: the members are optional
+with empty legacy values and no existing member's digest semantics
+changed (a pre-amendment reader refuses the new keys as unknown — the
+compatibility rule working as designed). The two members are pinned in
+the DOCUMENT (and its digest), not in the rendered template-variable
+set: the templates consume the same small pinned set as before.
+
 Registered ownership: ``execution_delivery_spec`` in
 :mod:`forge.adaptive.boundary_registry` (the registry's seventh entry).
 """
@@ -495,6 +513,16 @@ class ExecutionSpec:
     composition: SupportedComposition
     #: The schema discriminator (always :data:`EXECUTION_SPEC_SCHEMA`).
     schema_version: str = EXECUTION_SPEC_SCHEMA
+    #: The resolved ApprovedInput's ``plan_text_digest`` (sha256 over
+    #: the brief TEXT — #321's executor-input identity). Empty = the
+    #: recorded pre-#321 window (the spec's plan text is the brief and
+    #: no revision machinery was composed).
+    approved_input_digest: str = ""
+    #: The CredentialOperationGrant's id a redemption-mode dispatch
+    #: minted (#320's credential authorization). REQUIRED under
+    #: ``runner-redemption``; empty = the recorded pre-#320 window on
+    #: every other route.
+    grant_id: str = ""
 
     def spec_digest(self) -> str:
         """sha256 over the canonical pinned document — a field change
@@ -518,6 +546,11 @@ class ExecutionSpec:
             "credential_mode": self.credential_mode,
             "credential_ref": self.credential_ref,
             "profile_digest": self.profile_digest,
+            # Q39-17's authority members (ADR-0032's amendment): both
+            # additive-with-version-note — present (possibly empty) in
+            # every v1 document, inside spec_digest().
+            "approved_input_digest": self.approved_input_digest,
+            "grant_id": self.grant_id,
             "artifact_contract": {
                 "collector_entry": self.collector_entry,
                 "output_root": self.output_root,
@@ -580,6 +613,21 @@ AMBIENT_FALLBACK_VARIABLES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _require_grant_token(value: str) -> str:
+    """The grant id is ONE token (the broker mints ``uuid4().hex``): a
+    value that is empty, whitespace-padded or carries internal
+    whitespace is a different-or-broken authorization — refuse rather
+    than pin an id the redemption endpoint could never join on."""
+    cleaned = str(value or "").strip()
+    if not cleaned or any(char.isspace() for char in cleaned):
+        raise CompositionRefusal(
+            f"ExecutionSpec field 'grant_id' carries {value!r} — the grant id is "
+            "one token (the operation grant's own id, joined on at redemption); "
+            "a redemption spec names the grant it was authorized under or refuses"
+        )
+    return cleaned
+
+
 def compose_execution_spec(
     *,
     run_id: str,
@@ -593,6 +641,8 @@ def compose_execution_spec(
     continuation_ref: str = "",
     credential_ref: str = "",
     profile_digest: str = "",
+    approved_input_digest: str = "",
+    grant_id: str = "",
     collector_entry: str = DEFAULT_COLLECTOR_ENTRY,
     output_root: str = DEFAULT_OUTPUT_ROOT,
     matrix: tuple[SupportedComposition, ...] | None = None,
@@ -615,7 +665,13 @@ def compose_execution_spec(
     - a bound credential mode demands its non-secret ref; only
       ``ambient-legacy`` may carry none (the documented window);
     - ``model`` may be empty (the recorded unpinned case) — never a
-      permissive guess of a route.
+      permissive guess of a route;
+    - the Q39-17 authority members: a non-empty
+      ``approved_input_digest`` must be sha256 (the resolved
+      ApprovedInput's ``plan_text_digest``), and a ``runner-redemption``
+      composition REQUIRES its ``grant_id`` (a redemption the endpoint
+      could never authorize refuses here, at the dispatch pre-check
+      seam) — a present grant id is one token, never a composed value.
     """
     mode = _require_non_empty(resume_mode, "resume_mode")
     if mode not in RESUME_MODE_WORDS:
@@ -650,6 +706,24 @@ def compose_execution_spec(
     credential_ref_cleaned = str(credential_ref or "").strip()
     if credential_mode_cleaned != "ambient-legacy":
         credential_ref_cleaned = _require_non_empty(credential_ref_cleaned, "credential_ref")
+    approved_digest = str(approved_input_digest or "").strip().lower()
+    if approved_digest:
+        approved_digest = _require_sha256(approved_digest, "approved_input_digest")
+    grant_cleaned = str(grant_id or "").strip()
+    if credential_mode_cleaned == "runner-redemption":
+        # The redemption authorization IS the grant: a redemption-mode
+        # spec without its grant id pins an operation the endpoint must
+        # refuse (grant_absent_*) — refuse HERE, at the dispatch
+        # pre-check seam, before any template variable renders.
+        if not grant_cleaned:
+            raise CompositionRefusal(
+                "ExecutionSpec field 'grant_id' is empty under credential mode "
+                "'runner-redemption' — the dispatch minted an operation grant "
+                "beside the delivery plan (#320); the spec pins that grant's id "
+                "or the redemption refuses"
+            )
+    if grant_cleaned:
+        grant_cleaned = _require_grant_token(grant_cleaned)
     return ExecutionSpec(
         run_id=_require_non_empty(run_id, "run_id"),
         execution_attempt_id=_require_sha256(execution_attempt_id, "execution_attempt_id"),
@@ -663,6 +737,8 @@ def compose_execution_spec(
         collector_entry=_require_non_empty(collector_entry, "collector_entry"),
         output_root=_require_non_empty(output_root, "output_root"),
         composition=composition,
+        approved_input_digest=approved_digest,
+        grant_id=grant_cleaned,
     )
 
 
@@ -708,6 +784,8 @@ _DOCUMENT_KEYS = frozenset(
         "credential_mode",
         "credential_ref",
         "profile_digest",
+        "approved_input_digest",
+        "grant_id",
         "artifact_contract",
         "composition",
     }
@@ -780,6 +858,13 @@ def read_execution_spec(document: Mapping[str, Any]) -> ExecutionSpec:
         continuation_ref=str(document.get("continuation_ref") or ""),
         credential_ref=str(document.get("credential_ref") or ""),
         profile_digest=str(document.get("profile_digest") or ""),
+        # Q39-17: the authority members default to the empty legacy
+        # window — a PRE-amendment document (no such keys) still loads;
+        # the construction validation above re-runs either way (a
+        # redemption-mode document without its grant refuses with the
+        # precise instruction, never a silent authorization drop).
+        approved_input_digest=str(document.get("approved_input_digest") or ""),
+        grant_id=str(document.get("grant_id") or ""),
         collector_entry=str(artifact.get("collector_entry") or ""),
         output_root=str(artifact.get("output_root") or ""),
     )

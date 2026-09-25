@@ -57,6 +57,19 @@ class TestSelectionIntegrity:
         assert "tests/test_checkpoint_repository.py" in selected
         assert "tests/test_checkpoint_retry_authority.py" in selected
 
+    def test_the_selection_covers_the_q39_08_accounting_races(self, gate: ModuleType) -> None:
+        """#327: the #322 CAS-projection and #324 partial→final arms run
+        on the REQUIRED selection — their files are members of a profile,
+        and the critical ids are REQUIRED_TRACES (executed-ID tracked)."""
+        selected = {path for profile in gate.PROFILES for path in profile.selection}
+        assert "tests/test_credential_audit.py" in selected
+        assert "tests/test_usage_ingestion.py" in selected
+        by_profile = {profile.name: profile for profile in gate.PROFILES}
+        assert "accounting-races" in by_profile
+        traces = gate.traces_for_profile(by_profile["accounting-races"])
+        assert {trace.profile for trace in traces} == {"accounting-races"}
+        assert len(traces) == 2
+
     def test_profiles_own_separate_databases(self, gate: ModuleType) -> None:
         # The production-entry conftest resets the whole public schema per
         # test under FORGE_PG_TEST_URL — profiles must not share a database.
@@ -108,11 +121,50 @@ class TestManifestCheck:
             "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
             "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
             "::test_put_on_one_instance_read_on_a_fresh_one",
+            "tests/test_credential_audit.py::TestRealPostgres"
+            "::test_concurrent_redemptions_and_evidence_writers_survive",
+            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
+            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
         ]
         assert gate.missing_required(manifest) == []
         matches = gate.required_test_ids(manifest)
         assert set(matches) == {trace.label for trace in gate.REQUIRED_TRACES}
         assert all(ids for ids in matches.values())
+
+    def test_a_missing_accounting_race_trace_refuses(self, gate: ModuleType) -> None:
+        """#327: the accounting-races critical ids are REQUIRED — a
+        collection missing them (a renamed class, a removed skipif marker
+        that un-gates the test) refuses the gate instead of quietly
+        running fewer tests."""
+        manifest = [
+            "tests/production_entry/test_production_entry.py"
+            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
+            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_barrier",
+            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
+            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
+            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
+            "::test_put_on_one_instance_read_on_a_fresh_one",
+            # the #322 trace present, the #324 trace REMOVED:
+            "tests/test_credential_audit.py::TestRealPostgres"
+            "::test_concurrent_redemptions_and_evidence_writers_survive",
+        ]
+        absent = gate.missing_required(manifest)
+        assert [trace.label for trace in absent] == [
+            "Q39-05 (#324) concurrent partial+final reconcile under real isolation"
+        ]
+
+    def test_a_pg_url_skip_on_the_accounting_traces_is_required(self, gate: ModuleType) -> None:
+        """A missing prerequisite on the accounting races FAILS the gate
+        (a REQUIRED skip), never a silent green skip."""
+        node = (
+            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
+            "::test_concurrent_partial_and_final_reconcile_under_real_isolation"
+        )
+        reason = (
+            "FORGE_PG_TEST_URL not set — the real-PostgreSQL isolation proofs "
+            "run only against a disposable real Postgres"
+        )
+        assert gate.classify_skip(node, reason) == "required"
 
     def test_the_manifest_check_is_scoped_per_profile(self, gate: ModuleType) -> None:
         # production-entry demands ONLY PE-4; the checkpoint profile demands
@@ -136,6 +188,10 @@ class TestManifestCheck:
             "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
             "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
             "::test_put_on_one_instance_read_on_a_fresh_one",
+            "tests/test_credential_audit.py::TestRealPostgres"
+            "::test_concurrent_redemptions_and_evidence_writers_survive",
+            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
+            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [

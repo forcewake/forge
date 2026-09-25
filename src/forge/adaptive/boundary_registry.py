@@ -16,7 +16,11 @@ production callers that may depend on the owner's surface, the
 mechanical confinement rule that guards it, and the negative contract —
 what must NOT decide the same thing elsewhere. R38-17 (#318) added the
 seventh entry (execution_delivery_spec, ADR-0032): the versioned
-execution/delivery specification the lane templates consume.
+execution/delivery specification the lane templates consume. Q39-17
+(#336, ADR-0033) added the three consolidation rule-sets below (the
+grant load at the redemption endpoint, the approved-input brief at the
+GitLab dispatch, the locator allocation through the registry) — the
+mechanical guard for the shapes the #320/#321/#323 cycle landed.
 
 The registry is consumed by ``tests/test_architecture_boundaries.py``:
 
@@ -51,16 +55,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 __all__ = [
+    "APPROVED_INPUT_DISPATCH_MODULES",
     "AuthorityBoundary",
     "BOUNDARIES",
     "ATTEMPT_START_CONSTRUCTORS",
+    "BRIEF_DISPATCH_VARIABLES",
     "COMPOSED_DISPATCH_ENTRIES",
     "CONTINUATION_MODE_CONSTRUCTION_MODULES",
     "GC_SWEEP_ENTRYPOINTS",
     "GC_UNLINK_EXEMPT_RECEIVERS",
+    "GRANT_PERSISTED_SURFACES",
+    "LEGACY_CARRIER_DERIVATION_MODULES",
+    "LEGACY_CARRIER_FUNCTIONS",
     "LEGACY_LOOKUP_CHAIN_MODULES",
     "LEGACY_LOOKUP_CONFINED_FUNCTION",
     "MODE_VOCABULARY_HOME",
+    "REDEMPTION_ENDPOINT_MODULE",
+    "REDEMPTION_GRANT_LOADERS",
+    "REDEMPTION_REGISTRY_LOOKUPS",
     "RESOLVE_REPOSITORY_CALLERS",
     "boundary_by_name",
     "owner_modules",
@@ -207,6 +219,12 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.runs.azure_service",
             "forge.runs.github_service",
             "forge.runs.service",
+            # Q39-15 (#334): the operator detail route renders the
+            # project's admission accounting (admission_report — a
+            # SELECT-only fold) beside the occupancy gauge. It never
+            # releases, derives occupancy of its own, or writes: the
+            # read-only charter test pins zero row movement.
+            "forge.api_operator",
         ),
         enforcement=(
             "Import-registration only (the CAS is a database invariant, "
@@ -329,6 +347,11 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             # never reads rows around the authorized snapshot reader.
             "forge.adaptive.credential_broker",
             "forge.adaptive.project_credentials",
+            # Q39-15 (#334): the operating-limits read-model composes
+            # the owner's current_candidate binding (never forks its
+            # parsing) for the required-checks and review-budget folds;
+            # its rows all come through the authorized snapshot reader.
+            "forge.adaptive.ops_limits",
             "forge.adaptive.support_bundle",
             "forge.api_operator",
         ),
@@ -349,10 +372,11 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "WHICH execution and delivery choices a lane template "
             "consumes as PINS — the run/attempt identity, the driver + "
             "model route, the resume mode + pinned checkpoint ref, the "
-            "credential delivery mode + ref, the profile digest and the "
-            "artifact contract (collector entry, output root) — plus "
-            "the supported composition matrix and its preflight "
-            "refusals."
+            "credential delivery mode + ref, the profile digest, the "
+            "artifact contract (collector entry, output root) and "
+            "(Q39-17/#336) the two authority members: the approved-"
+            "input digest (#321) and the grant id (#320) — plus the "
+            "supported composition matrix and its preflight refusals."
         ),
         owner_modules=("forge.adaptive.execution_spec",),
         allowed_dependents=(),
@@ -465,6 +489,72 @@ GC_UNLINK_EXEMPT_RECEIVERS: tuple[str, ...] = (
     "os.unlink(tmp_name)",
     "self._pins_path(...).unlink()",
     "CheckpointGcJournal.clear path.unlink()",
+)
+
+# ---------------------------------------------------------------------------
+# Q39-17 (#336, ADR-0033 §5) — the three consolidation rule-sets. Each
+# guards a shape the #320/#321/#323 cycle landed; the AST checks in
+# ``tests/test_architecture_boundaries.py`` iterate these sets and each
+# rule carries an intentional-violation trap (the checkers may never
+# pass vacuously).
+# ---------------------------------------------------------------------------
+
+#: The redemption endpoint's module — the operation grant's judge
+#: (#320): every credential decision on that surface loads the
+#: PERSISTED grant first.
+REDEMPTION_ENDPOINT_MODULE: str = "forge.api_lane_control"
+
+#: The grant-loading functions of the redemption endpoint. A
+#: credential-registry lookup (REDEMPTION_REGISTRY_LOOKUPS) may run
+#: only inside a function that ALSO references one of these — the
+#: registry validates revocation/rotation/staged slots; it never
+#: authorizes an operation (the ``grant_absent_native_only`` refusal
+#: word: a registry entry alone grants nothing).
+REDEMPTION_GRANT_LOADERS: tuple[str, ...] = (
+    "_authorize_operation_grant",
+    "persist_operation_grant",
+)
+
+#: The registry lookups that must never stand alone as authorization at
+#: the redemption endpoint (the data-plane validation calls that run
+#: AFTER the grant authorization).
+REDEMPTION_REGISTRY_LOOKUPS: tuple[str, ...] = ("resolve_dispatch_credential",)
+
+#: The broker's persisted-grant surfaces a registered loader must
+#: reach (the inverse-honesty check: a loader that no longer loads the
+#: persisted grant hollows the rule).
+GRANT_PERSISTED_SURFACES: tuple[str, ...] = (
+    "operation_grant_for_plan",
+    "operation_grants_for_attempt",
+    "merge_operation_grant",
+)
+
+#: The modules whose dispatch entries resolve ApprovedInput at EVERY
+#: dispatch entry (Q39-02/#321 — ADR-0033's first extraction rung).
+APPROVED_INPUT_DISPATCH_MODULES: tuple[str, ...] = ("forge.runs.service",)
+
+#: The lane variables that carry the dispatched executor brief: a
+#: function referencing one of these CONSTRUCTS a dispatched brief and
+#: must obtain its text from ``resolve_approved_input`` /
+#: ``ApprovedInput.brief()`` — never a direct ``spec.plan_summary``
+#: brief (the pre-#321 shape the live counterexample recorded: the
+#: resumed lane reverted to the superseded plan).
+BRIEF_DISPATCH_VARIABLES: tuple[str, ...] = (
+    "LANE_PLAN_DIGEST_VARIABLE",
+    "LANE_BRIEF_ENVELOPE_DIGEST_VARIABLE",
+)
+
+#: The only module that may derive the LEGACY lossy carrier name
+#: (``credential_secret_name`` / ``credential_secret_segment`` — the
+#: pre-#323 spelling): the broker, whose NativeLocatorRegistry owns the
+#: legacy collision groups and the migration inventory. A dispatch leg
+#: deriving a carrier directly bypasses the registry's collision check
+#: (Q39-04/#323) — allocation goes through
+#: ``NativeLocatorRegistry.allocate``.
+LEGACY_CARRIER_DERIVATION_MODULES: tuple[str, ...] = ("forge.adaptive.credential_broker",)
+LEGACY_CARRIER_FUNCTIONS: tuple[str, ...] = (
+    "credential_secret_name",
+    "credential_secret_segment",
 )
 
 
