@@ -5,7 +5,7 @@
       "objectives_achieved": 9,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -37,7 +37,7 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -76,7 +76,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -104,7 +104,7 @@
       "objectives_achieved": 6,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -135,7 +135,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -154,7 +154,7 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -188,7 +188,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -217,7 +217,7 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -257,7 +257,7 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+        "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -314,7 +314,7 @@
       "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
     },
     "profile": {
-      "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+      "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
       "qualification": "qualified-for-profile"
     },
     "restore_time_s": {
@@ -330,7 +330,7 @@
   "profile": {
     "bind": "matched",
     "differences": [],
-    "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+    "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
     "profile": "supported-gitlab-ce-v1",
     "qualification": "qualified-for-profile"
   },

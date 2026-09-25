@@ -1,0 +1,19 @@
+model_list:
+  - model_name: fast
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/ZAI_API_KEY
+  - model_name: strong
+    litellm_params:
+      model: openai/glm-5.2
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/ZAI_API_KEY
+  - model_name: code
+    litellm_params:
+      model: openai/glm-5.3
+      api_base: https://api.z.ai/api/coding/paas/v4
+      api_key: os.environ/ZAI_API_KEY
+
+litellm_settings:
+  drop_params: true

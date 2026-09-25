@@ -81,7 +81,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-25T03:09:57+00:00",
+  "frozen_at": "2026-09-25T03:48:22+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.37.0.json",
@@ -114,13 +114,14 @@
       "version": "0.37.0"
     }
   },
-  "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
+  "manifest_digest": "3d63ac3c8d8cd0f791bba0cef40f07d2e3545698187cc3164aba105f48bbce03",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",
     "litellm_route": "fast",
     "receipts": [
       "litellm-config.yaml",
+      "qualification/profiles/receipts/litellm-config-lab-v1.yaml",
       "qualification/records/gitlab-ce-v1@0.37.0.json"
     ],
     "upstream": "openai/glm-5.3-flash"

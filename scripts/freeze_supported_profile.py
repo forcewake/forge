@@ -114,7 +114,13 @@ CLOSURE_RECEIPT_CANDIDATES = (
 )
 PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.37.0.json"
 PROFILE_DOC_RECEIPT = "qualification/profiles/gitlab-ce-v1.md"
-LITELLM_CONFIG = "litellm-config.yaml"
+#: The lab gateway's model-route receipt (env-referenced keys only — no
+#: secrets; the working-tree file is gitignored, so the COMMITTED copy is
+#: the citable receipt; CI has no lab file).
+LITELLM_CONFIG_CANDIDATES = (
+    "litellm-config.yaml",
+    "qualification/profiles/receipts/litellm-config-lab-v1.yaml",
+)
 LANE_TEMPLATE_PATH = "ci/templates/claude-sdk-lane.gitlab-ci.yml"
 TASK_SCRIPT = "scripts/run_useful_wip_resume.py"
 
@@ -325,15 +331,15 @@ def _load_frozen_task() -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, s
 
 def _litellm_route(root: Path, route_name: str) -> str:
     """The upstream model the litellm ``fast`` route resolves to."""
-    text = (root / LITELLM_CONFIG).read_text(encoding="utf-8")
+    path = root / _first_existing(root, LITELLM_CONFIG_CANDIDATES)
+    text = path.read_text(encoding="utf-8")
     pattern = re.compile(
         rf"model_name:\s*{re.escape(route_name)}\s*\n\s*litellm_params:\s*\n\s*model:\s*(\S+)"
     )
     match = pattern.search(text)
     if not match:
         raise FreezeRefused(
-            f"{LITELLM_CONFIG} carries no '{route_name}' route — the model route axis "
-            "cannot be bound"
+            f"{path} carries no '{route_name}' route — the model route axis cannot be bound"
         )
     return match.group(1)
 
@@ -679,7 +685,7 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             "upstream": inputs.litellm_upstream,
             "lane_model": "glm-5.3-flash",
             "gateway": "https://api.z.ai/api/anthropic",
-            "receipts": [LITELLM_CONFIG, PROFILE_RECORD_RECEIPT],
+            "receipts": list(LITELLM_CONFIG_CANDIDATES) + [PROFILE_RECORD_RECEIPT],
         },
         "credential_route": {
             "provider": "gitlab",
