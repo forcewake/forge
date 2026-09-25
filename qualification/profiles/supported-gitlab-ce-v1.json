@@ -81,7 +81,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-25T00:06:56+00:00",
+  "frozen_at": "2026-09-25T03:09:57+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.37.0.json",
@@ -95,7 +95,10 @@
         "sha256": "18041cc0fbf9b54c31f39288bea72db2b9fd06b231d4e9eb7664ffad23263604",
         "source": "local-uv-build"
       },
-      "receipt": "dist/lane-closure/closure-manifest.json",
+      "receipt_candidates": [
+        "dist/lane-closure/closure-manifest.json",
+        "qualification/profiles/receipts/lane-closure-v0.37.0.json"
+      ],
       "status": "staged closure predates the promoted wheel — the supported composition is WHEEL-pinned, not closure-pinned (an honest gap, not a defaulted axis)"
     },
     "executed_live": {
@@ -111,7 +114,7 @@
       "version": "0.37.0"
     }
   },
-  "manifest_digest": "7c292dd89bb9a1f84af7d1594443020b1d754fe0d9e124816c69a2e4455d63fd",
+  "manifest_digest": "857805169e831ba1194a52666a71845d529aaad66fad7a7325cd6e7d42af57d2",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",

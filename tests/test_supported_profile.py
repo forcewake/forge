@@ -129,7 +129,14 @@ class TestFreezeFieldSourcing:
             ROOT / "docs/evaluation/2026-09-25-useful-wip-resume/useful-wip-resume-2026-09-25.json"
         )
         inventory = _load(ROOT / "qualification/inventory-2026-09-25.json")
-        closure = _load(ROOT / "dist/lane-closure/closure-manifest.json")
+        from scripts.freeze_supported_profile import CLOSURE_RECEIPT_CANDIDATES
+
+        closure_path = next(
+            (ROOT / c for c in CLOSURE_RECEIPT_CANDIDATES if (ROOT / c).exists()),
+            None,
+        )
+        assert closure_path is not None, "no closure receipt (dist build or committed copy)"
+        closure = _load(closure_path)
         record = _load(ROOT / "qualification/records/gitlab-ce-v1@0.37.0.json")
 
         promoted = document["control_plane"]["promoted"]

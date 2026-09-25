@@ -94,7 +94,24 @@ LIVE_TRACE_RECEIPT = (
 )
 LIVE_RUN_RECEIPT = "docs/evaluation/2026-09-25-useful-wip-resume/live-run-evidence.json"
 INVENTORY_RECEIPT = "qualification/inventory-2026-09-25.json"
-CLOSURE_RECEIPT = "dist/lane-closure/closure-manifest.json"
+
+
+#: The closure receipt: the locally built artifact when present, else the
+#: COMMITTED copy (CI has no dist/ — the freeze binds receipts, and the
+#: committed copy IS the receipt for the promoted composition).
+def _first_existing(root, candidates):
+    for candidate in candidates:
+        if (root / candidate).is_file():
+            return candidate
+    raise FreezeRefused(
+        f"receipt {candidates[0]} is missing — the freeze binds receipts, never guesses"
+    )
+
+
+CLOSURE_RECEIPT_CANDIDATES = (
+    "dist/lane-closure/closure-manifest.json",
+    "qualification/profiles/receipts/lane-closure-v0.37.0.json",
+)
 PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.37.0.json"
 PROFILE_DOC_RECEIPT = "qualification/profiles/gitlab-ce-v1.md"
 LITELLM_CONFIG = "litellm-config.yaml"
@@ -393,7 +410,7 @@ class CaptureInputs:
         trace = _load_json(root, LIVE_TRACE_RECEIPT)
         live_run = _load_json(root, LIVE_RUN_RECEIPT)
         inventory = _load_json(root, INVENTORY_RECEIPT)
-        closure = _load_json(root, CLOSURE_RECEIPT)
+        closure = _load_json(root, _first_existing(root, CLOSURE_RECEIPT_CANDIDATES))
         record = _load_json(root, PROFILE_RECORD_RECEIPT)
         # The template bytes: recovered from the committed receipt and
         # cross-checked against the traced sha below — the receipt IS the
@@ -479,10 +496,12 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
         )
     closure_forge = inputs.closure.get("forge", {})
     closure_digest = _require_hex64(
-        inputs.closure.get("closure_digest"), "closure_digest", CLOSURE_RECEIPT
+        inputs.closure.get("closure_digest"), "closure_digest", CLOSURE_RECEIPT_CANDIDATES[0]
     )
     closure_wheel_sha = _require_hex64(
-        closure_forge.get("wheel", {}).get("sha256"), "closure.forge.wheel.sha256", CLOSURE_RECEIPT
+        closure_forge.get("wheel", {}).get("sha256"),
+        "closure.forge.wheel.sha256",
+        CLOSURE_RECEIPT_CANDIDATES[0],
     )
 
     # -- the runner profile -----------------------------------------------
@@ -608,7 +627,7 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                     "composition is WHEEL-pinned, not closure-pinned (an honest gap, "
                     "not a defaulted axis)"
                 ),
-                "receipt": CLOSURE_RECEIPT,
+                "receipt_candidates": list(CLOSURE_RECEIPT_CANDIDATES),
             },
         },
         "target_template": {
