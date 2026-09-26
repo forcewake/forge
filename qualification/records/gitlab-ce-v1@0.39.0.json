@@ -59,13 +59,14 @@
     "qualification/records/supported-composition-v2-2026-09-25.json",
     "qualification/records/ops-limits-2026-09-25.json",
     "qualification/profiles/supported-gitlab-ce-v1.json",
-    "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
+    "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json",
+    "docs/releases/evidence/v0.39.0/promotion.json"
   ],
   "harness_binary": "claude-code",
   "harness_version": "2.1.273",
-  "image_digest": "sha256:33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+  "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
   "legacy": false,
-  "note": "Q39 cycle release record. The four claimed capabilities were proven LIVE by the supported-composition v2 trace on the EXACT composition this release ships: the control plane was the working-tree alignment build (image sha256:33eb4622, deployed schema head 028) and the lane wheel forge-0.38.0-py3-none-any.whl (sha256 37fb5b0a) — the v0.39.0 tag promotes that same tree, closing the moving-tree gap the v0.38.0 record named. Honest posture: (1) this dispatch's model credential rode the gitlab-protected-variable route — NO operation grant was minted on it; the #320 grant machinery is proven by its offline refusal-matrix suites, not by this trace. (2) The human approval on the promotion decision stays PENDING (approvals are a separate human artifact — qualification/profile-approvals.json — and this record claims none). (3) The follow-up release commit re-binds this record to the promoted image digest once release.yml records it; until then the pinned digest above is the EXECUTED lab composition, not the GHCR digest. (4) A real ~55-minute home-network outage occurred mid-cycle (TLS resets; gitlab.forcewake.me additionally lost its zone record): degradation was graceful (blocked classification, zero paid dispatches burned, no lost code), recovery by operator action — recorded as the excluded-failure-domains worked example in docs/operations/support-agreement.md. Spend: $0.4032 lane (SDK receipts) + planner/reviewer inside the run budget — under the $2.50 cap.",
+  "note": "Q39 cycle release record. The four claimed capabilities were proven LIVE by the supported-composition v2 trace on the EXACT composition this release ships: the control plane was the working-tree alignment build (image sha256:33eb4622, deployed schema head 028) and the lane wheel forge-0.38.0-py3-none-any.whl (sha256 37fb5b0a) — the v0.39.0 tag promotes that same tree, closing the moving-tree gap the v0.38.0 record named. Honest posture: (1) this dispatch's model credential rode the gitlab-protected-variable route — NO operation grant was minted on it; the #320 grant machinery is proven by its offline refusal-matrix suites, not by this trace. (2) The human approval on the promotion decision stays PENDING (approvals are a separate human artifact — qualification/profile-approvals.json — and this record claims none). (3) BOUND to the promoted v0.39.0 artifacts: image digest sha256:72438649…, lane wheel 78711c28… — BYTE-IDENTICAL to the qualification wheel the freeze pinned (the promoted lane wheel was built from the exact traced tree), so the moving-tree gap the v0.38.0 record named is CLOSED at this release. The executed lab (podman build sha256:33eb4622) remains bound in the manifest's executed_lab section as the build that RAN the trace. (4) A real ~55-minute home-network outage occurred mid-cycle (TLS resets; gitlab.forcewake.me additionally lost its zone record): degradation was graceful (blocked classification, zero paid dispatches burned, no lost code), recovery by operator action — recorded as the excluded-failure-domains worked example in docs/operations/support-agreement.md. Spend: $0.4032 lane (SDK receipts) + planner/reviewer inside the run budget — under the $2.50 cap.",
   "profile": "gitlab-ce-v1",
   "provider": "gitlab",
   "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-25",
@@ -110,5 +111,5 @@
     "target_schema": "028"
   },
   "verification_contract": "one required job named smoke asserting six exact slugify cases + app rewired + legacy deleted on the CURRENT candidate sha (committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/); PLUS the v2 revision marker (__all__ = [\"slugify\"] in src/utils/text.py) proving the resumed executor consumed the approved revision-2 brief",
-  "wheel_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd"
+  "wheel_sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de"
 }

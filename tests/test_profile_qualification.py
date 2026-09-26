@@ -1566,6 +1566,11 @@ def test_the_tiers_column_is_trace_derived() -> None:
 SUPPORTED_MANIFEST = ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1.json"
 
 
+def _cited_gitlab_record_id() -> str:
+    receipt = str(_supported_document()["harness"]["receipt"])  # type: ignore[index]
+    return receipt.rsplit("/", 1)[-1].removesuffix(".json")
+
+
 def _supported_document() -> dict[str, object]:
     import json as _json
 
@@ -1607,7 +1612,8 @@ def test_supported_profile_binding_matches_the_cited_record() -> None:
 
 def test_supported_profile_binding_names_a_swapped_wheel_under_a_constant_version() -> None:
     records = list(load_profile_records(ROOT))
-    cited = next(record for record in records if record.record_id == "gitlab-ce-v1@0.37.0")
+    cited_id = _cited_gitlab_record_id()
+    cited = next(record for record in records if record.record_id == cited_id)
     swapped = ProfileQualificationRecord(**{**cited.__dict__, "wheel_sha256": "9" * 64})
     bindings = supported_profile_binding(_supported_document(), [swapped])
     wheel = next(binding for binding in bindings if binding.axis == "wheel_sha256")
@@ -1622,7 +1628,9 @@ def test_supported_profile_binding_names_a_swapped_wheel_under_a_constant_versio
 
 def test_supported_profile_binding_falls_back_to_the_latest_record_with_a_note() -> None:
     records = [
-        record for record in load_profile_records(ROOT) if record.record_id != "gitlab-ce-v1@0.37.0"
+        record
+        for record in load_profile_records(ROOT)
+        if record.record_id != _cited_gitlab_record_id()
     ]
     if not any(record.profile == "gitlab-ce-v1" for record in records):
         pytest.skip("no alternative gitlab record to fall back to")

@@ -1,7 +1,7 @@
 # Support agreement — the supported profile (Q39-15 / #334)
 
 The supported profile is `supported-gitlab-ce-v1` (the frozen composition,
-manifest digest `13d0fcec…`, see the [supported-profile runbook](
+manifest digest `099431ca…`, see the [supported-profile runbook](
 supported-profile-runbook.md) and the [profile records](
 ../releases/profile-records.md)). This document states what operating
 limits are MEASURED on that profile, who owns the response to each failure

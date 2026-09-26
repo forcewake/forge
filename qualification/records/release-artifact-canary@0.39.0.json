@@ -11,25 +11,25 @@
     {
       "capability": "release-artifact-canary",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: the v0.38.0 canary stands as the current binary-smoke evidence (fresh + seed-real-data + migrate stages); the v0.39.0 canary runs in release.yml against this tag's digest and the follow-up release commit re-binds this record to it",
-      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "covers": "fresh stage: migrate (027->028 on the promoted image), boot gate, /health, /mcp 401, doctor (promotion.json canary rows)",
+      "executed_at": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
       "outcome": "pass"
     },
     {
       "capability": "release-canary/previous-release-upgrade",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: v0.38.0's seeded upgrade (027->027 same-head preservation) stands; the v0.39.0 canary is expected to exercise the REAL 027->028 transition (the promoted v0.38.0 image carries head 027, v0.39.0 carries 028) — matching the cold-install upgrade receipt (five seeded tables preserved)",
-      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "covers": "seed-real-data + migrate stages: seeded at previous head 027 (flow_runs, run_specs, step_runs, control_commands, publication_intents); prev head 027 -> 028; upgrade preserved counts + digests — the REAL schema transition with data preservation",
+      "executed_at": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
       "outcome": "pass"
     }
   ],
   "evidence_refs": [
-    "docs/releases/evidence/v0.38.0/promotion.json"
+    "docs/releases/evidence/v0.39.0/promotion.json"
   ],
   "harness_binary": "ghcr.io/forcewake/forge",
-  "harness_version": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
-  "image_digest": "sha256:d9bb946510b69a80bf0b47049e2553d70f4bea7354630d1d63d95660f5314a5a",
-  "note": "Pre-release window record for the v0.39.0 tag: canary capabilities cite the promoted v0.38.0 evidence until release.yml records the v0.39.0 stages; the follow-up release commit re-binds every field to the new promotion record. The upgrade expectation is the real 027->028 schema transition (migration 028: credential grants, append-only redemptions, the usage 4-part identity).",
+  "harness_version": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
+  "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
+  "note": "BOUND to the promoted v0.39.0 artifacts (verdict promote, all five required checks green at 4bbfc3e): the canary exercised the REAL 027->028 migration (migration 028: credential grants, append-only redemptions, the usage 4-part identity) with five seeded tables fingerprint-identical through the upgrade — the first data-bearing N-1->head edge proven by a promotion canary itself.",
   "profile": "release-artifact-canary",
   "provider": "*",
   "provider_behavior_fingerprint": "",
@@ -41,7 +41,7 @@
   "stamp": "forge.profile.qualification/1",
   "template_defaults_digest": "",
   "upgrade": {
-    "evidence_ref": "docs/releases/evidence/v0.38.0/promotion.json",
+    "evidence_ref": "docs/releases/evidence/v0.39.0/promotion.json",
     "preservation_checks": [
       "per-table row counts identical after upgrade",
       "sha256 fingerprints over ordered row identity identical after upgrade"
@@ -57,5 +57,5 @@
     "target_schema": "028"
   },
   "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
-  "wheel_sha256": "404a1fef0b81bf923b0c8abf5a7e32bdfc76bfa57ed2ad00c1a2bfa50de7f6b7"
+  "wheel_sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de"
 }

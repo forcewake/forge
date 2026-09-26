@@ -94,7 +94,7 @@ ARCHIVED_MANIFEST_PATH = (
 )
 
 #: Every receipt the freeze binds, by role (repo-relative).
-PROMOTION_RECEIPT = "docs/releases/evidence/v0.37.0/promotion.json"
+PROMOTION_RECEIPT = "docs/releases/evidence/v0.39.0/promotion.json"
 #: The v2 receipts (Q39-07/#326 — the executed-lab trace on the NEW
 #: composition): the alignment + live bundle + record live in the v2
 #: evaluation directory; the inventory is the post-alignment v2 snapshot.
@@ -103,11 +103,11 @@ ALIGNMENT_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/alignme
 LIVE_TRACE_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
 LIVE_RUN_RECEIPT = "docs/evaluation/2026-09-25-supported-composition-v2/live-run-evidence.json"
 INVENTORY_RECEIPT = "qualification/inventory-2026-09-25-v2.json"
-#: The newest promotion record (v0.38.0) — bound as the PENDING promotion:
-#: it still predates the qualified working-tree composition; the next
-#: promotion that carries the tree is the one that may retire this
-#: manifest's pending note.
-LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.38.0/promotion.json"
+#: The promotion record that carries THIS tree: v0.39.0 is built from the
+#: exact composition the trace executed (the promoted lane wheel is
+#: byte-identical to the qualification wheel — 78711c28…) — the
+#: moving-tree gap the v0.38.0 record named is CLOSED by this promotion.
+LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.39.0/promotion.json"
 #: The uv build of the working tree — the QUALIFICATION composition's
 #: wheel (the fresh cold-install target). Built by ``uv build`` from the
 #: exact tree the alignment image carried; the freeze binds its sha256
@@ -134,7 +134,7 @@ CLOSURE_RECEIPT_CANDIDATES = (
     "dist/lane-closure/closure-manifest.json",
     "qualification/profiles/receipts/lane-closure-v0.37.0.json",
 )
-PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.37.0.json"
+PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.39.0.json"
 PROFILE_DOC_RECEIPT = "qualification/profiles/gitlab-ce-v1.md"
 #: The lab gateway's model-route receipt (env-referenced keys only — no
 #: secrets; the working-tree file is gitignored, so the COMMITTED copy is
@@ -702,9 +702,11 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 ),
                 "wheel_url": str(inputs.latest_promotion.get("wheel_url", "")),
                 "status": (
-                    "promoted, STILL NOT the qualified composition — v0.38.0 predates "
-                    "the working tree this manifest qualifies; the pending promotion "
-                    "is the NEXT release built from this exact tree"
+                    "promoted FROM the qualified composition — v0.39.0 is built "
+                    "from the exact tree the trace executed and the promoted lane "
+                    "wheel is byte-identical to the qualification wheel "
+                    "(78711c28…); the pending-promotion note the v0.38.0 era "
+                    "carried is retired"
                 ),
                 "receipt": LATEST_PROMOTION_RECEIPT,
             },
@@ -738,12 +740,14 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "receipt": "alembic/versions + " + ALIGNMENT_RECEIPT,
             },
             "divergence": (
-                "the promoted v0.37.0 image digest and the executed lab digest DIFFER "
-                "(the v2 trace ran the working-tree build carrying the #320/#321/#325 "
-                "code no release carries yet; even the newest v0.38.0 promotion "
-                "predates it); both are bound above, neither is silently substituted — "
-                "the composition being qualified IS the executed-lab build, and its "
-                "promotion is pending, never assumed"
+                "the promoted v0.39.0 release is built from this exact tree and "
+                "its lane wheel is byte-identical to the qualification wheel "
+                "(78711c28…) — the moving-tree gap is closed at this promotion; "
+                "the executed-lab image digest and the promoted GHCR digest still "
+                "differ BY CONSTRUCTION (the podman working-tree build that RAN "
+                "the trace vs the CI build of the same source) — both are bound, "
+                "neither is silently substituted, and the next lab re-alignment "
+                "onto the promoted digest is recorded as the open follow-up"
             ),
         },
         "lane": {
@@ -767,7 +771,12 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "url": str(promotion.get("wheel_url", "")),
                 "sha256": wheel_sha,
                 "version": release_version,
-                "status": "the v0.37.0 promoted wheel — the historical install pin, NOT the qualification composition",
+                "status": (
+                    "the promoted v0.39.0 wheel — BYTE-IDENTICAL to the "
+                    "qualification wheel (78711c28…): for the first time the "
+                    "released install pin and the qualified composition are the "
+                    "same bytes"
+                ),
                 "receipt": PROMOTION_RECEIPT,
             },
             "executed_live": {
@@ -872,10 +881,12 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             },
             "release_canary": {
                 "status": (
-                    "pass (v0.38.0) — fresh-install canary + seeded previous-head "
-                    "upgrade 027->028; the v0.37.0 canary's upgrade stage ran "
-                    "027->027 (same-head preservation) — the data-bearing N-1->head "
-                    "edge for THIS manifest is cold_install_check --mode upgrade"
+                    "pass (v0.39.0) — fresh-install canary + seeded previous-head "
+                    "upgrade 027->028 WITH data preservation (five seeded tables "
+                    "fingerprint-identical through the real migration); the "
+                    "data-bearing N-1->head edge is now proven by the promotion "
+                    "canary itself, cross-checked by cold_install_check --mode "
+                    "upgrade"
                 ),
                 "receipt": f"{LATEST_PROMOTION_RECEIPT}#canary",
             },

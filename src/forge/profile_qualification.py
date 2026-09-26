@@ -2162,7 +2162,11 @@ def supported_profile_binding(
     control = document.get("control_plane")
     promoted = control.get("promoted", {}) if isinstance(control, Mapping) else {}
     harness = document.get("harness", {}) if isinstance(document.get("harness"), Mapping) else {}
-    record_id = "gitlab-ce-v1@0.37.0"
+    # the manifest names the record it binds (harness.receipt — the freeze's
+    # PROFILE_RECORD_RECEIPT); the binding follows THAT citation, so a new
+    # release's freeze re-targets the binding without touching this code
+    cited_receipt = str(harness.get("receipt", ""))
+    record_id = cited_receipt.rsplit("/", 1)[-1].removesuffix(".json") or "gitlab-ce-v1@0.37.0"
     record = next((item for item in records if item.record_id == record_id), None)
     if record is None:
         record = next(
