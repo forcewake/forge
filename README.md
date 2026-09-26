@@ -1,225 +1,111 @@
 # forge
 
-[![CI](https://github.com/forcewake/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/forcewake/forge/actions/workflows/ci.yml)
-[![Release](https://github.com/forcewake/forge/actions/workflows/release.yml/badge.svg)](https://github.com/forcewake/forge/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/tag/forcewake/forge?label=release&sort=semver)](https://github.com/forcewake/forge/releases)
+**An agentic software factory.** You file an issue. forge studies your codebase, proposes a plan, and waits. Once you approve it, the plan becomes an immutable contract — the exact bytes you approved are the exact bytes the model executes. Work runs on your own CI runners under hard spend caps, with credentials that expire at a deadline you set. The result arrives as a Draft MR, verified by your own pipeline against that exact candidate, reviewed read-only, and parked in `ready_for_human`.
 
-**forge** is an agentic software factory for **GitLab CE**, **GitHub**, and
-**Azure DevOps**: an authorized issue becomes a plan, a human-approved branch
-with code, a green pipeline, and a Draft merge request — ready for human
-review. You bring the model (any provider via [LiteLLM](https://docs.litellm.ai/)
-or native harness CLIs — Claude Code, Grok Build, opencode, GitHub Copilot
-CLI); forge runs on your own infrastructure and never merges.
-
-All three providers are **live-verified end-to-end**: `/implement` → plan →
-human gate → coding agent in ephemeral CI → trusted publisher → Draft MR/PR →
-review → `ready_for_human` — on real GitLab CE, real GitHub (App + Actions),
-and a real Azure DevOps organization (work items, service hooks, Pipelines).
-Per-capability verification depth varies — see the
-[guarantee matrix](#guarantee-levels).
-
-## The iron principle: the bot never merges
-
-forge proposes changes, drives the pipeline, and assembles evidence bound to
-a specific commit. It never merges, never pushes to a protected target
-branch, and never changes permissions. Review and merge are always performed
-by a human. This is enforced by the executor's capabilities and platform
-permissions — not by prompt instructions. See
-[ADR-0003](docs/adr/0003-no-merge-is-enforceable.md).
-
-## How a run works
+**The bot never presses Merge.** That is not a limitation — it is the product. Everything forge does is arranged so that the one irreversible act stays yours, taken on evidence you can audit.
 
 ```
-issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
-  →  coding agent in an ephemeral CI runner (no write credentials)
-  →  trusted publisher validates the candidate  →  Draft MR / PR
-  →  pipeline + required checks  →  readonly LLM review
-  →  ready_for_human + evidence bound to the exact commit
+ issue ──► researched plan ──► your approval ──► bounded execution ──► candidate
+                                                                        │
+                                                                 Draft MR (reserved)
+                                                                        │
+ human merge ◄── ready_for_human ◄── readonly review ◄── independent CI ◄─┘
+     │                    │
+     │                    └── /fix on the MR ──► bounded review round
+     │                                            from the exact current head
+     └── never performed by forge                ──► new candidate ──► (loop)
 ```
 
-- **Durable by design** ([ADR-0017](docs/adr/0017-durable-step-runtime.md)):
-  commands and steps live in Postgres; a worker crash at the six
-  failure-injection checkpoints (ingress, claim, gate, publish, draft,
-  evidence) converges — proven by two failure-injection suites: a coroutine
-  profile (two in-process workers, real Postgres, kill at each checkpoint)
-  and an OS-process profile that SIGKILLs real `python -m forge.worker`
-  subprocesses at each checkpoint and requires a fresh process to adopt the
-  durable state (nightly CI; `FORGE_PG_TEST_URL` +
-  `FORGE_OS_FI_REDIS_URL`).
-- **Proposal-only execution lane**
-  ([ADR-0016](docs/adr/0016-candidate-bundle-trusted-publisher.md)): coding
-  agents run in ephemeral CI with **no write credentials and no forge
-  secrets**; their output is a candidate artifact that a trusted publisher
-  validates and applies.
-- **Shared publisher contract** — builtin LLM ChangeSets and CLI agents
-  share the same validation, policy, and journal; how strongly each backend
-  enforces it differs — see the [guarantee matrix](#guarantee-levels).
-- **Human gate** ([ADR-0018](docs/adr/0018-immutable-run-spec.md)): the plan
-  is frozen into an immutable RunSpec; the decision has a deadline; cancel
-  revokes the publication grant before it stops the runner. The plan comment
-  carries an **Implementation block** — the gate approves the execution
-  shape (harness, model, fallbacks, budget class), not just the plan text.
-- **Quality contract**
-  ([ADR-0008](docs/adr/0008-quality-contract-instead-of-pipeline-status.md)):
-  pipeline success + required jobs green; failures classified code /
-  infrastructure / config / unknown — only *code* failures trigger the
-  bounded repair loop; unknown evidence never blames the code.
+* Three forges in production shape: GitLab CE, GitHub, Azure DevOps — all three lanes live-verified end to end.
+* **8,846 tests**, a fail-closed promotion gate, mutation-tested release traces, and a qualification record store that keeps lab proof and customer proof honestly separated.
+* One reviewed-ready task on the reference profile costs about **$0.40** in lane spend. The credential-redemption proof cost less than one cent — because it was designed to be provable without spending money.
 
-## Providers
+---
 
-Setup guides: [GitLab CE](docs/getting-started/gitlab.md) ·
-[GitHub](docs/getting-started/github.md) ·
-[Azure DevOps](docs/getting-started/azure-devops.md).
+## Why this exists
 
-| Capability | GitLab CE | GitHub | Azure DevOps |
-|---|---|---|---|
-| Commands (`/implement`, `/go`, `/cancel`) | ✅ comments | ✅ comments + `forge` label | ✅ work-item + PR comments |
-| Plan comment + human gate | ✅ | ✅ | ✅ (work-item comment) |
-| Harness execution | ✅ project CI (docker executor) | ✅ Actions (`workflow_dispatch`) | ✅ Pipelines (Runs-API dispatch) |
-| Builtin LLM implementer (no CI needed) | ✅ | ✅ | ✅ |
-| Trusted publisher | Commits API | GraphQL CAS (`expectedHeadOid`) | Push API CAS (`oldObjectId`) |
-| Draft MR / PR before CI | ✅ | ✅ | ✅ (`isDraft: true`) |
-| Readonly LLM review | ✅ MR notes | ✅ native reviews | ✅ PR threads (inline, sticky) |
-| CI-failure debug lane | ✅ | ✅ (Actions timeline) | ✅ (Pipelines timeline + task logs) |
-| Reactive review on push | ✅ | ✅ (incremental via before/after) | ✅ (incremental via PR iterations) |
-| MCP servers in the lane | ✅ | ✅ | ✅ |
-| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) | service account + PAT (Entra SPN = upgrade path) |
-| Webhook authenticity | secret token | HMAC signature | Basic credentials (no HMAC exists) over HTTPS |
+Every AI coding demo ends at "the code looks right." That is where forge starts, because "looks right" is the easy five percent. The hard problems are the ones around the code:
 
-Architecture: four orthogonal adapters — source, execution, harness driver,
-model route ([ADR-0019](docs/adr/0019-source-execution-adapters.md)).
-Adding a provider is an adapter, not a second factory.
+* **Authority** — who approved what, and which bytes did the model actually receive? forge pins every dispatch to an approved input with a three-way digest: what was approved, what the server sent, and what the executor consumed must be identical, or the run refuses to proceed.
+* **Money** — budgets that actually enforce. Not a note in a log file: typed amendments applied atomically to the enforcing guard, a closing reserve partitioned *before* coding starts so implementation can never eat the review's allowance, and an exposure model that keeps a streaming provider's intermediate subtotal from quietly releasing reserved liability.
+* **Review** — humans start reviewing *after* readiness is announced. A `/fix` comment on the MR opens a bounded review round from the exact current head; the previous delivery stays immutable, your commits stay intact, and the new candidate is re-verified from scratch. Old green checks render as history, never as current truth.
+* **Failure** — everything that can go wrong has a typed name, a bounded recovery, and a paper trail. A lost webhook, a dead runner, a rotated credential, a half-finished migration: the system parks, says exactly what it is waiting for, and never improvises.
 
-## Guarantee levels
+The bet: agentic work becomes trustworthy not when the models get better, but when the factory around them keeps receipts.
 
-What each capability is verified at today: **implemented** (code + unit
-tests) · **contract-tested** (CI contract suite, faked platform) ·
-**live** (exercised against the real platform in the dogfooding loop).
+## Proof, not promises
 
-The machine-readable source of truth for these claims is the release-evidence
-manifest — regenerate it with `python -m forge.release_manifest`. It records
-per capability, provider/backend: level, the evidence class, the exact test
-files / CI jobs, and per-finding closure evidence. Its levels are stricter
-than the prose rows above, which are the broad-stroke summary:
+Most tooling asks you to believe the README. forge's README asks you to read the records.
 
-- **implemented** — code + unit tests; no CI contract suite yet.
-- **contract-tested** — CI suite over fakes/stubs (PR gate), or a real-runtime
-  failure-injection suite (`coroutine_fi` on the `CI / integration` job;
-  `subprocess_fi` nightly on `CI / integration-os`). The platform/agent is
-  not real in the loop.
-- **live-canary-tested** — exercised against the real runtime: the built
-  release artifact (boot/migrate canary, `scripts/canary_smoke.py`) or the
-  real provider in the dogfood loop. Maintainer-run live exercises are
-  recorded at this level only when their artifacts live in this tree;
-  otherwise they are **not-run**.
-- **not-run** — no CI-reproducible evidence exists; recorded explicitly and
-  never converted to pass.
+* **The promotion gate** refuses to publish an image unless every required check is green *at the tagged commit* — a check with no recorded result blocks, fail-closed; a check that failed and passed on retry records both attempts. Verdicts: `promote`, `conditional_promote`, `block`. A green canary never outweighs a red required check.
+* **Mutation gates** run each critical release trace twice — once as a baseline, once with the defect deliberately reintroduced. If the seeded defect does not fail the trace, the gate fails. Release traces that cannot detect their own regressions do not ship.
+* **Byte-identical composition**: the wheel the release publishes is byte-identical to the wheel the live qualification trace executed — verified by digest, second release running. The code you install is the code that earned the evidence.
+* **The closure matrix** grades every capability on six evidence levels — domain, wired, executed, native, recovery, customer — and leaves the gaps visible as data. "Pending" is a state you can query, not a euphemism.
+* **Honest unknowns**: unknown spend is never rendered as zero; a killed job stays an unknown, never a successful cheap one; a partial receipt holds its upper-bound liability until it settles. The economics ledger keeps provider-reported, estimated, and billing-reconciled costs in three columns that are never blended.
 
-Evidence classes stay separate: a green boot canary is not an SDLC e2e claim,
-and boot canary, subprocess failure injection, coroutine failure injection,
-and real-provider e2e are never merged into one check. Where the manifest
-says `not_run`, the row above is the prose claim, not CI-verifiable evidence.
+### Guarantee levels
 
-| Capability | GitLab CE | GitHub | Azure DevOps |
-|---|---|---|---|
-| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) | contract-tested |
-| Publication policy — harness lane | live | contract-tested (shared publisher validation) | contract-tested |
-| CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks | contract-tested · parity in progress |
-| Repair-in-place | implemented · contract-tested | implemented · contract-tested | implemented · contract-tested |
-| Operator `/retry` + auto-revive | live | live | live |
+Every capability claim in the release manifest (`forge.release_manifest`, generated from the tagged tree) carries exactly one of four levels, and this README uses the same words with the same meanings:
 
-"Enforced" means the platform itself cannot apply a candidate that failed
-publisher validation. GitHub's CAS check (`expectedHeadOid`) happens at
-publish time, inside forge — platform-side enforcement is a known gap.
-GitLab CI verification keys on the required-jobs profile
-([ADR-0008](docs/adr/0008-quality-contract-instead-of-pipeline-status.md));
-the Azure checks gate is GitHub parity, in progress.
+* **implemented** — code + unit tests; no CI contract suite yet.
+* **contract-tested** — a CI suite over fakes and stubs gates the contract, or a failure-injection suite (`coroutine_fi`) has exercised it.
+* **live-canary-tested** — the shipped artifact was booted and probed by the release canary against a real database.
+* **not-run** — not executed in this release's evidence; stated, never implied by silence.
 
-## Four harness drivers, one contract
+Run `python -m forge.release_manifest` to regenerate the machine-readable manifest and `python -m forge.release_promotion gaps` to list every capability whose evidence class requires live qualification and does not have it. A gap with a name is a fact; a gap without one is a bug.
 
-Every driver implements the same proposal-only contract — mechanical
-commit/push deny (driver-native rules, not just the brief), scoped tool
-grants, candidate artifact handoff, usage receipts where the vendor
-provides them (unknown ≠ zero), and optional MCP servers
-(`FORGE_HARNESS_MCP`; [ADR-0022](docs/adr/0022-harness-mcp-integration.md)).
-Per-driver setup guides: [docs/harnesses/](docs/harnesses/README.md).
+All of it is committed: [`docs/releases/`](docs/releases/) (per-release promotion evidence), [`qualification/`](qualification/) (profile records with derived verdicts), [`docs/adr/`](docs/adr/) (34 architecture decision records), [`docs/operations/`](docs/operations/) (runbooks that were executed, not imagined).
 
-| Driver | Headless posture | Notes |
-|---|---|---|
-| **[Claude Code](docs/harnesses/claude-code.md)** | `-p` + stream-json, `--strict-mcp-config` | live-verified on all three providers |
-| **[Grok Build](docs/harnesses/grok-build.md)** | `--always-approve` + deny rules, hardened npm preamble | platform-binary hang workaround |
-| **[opencode](docs/harnesses/opencode.md)** | permission map via injected config | schema-translated MCP |
-| **[GitHub Copilot CLI](docs/harnesses/copilot-cli.md)** | `-p` + deny-wins tool rules | subscription auth (fine-grained PAT) |
+## What lands in your repository
 
-## Task-aware harness selection
-([full guide](docs/harnesses/README.md) ·
-[ADR-0023](docs/adr/0023-dynamic-harness-selection.md))
+A run, end to end, produces things you can point at:
 
-Instead of one pinned implementer, a project declares an ordered preference:
+1. **A plan with citations** — built from your actual sources (read-many, write-one: neighboring repositories are read only with explicit authorization), with facts, assumptions and open questions separated.
+2. **An approval artifact** — the approved input is frozen with its digest; a material revision mid-run goes through the same native approval, and the executor's next dispatch carries the new text or refuses.
+3. **A candidate on a reserved branch** — collected from the workspace generation that actually did the work, never from a stale checkout; a resumed attempt's generation ships, the original checkout is never swept up by accident.
+4. **A Draft MR** — one per run, by construction; merge is yours.
+5. **Independent verification** — your own CI, bound to the exact candidate sha; a moved head is a typed staleness, not a silent retest.
+6. **A read-only closing review** on the run's own budget, inside a reserve implementation cannot touch.
+7. **`ready_for_human`** — the terminal state that means "checks passed; merge is a human decision," after which your `/fix` and `/ask` comments drive bounded correction rounds.
 
-```yaml
-forge:
-  implement:
-    harnesses: [claude-code, grok-build]
-```
+## Features
 
-At plan time forge compiles the chain against the lanes the project
-onboarded (`forge doctor` reports exactly that), freezes the selected
-harness + fallback tail + budget class into the RunSpec, and shows them in
-the plan's **Implementation** block — `/go` approves the execution shape.
-The planner may propose an entry of the list with a one-line reason; it can
-reorder, never extend. Dispatch-time fallback down the frozen chain exists,
-is **off by default**, fires only on infrastructure-classified failures
-before any candidate, and journals every advance.
+### The delivery loop
 
-## MCP, both directions
+* **Approved inputs, digest-pinned** — `forge.revision.approved-input/1`: evidence, server and executor agree on the exact brief bytes ([`src/forge/adaptive/revisions.py`](src/forge/adaptive/revisions.py)).
+* **Real harness lanes** — claude-code, codex, copilot and opencode driven through their actual SDKs/binaries on your GitLab/GitHub/Azure runners; the lane template ships in the repo and is frozen into the supported profile by digest ([`ci/templates/`](ci/templates/), [`src/forge/lane_driver.py`](src/forge/lane_driver.py)).
+* **Exact-WIP resume** — pause mid-turn, destroy the runner, resume on another: the content-addressed checkpoint restores new/modified/deleted files exactly (proven live with all three shapes in one checkpoint).
+* **Steering and interruption** — `/pause`, `/steer` and material revisions land through a durable mailbox; causal effect verified live on every arm.
+* **Bounded review rounds** — linked child work units after `ready_for_human`: own admission, scope, budget and generation; the original delivery stays immutable; one outstanding round per MR with a deterministic race arbiter ([`docs/operations/review-rounds.md`](docs/operations/review-rounds.md)).
 
-- **forge as an MCP server** (ADR-0021/§4): a scoped run surface —
-  `run_list` / `run_get` / `plan_get` / `run_evidence_get` — over durable
-  state with per-token principals (`FORGE_MCP_SCOPED_TOKENS`), per-call
-  scope enforcement, and an audit log. The surface never acts with forge's
-  provider tokens. Plus the classic GitLab helper tools.
-- **MCP servers inside every harness lane**: one CI variable
-  (`FORGE_HARNESS_MCP`) rendered into each driver's native config;
-  `--strict-mcp-config` on Claude means repo-supplied `.mcp.json` files are
-  never loaded — servers cross the boundary as CI variables, never as repo
-  content (live-verified with Context7 and Microsoft Learn on GitLab CI).
+### Authority and credentials
 
-## Observability
+* **Operation-scoped grants** — redemption authority is a grant persisted at dispatch (subject, work, attempt generation, route, exact ref, operation, absolute deadline) — never taken from the request. The refusal matrix names every way a redemption can be refused ([`src/forge/adaptive/credential_broker.py`](src/forge/adaptive/credential_broker.py)).
+* **Same ref means same binding revision** — revoke/regrant at the same locator cannot silently reuse an old authorization; issuance and cancellation have a documented linearization contract.
+* **Append-only audit** — credential redemptions are INSERT-only rows committed before any bytes leave the service; the JSON is a projection.
+* **Collision-safe native locators** — secret names derive from the full reference's sha256, not display names; legacy entries migrate recorded, never silently renamed.
 
-`/metrics.prometheus` exposes queue depth, worker heartbeats, runs by
-lifecycle status, and the **delivery ladder** (`forge_delivery_ladder`):
-started → planned → gate_approved → candidate_published → ci_passed →
-ready_for_human — where work packages actually stand. Every model call is
-journaled (`llm_calls`), every external write is an intent-first
-`action_log` entry, raw webhook payloads land in `FORGE_CAPTURE_DIR`, and
-MCP calls carry an audit line. `forge doctor` verifies the environment and
-any target project's onboarding — read-only, exit code 0 means done.
+### Budgets that enforce
 
-## Status
+* **Typed amendments** — USD / calls / tokens / wall-clock are distinct axes; an amendment names its axis, its reason and its originating native command; redelivery applies once; two identical commands are two decisions ([`src/forge/durable/budgets.py`](src/forge/durable/budgets.py)).
+* **Closing reserve, partitioned before coding** — under the versioned `closing-partition/1` policy, the implementer reserves against limit − share, the reviewer against the full limits.
+* **Finality-based exposure** — settled, accrued-unsettled and retained liability as three quantities; a non-final receipt with a cost keeps its envelope; an unbounded pending interval refuses hard-cap actions with a typed reason ([`src/forge/adaptive/usage_ingestion.py`](src/forge/adaptive/usage_ingestion.py)).
 
-**v0.40.0** — three providers live-verified end-to-end, four harness
-drivers with registry-checked credential recipes, task-aware selection,
-identity-preserving CI verification, reserved Draft-MR publication (one MR
-per run, proven under failure injection), frozen-spec dispatch on every
-provider, scoped MCP run surface, honest delivery-cohort economics,
-provider-neutral operator commands (`/retry`, `/status`, `/why-blocked`,
-`/reconcile`) with bounded auto-revive, the 64-story adaptive roadmap
-complete (contracts, wiring, pilot, runbook), REAL interactive-driver
-clients for the execution lane (claude-agent-sdk with the harness hacks
-ported, codex app-server over JSON-RPC stdio, opencode serve over HTTP+SSE
-in `forge.adaptive.drivers`, LIVE-verified against real vendor binaries with the evidence-backed DriverMatrix seed; the edf938c review campaign landed 12 assembly slices — discovery spliced into /implement, durable Postgres mailbox, verified pause/checkpoint transaction, effect-intent steering, one-transaction revision approval, complete tested-world fingerprinting — all honestly tiered in `forge doctor --capabilities`), the 0fca1b7 E2E-qualification wave (qualification profiles, research cohort, promotion gate, pilot kit, two-writer matrix, operator view, ADR-0029 boundaries), and the c7ae8db M0/M1 execution-integrity wave: the candidate collected from the ACTIVE workspace generation (0-byte resumed candidates fixed), retry continuation decided from recoverable state, ONE configured checkpoint repository across upload/resume (postgres-safe), execution slots bound to OBSERVED native occupancy (migration 027), reference-safe checkpoint GC, restart-stable legacy credential window, composition envelopes in the production dispatch path, reproducible lane installs from the promoted wheel, the mandatory production-entry trace suite (AT-01..AT-06), , the checkpoint-migration command set, and the 16339c2 R36 completion wave: collector ownership bound to the physically-owned workspace and exact attempt, one typed continuation decision with reason-coded refusals, every retry lookup on the single async checkpoint authority (typed exact/absent/unavailable/corrupt/unauthorized), CAS reference/deletion serialization, cutover fencing at the composition root, envelope v2 execution identity, explicit installer routes, the required PostgreSQL qualification gate in CI, GitLab CE entry traces + the qualification driver, hash-locked lane closures, discovery authority for read-many/write-one, the live research cohort machinery, revision proof through the next executor input, verification bound to the exact candidate, the authorized operator API, an EXECUTED 12-task lab pilot (2-of-3 → expand), connected delivery measurement, the durable two-writer saga over native-shaped remotes, complete tested-world verification, ops drills, profile qualification records with derived verdicts, , ADR-0030 boundary ownership enforced by architectural tests, and the 4af6b33 R37 completion wave: continuation reuse bound to the exact recovery event, canonical operator subjects + a read model that never relabels history, strict report-inventory identities + typed applicability, the real lab ALIGNED (0.36.0, schema 027, budget caps) with the LIVE single-writer qualification (real issue → claude-sdk-lane → real model → Draft MR, oracle green; the exact-resume envelope live), read-many/write-one discovery proven by the REAL model, causal steering proven live, the genuinely live planning comparison (15 arms, HOLD pending human review), the two-writer saga on real GitLab native effects, the trusted verification executor with probe-proven isolation, the reference/package separation (ADR-0031), , deployment ops executed on the aligned lab (5/5), and the 59ba869 R38 completion wave: the shipped GitLab finalizer fixed + qualified live (MR with zero manual patches), the provider-safe credential delivery contract (refs-only dispatch + native secrets/runner-redemption; the consumer proven to receive the broker-selected key), the operational backups classified (no credentials found) and moved to private storage with a public-artifact gate, THE useful-WIP cross-runner resume live green (three file shapes through the exact checkpoint), the supported profile frozen + cold-install proven (fresh + 026→027 upgrade), the combined steering trace causal=true on all five arms, two-writer content safety (same-file window typed, blob-verified), the conformance release gate (both mutation arms caught), real lane economics (coverage 0.8), the customer-scale discovery machinery, the .NET recipe executed on real dependencies, and the forge CLI entry-points, and the 6df4020 Q39 completion wave: operation-scoped credential grants (redemption authority from a PERSISTED dispatch grant, never the request — refusal matrix, await-fence, typed runner verification), the executor brief rendered from the ACTIVE revision (ApprovedInput + three-way digest equality — the resumed-model revert counterexample closed LIVE), the append-only credential audit, collision-safe native secret locators + concurrent registry, usage partial→final reconciliation on the canonical 4-part identity, the closing budget's three honest quantities + review-only continuation, the supported composition v2 re-frozen onto the exact traced build with cold-install fresh/upgrade/verify and the LIVE reviewed-ready trace (material revision approved natively, the resumed candidate carrying the revision-2 brief, closing review within reserve, $0.40 lane spend), the conformance gate v2 (five checks + four mutation arms), the accepted-task economics ledger (three cost columns never blended, executed over the real captures), operating limits as one authorized operator surface with four structurally separate ops.* measures + capped admission that cannot convert intake into execution slots + the support agreement, ADR-0033 + the closure matrix with honest gaps, and /fix//ask post-merge classification (fail-closed, head-bound), and the b521e1a Q40 completion wave: the /fix//ask PRODUCTION path (flag-gated ingress with two-layer dedup on the delivery UUID + the logical project/MR/note identity, the installed reconciler correction pass), finality-based budget exposure (settled/accrued/retained-liability — the partial-with-cost counterexample closed), BOUNDED REVIEW ROUNDS after ready_for_human (linked child rounds from the exact current MR head, the classic-run adapter, the race arbiter, the original delivery immutable), typed budget amendments applied to the enforcing guard with the closing reserve partitioned before coding (real LLMClient+BudgetGuard acceptance), the serialized grant authority (keyed rows + CAS projection + full identity validation with binding-revision comparison and the linearization contract), operation-grant redemption LIVE-qualified (sentinel identity proof, generation retirement, seven typed negative classes), the composed-trace mutation gates with prerequisite-missing honesty, the cold-install kit for the second engineer, the five-fact operator projection, ADR-0034 + the BudgetAmendment unification, the measured operating envelope with the workflow-rows restore drill, and the drafted 1.0 supported contract; images on GHCR
-<!-- generated by scripts/generate_template_pins.py -- begin -->
-(`ghcr.io/forcewake/forge:0.40.0` — digest `sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0`, verdict `promote`,
-evidence `docs/releases/evidence/v0.40.0/promotion.json`, qualifying CI run `36261278972`).
-<!-- generated by scripts/generate_template_pins.py -- end --> 8846 tests;
-failure-injection-proven durable core; mypy-clean over the typed core.
-**Pre-production**: expect breaking changes before 1.0. The
-[CHANGELOG](CHANGELOG.md) has the full history.
+### Operators
+
+* `/implement /go /pause /steer /retry /cancel /status /why-blocked /reconcile /security /fix /ask /approve-revision` — native commands on issues and MRs, each with typed refusals and idempotent redelivery.
+* **One coherent projection** — execution, review round, candidate, verification and acceptance as separate but linked facts; every offered action names the version it expects and refuses if the world moved ([`src/forge/adaptive/operator_view.py`](src/forge/adaptive/operator_view.py)).
+* **The measured operating envelope** — slot limits, queue policy, degradation behavior, restore rehearsals and alerts with threshold bases, measured on the real workflow ([`docs/operations/support-agreement.md`](docs/operations/support-agreement.md)).
+
+### Qualification machinery
+
+* **The supported profile** — a frozen manifest binding control plane, wheel, template, runner and schema together; cold-install proven fresh, upgraded (data-bearing, fingerprinted) and verified ([`qualification/profiles/`](qualification/profiles/)).
+* **Deployment drills** — occupancy under partition, lost responses, backup/restore with typed refusals, degraded modes, workflow-restore covering rounds/amendments/grants.
+* **The economics ledger** — run → attempt → receipt → native job → candidate → verification → human decision, joined on stable ids; unjoinable links surface as gaps, never drop ([`src/forge/adaptive/delivery_economics.py`](src/forge/adaptive/delivery_economics.py)).
 
 ## Quick start
 
-### 1. Run the image (or build from source)
+### 1. Run the image
 
 <!-- generated by scripts/generate_template_pins.py -- begin -->
 ```bash
@@ -236,84 +122,112 @@ uv sync && set -o pipefail && .venv/bin/python -m pytest -q
 ### 2. Configure
 
 ```bash
-cp .env.example .env   # then edit: GITLAB_URL/TOKEN or GitHub App values
-                       # or FORGE_AZDO_* — plus the model key,
-                       # DATABASE_URL (Postgres), REDIS_URL, LITELLM_URL
+cp .env.example .env    # GITLAB_URL/GITLAB_TOKEN (or GitHub App / Azure values),
+                        # DATABASE_URL (Postgres), REDIS_URL, LITELLM_URL,
+                        # the model route + spend caps
 ```
 
-### 3. Migrate and run
+### 3. Migrate, boot, verify
 
 ```bash
-python -m forge.migrate             # apply schema migrations
-uv run uvicorn forge.main:app --host 0.0.0.0 --port 8420   # app
-uv run python -m forge.worker                              # worker
-curl localhost:8420/health
+python -m forge.migrate             # alembic chain, currently head 031
+python -m forge.doctor              # environment + capability report
+python -m forge.worker              # the durable worker
 ```
 
-### 4. Connect a project
+### 4. Onboard a project
 
-- **GitLab CE:** [docs/getting-started/gitlab.md](docs/getting-started/gitlab.md)
-  (webhook, bot PAT, harness template include, `forge doctor`).
-- **GitHub:** [docs/getting-started/github.md](docs/getting-started/github.md)
-  (GitHub App registration, webhook, secrets, harness workflow, label
-  trigger, `forge doctor`).
-- **Azure DevOps:** [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md)
-  (service account + PAT scopes, service hooks, lane pipeline, branch
-  policy, live-verification checklist).
+Create an issue template with the bot mention, register the webhook, add the harness CI include and the CI variables (`forge doctor` walks you through it and refuses to guess). Then, on a real issue:
 
-### 5. First run
+```text
+@forge /implement     # the researched plan appears, with citations
+@forge /go            # bounded execution → Draft MR → ready_for_human
+```
 
-Comment `/implement` on an issue (or a work item on Azure DevOps). forge
-posts a plan; reply with `/go <run-id>` (or assign the `forge` label on
-GitHub). When the run reaches `ready_for_human`, the evidence comment
-carries everything a reviewer needs. The merge button stays yours.
+The full second-engineer path — every command, every expected observable, every typed failure — is the committed runbook: [`docs/onboarding/cold-install-runbook.md`](docs/onboarding/cold-install-runbook.md).
 
-## Dogfooding
+## How it works
 
-forge is developed **through forge**: issues on this repo run the full loop
-(`/implement` → gate → agent in Actions → Draft PR) — see
-[docs/reference/dogfooding.md](docs/reference/dogfooding.md).
+A modular monolith over Postgres, one release train, provider differences kept in adapters rather than averaged away:
 
-## For AI agents
+```
+webhook ──► gateway (token-checked ingress, two-layer dedup)
+              │
+              ▼
+        durable inbox (Postgres) ──► worker + reconciler
+              │                        │  discovery → planning → approval
+              │                        │  dispatch: envelope + grant + budget
+              ▼                        ▼
+        lane on YOUR runner ──► candidate collector ──► trusted publisher
+                                       │                    │
+                                       ▼                    ▼
+                              independent CI          Draft MR + evidence
+                                       │
+                                       ▼
+                            readonly review ──► ready_for_human ──► /fix rounds
+```
 
-This repository is built to be worked on by coding agents:
+* [`src/forge/gateway/`](src/forge/gateway/) — authenticated native ingress; commands are durable rows before anything slow happens.
+* [`src/forge/runs/`](src/forge/runs/) — the service, the reconciler, the publisher: one validated write path per decision (ADR-0034's ownership map names the owner and its real callers).
+* [`src/forge/durable/`](src/forge/durable/) — Postgres models, budgets, leases, the append-only stores.
+* [`src/forge/adaptive/`](src/forge/adaptive/) — the authority surface: credential broker, revisions, closing budget, economics, operator view, ops limits, the closure matrix.
+* [`scripts/`](scripts/) — the gates: conformance, PG qualification, profile freeze, cold-install checks, promotion. The release pipeline is in [`.github/workflows/`](.github/workflows/) and refuses to flatter itself.
 
-- **[AGENTS.md](AGENTS.md)** — the agent entry point: rules, repo map,
-  gotchas, verification gates.
-- **[docs/onboarding-prompt.md](docs/reference/onboarding-prompt.md)** — a
-  copy-paste prompt that takes a fresh clone to a verified dev environment.
-- **[.claude/skills/](.claude/skills/)** — task playbooks (readable by any
-  agent): [`forge-setup`](.claude/skills/forge-setup/SKILL.md),
-  [`forge-lab`](.claude/skills/forge-lab/SKILL.md),
-  [`forge-debug-run`](.claude/skills/forge-debug-run/SKILL.md),
-  [`forge-onboard-project`](.claude/skills/forge-onboard-project/SKILL.md),
-  [`forge-demo`](.claude/skills/forge-demo/SKILL.md).
-- **`forge doctor`** — the setup oracle: `uv run python -m forge.doctor
-  [--project <id>] [--json]`; exit code 0 means the environment (or a
-  target project's onboarding) is complete. Read-only; never prints secret
-  values.
+## Providers and harnesses
+
+| | native lane | notes |
+| --- | --- | --- |
+| GitLab CE 19.x | claude-code, codex, copilot, opencode (SDK lanes) + batch recipes | the reference profile: every capability above proven live on it |
+| GitHub | claude-code lane (PR flow) | native CAS semantics kept explicit, never approximated |
+| Azure DevOps | forge-lane pipeline template | pipeline-run verification against `System.History` semantics |
+
+Harness drivers are real clients against real binaries — [`src/forge/adaptive/drivers/`](src/forge/adaptive/drivers/) — not prompt stubs; their live verification status is tracked per binary in the DriverMatrix with evidence.
+
+## Status
+
+<!-- generated by scripts/generate_template_pins.py -- begin -->
+(`ghcr.io/forcewake/forge:0.40.0` — digest `sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0`, verdict `promote`,
+evidence `docs/releases/evidence/v0.40.0/promotion.json`, qualifying CI run `36261278972`).
+<!-- generated by scripts/generate_template_pins.py -- end -->
+
+**v0.40.0** — the honest tiers — what is machine-proven, what is live-proven on the lab, what waits on the world:
+
+* **Live-proven** (the reference GitLab profile, records committed): issue → plan → approval → lane → Draft MR → independent CI → closing review → `ready_for_human`; material revision consumed by the resumed executor (zero rescue steers); cross-runner exact-WIP resume; operation-grant redemption end to end with sentinel identity proof; bounded review rounds; guarded budget amendments; measured operating envelope.
+* **Machine-proven** (gates + mutation arms in CI): everything this README claims about refusals, idempotence, concurrency and budget enforcement.
+* **Honestly open** (named in the records, not hidden): external design-partner acceptance; the blind planning review by real reviewers; a customer two-writer change; the second-engineer install. The 1.0 declaration gate is written down — [`docs/product/supported-contract.md`](docs/product/supported-contract.md) — with four of its six items already linked to their proof.
+
+## What forge will never do
+
+* **Merge, deploy, or resolve your discussions.** Reserved branches and Draft MRs are structural, not configurational.
+* **Turn unknowns into zeros.** Unknown spend, missing evidence and ungraded work stay visible as exactly that.
+* **Substitute silently.** A moved head, a rotated credential, a changed contract invalidates the evidence that depended on it — loudly.
+* **Average your providers away.** GitLab, GitHub and Azure keep their real semantics in their adapters; no generic interface promises more than the platform beneath it delivers.
 
 ## Documentation
 
-The full index lives at **[docs/README.md](docs/README.md)**. Highlights:
+* [`docs/operations/`](docs/operations/) — runbooks: operator commands, closing budgets, credential delivery, deployment drills, the support agreement with its measured envelope.
+* [`docs/onboarding/cold-install-runbook.md`](docs/onboarding/cold-install-runbook.md) — install the exact supported composition, step by step.
+* [`docs/adr/`](docs/adr/) — 34 decision records, each still true.
+* [`docs/releases/`](docs/releases/) — the promotion gate, per-release evidence, the record format.
+* [`docs/product/supported-contract.md`](docs/product/supported-contract.md) — the 1.0 candidate contract.
 
-| Doc | Scope |
-|-----|-------|
-| [docs/harnesses/](docs/harnesses/README.md) | the four drivers + multi-harness auto-selection (how it works, fallback, rejected alternatives) |
-| [docs/harnesses/claude-code.md](docs/harnesses/claude-code.md) | Claude Code: variables, flags, MCP, gotchas |
-| [docs/harnesses/grok-build.md](docs/harnesses/grok-build.md) | Grok Build: auth rotation, the npm hang fix, deny rules |
-| [docs/harnesses/opencode.md](docs/harnesses/opencode.md) | opencode: injected permission map, MCP translation |
-| [docs/harnesses/copilot-cli.md](docs/harnesses/copilot-cli.md) | Copilot CLI: fine-grained PAT, scoped grants |
-| [docs/harnesses/onboarding.md](docs/harnesses/onboarding.md) | shared harness setup: includes, MCP servers, writing the task |
-| [docs/getting-started/gitlab.md](docs/getting-started/gitlab.md) | GitLab CE project onboarding |
-| [docs/getting-started/github.md](docs/getting-started/github.md) | GitHub App + project setup |
-| [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md) | Azure DevOps setup + the live-verification checklist |
-| [docs/operations/operator-commands.md](docs/operations/operator-commands.md) | the operator surface: `/implement` `/go` `/cancel` `/retry` `/status` `/why-blocked` `/reconcile` `/security`, the `forge` label, auto-revive |
-| [docs/faq.md](docs/reference/faq.md) | frequently asked questions (all providers) |
-| [docs/adr/](docs/adr/) | architecture decisions (0000–0027) |
-| [demo/](demo/) | sales demo script + regeneration skill |
+## Development
+
+```bash
+uv sync
+uv run python -m pytest -q                     # the suite
+uv run python scripts/gate_conformance.py      # shipped-template conformance + mutation arms
+uv run python scripts/pg_gate.py               # required PG profiles (fail-closed on missing fixtures)
+uv run python scripts/freeze_supported_profile.py --check
+uv run ruff check . && uv run ruff format --check .
+```
+
+Migrations are guarded: downgrades refuse while authorization evidence exists. The schema is at head 031; the chain runs on real Postgres in CI.
 
 ## License
 
-BSD-3-Clause — see [LICENSE](LICENSE). Provenance and third-party notices:
-[UPSTREAM.md](UPSTREAM.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+BSD-3-Clause. Provenance and upstream acknowledgments: [`LICENSE`](LICENSE), [`UPSTREAM.md`](UPSTREAM.md).
+
+---
+
+forge is built by people who think the interesting part of agentic software is not watching it write code — it's being able to trust what happened while you looked away.

@@ -408,9 +408,11 @@ def test_readme_status_matches_the_shipped_version() -> None:
     text = _read("README.md")
     assert f"**v{__version__}**" in text, "README status header is not the shipped version"
     assert f"ghcr.io/forcewake/forge:{__version__}" in text, "image tag drifted"
-    counts = re.findall(r"(\d{4}) tests", text)
+    counts = re.findall(r"([\d,]{4,7}) tests", text)
     assert counts, "README names no test count"
-    assert all(int(n) >= 3000 for n in counts), "test count is from an ancient release"
+    assert all(int(n.replace(",", "")) >= 3000 for n in counts), (
+        "test count is from an ancient release"
+    )
 
 
 def test_readme_quick_start_pulls_the_current_tag() -> None:
