@@ -88,7 +88,7 @@ jobs:
           echo "lane sdist  : $(basename "$SDIST") sha256:$SDIST_SHA"
 
       - name: Keep the lane wheel set as a workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lane-dist-v${{ github.ref_name }}
           path: dist
@@ -211,7 +211,7 @@ jobs:
 
       - name: Keep the promotion record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: promotion-record-v${{ github.ref_name }}
           path: promotion.json
