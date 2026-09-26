@@ -40,10 +40,10 @@ wins and this runbook must be re-read; never install from a table.
 
 | Axis | Pinned value | Receipt |
 | --- | --- | --- |
-| Freeze manifest | digest `f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300` (frozen 2026-09-26 — the R40-07 redemption qualification's re-freeze) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
+| Freeze manifest | digest `bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e` (frozen 2026-09-26 — the v0.40.0 release prep re-freeze) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
 | Promoted release | **v0.39.0**, source `4bbfc3e7…`, image `ghcr.io/forcewake/forge` @ `sha256:72438649…`, wheel sha256 `78711c2887510a22…` (byte-identical to the qualification wheel — the moving-tree gap closed at this promotion), sdist sha256 `085f052d…` | `docs/releases/evidence/v0.39.0/promotion.json` |
 | Control plane + worker (one build) | the promotion's image above; the executed-lab bind (`localhost/forge:dev` @ `sha256:ddcb9137…`, reports 0.39.0, rollback tag `pre-r3708-20260926T132558Z`) is the OTHER bound identity — each image axis must match ONE of them exactly | manifest `control_plane` |
-| Lane wheel (what a cold install installs) | `forge-0.39.0-py3-none-any.whl` @ sha256 `78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de` (`dist/forge-0.39.0-py3-none-any.whl` — the qualification build; the released URL carries the SAME bytes) | manifest `lane.wheel` + the promotion |
+| Lane wheel (what a cold install installs) | `forge-0.40.0-py3-none-any.whl` @ sha256 `150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff` (`dist/forge-0.40.0-py3-none-any.whl` — the qualification build; the released URL carries the promoted wheel until v0.40.0's promotion records land) | manifest `lane.wheel` + the promotion |
 | Schema | head **031**, declared predecessor **030** (the supported upgrade is exactly one step, 030 → 031) | manifest `control_plane.schema_revision` |
 | Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ sha256 `3d74be378bc70120…` — the bytes are frozen INTO the manifest; the install renders from the manifest, never from the working tree | manifest `target_template.frozen` |
 | Runner | GitLab runner **id 4 `unraid`**, docker executor, online | `qualification/inventory-2026-09-25-v2.json` |
