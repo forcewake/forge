@@ -175,13 +175,48 @@ webhook ──► gateway (token-checked ingress, two-layer dedup)
 
 ## Providers and harnesses
 
-| | native lane | notes |
-| --- | --- | --- |
-| GitLab CE 19.x | claude-code, codex, copilot, opencode (SDK lanes) + batch recipes | the reference profile: every capability above proven live on it |
-| GitHub | claude-code lane (PR flow) | native CAS semantics kept explicit, never approximated |
-| Azure DevOps | forge-lane pipeline template | pipeline-run verification against `System.History` semantics |
+### Provider capability matrix
 
-Harness drivers are real clients against real binaries — [`src/forge/adaptive/drivers/`](src/forge/adaptive/drivers/) — not prompt stubs; their live verification status is tracked per binary in the DriverMatrix with evidence.
+| Capability | GitLab CE | GitHub | Azure DevOps |
+|---|---|---|---|
+| Commands (`/implement`, `/go`, `/cancel`, `/retry`, `/pause`, `/steer`, `/status`, `/why-blocked`, `/reconcile`, `/security`) | ✅ comments | ✅ comments + `forge` label | ✅ work-item + PR comments |
+| Review feedback (`/fix`, `/ask`, `/approve-revision`) and bounded review rounds | ✅ live — the reference path | not yet | not yet |
+| Plan comment + human gate | ✅ | ✅ | ✅ (work-item comment) |
+| Harness execution | ✅ project CI (docker executor) | ✅ Actions (`workflow_dispatch`) | ✅ Pipelines (Runs-API dispatch) |
+| Builtin LLM implementer (no CI needed) | ✅ | ✅ | ✅ |
+| Trusted publisher | Commits API | GraphQL CAS (`expectedHeadOid`) | Push API CAS (`oldObjectId`) |
+| Draft MR / PR before CI — one per run, reserved | ✅ | ✅ | ✅ (`isDraft: true`) |
+| Readonly LLM review | ✅ MR notes | ✅ native reviews | ✅ PR threads (inline, sticky) |
+| CI-failure debug lane | ✅ | ✅ (Actions timeline) | ✅ (Pipelines timeline + task logs) |
+| Reactive review on push | ✅ | ✅ (incremental via before/after) | ✅ (incremental via PR iterations) |
+| Credential delivery | native secrets, protected variables, runner redemption (all live-qualified) | native secrets | staged env |
+| MCP servers in the lane | ✅ | ✅ | ✅ |
+| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) | service account + PAT (Entra SPN = upgrade path) |
+| Webhook authenticity | secret token | HMAC signature | Basic credentials (no HMAC exists) over HTTPS |
+
+Delivery semantics, with the evidence level honestly stated per cell:
+
+| Capability | GitLab CE | GitHub | Azure DevOps |
+|---|---|---|---|
+| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) | contract-tested |
+| Publication policy — harness lane | live | contract-tested (shared publisher validation) | contract-tested |
+| CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks | contract-tested · parity in progress |
+| Repair-in-place | implemented · contract-tested | implemented · contract-tested | implemented · contract-tested |
+| Operator `/retry` + auto-revive | live | live | live |
+| Exact-WIP cross-runner resume | live (three file shapes) | contract-tested | contract-tested |
+
+GitLab CE 19.x is the reference profile: every capability this README describes is proven live on it, with the records committed under [`qualification/records/`](qualification/records/). GitHub keeps native CAS semantics explicit, never approximated; Azure verifies pipeline runs against `System.History` semantics.
+
+### Drivers
+
+Real clients against real binaries — [`src/forge/adaptive/drivers/`](src/forge/adaptive/drivers/), not prompt stubs; live verification status is tracked per binary in the DriverMatrix with evidence. Per-driver setup guides: [docs/harnesses/](docs/harnesses/README.md).
+
+| Driver | Headless posture | Notes |
+|---|---|---|
+| **[Claude Code](docs/harnesses/claude-code.md)** | `-p` + stream-json, `--strict-mcp-config` | live-verified on all three providers |
+| **[Grok Build](docs/harnesses/grok-build.md)** | `--always-approve` + deny rules, hardened npm preamble | platform-binary hang workaround |
+| **[opencode](docs/harnesses/opencode.md)** | permission map via injected config | schema-translated MCP |
+| **[GitHub Copilot CLI](docs/harnesses/copilot-cli.md)** | `-p` + deny-wins tool rules | subscription auth (fine-grained PAT) |
 
 ## Status
 
