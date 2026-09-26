@@ -38,6 +38,14 @@ The registry is consumed by ``tests/test_architecture_boundaries.py``:
   the dependency-direction rules live in
   ``tests/test_reference_separation.py``.
 
+R40-17 (#353, ADR-0034) added the eighth and ninth entries — the
+budget-amendment APPLICATION decision (one durable table, two provider
+applicants) and the feedback ADMISSION decision (one flag home) —
+plus the amendment-applicants allow-set below (the mechanical guard
+for the #353 extraction: a THIRD module starting to apply amendments
+unregistered is an architecture failure, and the GitHub leg's legacy
+evidence ledger is gone by the same change).
+
 This module is deliberately IMPORT-LIGHT (pure stdlib data, no forge
 imports): the registry must be loadable by tooling and tests without
 importing any owner.
@@ -60,6 +68,7 @@ __all__ = [
     "BOUNDARIES",
     "ATTEMPT_START_CONSTRUCTORS",
     "BRIEF_DISPATCH_VARIABLES",
+    "BUDGET_AMENDMENT_APPLICANTS",
     "COMPOSED_DISPATCH_ENTRIES",
     "CONTINUATION_MODE_CONSTRUCTION_MODULES",
     "GC_SWEEP_ENTRYPOINTS",
@@ -347,6 +356,12 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             # never reads rows around the authorized snapshot reader.
             "forge.adaptive.credential_broker",
             "forge.adaptive.project_credentials",
+            # R40-13 (#349): the runs service's /status note appends the
+            # owner's stable status-comment identity marker (a pure
+            # digest over the snapshot facts it already rendered) — the
+            # ONE call-site wiring; the service derives no state and
+            # reads no rows through it.
+            "forge.runs.service",
             # Q39-15 (#334): the operating-limits read-model composes
             # the owner's current_candidate binding (never forks its
             # parsing) for the required-checks and review-budget folds;
@@ -403,6 +418,101 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "the GitLab batch lanes restore no checkpoint — the matrix "
             "records both as resume-incapable recipes rather than "
             "fabricating parity."
+        ),
+    ),
+    AuthorityBoundary(
+        # R40-17 (#353, ADR-0034 §1)
+        name="budget_amendment_application",
+        decision=(
+            "WHETHER an operator budget amendment applies — the ONE "
+            "durable ``budget_amendments`` decision keyed by the "
+            "ORIGINATING native command identity, applied atomically "
+            "to the enforcement resource (the run_budgets limits, or "
+            "the closing gate's effective usd cap), replay-idempotent "
+            "by that key, refused typed with the limiting axis named."
+        ),
+        owner_modules=("forge.durable.budgets",),
+        allowed_dependents=(
+            # The REAL direct importers of the owner module, verified at
+            # write time: the package facade that re-exports the seam
+            # (github_service/azure_service consume it through the
+            # facade — their AMENDMENT call sites are confined by
+            # BUDGET_AMENDMENT_APPLICANTS below), the policy seam
+            # (ClosingReservePolicy / the partition / the ledger
+            # projection) the applicants compose, the LLM client that
+            # carries the guard, and the revival read.
+            "forge.durable",
+            "forge.adaptive.closing_budget",
+            "forge.factory.llm",
+            "forge.runs.revival",
+            "forge.runs.service",
+        ),
+        enforcement=(
+            "BUDGET_AMENDMENT_APPLICANTS is exhaustive: only the owner "
+            "and the two provider continuation routes may construct/"
+            "apply a BudgetAmendmentCommand; every recorded decision "
+            "projects the ledger through the ONE "
+            "forge.adaptive.closing_budget.amendment_ledger_document "
+            "(the legacy #325 top_ups view rides the SAME rows)."
+        ),
+        negative_contract=(
+            "No surface may record an amendment into run EVIDENCE as "
+            "the ledger (the #340 recorded defect and the GitHub leg's "
+            "pre-#353 TopUpLedger), re-derive the effective cap without "
+            "the applied usd total, or apply a second ledger beside the "
+            "table — an amendment that does not move the enforcement "
+            "resource buys nothing (mutation gate MG-2)."
+        ),
+        honest_gaps=(
+            "The native amendment command surface (the note/delivery "
+            "identity) is wired on the GitLab leg's operator route "
+            "(continue_review_only) and the GitHub leg's mirrored "
+            "route; the GitHub leg's authority-window/unverified guards "
+            "(the #340 TTL stamps) remain GitLab-only — the GitHub "
+            "block does not stamp authority_expires_at yet (ADR-0034 §4 "
+            "names the rung)."
+        ),
+    ),
+    AuthorityBoundary(
+        # R40-17 (#353, ADR-0034 §1)
+        name="feedback_admission",
+        decision=(
+            "WHETHER a reviewer feedback note is ADMITTED at all — the "
+            "capability flag, the closed verb set (/fix, /ask), the "
+            "bounded review-round policy, and (with the run service's "
+            "admission zone) whether a post-readiness correction opens "
+            "a NEW round with its OWN budget admission."
+        ),
+        owner_modules=("forge.gateway.feedback",),
+        allowed_dependents=(
+            # The checked ingress unions the verb set into its accepted
+            # command vocabulary per delivery (zero routing when off).
+            "forge.gateway.router",
+            # The durable admission: note parse → request staging →
+            # round admission (the child run's own budget opens through
+            # open_budget_from_spec + closing-partition/1, never an
+            # amendment) → the reconciler's bounded correction/round
+            # passes.
+            "forge.runs.service",
+        ),
+        enforcement=(
+            "Import-registration only: the flag home is import-light "
+            "stdlib; the verbs are parsed by the revisions note parser "
+            "and admitted only through the run service's staged "
+            "admission (a request outside the window/round bound "
+            "refuses typed — never a silent drop)."
+        ),
+        negative_contract=(
+            "No ingress may parse the feedback verbs when the flag is "
+            "off (parse-then-refuse is not zero routing), admit a "
+            "round past the bounded policy, or fund a new round by "
+            "amending the PARENT's budget — the child opens its own "
+            "ledger from the same frozen spec ceilings."
+        ),
+        honest_gaps=(
+            "ONE native platform is qualified (GitLab MR notes, #337); "
+            "GitHub and Azure DevOps ingresses never parse the verbs — "
+            "parity is not claimed."
         ),
     ),
 )
@@ -522,11 +632,16 @@ REDEMPTION_REGISTRY_LOOKUPS: tuple[str, ...] = ("resolve_dispatch_credential",)
 
 #: The broker's persisted-grant surfaces a registered loader must
 #: reach (the inverse-honesty check: a loader that no longer loads the
-#: persisted grant hollows the rule).
+#: persisted grant hollows the rule). R40-06/#342 moves the loader onto
+#: the ONE authoritative home — the keyed ``operation_grants`` row — so
+#: the surfaces beside the evidence-map helpers are the document codec
+#: and the identity-validation entrypoint it loads the row through.
 GRANT_PERSISTED_SURFACES: tuple[str, ...] = (
     "operation_grant_for_plan",
     "operation_grants_for_attempt",
     "merge_operation_grant",
+    "CredentialOperationGrant",
+    "validate_operation_grant_document",
 )
 
 #: The modules whose dispatch entries resolve ApprovedInput at EVERY
@@ -555,6 +670,21 @@ LEGACY_CARRIER_DERIVATION_MODULES: tuple[str, ...] = ("forge.adaptive.credential
 LEGACY_CARRIER_FUNCTIONS: tuple[str, ...] = (
     "credential_secret_name",
     "credential_secret_segment",
+)
+
+#: R40-17 (#353, ADR-0034 §2) — the ONLY modules that may CONSTRUCT or
+#: APPLY a ``BudgetAmendmentCommand`` (``apply_budget_amendment``): the
+#: owner (the stable seam itself) and the two provider continuation
+#: routes — the GitLab operator route/reviewer continuation and the
+#: GitHub leg's mirrored continuation (migrated OFF its legacy evidence
+#: ledger in the same change). The services import the durable PACKAGE
+#: facade, so this NAME-reference allow-set (not the import
+#: registration) is what confines them; a THIRD module starting to
+#: apply amendments is the architecture failure the check reports.
+BUDGET_AMENDMENT_APPLICANTS: tuple[str, ...] = (
+    "forge.durable.budgets",
+    "forge.runs.service",
+    "forge.runs.github_service",
 )
 
 

@@ -81,6 +81,8 @@ from forge.adaptive.credential_broker import (
     delivery_plan,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
+from forge.adaptive.models import PlanRevision
+from forge.adaptive.operator_view import with_status_comment_identity
 from forge.adaptive.project_credentials import (
     CredentialRefusal,
     ProjectCredentialRegistry,
@@ -99,20 +101,28 @@ from forge.adaptive.revisions import (
     REQUEST_DELETED_DISCUSSION,
     REQUEST_DISPATCHED,
     REQUEST_MATERIALIZED,
+    REQUEST_MR_CLOSED,
     REQUEST_RECORDED,
     REQUEST_REFUSED_UNAUTHORIZED,
+    REQUEST_ROUND_ADMITTED,
+    REQUEST_ROUND_LIMIT,
     REQUEST_STAGED,
     REQUEST_STALE_HEAD,
     REQUEST_WINDOW_CLOSED,
+    REVISION_CONTENT_KEY,
     REVISION_EXECUTOR_DIGEST_KEY,
     RevisionRebindRefused,
     ReviewFeedbackRefused,
     ReviewFeedbackRequest,
+    classic_spec_revision,
     classify_review_feedback,
+    correction_decision_id,
+    correction_invalidation_set,
     executor_digest_document,
     head_binding_guard,
     mark_review_feedback_request,
     parse_review_feedback_note,
+    plan_digest as revision_plan_digest,
     read_review_feedback_requests,
     record_review_feedback_request,
     referenced_paths_of,
@@ -120,6 +130,8 @@ from forge.adaptive.revisions import (
     resolve_approved_input,
     review_feedback_requests_of,
     review_feedback_summary_section,
+    review_correction_revision,
+    round_active_plan_seed,
     stage_review_correction,
 )
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
@@ -156,14 +168,27 @@ from forge.durable import (
     settle_negative_probe,
     settle_state_record,
 )
+from forge.durable.models import ReviewRound
 from forge.durable.budgets import (
+    AXIS_CALLS,
+    AXIS_TOKENS,
+    AXIS_USD,
+    AXIS_WALLCLOCK,
     BUDGET_EXHAUSTED,
+    RESERVE_CLOSING,
+    BudgetAmendmentCommand,
     BudgetGuard,
     BudgetLimits,
+    apply_budget_amendment,
+    budget_amendments_for_run,
     budget_block_reason,
+    budget_for_run,
+    budget_limits_from_spec,
+    limiting_axis,
     open_budget,
     reconcile_harness_receipt,
     resolve_budget_limits,
+    usd_amendment_total,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
@@ -171,6 +196,7 @@ from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.gateway.feedback import max_review_rounds
 from forge.harnesses.brief_envelope import build_brief_envelope
 from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.policy.evidence import EvidencePolicy
@@ -298,6 +324,32 @@ _RESUMABLE_PLAN_STATUSES = frozenset({"preflight", "planning"})
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
+
+#: R40-04 (#340): the reviewer's real reservation shape — one call plus
+#: the JSON-mode token estimate the factory reviewer's ``complete`` uses
+#: (``factory/llm.py`` defaults ``max_tokens=4096``). The review-only
+#: continuation's pre-review capacity check (:func:`limiting_axis`)
+#: probes exactly this shape so a refusal names the axis the real guard
+#: would refuse on, before any paid call.
+REVIEW_CALL_TOKEN_ESTIMATE = 4096
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO timestamp from run evidence, or ``None``.
+
+    Naive stamps read as UTC; unparsable/absent values return ``None``
+    (no authority deadline recorded — the legacy pre-#340 block shape).
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
 
 # ----------------------------------------------------------------------
 # R37-07 (issue #288): the GitLab dispatch envelope — the lane-resume /
@@ -1239,12 +1291,30 @@ class RunService:
 
         # F22: open the run's budget from the spec (idempotent) so the
         # planning + factory legs reserve against real limits.
+        # R40-04 (#340): the mandatory closing share is partitioned in the
+        # SAME frozen open — BEFORE any implementation reservation exists —
+        # under the stated versioned policy (closing-partition/1), so the
+        # coder's reservations cannot enter it through the real admission
+        # path while the reviewer's still can.
         if spec_document is not None:
+            from forge.adaptive.closing_budget import ClosingReservePolicy, closing_partition
             from forge.durable import open_budget_from_spec
 
+            spec_limits = budget_limits_from_spec(spec_document)
+            partition = (
+                closing_partition(spec_limits, ClosingReservePolicy.from_env())
+                if spec_limits is not None
+                else None
+            )
             async with self._session_factory() as session:
                 await open_budget_from_spec(
-                    session, run_id=run_id, spec_document=spec_document, spec_digest=spec_digest
+                    session,
+                    run_id=run_id,
+                    spec_document=spec_document,
+                    spec_digest=spec_digest,
+                    closing_reserved_calls=partition.calls if partition else None,
+                    closing_reserved_tokens=partition.tokens if partition else None,
+                    closing_partition_policy=(partition.policy_version if partition else None),
                 )
                 await session.commit()
 
@@ -1297,14 +1367,26 @@ class RunService:
         Agents are shared across the service instance; the budget lives in
         the database and is re-loaded per execution leg. ``None`` (no budget
         row — unlimited run) clears any previous binding.
+
+        R40-04 (#340): the reviewer's guard carries the CLOSING purpose —
+        it may spend the protected closing share partitioned at open time;
+        the planner/implementer guards keep the implementation purpose and
+        cannot enter it.
         """
         from forge.durable import load_budget_guard
 
         guard = await load_budget_guard(self._session_factory, run_id)
-        for agent in (self._planner, self._implementer, self._reviewer):
+        closing_guard = await load_budget_guard(
+            self._session_factory, run_id, purpose=RESERVE_CLOSING
+        )
+        for agent, agent_guard in (
+            (self._planner, guard),
+            (self._implementer, guard),
+            (self._reviewer, closing_guard),
+        ):
             client = getattr(agent, "_llm", None)
             if client is not None and hasattr(client, "set_budget"):
-                client.set_budget(guard)
+                client.set_budget(agent_guard)
 
     def _budget_profiles(self) -> dict[str, dict[str, Any]]:
         """The configured numeric budget profiles (R13): forge.yml first
@@ -2168,7 +2250,8 @@ class RunService:
                 )
                 logger.info("/status on issue !%s — no run", issue_iid)
             else:
-                body = format_status_reply(await collect_status_snapshot(session, run))
+                snapshot = await collect_status_snapshot(session, run)
+                body = with_status_comment_identity(format_status_reply(snapshot), snapshot)
                 run_id = run.id
         await self._post_journaled_note(
             project_id,
@@ -2543,9 +2626,16 @@ class RunService:
         # in-scope correction: the bounded lane only re-enters the
         # delivery pipeline from the pre-ready states (ADR-0004 —
         # ready_for_human has no outgoing edge: the human decision is
-        # final). Outside the window the request is recorded (the audit
-        # stands) and the reviewer is told the honest path.
+        # final). R40-02 (#338): readiness no longer ends the JOURNEY —
+        # an authorized /fix on a ready delivery admits a LINKED review
+        # round (its own work unit; the terminal record is never
+        # reopened). Every other post-window status keeps the honest
+        # refusal: the request is recorded (the audit stands) and the
+        # reviewer is told the way forward.
         if run_status not in (FlowStatus.WAITING_CI.value, FlowStatus.EVALUATING_CI.value):
+            if run_status == FlowStatus.READY_FOR_HUMAN.value:
+                await self._admit_review_round(project_id, mr_iid, run_id, issue_iid, request)
+                return
             await mark_review_feedback_request(
                 self._session_factory, run_id, note_id, REQUEST_WINDOW_CLOSED
             )
@@ -2734,6 +2824,663 @@ class RunService:
             await self._advance_proposal(
                 project_id, run_id, repair_context=context, repair_reason=reason
             )
+
+    # ------------------------------------------------------------------
+    # R40-02 (#338) — the linked post-readiness review round
+    # ------------------------------------------------------------------
+
+    #: The round-row statuses that still hold the lineage's ONE outstanding
+    #: correction slot (mirrors the ``uq_review_round_open_per_root``
+    #: partial index predicate — the query reads what the index enforces).
+    _ROUND_OPEN_STATUSES = ("admitted", "dispatched")
+
+    async def _round_lineage(
+        self, session: AsyncSession, run_id: str
+    ) -> tuple[str, list[ReviewRound]]:
+        """The run's lineage root + its recorded rounds (R40-02).
+
+        ``root`` is delivery 1's run id: a run that is itself a round child
+        (a completed round two, itself corrected by a round three) inherits
+        its round's root, so bounding and the outstanding-slot check key on
+        the LINEAGE, never on the last delivery alone.
+        """
+        own = (
+            (
+                await session.execute(
+                    select(ReviewRound)
+                    .where(ReviewRound.child_run_id == run_id)
+                    .order_by(ReviewRound.id.desc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        root = own.root_run_id if own is not None else run_id
+        rounds = (
+            (
+                await session.execute(
+                    select(ReviewRound)
+                    .where(ReviewRound.root_run_id == root)
+                    .order_by(ReviewRound.round_number.asc(), ReviewRound.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return root, list(rounds)
+
+    async def _admit_review_round(
+        self,
+        project_id: int,
+        mr_iid: int | None,
+        run_id: str,
+        issue_iid: int | None,
+        request: ReviewFeedbackRequest,
+    ) -> None:
+        """Admit ONE linked review round off a ready delivery (R40-02).
+
+        The eligibility ladder, every rung refusing with an explanation and
+        ZERO commits: the MR must still be the open collaboration surface
+        (merged/closed ended the human decision); the lineage may hold ONE
+        outstanding round (checked FIRST so two authorized corrections
+        racing the same head answer CONFLICT deterministically); the head
+        must not have moved between the request and this admission (the
+        same ``stale_head`` fence the pre-ready route applies — human
+        edits preserved, never force-pushed); and the bounded round count
+        (``FORGE_MAX_REVIEW_ROUNDS``) must not be exhausted. The admission
+        itself is ONE transaction: the round row, the child run (walked to
+        ``proposing`` over the legal graph, seeded with the round's
+        active-plan representation), the copied frozen spec, the confirmed
+        MR reservation on the SAME branch, the child's OWN budget opened
+        from that spec, and the admission outbox row — or nothing at all.
+        """
+        if mr_iid is None:
+            logger.info("Review round for run %s without an MR — ignoring", run_id[:8])
+            return
+        try:
+            mr = await self._gitlab.get_merge_request(project_id, mr_iid)
+        except GitLabAPIError:
+            logger.info(
+                "MR !%s state read failed for run %s — the redelivery re-enters here",
+                mr_iid,
+                run_id[:8],
+            )
+            return
+        mr_state = (getattr(mr, "state", "") or "").strip().lower()
+        if mr_state in ("merged", "closed"):
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_MR_CLOSED
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, request.note_id, self._rf_mr_closed_body(mr_state)
+            )
+            return
+
+        async with self._session_factory() as session:
+            root, rounds = await self._round_lineage(session, run_id)
+        # The outstanding-slot check runs BEFORE the head fence: two
+        # authorized corrections racing the same head answer CONFLICT
+        # deterministically (the partial unique index is the arbiter a
+        # true race hits at the INSERT), never a head reading that
+        # depends on which round's candidate landed last.
+        open_rounds = [row for row in rounds if row.status in self._ROUND_OPEN_STATUSES]
+        if open_rounds:
+            await mark_review_feedback_request(
+                self._session_factory,
+                run_id,
+                request.note_id,
+                REQUEST_CONFLICTING,
+                conflict_with=open_rounds[0].decision_id,
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_round_conflict_body(run_id, open_rounds[0]),
+            )
+            return
+        # The head fence DURING approval: the request bound the MR head at
+        # note time; a head that moved since is a human edit this
+        # authorization never saw — preserve it, refuse stale.
+        head = await self._read_mr_head(project_id, mr_iid, issue_iid, run_id)
+        try:
+            head_binding_guard(request.head_sha, head)
+        except ReviewFeedbackRefused:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_STALE_HEAD
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_stale_head_body(run_id, request),
+                allow_repeat=True,
+            )
+            return
+        bound = max_review_rounds()
+        if bound <= 0 or len(rounds) >= bound:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_ROUND_LIMIT
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, request.note_id, self._rf_round_limit_body(bound)
+            )
+            return
+
+        # The round's plan derives from exactly two verified sources: the
+        # parent's frozen RunSpec (digest-verified read) and the accepted
+        # request. A parent that staged an adaptive revision chains from
+        # its durable content instead — never a re-derivation.
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except SpecInvalid as exc:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_round_specless_body(run_id, exc),
+            )
+            return
+        async with self._session_factory() as session:
+            parent = await self._get_run(session, run_id)
+            parent_evidence = dict(parent.evidence or {})
+            spec_row = (
+                (
+                    await session.execute(
+                        select(RunSpec)
+                        .where(RunSpec.run_id == run_id)
+                        .order_by(RunSpec.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        # Copy the frozen bytes VERBATIM (never a re-serialization): the
+        # child's spec digest check recomputes over these exact bytes.
+        spec_document = dict(spec_row.document) if spec_row is not None else spec.to_document()
+        spec_digest_value = str(parent.spec_digest or (spec_row.digest if spec_row else "") or "")
+        active_raw = parent_evidence.get(ACTIVE_PLAN_KEY)
+        content_raw = active_raw.get(REVISION_CONTENT_KEY) if isinstance(active_raw, dict) else None
+        decision_id = correction_decision_id(run_id, request.note_id)
+        # The lineage id: the child SHARES the parent's 8-hex branch prefix
+        # so every branch-deriving leg (implementer, publisher, CI poll,
+        # drift checks) lands on the SAME factory branch — the MR stays
+        # the collaboration surface by construction, not by re-wiring.
+        child_id = f"{run_id[:8]}{uuid4().hex[:24]}"
+        if isinstance(content_raw, dict) and content_raw:
+            try:
+                base_revision = PlanRevision.model_validate(dict(content_raw))
+            except Exception as exc:  # pydantic ValidationError — unreadable
+                await mark_review_feedback_request(
+                    self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
+                )
+                await self._reply_review_feedback(
+                    project_id,
+                    mr_iid,
+                    run_id,
+                    request.note_id,
+                    self._rf_refused_body(
+                        run_id,
+                        ReviewFeedbackRefused(
+                            "content_unreadable",
+                            f"the parent's active revision does not parse: {type(exc).__name__}",
+                        ),
+                    ),
+                )
+                return
+            round_revision = review_correction_revision(base_revision, request)
+            revised_from = str(active_raw.get("plan_digest") or "") if active_raw else ""
+        else:
+            round_revision = classic_spec_revision(
+                work_id=child_id, spec=spec_document, request=request
+            )
+            revised_from = str(spec.plan_digest or "")
+        round_number = len(rounds) + 2  # delivery 1 is round 1 (never a row)
+        last_candidate = str(list(parent.candidate_shas or [])[-1]) if parent.candidate_shas else ""
+        invalidation = (
+            correction_invalidation_set(
+                last_candidate,
+                {
+                    "review": {"applicability": last_candidate},
+                    "verification": {"applicability": last_candidate},
+                    "pipeline": {"applicability": last_candidate},
+                },
+            )
+            if last_candidate
+            else {}
+        )
+        child_evidence = {
+            "requested_by": request.actor,
+            "backend": str(parent_evidence.get("backend") or "").strip(),
+            "review_round": {
+                "parent_run_id": run_id,
+                "root_run_id": root,
+                "round_number": round_number,
+                "note_id": request.note_id,
+                "decision_id": decision_id,
+                "base_head_sha": request.head_sha,
+                "mr_iid": mr_iid,
+            },
+            "round_invalidation": invalidation,
+            ACTIVE_PLAN_KEY: round_active_plan_seed(
+                round_revision,
+                revised_from_digest=revised_from,
+                decision_id=decision_id,
+            ),
+            # The round inherits its OWN copy of the request: the child's
+            # readiness gate then holds the candidate until the reviewer
+            # resolves the originating discussion (the human decision —
+            # forge never resolves it).
+            "review_feedback_requests": {
+                request.note_id: request.with_status(
+                    REQUEST_DISPATCHED, decision_id=decision_id
+                ).document()
+            },
+        }
+
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                parent = await self._get_run(session, run_id)
+                if parent.status != FlowStatus.READY_FOR_HUMAN.value:
+                    # The run moved between the read and the admission —
+                    # the pre-ready staged route (or the window answer)
+                    # owns the request now; nothing is admitted.
+                    raise ReviewFeedbackRefused(
+                        "parent_moved",
+                        f"run {run_id!r} is {parent.status!r}, not ready_for_human",
+                    )
+                # The child's OWN budget admission (R40-04 discipline): a
+                # new round is never funded by an amendment — it opens its
+                # own ledger from the SAME frozen spec ceilings, closing
+                # share partitioned up front.
+                from forge.adaptive.closing_budget import ClosingReservePolicy, closing_partition
+                from forge.durable import open_budget_from_spec
+
+                spec_limits = budget_limits_from_spec(spec_document)
+                partition = (
+                    closing_partition(spec_limits, ClosingReservePolicy.from_env())
+                    if spec_limits is not None
+                    else None
+                )
+                if spec_limits is not None:
+                    await open_budget_from_spec(
+                        session,
+                        run_id=child_id,
+                        spec_document=spec_document,
+                        spec_digest=spec_digest_value or None,
+                        closing_reserved_calls=partition.calls if partition else None,
+                        closing_reserved_tokens=partition.tokens if partition else None,
+                        closing_partition_policy=(partition.policy_version if partition else None),
+                    )
+                session.add(
+                    FlowRun(
+                        id=child_id,
+                        project_id=parent.project_id,
+                        issue_iid=parent.issue_iid,
+                        provider="gitlab",
+                        mr_iid=mr_iid,
+                        base_sha=request.head_sha,
+                        spec_digest=parent.spec_digest,
+                        config_digest=parent.config_digest,
+                        plan_digest=revision_plan_digest(round_revision),
+                        evidence=child_evidence,
+                    )
+                )
+                reason = f"review round {round_number} admitted (note {request.note_id})"
+                await controller.transition(child_id, FlowStatus.PREFLIGHT, reason=reason)
+                await controller.transition(child_id, FlowStatus.PLANNING, reason=reason)
+                await controller.transition(child_id, FlowStatus.WAITING_APPROVAL, reason=reason)
+                await controller.transition(child_id, FlowStatus.PROPOSING, reason=reason)
+                session.add(
+                    RunSpec(
+                        id=uuid4().hex,
+                        run_id=child_id,
+                        schema_version=(
+                            int(spec_row.schema_version)
+                            if spec_row is not None
+                            else EXECUTABLE_SPEC_SCHEMA_VERSION
+                        ),
+                        document=spec_document,
+                        digest=spec_digest_value or str(parent.spec_digest or ""),
+                    )
+                )
+                session.add(
+                    MRReservation(
+                        flow_run_id=child_id,
+                        branch=factory_branch(parent.issue_iid, child_id),
+                        status="confirmed",
+                        mr_iid=mr_iid,
+                    )
+                )
+                session.add(
+                    ReviewRound(
+                        id=uuid4().hex,
+                        parent_run_id=run_id,
+                        child_run_id=child_id,
+                        root_run_id=root,
+                        round_number=round_number,
+                        note_id=request.note_id,
+                        mr_iid=mr_iid,
+                        base_head_sha=request.head_sha,
+                        decision_id=decision_id,
+                        requested_by=request.actor,
+                        status="admitted",
+                    )
+                )
+                session.add(
+                    Outbox(
+                        flow_run_id=child_id,
+                        event_type="review_round.admitted",
+                        payload={
+                            "run_id": child_id,
+                            "parent_run_id": run_id,
+                            "root_run_id": root,
+                            "round_number": round_number,
+                            "note_id": request.note_id,
+                            "decision_id": decision_id,
+                            "base_head_sha": request.head_sha,
+                            "requested_by": request.actor,
+                        },
+                    )
+                )
+                await session.commit()
+        except IntegrityError:
+            # Two authorized corrections raced the same head: the open-round
+            # partial unique index is the arbiter — this caller is the
+            # loser, deterministically (the row that committed wins).
+            async with self._session_factory() as session:
+                _root, rounds_now = await self._round_lineage(session, run_id)
+            winner = next(
+                (row for row in rounds_now if row.status in self._ROUND_OPEN_STATUSES), None
+            )
+            await mark_review_feedback_request(
+                self._session_factory,
+                run_id,
+                request.note_id,
+                REQUEST_CONFLICTING,
+                conflict_with=winner.decision_id if winner is not None else "",
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_round_conflict_body(run_id, winner if winner is not None else request),
+            )
+            return
+        except ReviewFeedbackRefused as exc:
+            logger.info(
+                "Review round for run %s refused [%s] — %s", run_id[:8], exc.code, exc.detail
+            )
+            return
+
+        # Durable-first: the parent's request carries the linkage BEFORE
+        # the dispatch legs run (a crash mid-dispatch resumes through the
+        # admitted round + the reconciler pass below).
+        await mark_review_feedback_request(
+            self._session_factory,
+            run_id,
+            request.note_id,
+            REQUEST_ROUND_ADMITTED,
+            decision_id=decision_id,
+            invalidation=invalidation,
+        )
+        await self._reply_review_feedback(
+            project_id,
+            mr_iid,
+            run_id,
+            request.note_id,
+            self._rf_round_admitted_body(run_id, child_id, round_number, request),
+        )
+        logger.info(
+            "Review round %d admitted for run %s — child %s (head %s, root %s)",
+            round_number,
+            run_id[:8],
+            child_id[:8],
+            request.head_sha[:8],
+            root[:8],
+        )
+        await self._dispatch_review_round(child_id, project_id, request)
+
+    async def _dispatch_review_round(
+        self, child_id: str, project_id: int, request: ReviewFeedbackRequest
+    ) -> None:
+        """Run the round's correction cycle on its child work unit.
+
+        The child already sits in ``proposing`` (the admission walked it
+        there); this is the same advance leg the repair edge uses — the
+        implementer reads at the APPROVED current head (human additions
+        included), the writer pins ``expected_head`` to it (a later move is
+        the existing branch-drift refusal — no force-push, no replay
+        against the old base), and the candidate, checks and review that
+        follow bind to the NEW child run while delivery 1 stays immutable
+        history. Idempotent under the reconciler's re-drive: the advance
+        adopts its own journaled effects, and the operator MR note rides
+        ONLY the first dispatch (the ``admitted → dispatched`` transition).
+        """
+        backend_name = ""
+        first_dispatch = False
+        async with self._session_factory() as session:
+            run = await self._get_run(session, child_id)
+            if run is None:
+                return
+            backend_name = str((run.evidence or {}).get("backend") or "").strip()
+            row = (
+                (
+                    await session.execute(
+                        select(ReviewRound).where(ReviewRound.child_run_id == child_id).limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            first_dispatch = row is not None and row.status == "admitted"
+        context = self._rf_correction_context(request)
+        reason = f"review round correction: discussion {request.discussion_id or request.note_id}"
+        title = "## Review round correction — the reviewer requested a change"
+        logger.info("Review round child %s dispatching correction", child_id[:8])
+        if is_harness_backend(backend_name or self._backend_name()):
+            await self._advance_harness(
+                project_id,
+                child_id,
+                repair_context=context,
+                repair_reason=reason,
+                context_title=title,
+            )
+        else:
+            await self._advance_proposal(
+                project_id,
+                child_id,
+                repair_context=context,
+                context_title=title,
+            )
+        await self._mark_review_round(child_id, "dispatched")
+        if not first_dispatch:
+            return  # a re-drive — the operator note already went out
+        # The operator surface on the MR: the round's own note names the
+        # round (never a "repair cycle" — the child's cycle is its own).
+        await self._post_journaled_mr_note(
+            project_id,
+            request.mr_iid,
+            f"**Review round correction dispatched** (run `{child_id[:8]}`, discussion "
+            f"`{request.discussion_id or request.note_id}`) — new candidate checks and "
+            "review rerun on this merge request; the earlier ready delivery stays as "
+            f"history.{_automated_footer()}",
+            child_id,
+        )
+
+    async def _mark_review_round(self, child_id: str, status: str, reason: str = "") -> None:
+        """Apply ONE round-row lifecycle transition (idempotent per run)."""
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ReviewRound).where(ReviewRound.child_run_id == child_id).limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if row is None or row.status == status:
+                return
+            row.status = status
+            row.status_reason = reason[:200] if reason else None
+            session.add(
+                Outbox(
+                    flow_run_id=child_id,
+                    event_type="review_round.status",
+                    payload={"run_id": child_id, "status": status, "reason": reason[:200]},
+                )
+            )
+            await session.commit()
+
+    async def evaluate_review_rounds(self) -> None:
+        """The bounded review-round pass (R40-02) — the reconciler's shape.
+
+        One bounded scan over the OPEN round rows, one exception-isolated
+        step per round: a round whose child run reached a terminal status
+        CLOSES (freeing the lineage's one outstanding-correction slot and
+        recording the delivery relationship as complete); a round still
+        ``admitted`` (or whose child sits mid-advance after a crash) is
+        re-driven — the head fence first, then the advance leg, which is
+        mid-leg idempotent. At most ONE child round and ONE effect intent
+        ever survive a restart: the round row is the admission's
+        idempotency, and the advance adopts any journaled effect before
+        creating a new one.
+        """
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ReviewRound.id).where(
+                            ReviewRound.status.in_(self._ROUND_OPEN_STATUSES)
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for round_id in rows:
+            try:
+                await self._reconcile_one_review_round(round_id)
+            except Exception:
+                # One broken round must not stall the pass.
+                logger.exception("Review-round pass failed for round %s", round_id[:8])
+
+    async def _reconcile_one_review_round(self, round_id: str) -> None:
+        """Close or re-drive ONE open round (see :meth:`evaluate_review_rounds`)."""
+        async with self._session_factory() as session:
+            row = await session.get(ReviewRound, round_id)
+            if row is None or row.status not in self._ROUND_OPEN_STATUSES:
+                return
+            child = await self._get_run(session, row.child_run_id)
+            if child is None:
+                await self._mark_review_round(row.child_run_id, "ended", "child run row missing")
+                return
+            child_status = child.status
+            project_id = child.project_id
+            issue_iid = child.issue_iid
+        if child_status in {status.value for status in TERMINAL_STATUSES}:
+            closing = "completed" if child_status == FlowStatus.READY_FOR_HUMAN.value else "ended"
+            await self._mark_review_round(row.child_run_id, closing, f"child run {child_status}")
+            return
+        if child_status not in _RESUMABLE_ADVANCE_STATUSES:
+            if row.status == "admitted":
+                # The advance already ran (waiting_ci or beyond) but the
+                # dispatched mark was lost — label catch-up only.
+                await self._mark_review_round(row.child_run_id, "dispatched")
+            return
+        # The round never dispatched, or a crash left the child mid-advance:
+        # fence the head, then (re-)drive the SAME advance leg.
+        requests = review_feedback_requests_of(
+            (await self._read_run_evidence(row.child_run_id)) or {}
+        )
+        request = requests.get(row.note_id)
+        if request is None:
+            await self._mark_review_round(
+                row.child_run_id, "ended", "the child carries no request record"
+            )
+            return
+        try:
+            head = await self._read_mr_head(project_id, row.mr_iid, issue_iid, row.child_run_id)
+            head_binding_guard(row.base_head_sha, head)
+        except ReviewFeedbackRefused:
+            await self._mark_review_round(
+                row.child_run_id, "stale", "the MR head moved off the approved base"
+            )
+            await mark_review_feedback_request(
+                self._session_factory, row.parent_run_id, row.note_id, REQUEST_STALE_HEAD
+            )
+            await self._reply_review_feedback(
+                project_id,
+                row.mr_iid,
+                row.parent_run_id,
+                row.note_id,
+                self._rf_stale_head_body(row.parent_run_id, request),
+                allow_repeat=True,
+            )
+            return
+        await self._dispatch_review_round(row.child_run_id, project_id, request)
+
+    @staticmethod
+    def _rf_round_admitted_body(
+        run_id: str, child_id: str, round_number: int, request: ReviewFeedbackRequest
+    ) -> str:
+        return (
+            f"**Review round {round_number} opened** for run `{run_id[:8]}` — the ready "
+            f"delivery stays as history; round `{child_id}` starts from the approved "
+            f"MR head `{request.head_sha[:12]}`… (human edits included) with its own "
+            "budget, and the required checks + the review rerun on the NEW candidate "
+            "before any readiness claim.\n\n"
+            "Forge never merges and never resolves this discussion — resolve the "
+            f"thread when the correction satisfies you.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_mr_closed_body(state: str) -> str:
+        return (
+            f"This merge request is **{state}** — the collaboration surface is closed "
+            "and no review round can be opened on it (zero commits were made). The "
+            "request is recorded for the audit; raise a new implementation request on "
+            f"the issue instead.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_round_conflict_body(run_id: str, winner: ReviewRound | ReviewFeedbackRequest) -> str:
+        decision = getattr(winner, "decision_id", "") or ""
+        note = getattr(winner, "note_id", "") or ""
+        return (
+            f"Review feedback on run `{run_id[:8]}` conflicts with the review round "
+            f"already open from note `{note}` (decision `{decision}`) — one "
+            "outstanding correction per merge request. Wait for that round to "
+            f"complete, then raise the next correction.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_round_limit_body(bound: int) -> str:
+        return (
+            f"The bounded review-round policy is exhausted for this delivery "
+            f"(`FORGE_MAX_REVIEW_ROUNDS={bound}`) — the request is recorded but no "
+            "further rounds are admitted on this lineage. An operator can raise the "
+            f"bound explicitly.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_round_specless_body(run_id: str, exc: SpecInvalid) -> str:
+        return (
+            f"A review round for run `{run_id[:8]}` derives only from the run's "
+            f"verified frozen spec, which cannot be loaded ({exc}). The request is "
+            f"recorded; raise a fresh implementation request instead.{_automated_footer()}"
+        )
 
     async def _read_run_evidence(self, run_id: str) -> dict | None:
         async with self._session_factory() as session:
@@ -3653,6 +4400,7 @@ class RunService:
         *,
         repair_context: str = "",
         repair_reason: str | None = None,
+        context_title: str | None = None,
     ) -> None:
         """Run one propose → validate → commit → MR cycle (initial or repair).
 
@@ -3661,7 +4409,9 @@ class RunService:
         resume may enter mid-leg instead (the run already sat in
         ``validating``/``committing``/``ensuring_draft_mr``): stages already
         left behind are not re-entered — the walk continues from where the
-        durable state says it is (ADR-0017 §3).
+        durable state says it is (ADR-0017 §3). ``context_title`` (R40-02)
+        relabels the appended context block for callers whose context is a
+        reviewer's correction rather than a failed-CI repair.
         """
         # NEXT-11/R32-05: this is the dispatch boundary — the execution
         # lease is reserved here (idempotently per run), so no path that
@@ -3958,6 +4708,7 @@ class RunService:
         *,
         repair_context: str = "",
         repair_reason: str | None = None,
+        context_title: str | None = None,
         driver: str | None = None,
         resume_mode: str = LANE_RESUME_MODE_FRESH,
     ) -> None:
@@ -4201,10 +4952,11 @@ class RunService:
         plan_summary = approved_input.brief()
         brief = plan_summary
         if repair_context:
-            brief = (
-                f"{plan_summary}\n\n## Repair context — previous candidate failed CI"
-                f" ({repair_reason or 'code failure'})\n\n{repair_context}"
-            )
+            # R40-02 (#338): a review round's context is a CORRECTION the
+            # reviewer requested, not a failed-CI repair — the heading says
+            # what the executor is actually being asked to do.
+            heading = context_title or "## Repair context — previous candidate failed CI"
+            brief = f"{plan_summary}\n\n{heading}\n\n{repair_context}"
 
         issue_title = spec.task_title
         if driver is None:
@@ -5361,15 +6113,22 @@ class RunService:
 
         Consults the closing policy (``FORGE_CLOSING_RESERVE_USD`` /
         ``FORGE_CLOSING_RESERVE_FRACTION`` / ``FORGE_SPEND_CAP_USD``)
-        over the run's durable usage receipts. The recorded block binds
-        the decision to the candidate sha + tested identity — the
-        review-only continuation's binding — and carries the five-field
-        budget report (exact / known subtotal / lower bound / reserved
-        liability / unknown intervals) with the reserve visible.
+        over the run's durable usage receipts. R40-04 (#340): the cap the
+        decision checks is the EFFECTIVE cap — the policy cap plus the
+        run's APPLIED usd-axis amendments (:func:`usd_amendment_total`;
+        refused amendments never count) — and the block stamps the
+        authority window (``authority_expires_at``) the review-only
+        continuation checks BEFORE any paid review, plus the closing
+        capacity per axis (the partitioned share + the usd reserve). The
+        block binds the decision to the candidate sha + tested identity
+        and carries the five-field budget report with the reserve
+        visible.
         """
         from forge.adaptive.closing_budget import (
+            OBSERVABLE_CLOSING_CAPACITY,
             CandidateBinding,
             ClosingReservePolicy,
+            amendment_ledger_document,
             closing_budget_report,
             rows_from_durable_receipts,
         )
@@ -5380,14 +6139,19 @@ class RunService:
                 .scalars()
                 .all()
             )
+            amendments = await budget_amendments_for_run(session, run_id)
+            amended_usd = await usd_amendment_total(session, run_id)
+            budget_row = await budget_for_run(session, run_id)
             run = await self._get_run(session, run_id)
             standing = (run.evidence or {}).get("review_budget_block")
             standing = dict(standing) if isinstance(standing, dict) else {}
         policy = ClosingReservePolicy.from_env()
+        effective_cap = policy.cap_usd + amended_usd if policy.cap_usd is not None else None
         report = closing_budget_report(
-            rows_from_durable_receipts(receipts), cap_usd=policy.cap_usd, policy=policy
+            rows_from_durable_receipts(receipts), cap_usd=effective_cap, policy=policy
         )
         budget = report.to_json()
+        budget["amended_usd"] = round(amended_usd, 6)
         if budget["closing_reserve_usd"] is None:
             short_reason = (
                 "no closing reserve policy is configured — set"
@@ -5406,8 +6170,23 @@ class RunService:
                 f" cover the review (known {budget['known_subtotal_usd']} usd +"
                 f" reserved liability {budget['reserved_liability_usd']} usd vs the"
                 f" {budget['coder_ceiling_usd']} usd coder ceiling) — an explicit,"
-                " auditable top-up is required"
+                " auditable amendment on the limiting axis is required"
             )
+        authority_ttl = policy.authority_ttl_seconds()
+        authority_expires_at = datetime.now(timezone.utc) + timedelta(seconds=authority_ttl)
+        closing_capacity = {
+            "usd_reserve": budget["closing_reserve_usd"],
+            "amended_usd": round(amended_usd, 6),
+            "closing_reserved_calls": (
+                budget_row.closing_reserved_calls if budget_row is not None else None
+            ),
+            "closing_reserved_tokens": (
+                budget_row.closing_reserved_tokens if budget_row is not None else None
+            ),
+            "partition_policy": (
+                budget_row.closing_partition_policy if budget_row is not None else None
+            ),
+        }
         block = {
             "budget_decision": BUDGET_EXHAUSTED,
             "stage": "reviewer",
@@ -5415,12 +6194,21 @@ class RunService:
                 candidate_sha=candidate_sha, tested_identity=tested_identity
             ).to_json(),
             "released": False,
-            # the applied top-up ledger SURVIVES a re-recorded refusal —
-            # a retried operator command stays a replay across refusal
-            # cycles (the idempotency key is deterministic)
-            "top_ups": list(standing.get("top_ups") or []),
-            "top_up_total_usd": standing.get("top_up_total_usd") or 0.0,
+            # R40-04 (#340): the authority window for the review-only
+            # shortcut — checked BEFORE any amendment or paid review; a
+            # re-recorded refusal (a fresh budget decision) re-arms it.
+            "authority_expires_at": authority_expires_at.isoformat(),
+            # the amendment ledger SURVIVES a re-recorded refusal — the
+            # table is the source of truth; a retried command stays a
+            # replay across refusal cycles (the command identity never
+            # changes under redelivery). R40-17 (#353): the projection is
+            # the ONE shared :func:`amendment_ledger_document` every
+            # reviewer-leg decision composes — never an inline second
+            # spelling.
+            **amendment_ledger_document(amendments),
+            "review_only_calls": int(standing.get("review_only_calls") or 0),
             "short_reason": short_reason,
+            "closing_capacity": {OBSERVABLE_CLOSING_CAPACITY: closing_capacity},
             "budget": budget,
         }
         await self._merge_run_evidence(run_id, {"review_budget_block": block})
@@ -5431,32 +6219,60 @@ class RunService:
         run_id: str,
         *,
         operator: str,
+        command_id: str = "",
+        axis: str = AXIS_USD,
+        amount: float = 0.0,
+        reason: str = "",
         top_up_usd: float = 0.0,
         top_up_reason: str = "",
     ) -> dict[str, Any]:
-        """The explicit review-only continuation (Q39-06/#325 item 4).
+        """The explicit review-only continuation (Q39-06/#325 item 4,
+        rewired onto the budget amendment mechanism by R40-04/#340).
 
         After an explicit reviewer-leg budget decision, repeat ONLY the
         review of the SAME candidate/tested identity: no coder dispatch,
-        no new commits — the re-drive never touches the implementer or
-        the writer. The candidate binding is re-checked first: a moved
-        head (or tested identity) invalidates the shortcut with the
-        typed ``review_shortcut_stale`` and the run parks for the
-        required fresh verification. A top-up (amount + reason, both
-        required) is recorded BEFORE the re-drive and is
-        replay-idempotent — the same command retried adds its amount
-        exactly once.
+        no new commits, no replacement MR — the re-drive never touches
+        the implementer or the writer. The guards, IN ORDER and BEFORE
+        any amendment or paid review: the candidate binding is re-read
+        live (a moved head or tested identity invalidates the shortcut
+        with the typed ``review_shortcut_stale``), the recorded decision's
+        AUTHORITY window is checked (``review_shortcut_authority_expired``)
+        and the verification must still bind the tested candidate
+        (``review_shortcut_unverified``).
 
-        Returns the outcome document (``allowed`` / typed ``reason``).
+        R40-04 (#340): an amendment names the DISTINCT axis it changes
+        (``usd`` | ``calls`` | ``tokens`` | ``wallclock``) and rides the
+        ORIGINATING NATIVE COMMAND identity (*command_id* — the note/
+        delivery id the operator surface carried): two identical
+        amount/reason commands are two decisions; a redelivery of ONE
+        command applies once (``budget.amendment_replayed``). Count-axis
+        amendments move the enforcing ``run_budgets`` limits ATOMICALLY
+        and re-open a budget that was exhausted because the limit was
+        reached; usd amendments raise the closing gate's effective cap.
+        A refused amendment names the limiting axis; an amendment on an
+        axis that is not the one refusing the reviewer's reservation
+        does NOT silently permit the review — the continuation refuses
+        with ``budget.refused_axis`` naming the limiting axis.
+
+        Returns the outcome document (``allowed`` / typed ``reason`` /
+        the amendment record / the observables).
         """
         from forge.adaptive.closing_budget import (
+            OBSERVABLE_AMENDMENT_APPLIED,
+            OBSERVABLE_AMENDMENT_REPLAYED,
+            OBSERVABLE_REFUSED_AXIS,
+            OBSERVABLE_REVIEW_ONLY_CALLS,
             OBSERVABLE_REVIEW_ONLY_RECOVERY,
             REVIEW_SHORTCUT_STALE,
-            BudgetTopUp,
             CandidateBinding,
-            TopUpLedger,
+            amendment_ledger_document,
             review_only_continuation,
         )
+
+        # The pinned #325 spelling aliases onto the axis model: a usd
+        # top-up is a usd-axis amendment with its own reason.
+        if top_up_usd and not amount:
+            axis, amount, reason = AXIS_USD, float(top_up_usd), reason or top_up_reason
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
@@ -5495,10 +6311,14 @@ class RunService:
             candidate_sha=str(head or candidate_sha),
             tested_identity=str(verification.get("tested_oid") or candidate_sha),
         )
+        verified = verified_verdict(verification, candidate_sha)
+        authority_deadline = _parse_iso(block.get("authority_expires_at"))
         decision = review_only_continuation(
             budget_decision=str(block.get("budget_decision") or ""),
             recorded=recorded_binding,
             current=current_binding,
+            authority_expires_at=authority_deadline,
+            verified=verified,
         )
         if not decision.allowed:
             await self._merge_run_evidence(
@@ -5510,31 +6330,133 @@ class RunService:
                 )
             return decision.to_json()
 
-        # The explicit, auditable top-up — recorded BEFORE the re-drive,
-        # replay-idempotent by its derived key.
-        ledger = TopUpLedger(block.get("top_ups") or [])
-        if top_up_usd:
-            applied = ledger.apply(
-                BudgetTopUp(
+        # The explicit, auditable amendment — keyed by the ORIGINATING
+        # NATIVE COMMAND identity, applied ATOMICALLY to the enforcement
+        # resource BEFORE the re-drive, replay-idempotent by that key.
+        amendment_outcome: dict[str, Any] | None = None
+        if amount:
+            if not str(command_id or "").strip():
+                return {
+                    "allowed": False,
+                    "reason": "amendment_requires_command_identity",
+                    "detail": (
+                        "a budget amendment rides the originating native command's"
+                        " identity (the note/delivery id) — two identical"
+                        " amount/reason commands are two decisions, a redelivery"
+                        " of one applies once; content identity cannot tell them"
+                        " apart"
+                    ),
+                    "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+                }
+            try:
+                command = BudgetAmendmentCommand(
                     run_id=run_id,
-                    amount_usd=float(top_up_usd),
-                    reason=top_up_reason,
+                    command_id=command_id,
+                    axis=axis,
+                    amount=amount,
+                    reason=reason,
                     operator=operator,
                 )
+            except ValueError as exc:
+                return {
+                    "allowed": False,
+                    "reason": "amendment_refused",
+                    "detail": str(exc),
+                    OBSERVABLE_REFUSED_AXIS: axis,
+                    "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+                }
+            async with self._session_factory() as session:
+                applied = await apply_budget_amendment(session, command)
+                await session.commit()
+            amendment_outcome = applied.to_json()
+            logger.info(
+                "Run %s budget amendment %s on axis %s by %s (%s) — applied=%s"
+                " replayed=%s refusal=%s",
+                run_id[:8],
+                command.command_id,
+                command.axis,
+                operator,
+                command.reason,
+                applied.applied,
+                applied.replayed,
+                applied.refusal_reason,
+            )
+            if applied.replayed:
+                # A redelivery of the SAME command: its amount is already
+                # in — nothing moves a second time — but the command's
+                # continuation (the review re-drive) still proceeds, the
+                # same way a re-delivered note re-runs its handler.
+                logger.info(
+                    "Run %s budget amendment %s replayed — applied exactly once",
+                    run_id[:8],
+                    command.command_id,
+                )
+            elif not applied.applied:
+                # The typed refusal names the limiting axis; the block
+                # stays armed (never released) and the review never ran.
+                return {
+                    **decision.to_json(),
+                    "allowed": False,
+                    "reason": "amendment_refused",
+                    "detail": applied.refusal_reason or "the amendment was refused",
+                    "amendment": amendment_outcome,
+                    OBSERVABLE_REFUSED_AXIS: applied.refusal_reason.split(":", 1)[0]
+                    if applied.refusal_reason
+                    else None,
+                    "observables": [OBSERVABLE_REFUSED_AXIS],
+                }
+
+        # The pre-review capacity check (AT-04's refusal bar): an
+        # amendment on one axis must not silently pretend the review can
+        # run when ANOTHER axis still refuses the reviewer's reservation.
+        # The reviewer's real call shape is one call plus its JSON-mode
+        # token estimate (factory/reviewer.py).
+        async with self._session_factory() as session:
+            limiting = await limiting_axis(
+                session,
+                run_id,
+                calls=1,
+                tokens=REVIEW_CALL_TOKEN_ESTIMATE,
+                purpose=RESERVE_CLOSING,
+            )
+        if limiting is not None:
+            detail = (
+                f"the {limiting} axis still refuses the reviewer's reservation —"
+                " an amendment on another axis does not silently permit the"
+                " review; amend the limiting axis"
+                if limiting in (AXIS_CALLS, AXIS_TOKENS, AXIS_WALLCLOCK)
+                else f"the budget {limiting} still refuses the reviewer's reservation"
             )
             logger.info(
-                "Run %s budget top-up of %s usd by %s (%s) — applied=%s",
+                "Run %s review-only continuation refused by the %s axis",
                 run_id[:8],
-                applied.top_up.amount_usd,
-                operator,
-                applied.top_up.reason,
-                applied.applied,
+                limiting,
             )
+            return {
+                **decision.to_json(),
+                "allowed": False,
+                "reason": "review_capacity_refused",
+                "detail": detail,
+                "amendment": amendment_outcome,
+                OBSERVABLE_REFUSED_AXIS: limiting,
+                "observables": [OBSERVABLE_REFUSED_AXIS],
+            }
+
+        async with self._session_factory() as session:
+            amendments = await budget_amendments_for_run(session, run_id)
+            amended_usd = await usd_amendment_total(session, run_id)
         block = {
             **block,
-            "top_ups": list(ledger.records()),
-            "top_up_total_usd": ledger.total_added_usd(),
-            "released": {"operator": operator, "top_up_usd": ledger.total_added_usd()},
+            # R40-17 (#353): the ONE shared projection — same ledger, same
+            # views, as the refusal-time record above.
+            **amendment_ledger_document(amendments),
+            "review_only_calls": int(block.get("review_only_calls") or 0) + 1,
+            "released": {
+                "operator": operator,
+                "command_id": str(command_id or ""),
+                "axis": axis,
+                "top_up_usd": round(amended_usd, 6),
+            },
         }
         await self._merge_run_evidence(run_id, {"review_budget_block": block})
 
@@ -5547,7 +6469,6 @@ class RunService:
             status=str(pipeline_evidence.get("status") or "unknown"),
             web_url=pipeline_evidence.get("url"),
         )
-        verified = verified_verdict(verification, candidate_sha)
         warnings = (
             [] if verified else ["No verification profile configured — pipeline success only."]
         )
@@ -5564,7 +6485,24 @@ class RunService:
             verification_warnings=warnings,
             verification_evidence=verification,
         )
-        return decision.to_json()
+        outcome = {
+            **decision.to_json(),
+            "amendment": amendment_outcome,
+            OBSERVABLE_REVIEW_ONLY_CALLS: block["review_only_calls"],
+            "observables": [
+                name
+                for name, on in (
+                    (OBSERVABLE_AMENDMENT_APPLIED, bool(amendment_outcome)),
+                    (
+                        OBSERVABLE_AMENDMENT_REPLAYED,
+                        bool(amendment_outcome and amendment_outcome.get("replayed")),
+                    ),
+                    (OBSERVABLE_REVIEW_ONLY_RECOVERY, True),
+                )
+                if on
+            ],
+        }
+        return outcome
 
     async def _review_and_ready(
         self,

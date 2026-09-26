@@ -55,6 +55,22 @@ death), beside the cold-install qualification of the same profile
 | AT-10 → **CE-3** | `TestCE3OldAttemptCallbackCannotPublishAfterResume` | The first runner's job returns LATE claiming success with a well-formed candidate of its own: the stale attempt's journaled handle, polled by the dead worker's resurrected pass, CANNOT publish after the resume — the run stays `ready_for_human`, the candidate is recorded `superseded`, and the native surface shows zero new writes (no second commit, no MR change, foreign content nowhere). |
 | AT-10 → **CE-4** | `TestCE4RequiredRestorationFailureStartsNoModelTurn` | A rotted checkpoint blob at the authority: the second runner's REQUIRED restore fails loudly (`wip_restore_failed`) with ZERO vendor events after the pause leg (no model turn), zero publication, no generation, and nothing ever dispatched to the native surface. |
 
+## The mutation gates (R40-08 / #344, `test_mutation_gates.py`)
+
+The REQUIRED composed-trace set — one per high-risk invariant, each
+WITH its seeded-mutation arm (the SAME event sequence, ONE defect
+patched into the SHIPPED symbol the way a regression would reintroduce
+it; the arm asserts the defect's observable, so the baseline's
+assertions fail under the patch):
+
+| Trace | Baseline pins | The seeded mutant |
+| --- | --- | --- |
+| **MG-1** partial-liability admission (#339) | settled FINAL 8.00 + a PARTIAL at 0.50 inside a 3.00 envelope, cap 10.00 → bounded exposure 11.00, the closing review does NOT fit, the run BLOCKED, zero provider contact | `exposure_fold` reverted to VALUE PRESENCE — 8.50 "fits", the run wrongly stays reviewable |
+| **MG-2** guarded review amendment (#340 / AT-04) | the lane's own artifact receipt exhausts the one-call budget; the REAL LLMReviewer over the REAL LLMClient is refused by the ACTUAL BudgetGuard; a calls-axis amendment re-opens the enforcement row and EXACTLY ONE reviewer call reaches the provider; the redelivery applies once | `apply_budget_amendment` reverted to EVIDENCE-ONLY — the capacity check still refuses, nothing reaches the provider |
+| **MG-3** grant persistence under concurrent evidence (#341) | the redemption-mode dispatch persists its grant while a checkpoint-shaped evidence write lands in the window — BOTH survive (keyed row + projection + the concurrent key) | the projection writer reverted to the WHOLE-DOCUMENT overwrite — the concurrent key is silently dropped |
+
+MG-A (the `/fix`//`ask` feedback ingress, #337) is `test_feedback_ingress.py`'s FI-1 trace with FI-5's two registration-revert arms. All five classes are REQUIRED traces in `scripts/pg_gate.py` (a removed arm is the marker-removal mutation the manifest check detects). The traces write `forge.trace-record/1` execution records (source sha + evidence class) when `FORGE_TRACE_RECORD_DIR` is set — the pg-gate report embeds them. See `docs/operations/production-entry-mutation-gates.md`.
+
 ## The fakes
 
 - **`fake_native_server.py`** — stdlib HTTP server run as a subprocess

@@ -29,7 +29,13 @@ closing half of the fix, pinned by ``tests/test_closing_budget.py``:
   ``unknown`` stay five DISTINGUISHABLE fields (an exact cost is a final
   provider-reported/reconciled figure; the known subtotal adds
   estimates; the lower bound and the retained envelope belong to the
-  unknown intervals; ``unknown`` counts them).
+  unknown intervals; ``unknown`` counts them). R40-03 (#339) extends the
+  same honesty to FINALITY: ``settled_usd`` (final rows' costs),
+  ``accrued_unsettled_usd`` (the nonfinal rows' streamed subtotals),
+  ``retained_liability_usd`` (the envelope still fenced for them — the
+  subtotal rides INSIDE it), ``settlement_release_usd`` and
+  ``unbounded_intervals`` are reported as the ``budget.*`` observability
+  keys, because a partial's subtotal never settles liability.
 - **Review-only continuation** (:func:`review_only_continuation`) —
   after an explicit budget decision at the reviewer leg, a guarded
   continuation repeats ONLY the review of the SAME candidate/tested
@@ -55,6 +61,7 @@ import math
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from forge.adaptive.delivery_measurement import ProviderRoute
@@ -65,23 +72,41 @@ from forge.adaptive.usage_ingestion import (
     IngestedUsageRow,
     spend_cap_check,
 )
+from forge.durable.budgets import BudgetLimits
 
 __all__ = [
+    "CLOSING_PARTITION_POLICY_VERSION",
     "DEFAULT_CLOSING_RESERVE_FRACTION",
+    "DEFAULT_REVIEW_AUTHORITY_TTL_SECONDS",
+    "OBSERVABLE_ACCRUED_UNSETTLED",
+    "OBSERVABLE_AMENDMENT_APPLIED",
+    "OBSERVABLE_AMENDMENT_REPLAYED",
+    "OBSERVABLE_CLOSING_CAPACITY",
     "OBSERVABLE_CLOSING_RESERVE",
     "OBSERVABLE_PHASE_EXHAUSTION",
+    "OBSERVABLE_REFUSED_AXIS",
+    "OBSERVABLE_RETAINED_LIABILITY",
+    "OBSERVABLE_REVIEW_ONLY_CALLS",
     "OBSERVABLE_REVIEW_ONLY_RECOVERY",
+    "OBSERVABLE_SETTLEMENT_RELEASE",
+    "OBSERVABLE_UNBOUNDED_INTERVALS",
     "OBSERVABLE_UNRESOLVED_UPPER_BOUND",
+    "POLICY_AUTHORITY_TTL_ENV",
     "POLICY_CAP_ENV",
     "POLICY_FRACTION_ENV",
     "POLICY_RESERVE_ENV",
+    "REVIEW_SHORTCUT_AUTHORITY_EXPIRED",
     "REVIEW_SHORTCUT_STALE",
+    "REVIEW_SHORTCUT_UNVERIFIED",
     "AppliedTopUp",
     "BudgetTopUp",
     "CandidateBinding",
     "ClosingBudgetReport",
+    "ClosingPartition",
     "ClosingReservePolicy",
     "TopUpLedger",
+    "amendment_ledger_document",
+    "closing_partition",
     "coder_cap_check",
     "closing_budget_report",
     "review_only_continuation",
@@ -109,11 +134,60 @@ DEFAULT_CLOSING_RESERVE_FRACTION = 0.15
 #: current candidate and the required verification must rerun.
 REVIEW_SHORTCUT_STALE = "review_shortcut_stale"
 
-#: The observables (issue #325's observability scope).
+#: R40-04 (#340): the review-only shortcut's AUTHORITY expired — the
+#: recorded reviewer-leg budget decision is no longer a fresh operator
+#: surface (the TTL below); the run re-enters its normal gate instead of
+#: replaying a stale authorization.
+REVIEW_SHORTCUT_AUTHORITY_EXPIRED = "review_shortcut_authority_expired"
+
+#: R40-04 (#340): the shortcut has no verification bound to the tested
+#: candidate — the required verification is missing, and a paid review
+#: must not ride a shortcut that cannot prove what it is reviewing.
+REVIEW_SHORTCUT_UNVERIFIED = "review_shortcut_unverified"
+
+#: R40-04 (#340): how long the recorded reviewer-leg budget decision
+#: stays a valid authority for the review-only continuation. The TTL is
+#: stamped on the block when it is recorded (``authority_expires_at``)
+#: and checked BEFORE any amendment or paid review. Env knob
+#: ``FORGE_REVIEW_AUTHORITY_TTL_SECONDS``; a non-positive or unparsable
+#: value degrades to the default, never to "no expiry".
+POLICY_AUTHORITY_TTL_ENV = "FORGE_REVIEW_AUTHORITY_TTL_SECONDS"
+DEFAULT_REVIEW_AUTHORITY_TTL_SECONDS = 24 * 3600
+
+#: R40-04 (#340): the VERSIONED policy that sizes the closing share of
+#: the guard's numeric axes. v1's stated rule: the closing share of each
+#: limited axis is ``ceil(axis limit × closing fraction)`` — the same
+#: fraction record the USD reserve resolves from
+#: (:class:`ClosingReservePolicy`), applied per-axis because the axes
+#: are DISTINCT (a USD allowance cannot be silently converted into
+#: calls); wall-clock is NOT partitioned under v1 (the closing review
+#: rides the run's own clock — the deadline is anchored at open time and
+#: an extension is an explicit wallclock-axis amendment). Changing the
+#: rule means a NEW version string, never a silent re-derivation.
+CLOSING_PARTITION_POLICY_VERSION = "closing-partition/1"
+
+#: The observables (issue #325's observability scope, extended by
+#: R40-03/#339's finality model and R40-04/#340's amendment scope).
 OBSERVABLE_CLOSING_RESERVE = "budget.closing_reserve"
 OBSERVABLE_UNRESOLVED_UPPER_BOUND = "budget.unresolved_upper_bound"
 OBSERVABLE_REVIEW_ONLY_RECOVERY = "delivery.review_only_recovery"
 OBSERVABLE_PHASE_EXHAUSTION = "budget.phase_exhaustion"
+#: R40-03 (#339): the finality-separated quantities as report keys —
+#: the provisional subtotals streamed by partial receipts, the envelope
+#: still fenced for them, the headroom settlements returned, and how
+#: many intervals have no finite envelope at all.
+OBSERVABLE_ACCRUED_UNSETTLED = "budget.accrued_unsettled_usd"
+OBSERVABLE_RETAINED_LIABILITY = "budget.retained_liability_usd"
+OBSERVABLE_SETTLEMENT_RELEASE = "budget.settlement_release_usd"
+OBSERVABLE_UNBOUNDED_INTERVALS = "budget.unbounded_intervals"
+#: R40-04 (#340): the amendment + review-only scope — applied/replayed
+#: amendments, the refused limiting axis, the review-only call count and
+#: the closing share's capacity per axis.
+OBSERVABLE_AMENDMENT_APPLIED = "budget.amendment_applied"
+OBSERVABLE_AMENDMENT_REPLAYED = "budget.amendment_replayed"
+OBSERVABLE_REFUSED_AXIS = "budget.refused_axis"
+OBSERVABLE_REVIEW_ONLY_CALLS = "delivery.review_only_calls"
+OBSERVABLE_CLOSING_CAPACITY = "budget.closing_capacity"
 
 #: The cost bases that make a known figure EXACT (a final figure the
 #: provider itself reported, or one a billing reconciliation joined).
@@ -131,6 +205,20 @@ def _env_float(name: str, env: Mapping[str, str] | None) -> float | None:
     if value < 0 or math.isnan(value) or math.isinf(value):
         return None
     return value
+
+
+def _aware_utc(moment: Any) -> datetime | None:
+    """A timezone-aware datetime, or ``None`` for anything unparsable.
+
+    Naive values are read as UTC (the durable rows are written
+    timezone-aware; a naive stamp is a legacy spelling of the same
+    instant, never a different clock).
+    """
+    if not isinstance(moment, datetime):
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
 
 
 # ----------------------------------------------------------------------
@@ -215,6 +303,90 @@ class ClosingReservePolicy:
             "provisional": self.source == "default:provisional",
         }
 
+    def fraction_record(self) -> float:
+        """The effective fraction — an explicit record or the provisional default."""
+        return self.fraction if self.fraction is not None else DEFAULT_CLOSING_RESERVE_FRACTION
+
+    def authority_ttl_seconds(self, env: Mapping[str, str] | None = None) -> int:
+        """How long a recorded reviewer-leg decision stays a valid shortcut
+        authority (R40-04). The env knob wins when it parses to a positive
+        whole seconds value; anything else degrades to the documented
+        default — never to "no expiry"."""
+        raw = (env or os.environ).get(POLICY_AUTHORITY_TTL_ENV)
+        if raw is not None:
+            try:
+                value = int(str(raw).strip())
+            except ValueError:
+                value = 0
+            if value > 0:
+                return value
+        return DEFAULT_REVIEW_AUTHORITY_TTL_SECONDS
+
+
+# ----------------------------------------------------------------------
+# R40-04 (#340): the closing share of the guard's numeric axes — the
+# VERSIONED partition policy
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ClosingPartition:
+    """The closing share of the guard's numeric axes, frozen at budget
+    open time by :func:`closing_partition` under
+    :data:`CLOSING_PARTITION_POLICY_VERSION`.
+
+    ``calls``/``tokens`` are the per-axis shares the IMPLEMENTATION
+    reservation purpose cannot enter and the closing purpose (the
+    reviewer leg) can; ``wallclock_s`` is deliberately ``None`` under v1
+    (the stated rule — the review rides the run's own anchored clock).
+    """
+
+    calls: int | None
+    tokens: int | None
+    policy_version: str = CLOSING_PARTITION_POLICY_VERSION
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "policy_version": self.policy_version,
+            "closing_reserved_calls": self.calls,
+            "closing_reserved_tokens": self.tokens,
+            "wallclock_partitioned": False,
+        }
+
+
+def closing_partition(
+    limits: BudgetLimits, policy: ClosingReservePolicy
+) -> ClosingPartition | None:
+    """Size the closing share of the guard's numeric axes (v1 rule).
+
+    Each LIMITED axis reserves ``ceil(limit × fraction)`` — the same
+    fraction record the USD reserve resolves from, applied per-axis
+    because the dimensions are DISTINCT (a USD allowance never converts
+    into calls implicitly). An unlimited axis has no share to partition
+    (``None``); when NO axis is limited there is nothing to partition at
+    all — ``None`` — and the honest un-partitioned posture stands (the
+    guard enforces nothing there to protect).
+    """
+    fraction = policy.fraction_record()
+
+    def _share(limit: int | None) -> int | None:
+        if limit is None or limit <= 1:
+            # An unlimited axis has no share to partition; a one-unit
+            # axis cannot give the review a share without forbidding ALL
+            # implementation (the same contract the USD reserve states:
+            # protection is not prohibition) — v1 leaves it un-partitioned.
+            return None
+        share = max(math.ceil(limit * fraction), 1)
+        return min(share, limit - 1)  # never the whole axis
+
+    calls = _share(limits.max_calls)
+    tokens = _share(limits.max_tokens)
+    if calls is None and tokens is None:
+        return None
+    return ClosingPartition(
+        calls=calls, tokens=tokens, policy_version=CLOSING_PARTITION_POLICY_VERSION
+    )
+
 
 # ----------------------------------------------------------------------
 # Durable receipts → ingested rows (the report's input)
@@ -274,12 +446,19 @@ def rows_from_durable_receipts(receipts: Iterable[Any]) -> list[IngestedUsageRow
 class ClosingBudgetReport:
     """The budget report the reviewer-leg decision records.
 
-    The five cost fields stay DISTINGUISHABLE: ``exact_usd`` (final
-    provider-reported/reconciled figures only), ``known_subtotal_usd``
-    (every known figure, estimates included), ``lower_bound_usd`` (the
-    unknown intervals' known lower bounds), ``reserved_liability_usd``
-    (their worst-case retained envelope) and ``unknown_intervals`` (how
-    many they are).
+    The cost fields stay DISTINGUISHABLE — the Q39-06 five (``exact_usd``
+    — final provider-reported/reconciled figures only;
+    ``known_subtotal_usd`` — every known figure, estimates included;
+    ``lower_bound_usd`` — the unresolved intervals' floors;
+    ``reserved_liability_usd`` — their worst-case retained envelope;
+    ``unknown_intervals`` — how many they are) plus the R40-03 (#339)
+    finality split: ``settled_usd`` (FINAL rows' costs — finality, not
+    value presence, settles), ``accrued_unsettled_usd`` (the nonfinal
+    rows' streamed subtotals — provisional, never settled),
+    ``retained_liability_usd`` (the envelope still fenced for them, the
+    accrued subtotal riding INSIDE it), ``settlement_release_usd`` (the
+    headroom settlements returned, exactly once each) and
+    ``unbounded_intervals`` (intervals with no finite envelope).
     """
 
     cap_usd: float | None
@@ -292,6 +471,11 @@ class ClosingBudgetReport:
     closing_review_fits: bool
     reserve_intact: bool | None
     requires_bounded_policy: bool
+    settled_usd: float = 0.0
+    accrued_unsettled_usd: float = 0.0
+    retained_liability_usd: float = 0.0
+    settlement_release_usd: float = 0.0
+    unbounded_intervals: int = 0
     cap_check: dict[str, Any] = field(default_factory=dict)
     policy: ClosingReservePolicy = field(default_factory=ClosingReservePolicy)
 
@@ -305,17 +489,24 @@ class ClosingBudgetReport:
                 if self.cap_usd is not None and self.reserve_usd is not None
                 else None
             ),
-            # the five distinguishable fields
+            # the five distinguishable fields (Q39-06)
             "exact_usd": round(self.exact_usd, 6),
             "known_subtotal_usd": round(self.known_subtotal_usd, 6),
             "lower_bound_usd": round(self.lower_bound_usd, 6),
             "reserved_liability_usd": round(self.reserved_liability_usd, 6),
             "unknown_intervals": self.unknown_intervals,
+            # the finality split (R40-03/#339) — exact settled spend vs
+            # provisional accrued vs remaining liability
+            "settled_usd": round(self.settled_usd, 6),
+            "accrued_unsettled_usd": round(self.accrued_unsettled_usd, 6),
+            "retained_liability_usd": round(self.retained_liability_usd, 6),
+            "settlement_release_usd": round(self.settlement_release_usd, 6),
             # the decision + observables
             "closing_review_fits": self.closing_review_fits,
             "reserve_intact": self.reserve_intact,
             "closing_reserve": self.reserve_usd,
             "unresolved_upper_bound": self.cap_check.get("unbounded_intervals", 0),
+            "unbounded_intervals": self.unbounded_intervals,
             "phase_exhaustion": (self.reserve_intact is False or not self.closing_review_fits),
             "requires_bounded_policy": self.requires_bounded_policy,
             "cap_check": dict(self.cap_check),
@@ -386,6 +577,11 @@ def closing_budget_report(
         closing_review_fits=fits,
         reserve_intact=reserve_intact,
         requires_bounded_policy=bool(check.get("requires_bounded_policy")),
+        settled_usd=float(check["settled_usd"]),
+        accrued_unsettled_usd=float(check["accrued_unsettled_usd"]),
+        retained_liability_usd=float(check["retained_liability_usd"]),
+        settlement_release_usd=float(check["settlement_release_usd"]),
+        unbounded_intervals=int(check["unbounded_intervals"]),
         cap_check=check,
         policy=policy,
     )
@@ -465,8 +661,11 @@ class ReviewContinuation:
     allowed continuation — the shortcut re-runs no implementation. A
     refusal carries a typed reason: :data:`REVIEW_SHORTCUT_STALE` (the
     candidate or tested identity moved — the required verification must
-    rerun) or ``not_a_budget_decision`` (the recorded block was never an
-    explicit budget decision).
+    rerun), :data:`REVIEW_SHORTCUT_AUTHORITY_EXPIRED` (the recorded
+    decision's authority window passed — R40-04),
+    :data:`REVIEW_SHORTCUT_UNVERIFIED` (no verification is bound to the
+    tested candidate — R40-04) or ``not_a_budget_decision`` (the
+    recorded block was never an explicit budget decision).
     """
 
     allowed: bool
@@ -494,6 +693,9 @@ def review_only_continuation(
     budget_decision: str,
     recorded: CandidateBinding,
     current: CandidateBinding,
+    authority_expires_at: Any = None,
+    now: Any = None,
+    verified: bool = True,
 ) -> ReviewContinuation:
     """Whether the review-only shortcut may repeat the SAME review.
 
@@ -502,9 +704,15 @@ def review_only_continuation(
     must still name the CURRENT candidate sha and tested identity — a
     moved head (or a changed tested identity) invalidates the shortcut
     with the typed :data:`REVIEW_SHORTCUT_STALE` and the required
-    verification reruns. An allowed continuation carries ZERO coder
-    dispatches and ZERO commits: it repeats only the review of the
-    tested candidate.
+    verification reruns. R40-04 (#340) adds the pre-paid-review gates:
+    an ``authority_expires_at`` that has passed (checked against *now*,
+    both timezone-aware datetimes) refuses with
+    :data:`REVIEW_SHORTCUT_AUTHORITY_EXPIRED`, and a missing
+    verification (``verified=False`` — nothing binds the checks verdict
+    to the tested candidate) refuses with
+    :data:`REVIEW_SHORTCUT_UNVERIFIED`. An allowed continuation carries
+    ZERO coder dispatches and ZERO commits: it repeats only the review
+    of the tested candidate.
     """
     decision = str(budget_decision or "").strip()
     if "budget" not in decision:
@@ -534,6 +742,34 @@ def review_only_continuation(
             candidate=current,
             observable=OBSERVABLE_REVIEW_ONLY_RECOVERY,
         )
+    if authority_expires_at is not None:
+        deadline = _aware_utc(authority_expires_at)
+        moment = _aware_utc(now) if now is not None else datetime.now(timezone.utc)
+        if deadline is not None and moment is not None and moment > deadline:
+            return ReviewContinuation(
+                allowed=False,
+                reason=REVIEW_SHORTCUT_AUTHORITY_EXPIRED,
+                detail=(
+                    "the review-only shortcut's authority expired at"
+                    f" {authority_expires_at} — the recorded reviewer-leg budget"
+                    " decision is no longer a fresh operator surface; the run"
+                    " re-enters its normal gate"
+                ),
+                candidate=current,
+                observable=OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            )
+    if not verified:
+        return ReviewContinuation(
+            allowed=False,
+            reason=REVIEW_SHORTCUT_UNVERIFIED,
+            detail=(
+                "the review-only shortcut has no verification bound to the"
+                " tested candidate — the required verification is missing and"
+                " a paid review must not ride the shortcut"
+            ),
+            candidate=current,
+            observable=OBSERVABLE_REVIEW_ONLY_RECOVERY,
+        )
     return ReviewContinuation(
         allowed=True,
         reason="",
@@ -546,6 +782,70 @@ def review_only_continuation(
         commits=0,
         observable=OBSERVABLE_REVIEW_ONLY_RECOVERY,
     )
+
+
+# ----------------------------------------------------------------------
+# The amendment ledger's ONE projection (R40-17 / #353)
+# ----------------------------------------------------------------------
+
+
+def amendment_ledger_document(rows: Sequence[Any]) -> dict[str, Any]:
+    """The recorded decision's amendment ledger — the ONE projection of
+    the durable ``budget_amendments`` rows every reviewer-leg decision
+    composes (R40-17 / #353).
+
+    *rows* are ``forge.durable.models.BudgetAmendment`` rows (duck-typed
+    so this policy module keeps its single durable import); the function
+    is PURE over them. Two views of the SAME ledger, never two ledgers:
+
+    - ``amendments`` — the full audit rows (every status, applied and
+      refused, one entry per ORIGINATING command identity);
+    - ``top_ups`` / ``top_up_total_usd`` — the pinned #325 usd
+      projection of the SAME rows (the applied usd-axis amendments), so
+      an operator surface written against the pre-#340 spelling reads
+      the amendment table through it, never a second ledger.
+
+    The total is the APPLIED usd total — exactly
+    :func:`forge.durable.budgets.usd_amendment_total` over the same
+    rows: refused amendments never count and a replayed command is
+    already inside the standing rows exactly once.
+    """
+    return {
+        "amendments": [
+            {
+                "command_id": row.command_id,
+                "axis": row.axis,
+                "amount_usd": row.amount_usd,
+                "amount_calls": row.amount_calls,
+                "amount_tokens": row.amount_tokens,
+                "amount_wallclock_s": row.amount_wallclock_s,
+                "reason": row.reason,
+                "operator": row.operator,
+                "status": row.status,
+                "refusal_reason": row.refusal_reason,
+            }
+            for row in rows
+        ],
+        "top_ups": [
+            {
+                "run_id": row.run_id,
+                "amount_usd": row.amount_usd,
+                "reason": row.reason,
+                "operator": row.operator,
+                "idempotency_key": row.command_id,
+            }
+            for row in rows
+            if str(row.axis or "") == "usd" and str(row.status or "") == "applied"
+        ],
+        "top_up_total_usd": round(
+            math.fsum(
+                float(row.amount_usd)
+                for row in rows
+                if str(row.status or "") == "applied" and row.amount_usd is not None
+            ),
+            6,
+        ),
+    }
 
 
 # ----------------------------------------------------------------------

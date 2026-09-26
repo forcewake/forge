@@ -663,3 +663,31 @@ def make_gitlab_service(
         implementer=StubImplementer(),
         reviewer=StubReviewer(),
     )
+
+
+# ----------------------------------------------------------------------
+# R40-08 (#344): the trace-record hooks — the executed trace's outcome
+# stashed at report time so the mutation-gates' records carry the real
+# verdict, and the trace_record mark registered locally (the marker is
+# this package's vocabulary, not a repo-wide one).
+# ----------------------------------------------------------------------
+
+#: The stash key carrying the CALL-phase outcome to fixture teardown.
+TRACE_OUTCOME_KEY: pytest.StashKey[str] = pytest.StashKey()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "trace_record(label, mutation=None): a #344 mutation-gate trace whose "
+        "execution record (source sha + evidence class) is written when "
+        "FORGE_TRACE_RECORD_DIR is set",
+    )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call":
+        item.stash[TRACE_OUTCOME_KEY] = str(report.outcome)

@@ -68,7 +68,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
-from forge.adaptive.operator_view import OperatorProjection, current_candidate
+from forge.adaptive.operator_view import (
+    DELIVERY_VIEW_SCHEMA,
+    STALE_ACTION_REFUSAL,
+    OperatorProjection,
+    current_candidate,
+    delivery_view,
+)
 
 __all__ = [
     "COMMAND_APPLICATION_LATENCY",
@@ -80,7 +86,12 @@ __all__ = [
     "OPS_LIMITS_READ_MODEL_SCHEMA",
     "OPS_MEASURE_NAMES",
     "OPS_MEASURES_SCHEMA",
+    "QUEUE_AGE",
     "RECOVERY_DURATION",
+    "RECOVERY_ROUNDS",
+    "STALE_ACTION_REFUSAL",
+    "TIME_TO_SAFE_ACTION",
+    "UNRESOLVED_EFFECT_AGE",
     "AdmissionAccountingError",
     "admission_accounting",
     "assert_intake_never_slots",
@@ -88,12 +99,17 @@ __all__ = [
     "capped_admission_verdict",
     "command_application_latency",
     "customer_state",
+    "delivery_round_block",
     "manual_intervention_minutes",
     "native_occupancy_measure",
     "ops_limits_read_model",
+    "queue_age_measure",
     "ops_measures",
     "recovery_duration",
     "review_budget_distinction",
+    "recovery_rounds_measure",
+    "time_to_safe_action_measure",
+    "unresolved_effect_age_measure",
 ]
 
 #: The document stamps (versioned meaning, the house convention).
@@ -105,6 +121,25 @@ COMMAND_APPLICATION_LATENCY: Final = "ops.command_application_latency"
 NATIVE_OCCUPANCY: Final = "ops.native_occupancy"
 RECOVERY_DURATION: Final = "ops.recovery_duration"
 MANUAL_INTERVENTION_MINUTES: Final = "ops.manual_intervention_minutes"
+
+#: R40-13 (#349) — the operator observability dimensions, carried by the
+#: read-model as their own records beside the four above:
+#: ``operator.recovery_rounds`` (the lineage's recorded follow-up
+#: rounds), ``operator.unresolved_effect_age`` (the ages of the
+#: unresolved external effects) and ``operator.time_to_safe_action``
+#: (how long the current world has stood — a LOWER BOUND on how long a
+#: safe action has been decidable). ``operator.stale_action_refusal`` is
+#: the typed refusal code every action-versioned command carries
+#: (:data:`forge.adaptive.operator_view.STALE_ACTION_REFUSAL`, re-exported)
+#: — a refusal event, not a quantity, so it renders in the refusal
+#: reasons and never as a measure sample.
+RECOVERY_ROUNDS: Final = "operator.recovery_rounds"
+UNRESOLVED_EFFECT_AGE: Final = "operator.unresolved_effect_age"
+TIME_TO_SAFE_ACTION: Final = "operator.time_to_safe_action"
+#: R40-15 (#351) — the sustained-queue-age alert's observable: the QUEUED
+#: population's own ages (admitted-not-executing runs — the #334 separate
+#: population, never a slots claim).
+QUEUE_AGE: Final = "operator.queue_age"
 
 OPS_MEASURE_NAMES: Final[tuple[str, ...]] = (
     COMMAND_APPLICATION_LATENCY,
@@ -875,6 +910,300 @@ def review_budget_distinction(rows: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# R40-13 (#349) — the delivery-round read-model arm: the operator.*
+# observability records and the five linked facts' fold
+# ---------------------------------------------------------------------------
+
+
+def recovery_rounds_measure(rows: Mapping[str, Any]) -> dict[str, Any]:
+    """``operator.recovery_rounds`` — the lineage's recorded follow-up
+    review rounds (a GAUGE over the #338 ``review_rounds`` rows plus the
+    child evidence fragment).
+
+    Counted, never narrated: the total recorded, how many still hold the
+    lineage's ONE outstanding slot, and the newest round's reference —
+    the number an operator reads to know how many correction cycles a
+    delivery lineage has been through (the bounded round policy's input).
+    An unqueried rounds authority renders ``unknown``, never a confident
+    zero."""
+    rounds = rows.get("rounds")
+    if rounds is None:
+        run_raw = rows.get("run")
+        run: Mapping[str, Any] = run_raw if isinstance(run_raw, Mapping) else {}
+        own = run.get("evidence")
+        if isinstance(own, Mapping) and isinstance(own.get("review_round"), Mapping):
+            fragment = own["review_round"]
+            return _measure(
+                RECOVERY_ROUNDS,
+                kind="gauge",
+                unit="rounds",
+                definition=(
+                    "the lineage's recorded follow-up review rounds — counted from the "
+                    "run's own round fragment (the rounds table was not queried)"
+                ),
+                window="point-in-time",
+                samples=[],
+                extra={
+                    "recorded": 1,
+                    "open": 1,
+                    "newest": f"round:{fragment.get('round_number')}:{fragment.get('decision_id')}",
+                },
+            )
+        return _measure(
+            RECOVERY_ROUNDS,
+            kind="gauge",
+            unit="rounds",
+            definition="not measured: the rounds authority was not queried for this render",
+            window="",
+            samples=[],
+            coverage="unknown",
+            unknown_reason=(
+                "the review-rounds section was not queried (unselected or unreachable) — "
+                "this gauge renders unknown, never a confident zero"
+            ),
+        )
+    open_rounds = sum(
+        1 for row in rounds if str((row or {}).get("status") or "") in ("admitted", "dispatched")
+    )
+    newest_number = 0
+    newest_ref = ""
+    for row in rounds:
+        try:
+            number = int((row or {}).get("round_number") or 0)
+        except (TypeError, ValueError):
+            continue
+        if number >= newest_number:
+            newest_number = number
+            newest_ref = f"round:{number}:{str((row or {}).get('decision_id') or '')}"
+    return _measure(
+        RECOVERY_ROUNDS,
+        kind="gauge",
+        unit="rounds",
+        definition=(
+            "the lineage's recorded follow-up review rounds (the #338 review_rounds "
+            "rows naming this run as parent or child) — the correction-cycle count "
+            "the bounded round policy reads"
+        ),
+        window="point-in-time",
+        samples=[],
+        extra={"recorded": len(rounds), "open": open_rounds, "newest": newest_ref},
+    )
+
+
+def unresolved_effect_age_measure(rows: Mapping[str, Any], *, as_of: str = "") -> dict[str, Any]:
+    """``operator.unresolved_effect_age`` — the AGE of every unresolved
+    external effect (seconds), per publication-intent row still in an
+    unresolved state.
+
+    The reconciler's urgency number: an effect whose landing is unproven
+    blocks every safe retry, and its age says how long that uncertainty
+    has stood. Ages read against *as_of* from the row's own ``at``
+    moment (``None`` when either clock is unreadable — never a
+    synthesized age)."""
+    publications = rows.get("publications")
+    unresolved = ("requested", "dispatched", "probing", "unknown")
+    samples: list[dict[str, Any]] = []
+    if publications is None:
+        return _measure(
+            UNRESOLVED_EFFECT_AGE,
+            kind="duration",
+            unit="s",
+            definition=("not measured: the publications authority was not queried for this render"),
+            window="",
+            samples=[],
+            coverage="unknown",
+            unknown_reason=(
+                "the publications section was not queried — this measure renders "
+                "unknown, never an empty success"
+            ),
+        )
+    for row in publications:
+        if str((row or {}).get("status") or "") not in unresolved:
+            continue
+        entry: dict[str, Any] = {
+            "operation_key": str((row or {}).get("operation_key") or ""),
+            "status": str((row or {}).get("status") or ""),
+        }
+        age = _seconds((row or {}).get("at"), as_of) if as_of else None
+        entry["age_seconds"] = round(age, 3) if age is not None else None
+        samples.append(entry)
+    return _measure(
+        UNRESOLVED_EFFECT_AGE,
+        kind="duration",
+        unit="s",
+        definition=(
+            "per unresolved external effect (a publication intent whose landing is "
+            "unproven): the seconds it has stood unresolved, read against the render "
+            "moment — the reconciler's urgency number, never blended with the latency "
+            "measures"
+        ),
+        window="effect at → as_of, per unresolved intent",
+        samples=samples,
+        extra={"unresolved": len(samples)},
+    )
+
+
+def queue_age_measure(rows: Mapping[str, Any], *, as_of: str = "") -> dict[str, Any]:
+    """``operator.queue_age`` — the AGE of the QUEUED population
+    (seconds), per admitted-not-executing run.
+
+    R40-15 (#351): the sustained-queue-age alert's observable. The queued
+    population is the #334 SEPARATE population — runs admitted but not
+    holding execution capacity (the pre-execution statuses) — so its age
+    is NEVER a slot claim and never blended with the latency measures.
+    Ages read against *as_of* from each run's ``created_at``; an unqueried
+    runs authority renders ``unknown``, never a confident empty queue."""
+    runs = rows.get("runs")
+    if runs is None:
+        return _measure(
+            QUEUE_AGE,
+            kind="duration",
+            unit="s",
+            definition="not measured: the runs authority was not queried for this render",
+            window="",
+            samples=[],
+            coverage="unknown",
+            unknown_reason=(
+                "the runs section was not queried (unselected or unreachable) — this "
+                "measure renders unknown, never a confident empty queue"
+            ),
+        )
+    queued = {
+        "accepted",
+        "preflight",
+        "planning",
+        "waiting_approval",
+        "waiting_harness",
+        "waiting_ci",
+        "proposing",
+    }
+    samples: list[dict[str, Any]] = []
+    for row in runs:
+        status = str((row or {}).get("status") or "")
+        if status not in queued:
+            continue
+        entry: dict[str, Any] = {"run_id": str((row or {}).get("run_id") or ""), "status": status}
+        age = _seconds((row or {}).get("created_at"), as_of) if as_of else None
+        entry["age_seconds"] = round(age, 3) if age is not None else None
+        samples.append(entry)
+    ages = [float(entry["age_seconds"]) for entry in samples if entry["age_seconds"] is not None]
+    return _measure(
+        QUEUE_AGE,
+        kind="duration",
+        unit="s",
+        definition=(
+            "per admitted-not-executing run (the pre-execution statuses — a population "
+            "SEPARATE from execution slots): the seconds it has waited, read against the "
+            "render moment — the sustained-queue-age alert's input"
+        ),
+        window="run created_at → as_of, per queued run",
+        samples=samples,
+        extra={
+            "queued": len(samples),
+            "oldest_seconds": round(max(ages), 3) if ages else None,
+            "ages_unknown": sum(1 for entry in samples if entry["age_seconds"] is None),
+        },
+    )
+
+
+def time_to_safe_action_measure(
+    projection: OperatorProjection | Mapping[str, Any], *, as_of: str = ""
+) -> dict[str, Any]:
+    """``operator.time_to_safe_action`` — how long the current world has
+    stood (seconds): from the projection's last semantic transition to
+    the render moment.
+
+    An honest LOWER BOUND on how long a safe action has been decidable:
+    the world stopped moving at the last transition, so every second
+    after it is time a safe action existed and went unacted. It is NOT
+    reaction time (whether a human LOOKED is recorded nowhere) and never
+    a blended average."""
+    last_transition = str(getattr(projection, "last_transition_at", "") or "")
+    age = _seconds(last_transition, as_of) if as_of and last_transition else None
+    return _measure(
+        TIME_TO_SAFE_ACTION,
+        kind="duration",
+        unit="s",
+        definition=(
+            "from the last recorded semantic transition to the render moment — a "
+            "LOWER BOUND on how long a safe action has been decidable against a "
+            "stable world; human reaction time is recorded nowhere and is never invented"
+        ),
+        window="last transition → as_of",
+        samples=[],
+        extra={
+            "last_transition_at": last_transition,
+            "stood_seconds": round(age, 3) if age is not None else None,
+        },
+    )
+
+
+def delivery_round_block(
+    rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | Mapping[str, Any],
+    as_of: str = "",
+) -> dict[str, Any]:
+    """The R40-13 five-fact fold for the read-model: the delivery/round
+    subject, the lineage customer state, the supersession and the typed
+    next-actions — one block over the SAME rows the read-model read.
+
+    The lineage customer state reconciles the projection's own state
+    with the round facts: a delivery whose lineage holds an OPEN round
+    is ``progressing`` (the round's child is the current execution),
+    whatever the parent's own terminal-looking state says; a SUPERSEDED
+    parent never reports its old ``verified`` readiness as the
+    lineage's current state. Actions offered against the block carry
+    :data:`STALE_ACTION_REFUSAL` as their refusal contract — the
+    expected candidate/round/version ticket the guarded route checks."""
+    view = delivery_view(
+        rows,
+        projection=projection if isinstance(projection, OperatorProjection) else None,
+        now=as_of or None,
+    )
+    facts = view.get("facts") or {}
+    round_fact = facts.get("review_round") or {}
+    open_round = bool(round_fact.get("open"))
+    superseded = bool((facts.get("candidate") or {}).get("superseded_by"))
+    projection_state = str(getattr(projection, "state", "") or "")
+    if open_round:
+        lineage_state: dict[str, Any] = {
+            "state": "progressing",
+            "basis": (
+                f"the lineage's {round_fact.get('ref')} is open — the round's child "
+                "run is the current execution, whatever the parent's own record says"
+            ),
+        }
+    elif superseded:
+        lineage_state = {
+            "state": "unverified",
+            "basis": (
+                "the parent's delivery was superseded by a follow-up round — its green "
+                "evidence is history; the lineage's current candidate carries no "
+                "current-pass verification in these rows"
+            ),
+        }
+    else:
+        lineage_state = (
+            customer_state(projection_state) if projection_state else {"state": "unknown"}
+        )
+    return {
+        "schema": DELIVERY_VIEW_SCHEMA,
+        "round_ref": view.get("round_ref"),
+        "superseded_by": (facts.get("candidate") or {}).get("superseded_by") or "",
+        "lineage_customer_state": lineage_state,
+        "acceptance": facts.get("acceptance") or {},
+        "next_actions": view.get("next_actions") or [],
+        "stale_action_refusal": STALE_ACTION_REFUSAL,
+        "history_separation": (
+            "the parent's ready delivery, verdict and evidence are immutable history "
+            "the moment a superseding round exists — they never re-render as the "
+            "lineage's current readiness"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # The six-quantity read-model
 # ---------------------------------------------------------------------------
 
@@ -1058,6 +1387,16 @@ def ops_limits_read_model(
         },
         "measures": ops_measures(rows, occupancy=occupancy, limit=limit, as_of=as_of),
         "review_budget": review_budget_distinction(rows),
+        # R40-13 (#349): the delivery-round arm — the five linked facts'
+        # fold (round subject, lineage customer state, supersession, the
+        # typed next-actions) plus the three operator.* observability
+        # records (recovery rounds, unresolved-effect ages, time to safe
+        # action), each its own record.
+        "delivery_round": delivery_round_block(rows, projection=projection, as_of=as_of),
+        RECOVERY_ROUNDS: recovery_rounds_measure(rows),
+        UNRESOLVED_EFFECT_AGE: unresolved_effect_age_measure(rows, as_of=as_of),
+        TIME_TO_SAFE_ACTION: time_to_safe_action_measure(projection, as_of=as_of),
+        QUEUE_AGE: queue_age_measure(rows, as_of=as_of),
         "history_separation": (
             "every current field derives from the LATEST row of its section; every "
             "historical sample inside a measure carries its own from/to moments — "

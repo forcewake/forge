@@ -146,3 +146,37 @@ deliberate capacity decision, recorded — never a routine cleanup.
 | `override.audit` | approver + reason of every audited override |
 
 All are counts and ages over durable rows — no secrets, no prompts.
+
+## The R40-15 (#351) envelope arms
+
+Five further drills extend the substrate to the SELECTED workflow's own
+shape (review rounds #338, guarded amendments #340, redemption-mode
+dispatch #343). They are driven by
+`scripts/run_deployment_ops.py --sections …` (profile-bound, like every
+R38-18 arm) and pinned by `tests/test_ops_drills.py`:
+
+- `partition` — occupancy under a simulated network partition: slots HOLD
+  while the observation channel is down (a partitioned reconciler pass
+  releases NOTHING), the issued-but-unanswered cancel stays `draining`,
+  and ONE bounded pass after the heal drains everything;
+- `degradation_parking` — the WORKLOAD side of provider degradation: a
+  queued burst parks bounded (typed intake refusals beyond the fair-use
+  bounds, at most `1 + revive_limit` dispatch attempts per run, ZERO
+  re-plans — degradation never becomes a code-repair loop);
+- `redemption_lane` — the drills' harness leg in the CURRENT lane mode:
+  the real mounted router, a grant minted the dispatch seam's way and the
+  lane's redemption through the REAL endpoint, with the typed refusal
+  arms (superseded generation, wrong ref with zero broker calls, expired
+  window);
+- `workflow_restore` — the data-bearing restore over the workflow's own
+  rows (rounds, amendments, grants + redemptions, native intent): the
+  consistency gate verifies everything BEFORE the dispatch gate may open;
+- `workflow_envelope` — the LIVE envelope from the selected workflow's
+  own shape on a disposable project: intake → plan → redemption-mode
+  dispatch → readiness → the /fix review round → the round child, with
+  the SEPARATE measures (issue→reviewed-ready, reviewer wait,
+  command→applied, checkpoint→restored) each carrying its own n.
+
+The envelope numbers, the alerts keyed to them and the blocked-live
+items live in the [support agreement](support-agreement.md) and
+[deployment boundaries §11](deployment-boundaries.md).

@@ -102,6 +102,10 @@ __all__ = [
     "REVISION_CONTENT_KEY",
     "REVISION_EXECUTOR_DIGEST_KEY",
     "REVISION_NOTE_MARKER",
+    "ROUND_SEED_SCHEMA",
+    "REQUEST_MR_CLOSED",
+    "REQUEST_ROUND_ADMITTED",
+    "REQUEST_ROUND_LIMIT",
     "RevisionDecision",
     "RevisionRebindRefused",
     "TacticalPolicy",
@@ -148,6 +152,8 @@ __all__ = [
     "stage_standing_guidance_promotion",
     "stale_callback_guard",
     "standing_guidance_revision",
+    "classic_spec_revision",
+    "round_active_plan_seed",
     "transformation_kinds",
     "wip_artifacts_of_evidence",
 ]
@@ -2693,6 +2699,16 @@ REQUEST_REFUSED_UNAUTHORIZED = "refused_unauthorized"
 REQUEST_DELETED_DISCUSSION = "deleted_discussion"
 REQUEST_CONFLICTING = "conflicting_correction"
 REQUEST_WINDOW_CLOSED = "correction_window_closed"
+#: R40-02 (#338): the request admitted a linked post-readiness round —
+#: the round's child run carries the correction; the parent's terminal
+#: record is untouched (the linkage lives in ``review_rounds``).
+REQUEST_ROUND_ADMITTED = "round_admitted"
+#: R40-02 (#338): the MR is merged/closed — eligibility refused, zero
+#: commits (the human decision already ended the collaboration surface).
+REQUEST_MR_CLOSED = "mr_closed"
+#: R40-02 (#338): the bounded round count is exhausted — the operator
+#: policy (FORGE_MAX_REVIEW_ROUNDS) refuses further rounds on the lineage.
+REQUEST_ROUND_LIMIT = "round_limit"
 
 
 class ReviewFeedbackRefused(ValueError):
@@ -3269,3 +3285,160 @@ def review_feedback_summary_section(
     if not resolved and not open_:  # pragma: no cover — requests exist above
         lines.append("- (no tracked discussions)")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+
+
+# R40-02 (#338) — the linked post-readiness review round
+# ---------------------------------------------------------------------------
+#
+# The verified gap: ``correction_window_closed`` answered every /fix after
+# ``ready_for_human`` — while reviewers ask for corrections AFTER readiness
+# is announced. The round this section shapes is the review's own model:
+#
+#     Delivery 1 — immutable, ready.
+#         ↓ human requests a change
+#     Review round 2: current MR head + request + scope + budget + approval
+#         ↓
+#     New candidate, new checks, new review.
+#
+# The terminal record is never reopened: the round is a NEW linked work
+# unit (its own FlowRun, budget, base head and execution generation), and
+# everything here is PURE — the derivation of the round's active-plan
+# representation from durable material, with the service owning the I/O:
+#
+# - :func:`classic_spec_revision` — the VERIFIED adapter for ordinary
+#   classic runs that never staged an adaptive revision (no
+#   ``active_plan`` pointer): the initial approved input is DERIVED, never
+#   guessed, from exactly two sources — the digest-verified frozen RunSpec
+#   document and the accepted request. A parent that DID stage a revision
+#   chains from its durable content instead (the #337 world); nothing else
+#   contributes to the round's plan.
+# - :func:`round_active_plan_seed` — the ACTIVE-plan document the round's
+#   child run is seeded with: the folded correction revision as CONTENT,
+#   the parent's (or adapter's) digest as ``revised_from_digest``, and the
+#   round's deterministic decision identity as the activation authority.
+#   :func:`resolve_approved_input` then briefs the round's executor from
+#   this document at every dispatch entry — the #321 join, unchanged.
+
+#: The round's seeded active-plan document schema (the seed is written by
+#: the round admission itself — the authorized /fix + eligibility IS the
+#: activation authority, recorded as ``activated_by_decision``).
+ROUND_SEED_SCHEMA = "forge.revision.round-seed/1"
+
+#: The closed set of spec document fields the classic adapter reads — the
+#: derivation's own honesty bound: nothing outside these frozen, verified
+#: values (plus the accepted request) shapes the round's plan.
+_CLASSIC_ADAPTER_SPEC_FIELDS: tuple[str, ...] = (
+    "task_title",
+    "task_description",
+    "plan_summary",
+    "plan_digest",
+    "policy_digest",
+    "allowed_paths",
+    "source_base_oid",
+)
+
+
+def _spec_digest_of(document: Mapping[str, Any]) -> str:
+    """sha256 over the adapter's canonical projection of the spec document."""
+    canonical = json.dumps(
+        {name: document.get(name) for name in _CLASSIC_ADAPTER_SPEC_FIELDS},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def classic_spec_revision(
+    *,
+    work_id: str,
+    spec: Mapping[str, Any],
+    request: ReviewFeedbackRequest,
+) -> PlanRevision:
+    """The verified classic-run adapter: frozen spec → revision 1 (R40-02).
+
+    An ORDINARY classic run never staged a PlanRevision — its approved
+    input is the frozen RunSpec — so a post-readiness round has no active
+    revision to fold the correction into. This adapter derives the initial
+    usable representation from EXACTLY two durable sources:
+
+    - the digest-verified frozen spec document (the same bytes the gate
+      approved; the caller loads it through the verified spec read, never
+      a live re-read), and
+    - the accepted request (the classified, authorized /fix).
+
+    The derivation is deterministic and total: one step carrying the
+    frozen plan objective (the plan the approver saw, not a re-plan), the
+    spec's task text as the revision summary, digests derived from the
+    adapter's canonical projection of the spec, and the correction then
+    folded through the EXISTING :func:`review_correction_revision` (steps
+    byte-identical to the derived base, the correction riding the summary
+    with its full provenance). The returned revision is a PROPOSAL-shaped
+    base + fold: it carries no authority until the round admission seeds
+    it as the child's active plan under the round's decision identity.
+    """
+    task_title = str(spec.get("task_title") or "").strip()
+    plan_summary = str(spec.get("plan_summary") or "").strip()
+    projection = _spec_digest_of(spec)
+    base = PlanRevision(
+        plan_id=f"spec-{projection[:16]}",
+        work_id=work_id,
+        revision=1,
+        parent_revision=None,
+        work_contract_digest=_spec_digest_of(
+            {
+                "policy_digest": spec.get("policy_digest"),
+                "allowed_paths": spec.get("allowed_paths"),
+                "task_digest": sha256(
+                    f"{task_title}\n{spec.get('task_description') or ''}".encode("utf-8")
+                ).hexdigest(),
+            }
+        ),
+        snapshot_set_digest=sha256(
+            f"{spec.get('source_base_oid') or ''}:{projection}".encode("utf-8")
+        ).hexdigest(),
+        summary=plan_summary or task_title,
+        steps=[
+            PlanStep(
+                step_id="spec-plan",
+                objective=plan_summary or task_title or "Implement the approved plan.",
+            )
+        ],
+    )
+    return review_correction_revision(base, request)
+
+
+def round_active_plan_seed(
+    revision: PlanRevision,
+    *,
+    revised_from_digest: str,
+    decision_id: str,
+    authorization_epoch: int = 1,
+) -> dict[str, Any]:
+    """The ACTIVE-plan document a review round's child run is seeded with.
+
+    The same shape :func:`active_plan_document_of` writes for an activated
+    revision, minted here for the round's OWN work unit: the folded
+    correction revision is the CONTENT (so :func:`resolve_approved_input`
+    digests and briefs from it — the #321 join), ``revised_from_digest``
+    records what the round supersedes (the parent's active digest, or the
+    classic adapter's derived base for a spec-run), and the decision id is
+    the round's deterministic correction identity — the audit name the
+    admission, the request lifecycle and the seeded pointer all share.
+    """
+    return {
+        "schema": ACTIVE_PLAN_SCHEMA,
+        "seed": ROUND_SEED_SCHEMA,
+        "work_id": revision.work_id,
+        "plan_id": revision.plan_id,
+        "active_revision": revision.revision,
+        "plan_digest": plan_digest(revision),
+        "revised_from_digest": revised_from_digest,
+        "work_contract_digest": revision.work_contract_digest,
+        "authorization_epoch": authorization_epoch,
+        "publication_epoch": 1,
+        "activated_by_decision": decision_id,
+        REVISION_CONTENT_KEY: revision.model_dump(),
+    }

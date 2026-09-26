@@ -27,14 +27,22 @@ ingestion contract that closes it:
 - RATE-CARD IDENTITY: every row carries its rate-card id and cost basis
   (estimated vs provider-reported vs billing-reconciliation); a route or
   card change creates a NEW attribution segment — history never rewritten.
-- SPEND CAPS (Q39-06/#325): the check before the next chargeable action
-  keeps THREE quantities separated — known spend, the unknown intervals'
-  lower bound, and their worst-case reserved LIABILITY (the upper
-  envelope) — and the hard cap consults ``known + reserved_liability +
-  projection``. A lower bound can never bound spend from above (the P03
-  probe); an unknown interval with no finite upper bound BLOCKS the next
-  chargeable action until an explicit bounded policy ceiling is supplied
-  or the interval reconciles (releasing its envelope exactly once).
+- SPEND CAPS (Q39-06/#325, corrected by R40-03/#339): the check before
+  the next chargeable action classifies by FINALITY, never by value
+  presence — settled spend (final rows), accrued-unsettled subtotals
+  (nonfinal rows), the unresolved intervals' lower bound and their
+  worst-case retained LIABILITY stay separated, and the hard cap
+  consults ``settled + retained_liability + projection``. Each
+  unresolved interval retains ``max(envelope, accrued, lower)`` — a
+  partial's subtotal rides INSIDE the envelope and never releases it
+  (the P01 probe); a lower bound can never bound spend from above (the
+  P03 probe); an unresolved interval with no finite upper bound — a
+  nonfinal row that already carries a cost included — is a typed
+  ``unbounded-exposure`` refusal until an explicit bounded policy
+  ceiling is supplied or the interval reconciles (releasing its
+  envelope exactly once); an envelope below the accrued cost is a typed
+  ``incoherent-bound`` inconsistency, never free headroom; NaN/infinity/
+  negative inputs are typed findings, never silent defaults.
 - DUPLICATE CALL IDS across attempts never false-join (one identity
   counted once, the duplication surfaced).
 - THE DURABLE WRITE: ``persist_ingested_rows`` lands rows through the R23
@@ -49,7 +57,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
+import random
 from pathlib import Path
 
 import pytest
@@ -68,9 +78,18 @@ from forge.adaptive.usage_ingestion import (
     COST_BASIS_ESTIMATED,
     COST_BASIS_PROVIDER_REPORTED,
     IDENTITY_REJECTED,
+    INCOHERENT_BOUND,
+    INVALID_BOUND,
+    INVALID_CAP,
+    INVALID_COST,
+    INVALID_LOWER_BOUND,
+    INVALID_POLICY_CEILING,
+    INVALID_PROJECTION,
+    UNBOUNDED_EXPOSURE,
     IngestedUsageRow,
     UsageIngestStore,
     attribution_segment,
+    exposure_fold,
     ingest_usage_artifact,
     normalize_counters,
     persist_ingested_rows,
@@ -780,6 +799,418 @@ def test_reconciliation_releases_a_reserve_exactly_once():
     assert once["known_spend"] == released["known_spend"]
     assert once["reserved_liability"] == released["reserved_liability"]
     assert once["unknown_intervals"] == 0
+
+
+# ----------------------------------------------------------------------
+# R40-03 (#339) — finality settles: a partial that already carries a
+# cost keeps its whole retained envelope
+# ----------------------------------------------------------------------
+
+
+def test_the_p01_counterexample_a_partial_subtotal_never_releases_the_envelope():
+    """P01, pinned to the corrected numbers: cap 10, settled 8, a PARTIAL
+    receipt at 0.5 inside an upper envelope of 3, projection 1. The old
+    value-presence math "allowed" 8 + 0.5 + 1 = 9.5; the bounded exposure
+    is 8 + 3 + 1 = 12, so the exposure alone is 11 — the cap refuses.
+    The final 0.5 then settles ONCE, releases the envelope exactly once
+    (2.5 of headroom), and the within-cap next request passes."""
+    rows = [
+        _cap_row("settled", cost=8.0, basis=COST_BASIS_PROVIDER_REPORTED),
+        _cap_row("partial", cost=0.5, lower=0.5, upper=3.0, final=False),
+    ]
+    check = spend_cap_check(rows, cap_usd=10.0, projection_usd=1.0)
+    assert check["allowed"] is False
+    assert check["requires_bounded_policy"] is False  # the envelope IS finite
+    assert check["settled_usd"] == pytest.approx(8.0)
+    assert check["accrued_unsettled_usd"] == pytest.approx(0.5)
+    assert check["retained_liability_usd"] == pytest.approx(3.0)  # max(3.0, 0.5)
+    assert check["unknown_lower_bound"] == pytest.approx(0.5)  # the subtotal is its floor
+    assert check["reserved_usd"] == pytest.approx(11.0)  # exposure >= 11 before the projection
+    assert check["headroom_usd"] == pytest.approx(-1.0)
+    assert any("never settles liability" in note for note in check["notes"])
+
+    # the same delivery through the STORE (the streaming contract), then
+    # the reconciliation: the final 0.5 settles exactly once
+    store = UsageIngestStore()
+    store.ingest([rows[0]])
+    partial_delivery = store.ingest([rows[1]])
+    assert len(partial_delivery.created) == 1
+    held = spend_cap_check(store.rows(), cap_usd=10.0, projection_usd=1.0)
+    assert held["allowed"] is False and held["reserved_usd"] == pytest.approx(11.0)
+    final_delivery = store.ingest([_cap_row("partial", cost=0.5, lower=0.5, upper=3.0, final=True)])
+    assert len(final_delivery.reconciled) == 1
+    settled = spend_cap_check(store.rows(), cap_usd=10.0, projection_usd=1.0)
+    assert settled["allowed"] is True  # 8 + 0.5 + 1 = 9.5 <= 10 — fits now
+    assert settled["settled_usd"] == pytest.approx(8.5)
+    assert settled["accrued_unsettled_usd"] == pytest.approx(0.0)
+    assert settled["retained_liability_usd"] == pytest.approx(0.0)
+    assert settled["unresolved_intervals"] == 0
+    assert settled["settlement_release_usd"] == pytest.approx(2.5)  # max(3, 0.5) - 0.5
+    # the replayed identical final releases nothing a second time
+    replay = store.ingest([_cap_row("partial", cost=0.5, lower=0.5, upper=3.0, final=True)])
+    assert not replay.wrote_something_new
+    once_more = spend_cap_check(store.rows(), cap_usd=10.0, projection_usd=1.0)
+    assert once_more["settled_usd"] == settled["settled_usd"]
+    assert once_more["settlement_release_usd"] == pytest.approx(2.5)  # ONCE, not 5.0
+    assert once_more["reserved_usd"] == pytest.approx(8.5)
+
+
+def test_a_nonfinal_row_with_a_cost_and_no_envelope_is_typed_unbounded_exposure():
+    """R40-03 scope item 2: a partial that already carries a cost but NO
+    finite envelope (neither its own bound nor the policy ceiling) cannot
+    be bounded from above — a typed ``unbounded-exposure`` refusal."""
+    rows = [
+        _cap_row("settled", cost=8.0, basis=COST_BASIS_PROVIDER_REPORTED),
+        _cap_row("partial-bare", cost=0.5, lower=0.5, final=False),
+    ]
+    check = spend_cap_check(rows, cap_usd=100.0, projection_usd=0.0)
+    assert check["allowed"] is False
+    assert check["requires_bounded_policy"] is True
+    assert check["unbounded_intervals"] == 1
+    finding = next(f for f in check["findings"] if f["type"] == UNBOUNDED_EXPOSURE)
+    assert finding["receipt_id"] == "partial-bare"
+    assert finding["final"] is False
+    assert finding["accrued_cost_usd"] == pytest.approx(0.5)
+    # the explicit bounded policy ceiling rescues the arm
+    rescued = spend_cap_check(rows, cap_usd=100.0, unknown_interval_ceiling_usd=3.0)
+    assert rescued["allowed"] is True  # 8 + max(3.0, 0.5) <= 100
+    assert rescued["requires_bounded_policy"] is False
+    assert rescued["retained_liability_usd"] == pytest.approx(3.0)
+
+
+def test_an_envelope_below_the_accrued_cost_is_an_inconsistency_never_headroom():
+    """R40-03 scope item 4: an upper bound below the observed accrued cost
+    is a typed ``incoherent-bound`` finding — the interval still retains
+    at least its accrued cost, never the cheap envelope as headroom."""
+    rows = [_cap_row("partial", cost=0.9, lower=0.0, upper=0.3, final=False)]
+    check = spend_cap_check(rows, cap_usd=1.0, projection_usd=0.0)
+    assert check["retained_liability_usd"] == pytest.approx(0.9)  # NOT 0.3
+    assert check["accrued_unsettled_usd"] == pytest.approx(0.9)
+    assert check["incoherent_bounds"] == 1
+    finding = next(f for f in check["findings"] if f["type"] == INCOHERENT_BOUND)
+    assert finding["accrued_cost_usd"] == pytest.approx(0.9)
+    assert finding["upper_bound_usd"] == pytest.approx(0.3)
+    # the inconsistency is NOT free headroom: the exposure fences 0.9
+    assert check["allowed"] is True  # 0.9 <= 1 — but only 0.1 remains
+    assert check["headroom_usd"] == pytest.approx(0.1)
+    # a settlement landing ABOVE its own declared envelope flags the same way
+    settled_above = spend_cap_check(
+        [_cap_row("late", cost=0.5, lower=0.5, upper=0.3, final=True)], cap_usd=10.0
+    )
+    assert settled_above["incoherent_bounds"] == 1
+    assert settled_above["settled_usd"] == pytest.approx(0.5)
+    assert settled_above["settlement_release_usd"] == pytest.approx(0.0)  # max(0.3, 0.5) - 0.5
+
+
+def test_malformed_numbers_are_typed_findings_never_silent_defaults():
+    """NaN / infinity / negative caps, projections, ceilings, costs and
+    bounds refuse with a typed finding — never a clamped default."""
+    nan = float("nan")
+    inf = float("inf")
+    rows = [_cap_row("settled", cost=1.0, basis=COST_BASIS_PROVIDER_REPORTED)]
+
+    bad_cap = spend_cap_check(rows, cap_usd=nan, projection_usd=0.0)
+    assert bad_cap["allowed"] is False
+    assert bad_cap["headroom_usd"] is None
+    assert any(f["type"] == INVALID_CAP for f in bad_cap["findings"])
+    negative_cap = spend_cap_check(rows, cap_usd=-1.0, projection_usd=0.0)
+    assert negative_cap["allowed"] is False
+    assert any(f["type"] == INVALID_CAP for f in negative_cap["findings"])
+
+    bad_projection = spend_cap_check(rows, cap_usd=10.0, projection_usd=-0.5)
+    assert bad_projection["allowed"] is False
+    assert any(f["type"] == INVALID_PROJECTION for f in bad_projection["findings"])
+    assert spend_cap_check(rows, cap_usd=10.0, projection_usd=inf)["allowed"] is False
+
+    # a corrupt policy ceiling is treated as NOT supplied: the interval it
+    # would cover is unbounded, and the corruption itself is a finding
+    bare = [_cap_row("partial", cost=0.5, lower=0.5, final=False)]
+    bad_ceiling = spend_cap_check(bare, cap_usd=10.0, unknown_interval_ceiling_usd=nan)
+    assert bad_ceiling["allowed"] is False
+    types = {f["type"] for f in bad_ceiling["findings"]}
+    assert INVALID_POLICY_CEILING in types and UNBOUNDED_EXPOSURE in types
+
+    # a NaN cost never settles an interval: it stays unresolved (bounded
+    # here by its own envelope — the figure itself stays flagged)
+    nan_cost = spend_cap_check(
+        [_cap_row("corrupt", cost=nan, lower=0.0, upper=2.0, final=True)], cap_usd=10.0
+    )
+    assert nan_cost["settled_usd"] == pytest.approx(0.0)
+    assert nan_cost["unresolved_intervals"] == 1
+    assert nan_cost["retained_liability_usd"] == pytest.approx(2.0)
+    assert any(f["type"] == INVALID_COST for f in nan_cost["findings"])
+
+    # an infinite upper bound is no bound at all
+    inf_bound = spend_cap_check(
+        [_cap_row("unboundable", cost=0.1, lower=0.1, upper=inf, final=False)], cap_usd=10.0
+    )
+    assert inf_bound["requires_bounded_policy"] is True
+    types = {f["type"] for f in inf_bound["findings"]}
+    assert INVALID_BOUND in types and UNBOUNDED_EXPOSURE in types
+
+    # a negative lower bound is reported at 0 for the (non-gating) sum,
+    # visibly — and nothing anywhere in the result is NaN
+    negative_lower = spend_cap_check(
+        [_cap_row("odd", cost=None, lower=-3.0, final=False)], cap_usd=10.0
+    )
+    assert negative_lower["unknown_lower_bound"] == pytest.approx(0.0)
+    assert any(f["type"] == INVALID_LOWER_BOUND for f in negative_lower["findings"])
+    for value in (
+        negative_lower["settled_usd"],
+        negative_lower["accrued_unsettled_usd"],
+        negative_lower["unknown_lower_bound"],
+        negative_lower["retained_liability_usd"],
+        negative_lower["settlement_release_usd"],
+    ):
+        assert math.isfinite(value)
+
+
+def _random_rows(rng: random.Random, count: int) -> list[IngestedUsageRow]:
+    rows: list[IngestedUsageRow] = []
+    for index in range(count):
+        rows.append(
+            _cap_row(
+                f"r{index}",
+                cost=rng.choice([None, round(rng.uniform(0, 2), 4)]),
+                lower=round(rng.uniform(0, 1), 4),
+                upper=rng.choice([None, round(rng.uniform(0, 3), 4)]),
+                final=rng.random() < 0.5,
+            )
+        )
+    return rows
+
+
+def _canonical_findings(check: dict) -> list[str]:
+    return sorted(json.dumps(finding, sort_keys=True) for finding in check["findings"])
+
+
+def test_the_fold_is_order_invariant_over_random_row_sets():
+    """Property: the exposure fold over a row set is identical under every
+    permutation of the rows (findings compared order-insensitively)."""
+    rng = random.Random(339)
+    for _trial in range(25):
+        rows = _random_rows(rng, rng.randint(0, 8))
+        base = spend_cap_check(
+            rows, cap_usd=5.0, projection_usd=0.25, unknown_interval_ceiling_usd=1.5
+        )
+        for _shuffle in range(3):
+            shuffled = list(rows)
+            rng.shuffle(shuffled)
+            other = spend_cap_check(
+                shuffled, cap_usd=5.0, projection_usd=0.25, unknown_interval_ceiling_usd=1.5
+            )
+            for key in base:
+                if key == "findings":
+                    assert _canonical_findings(other) == _canonical_findings(base)
+                else:
+                    assert other[key] == base[key]
+
+
+def test_store_replay_and_delivery_order_invariance():
+    """Property: delivering each identity as (partial, final) in ANY order
+    — and replaying every delivery again — leaves one identical fold: a
+    late partial after the final is a replay, a partial before its final
+    reconciles, and a repeated final is a no-op."""
+    rng = random.Random(340)
+    for _trial in range(25):
+        pairs: list[tuple[IngestedUsageRow, IngestedUsageRow]] = []
+        for index in range(rng.randint(1, 6)):
+            settled_cost = round(rng.uniform(0.1, 1.0), 4)
+            envelope = round(settled_cost + rng.uniform(0.0, 2.0), 4)
+            pairs.append(
+                (
+                    _cap_row(
+                        f"p{index}",
+                        cost=round(settled_cost / 2, 4),
+                        lower=0.0,
+                        upper=envelope,
+                        final=False,
+                    ),
+                    _cap_row(f"p{index}", cost=settled_cost, lower=0.0, upper=envelope, final=True),
+                )
+            )
+        canonical = [final for _partial, final in pairs]
+        deliveries = [row for pair in pairs for row in pair]
+        for _shuffle in range(3):
+            rng.shuffle(deliveries)
+            store = UsageIngestStore()
+            for row in deliveries:
+                store.ingest([row])
+            # the full replay of every delivery moves NOTHING
+            for row in deliveries:
+                assert not store.ingest([row]).wrote_something_new
+            expected = spend_cap_check(canonical, cap_usd=10.0, projection_usd=0.5)
+            got = spend_cap_check(store.rows(), cap_usd=10.0, projection_usd=0.5)
+            for key in expected:
+                if key == "findings":
+                    assert _canonical_findings(got) == _canonical_findings(expected)
+                else:
+                    assert got[key] == expected[key]
+
+
+def test_monotonicity_a_higher_partial_never_reduces_liability():
+    """Property: within one identity a newer higher partial and an
+    out-of-order older partial are surfaced conflicts (the first stands)
+    — liability never moves DOWN between partials; and at the fold level
+    a higher accrued subtotal never yields a smaller interval."""
+    # the fold level: for every (accrued <= accrued') and fixed envelope,
+    # the interval's retained liability is non-decreasing
+    rng = random.Random(341)
+    for _trial in range(200):
+        envelope = round(rng.uniform(0, 3), 4)
+        accrued = round(rng.uniform(0, 3), 4)
+        grown = accrued + round(rng.uniform(0, 2), 4)
+        lower = _cap_row("i", cost=accrued, lower=accrued, upper=envelope, final=False)
+        higher = _cap_row("i", cost=grown, lower=grown, upper=envelope, final=False)
+        less = exposure_fold([lower]).retained_liability_usd
+        more = exposure_fold([higher]).retained_liability_usd
+        assert more >= less - 1e-12
+        assert less >= min(accrued, envelope) - 1e-12
+
+    # the store level: a streamed partial at 0.9/envelope 3.0 stands; a
+    # NEWER higher partial (1.2) and an out-of-order OLDER one (0.4)
+    # are conflicts — the exposure never drops until the settlement
+    store = UsageIngestStore()
+    store.ingest([_cap_row("stream", cost=0.9, lower=0.9, upper=3.0, final=False)])
+    before = spend_cap_check(store.rows(), cap_usd=10.0)["reserved_usd"]
+    assert before == pytest.approx(3.0)
+    newer = store.ingest([_cap_row("stream", cost=1.2, lower=1.2, upper=3.0, final=False)])
+    older = store.ingest([_cap_row("stream", cost=0.4, lower=0.4, upper=3.0, final=False)])
+    assert len(newer.conflicts) == 1 and len(older.conflicts) == 1
+    assert spend_cap_check(store.rows(), cap_usd=10.0)["reserved_usd"] == pytest.approx(3.0)
+    stored = store.rows()[0]
+    assert stored.cost_usd == pytest.approx(0.9)  # the first stands, never averaged
+    # the settlement drops the exposure exactly once, to the settled cost
+    store.ingest([_cap_row("stream", cost=1.0, lower=1.0, upper=3.0, final=True)])
+    after = spend_cap_check(store.rows(), cap_usd=10.0)
+    assert after["reserved_usd"] == pytest.approx(1.0)
+    assert after["settlement_release_usd"] == pytest.approx(2.0)  # max(3, 1) - 1
+
+
+async def test_sql_reloaded_rows_give_the_same_check_for_every_combination(db):
+    """AC: SQL-reloaded and in-memory rows give IDENTICAL results for
+    every finality/cost/bound combination — the fold runs against the
+    ACTUAL persistence (persist → reload through the durable-mapping
+    seam → re-check)."""
+    from forge.adaptive.closing_budget import rows_from_durable_receipts
+
+    combos: list[dict] = []
+    for final in (True, False):
+        for cost in (None, 0.5):
+            for upper in (None, 2.0):
+                combos.append(
+                    {
+                        "receipt_id": f"combo-{int(final)}-{cost is not None}-{upper is not None}",
+                        "final": final,
+                        "cost_usd": cost,
+                        "cost_lower_bound_usd": 0.25 if cost is None else cost,
+                        "cost_upper_bound_usd": upper,
+                    }
+                )
+    # the incoherent arm: an envelope below the accrued subtotal
+    combos.append(
+        {
+            "receipt_id": "combo-incoherent",
+            "final": False,
+            "cost_usd": 2.5,
+            "cost_lower_bound_usd": 2.5,
+            "cost_upper_bound_usd": 0.75,
+        }
+    )
+    rows = [_ingested(**combo) for combo in combos]
+    async with db() as session:
+        outcome = await persist_ingested_rows(session, rows)
+        await session.commit()
+    assert outcome.created == len(rows)
+    async with db() as session:
+        receipts = (await session.execute(select(UsageReceipt))).scalars().all()
+    reloaded = rows_from_durable_receipts(receipts)
+    assert len(reloaded) == len(rows)
+    for ceiling in (None, 3.0):
+        in_memory = spend_cap_check(rows, cap_usd=10.0, unknown_interval_ceiling_usd=ceiling)
+        from_sql = spend_cap_check(reloaded, cap_usd=10.0, unknown_interval_ceiling_usd=ceiling)
+        assert from_sql == in_memory  # EVERY field, every combination
+
+
+def test_the_budget_gate_projection_seam_consults_the_calculator():
+    """The recording-provider-shaped seam: the numbers the live budget
+    gate holds — the SpendLedger's USD limit and its worst-case
+    projection — are exactly the cap and projection the corrected
+    calculator consults. A provider streaming a partial receipt that
+    already carries a subtotal must NOT unlock the headroom its envelope
+    still fences (the seam the review calls the SpendLedger projection)."""
+    from forge.adaptive.research_cohort_live import SpendLedger
+
+    ledger = SpendLedger(model="unknown", limit_usd=1.0)
+    max_tokens = 4000
+    projection = ledger.estimate(ledger.worst_case_input_tokens, max_tokens)
+    subtotal = round(projection / 2, 6)
+    settled_cost = round(ledger.limit_usd - 1.5 * projection, 6)
+
+    # the recording provider: one settled receipt + one STREAMED partial
+    # whose envelope is the lane's contracted worst case (the ledger's own
+    # projection priced it)
+    store = UsageIngestStore()
+    ingest_usage_artifact(
+        store,
+        {
+            "receipt_id": "call-1",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "total_cost_usd": settled_cost,
+            "final": True,
+        },
+        work_id="w",
+        attempt_id="a1",
+        source="sdk-receipt",
+    )
+    ingest_usage_artifact(
+        store,
+        {
+            "receipt_id": "call-2",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 500,
+            "output_tokens": 50,
+            "total_cost_usd": subtotal,
+            "cost_upper_bound_usd": round(projection, 6),
+            "final": False,
+        },
+        work_id="w",
+        attempt_id="a1",
+        source="sdk-receipt",
+    )
+    # the ledger's own arithmetic over the SUBTOTALS would admit the call:
+    # settled + subtotal + projection == the limit exactly
+    ledger.spent_usd = settled_cost + subtotal
+    assert ledger.allows_call(max_tokens) is True  # the naive reading fits
+    assert settled_cost + subtotal + projection == pytest.approx(ledger.limit_usd)
+    # the corrected calculator the gate consults REFUSES: the envelope
+    # rides on top of the settled spend, and the projection tips it over
+    check = spend_cap_check(store.rows(), cap_usd=ledger.limit_usd, projection_usd=projection)
+    assert check["allowed"] is False
+    assert check["settled_usd"] == pytest.approx(settled_cost)
+    assert check["accrued_unsettled_usd"] == pytest.approx(subtotal)
+    assert check["retained_liability_usd"] == pytest.approx(projection)
+    assert check["reserved_usd"] + projection > ledger.limit_usd
+    # and once the partial settles at its subtotal, the same projection fits
+    store.ingest(
+        [
+            IngestedUsageRow(
+                work_id="w",
+                attempt_id="a1",
+                receipt_id="call-2",
+                source="sdk-receipt",
+                route=ProviderRoute("claude-sdk-lane", "m"),
+                cost_usd=subtotal,
+                cost_lower_bound_usd=subtotal,
+                cost_upper_bound_usd=round(projection, 6),
+                final=True,
+            )
+        ]
+    )
+    settled = spend_cap_check(store.rows(), cap_usd=ledger.limit_usd, projection_usd=projection)
+    assert settled["allowed"] is True  # settled + projection <= limit
 
 
 # ----------------------------------------------------------------------

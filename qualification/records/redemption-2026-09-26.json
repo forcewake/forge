@@ -1,0 +1,75 @@
+{
+  "authority_contract_version": "keyed operation_grants authority rows (migration 029, #341): UNIQUE per (work_id, attempt_generation, provider), the commit point for every redemption; the run-evidence map is a derived projection. The authority table was deployed to the lab by THIS qualification's first alignment (schema 028 -> 031) and every grant in the trace was minted by the native dispatch path \u2014 never seeded (asserted: zero rows before /go).",
+  "capabilities": [
+    "operation-grant-redemption"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "runner-redemption (FORGE_CREDENTIAL_DELIVERY=runner-redemption pinned EXPLICITLY on both consumers by the alignment): the dispatch mints the operation grant BEFORE the provider call, the lane exchanges its attempt-scoped HMAC lane token at GET /lane/credentials/redeem, the EnvBroker resolves the bound ref, the value sets EXACTLY ONE env slot (ANTHROPIC_AUTH_TOKEN) with the family's strays scrubbed, and every redemption lands in the append-only credential_redemptions ledger (6 rows, all grant-joined; 7 typed refusals, zero rows, zero emitted values)",
+  "evidence": [
+    {
+      "artifact_sha256": "574461128c568836e80b1785d94a400f050a1df37d7661b88db562961e51f0cb",
+      "capability": "operation-grant-redemption",
+      "class": "live-provider",
+      "covers": "the live redemption trace (executed 2026-09-26, disposable project 132 forge-redemption-2026-09-26, deleted after capture): native issue -> /implement (evidence-backed plan, run 3360ff646e914652843aa305947f7266) -> NO grant before /go (asserted) -> /go MINTED grant c7faeaa3 (attempt 0) through the native path -> the lane bootstrap REDEEMED generation 1's grant cb80a3ca through the lane-control endpoint (audit row 1, broker receipt e9d25820, binding revision 2) -> the lane's consumer receipt joins the authority row (grant_id, redemption_id 6b665cf4) -> the ACTUAL model consumer (claude-cli via agent-sdk) presented the BROKER-SELECTED sentinel to the recording model endpoint (1 capture, digest-matched) while the competing AMBIENT sentinel sat in the same lane env and was NEVER presented. Arms, all live and typed: generation retirement (gen-2 lane followed its own grant 9abf7f9e; gen-1 token refused superseded), cold control-plane restart MID-WINDOW (absolute deadline preserved, idempotent replay redeemed through the restarted plane, the in-flight lane's own redemption landed; a finished attempt replays nothing \u2014 attempt_terminal), wrong ref (grant_ref_mismatch), wrong route (grant_route_mismatch), binding rotation between approval and redemption (binding_revision_mismatch; the lane failed CLOSED with zero model calls), expired 20s-window grant (grant_expired at the endpoint AND in the real lane).",
+      "executed_at": "2026-09-26T14:13:38+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-26-redemption-qualification/live-run-evidence.json",
+    "docs/evaluation/2026-09-26-redemption-qualification/alignment-receipts.json",
+    "docs/evaluation/2026-09-26-redemption-qualification/README.md",
+    "qualification/records/gitlab-ce-v1@0.39.0.json"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:ddcb9137b09c41acbbc7a1cdffbcf60c79beffbe2bfd5708034f29edf58ba1a7",
+  "legacy": false,
+  "note": "R40-07 (#343) closure record \u2014 the cycle's remaining LIVE proof class. Posture: (1) the control plane is the WORKING-TREE alignment build (image sha256:ddcb9137, schema head 031 \u2014 the #341/#342 machinery is uncommitted-ahead of the promoted v0.39.0 tag, the same honest divergence the v2 trace recorded for its cycle); the LANE ran the PROMOTED v0.39.0 package (git sha b521e1a) whose lane-side redemption consumer is the #303/#320 vintage \u2014 the ENDPOINT (the authority) enforced the complete #342 identity validation (operation word, binding revision, absolute deadline, row-document key consistency); the R40-06 lane-side response verification is exercised by the offline suites. (2) The consumer-identity proof used a RECORDING model endpoint (issue #343 scope 3's controlled-endpoint allowance) \u2014 ZERO real model calls; a real-model redemption pass stays a separate bounded drill requiring spend authorization. Total model spend: 1 planner call / 769 tokens on the qualifying run (glm-5.3-flash via litellm; the expiry arm's planner call has no separate run-budget row) \u2014 well under $0.01 of the $2.50 cap. (3) LIVE-FOUND, recorded honestly: (a) an operator-misbound ref (env:FORGE_BROKER_MODEL_TOKEN) was refused typed staged_slot_mismatch with zero emitted values \u2014 the EnvBroker stages under the ref's own env NAME, so the ref must BE the binding's env slot (the runbook's redemption section now states the invariant); (b) the credential registry is re-read from the persisted document on EVERY dispatch command and EVERY redemption request (no startup snapshot) \u2014 a rotation binds the next dispatch without a restart; (c) a finished (blocked) attempt refuses replays typed attempt_terminal, so the restart-survival proof must ride a LIVE attempt's window. (4) Native-secret success stays DISTINCT from redemption success: this record claims the redemption capability only; the protected-variable route keeps its own prior evidence. (5) The human approval on the profile stays PENDING (qualification/profile-approvals.json \u2014 this record claims none).",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-26 (the second live observation; identical to the 0.39.0 record's)",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-26",
+  "qualification_redemption_negative_coverage": {
+    "note": "the LIVE arms only the real lane/endpoint could prove (issue #343 acceptance 5); the full offline refusal matrix stays covered by tests/test_operation_grant.py (69), test_credential_consumption.py (28), test_credential_broker.py (59) and test_credential_audit.py (18)",
+    "typed_refusals_observed_live": [
+      "staged_slot_mismatch (misbound ref \u2014 EnvBroker staged outside the binding's slot; zero emitted values)",
+      "superseded-generation lane token (x2: the retire arm and a stale-token probe)",
+      "attempt_terminal (a finished attempt replays nothing; x3 across arms)",
+      "grant_ref_mismatch (live attempt)",
+      "grant_route_mismatch (live attempt)",
+      "binding_revision_mismatch (rotation between approval and redemption; the lane failed closed, zero model calls)",
+      "grant_expired (20s window: the endpoint typed AND the real lane failed closed)"
+    ],
+    "zero_successful_retrievals": true
+  },
+  "record_id": "gitlab-ce-v1-Q40-07-redemption-2026-09-26",
+  "refusal_resolution": [
+    {
+      "action": "run a bounded real-model dispatch under the runner-redemption route (the identity proof used the recording endpoint; the real-provider lane pass needs its own spend authorization)",
+      "owner": "next live drill (maintainer authorization)",
+      "refusal": "the consumer-identity proof class permits a controlled model endpoint, and this trace used it \u2014 zero real model calls rode the redeemed credential",
+      "status": "open"
+    },
+    {
+      "action": "record the human approval decision in qualification/profile-approvals.json",
+      "owner": "maintainer (Pavel)",
+      "refusal": "profile approval is a separate human artifact this record deliberately does not claim",
+      "status": "open"
+    },
+    {
+      "action": "state the EnvBroker ref invariant (the ref's env name must BE the binding's env slot) in the runbook's credential section",
+      "owner": "closed in this cycle (docs/operations/supported-profile-runbook.md, the redemption section)",
+      "refusal": "the first live dispatch rode an operator-misbound ref (env:FORGE_BROKER_MODEL_TOKEN) \u2014 the endpoint's staged-slot guard refused typed staged_slot_mismatch with zero emitted values (the guard held; the configuration was wrong)",
+      "status": "resolved"
+    }
+  ],
+  "release_version": "0.39.0",
+  "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@b521e1a7bd3568dd48bb235b6b7d743a21caca99 (forge[interactive]; the PROMOTED v0.39.0 tree \u2014 FORGE_LANE_REF immutable sha; claude-code CLI pinned 2.1.273, the lane's SDK user-agent reported claude-cli/2.1.283 sdk-py agent-sdk/0.2.160; uv python 3.13); control plane = the working-tree alignment build of the SAME tree plus this cycle's #341/#342 machinery (uncommitted-ahead, recorded)",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker aligned by scripts/align_lab.py with FORGE_CREDENTIAL_DELIVERY=runner-redemption + the registry + the slot-named broker env pinned on both consumers (four receipted alignments: selection, corrective rebind, 20s expire window, canonical restore)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "verification_contract": "the SHIPPED claude-sdk-lane template VERBATIM (sha256 3d74be37 \u2014 byte-identical to the frozen profile's template) committed into the disposable project before any run (seed d3351d0c); the qualifying lane's own artifacts must carry the consumer receipt (credential_consumption) whose grant_id joins the authority row, and the recording model endpoint must capture EXACTLY the broker-selected sentinel's digest while the ambient sentinel's digest appears nowhere; the candidate diff was never the object (the driver leg is designed to fail fast at the recorder \u2014 recorded honestly)",
+  "wheel_sha256": ""
+}

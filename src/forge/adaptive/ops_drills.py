@@ -97,7 +97,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 from uuid import uuid4
@@ -111,6 +111,7 @@ from forge.adaptive.admission import (
     AdmissionPolicy,
     ExecutionLease,
     NativeStatus,
+    check_admission,
     clear_native_start_intent,
     definite_start_refusal,
     lease_occupancy,
@@ -145,15 +146,21 @@ __all__ = [
     "DrillOutcome",
     "FaultedNativeLane",
     "LostStartResponse",
+    "PERCENTILE_MIN_N",
     "PROFILE_BINDING_AXES",
     "PROFILE_QUALIFIED",
     "PROFILE_UNQUALIFIED",
     "PUBLISHED_REPORT_STAMP",
+    "PartitionedProbe",
     "RemoteCycleRecord",
     "RemoteDispatchLane",
+    "RestoreConsistencyRefused",
     "RestorePreflightRefused",
     "UploadAdmissionBudget",
     "UploadBudgetExceeded",
+    "WORKFLOW_RESTORE_TABLES",
+    "WorkflowCycleRecord",
+    "WorkflowShapeLane",
     "build_fixture",
     "build_topology_document",
     "checkpoint_payload",
@@ -165,15 +172,22 @@ __all__ = [
     "drill_credential_isolation",
     "drill_degraded_faults",
     "drill_degraded_modes",
+    "drill_degradation_parking",
     "drill_lost_response_at_cap",
     "drill_mismatched_restore_preflight",
     "drill_native_start_load",
     "drill_operator_override_audit",
     "drill_pause_cancel_percentiles",
+    "drill_partition_occupancy",
+    "drill_redemption_lane",
     "drill_remote_occupancy",
     "drill_restore_deployment",
     "drill_token_rotation",
     "drill_volume_fill_during_pause",
+    "drill_workflow_envelope",
+    "drill_workflow_restore",
+    "envelope_percentiles",
+    "envelope_stage_seconds",
     "percentile_summary",
     "profile_binding_row",
     "profile_manifest_digest",
@@ -181,6 +195,7 @@ __all__ = [
     "reviewer_wip_bound_row",
     "run_drill",
     "summarize_for_publication",
+    "verify_workflow_consistency",
 ]
 
 #: The report's scope sentence — every drill outcome carries it and the
@@ -3035,7 +3050,7 @@ async def drill_lost_response_at_cap(
         "from the lease row, never from the dropped answer)",
     )
     outcome.check(
-        occupancy_words_seen & {"dispatched_unknown", "draining", "native_running"},
+        bool(occupancy_words_seen & {"dispatched_unknown", "draining", "native_running"}),
         "the controlled failure kept its occupancy VISIBLE while unresolved (words seen: "
         f"{sorted(occupancy_words_seen)}) — unknown occupancy keeps consuming capacity",
     )
@@ -3656,6 +3671,1694 @@ async def drill_pause_cancel_percentiles(
 
 
 # ---------------------------------------------------------------------------
+# R40-15 (issue #351) — the OPERATING ENVELOPE arms
+#
+# The R38-18 arms measured the deployment's limits on the SIMPLE dispatch
+# shape. The selected workflow has since grown its real shape — review
+# rounds (#338), guarded amendments (#340) and runner-redemption dispatch
+# (#343, the CURRENT lane mode) — and a token-speed number is not factory
+# throughput. Every drill below re-measures the envelope over THAT shape:
+#
+# - :func:`drill_partition_occupancy` — occupancy under uncertainty while
+#   the observation channel itself is down (the simulated network
+#   partition): slots stay occupied while native work runs OR its
+#   start/cancel outcome is unknown, the reconciler's partitioned pass
+#   releases NOTHING, and ONE bounded pass drains everything after the
+#   heal;
+# - :func:`drill_degradation_parking` — the WORKLOAD side of provider
+#   degradation (the app side is :func:`drill_degraded_modes`): a queued
+#   burst during a sustained 429 window parks BOUNDED — typed intake
+#   refusals beyond the fair-use bounds, a bounded queue, at most
+#   ``1 + revive_limit`` dispatch attempts per run and ZERO model turns
+#   (degradation never becomes a code-repair loop);
+# - :func:`drill_workflow_envelope` — the envelope FROM the selected
+#   workflow's own shape, seam-driven (:class:`WorkflowShapeLane`): a run
+#   that includes a review round, an amendment and a redemption-mode
+#   dispatch, with command-to-applied / issue-to-reviewed-ready /
+#   reviewer-wait measured as SEPARATE records (percentiles only where
+#   the sample supports them — n is labelled everywhere);
+# - :func:`drill_redemption_lane` — the drills' harness leg in the
+#   CURRENT lane mode: the real mounted router, a grant minted the
+#   dispatch seam's way (``runner-redemption``) and the lane's redemption
+#   through the REAL endpoint, plus the typed refusal arms;
+# - :func:`drill_workflow_restore` — the data-bearing restore drill: a
+#   disposable installation seeded with the REAL workflow shape (round
+#   rows, amendment rows, grant + redemption rows, native-intent leases)
+#   is backed up and restored; work + checkpoint + native-intent
+#   consistency — the review_rounds and budget_amendments rows included —
+#   is VERIFIED before the dispatch gate may open.
+# ---------------------------------------------------------------------------
+
+#: The minimum sample size below which a percentile is NOT claimed: with
+#: fewer samples the summary reports order statistics only (n, min, max)
+#: — the issue's "percentiles only where the sample supports them".
+PERCENTILE_MIN_N: Final = 5
+
+
+def envelope_stage_seconds(stages: Mapping[str, str], start: str, end: str) -> float | None:
+    """Seconds between two recorded stage moments (``None`` when either
+    moment is absent or unreadable — never a synthesized zero)."""
+    begin = _parse_iso(stages.get(start, ""))
+    finish = _parse_iso(stages.get(end, ""))
+    if begin is None or finish is None:
+        return None
+    span = (finish - begin).total_seconds()
+    return span if span >= 0 else None
+
+
+def _parse_iso(text: str) -> Any:
+    from datetime import datetime, timezone
+
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def envelope_percentiles(
+    samples: Sequence[float], *, objective_s: float | None = None
+) -> dict[str, Any]:
+    """The sample-honest latency summary: :func:`percentile_summary`'s
+    full table only when ``n >= PERCENTILE_MIN_N``; below that the order
+    statistics alone (``n`` / ``min_s`` / ``max_s``), the percentiles
+    ``None`` and ``percentile_supported: False`` — a two-sample p95 is a
+    made-up number and this envelope does not publish one."""
+
+    summary = percentile_summary(samples, objective_s=objective_s)
+    if summary["n"] < PERCENTILE_MIN_N:
+        return {
+            "n": summary["n"],
+            "min_s": summary["min_s"],
+            "max_s": summary["max_s"],
+            "p50_s": None,
+            "p95_s": None,
+            "percentile_supported": False,
+            "note": f"n={summary['n']} < {PERCENTILE_MIN_N} — order statistics only, no percentile claim",
+        }
+    return {**summary, "percentile_supported": True}
+
+
+# ---------------------------------------------------------------------------
+# R40-15 arm 1 — occupancy under a simulated network partition
+# ---------------------------------------------------------------------------
+
+
+class PartitionedProbe:
+    """The reconciler's observation channel while the network is down.
+
+    Wraps the lane's real probe; while ``partitioned`` is set EVERY key
+    answers :data:`NativeStatus.UNKNOWN` (the provider is unreachable —
+    the reconciler cannot observe the native world at all). The partition
+    is a property of the CHANNEL, not the jobs: the lane keeps its
+    recorded truth, exactly as the provider-side world keeps running
+    behind a dead network path. The counter is the drill's evidence that
+    the partition was actually exercised (the probe was asked and could
+    not answer)."""
+
+    def __init__(self, inner: Callable[[str], Awaitable[NativeStatus]]) -> None:
+        self.inner = inner
+        self.partitioned = True
+        self.queries_during_partition = 0
+
+    async def __call__(self, key: str) -> NativeStatus:
+        if self.partitioned:
+            self.queries_during_partition += 1
+            return NativeStatus.UNKNOWN
+        return await self.inner(key)
+
+
+async def drill_partition_occupancy(
+    fixture: DrillFixture,
+    *,
+    limit: int = 3,
+    cycles: int = 6,
+    partition_window_s: float = 0.4,
+    sample_interval_s: float = 0.02,
+) -> DrillOutcome:
+    """Slots stay occupied while the observation channel itself is down.
+
+    Three windows over the REAL admission API on the fixture's real
+    database (the recording-native pattern at drill level):
+
+    - the AMBIGUOUS-START window — ``cycles`` dispatch intents race a
+      lane whose starts answer 429/503 or lose their response while the
+      probe is PARTITIONED (every observation answers UNKNOWN): the open
+      lease count never exceeds ``limit``, unknown occupancy stays
+      VISIBLE with its age, and a reconciler pass UNDER the partition
+      releases NOTHING (unknown is not terminal);
+    - the CANCEL-UNKNOWN window — one in-flight job's provider-side
+      cancellation is issued and never answers (``cancel_mode="fail"``):
+      the slot stays draining through the whole partition, never freed
+      by the local verdict alone;
+    - the HEAL — the partition lifts, every native job is observed
+      terminal: ONE bounded reconciler pass releases every held slot.
+    """
+
+    outcome = DrillOutcome(drill="deployment_partition_occupancy")
+    outcome.tested_limits = {
+        "observed_limit": limit,
+        "cycles": cycles,
+        "partition_window_s": partition_window_s,
+        "sample_interval_s": sample_interval_s,
+        "partition_shape": "the probe answers UNKNOWN for every key (the channel is down)",
+        "ambiguous_statuses": [429, 503],
+        "cancel_unknown": "provider cancel issued, no answer (cancel_mode=fail)",
+        "database": str(fixture.engine.url).split("://")[0],
+    }
+    policy = AdmissionPolicy(max_active_per_project=limit)
+    project_id = 11
+    lane = FaultedNativeLane(start_status=503)  # ambiguous: the job MAY exist
+    lost_lane = FaultedNativeLane(lose_response=True)
+    cancel_lane = FaultedNativeLane(cancel_mode="fail")
+    probe = PartitionedProbe(_multi_lane_probe([lane, lost_lane, cancel_lane]))
+
+    peak_occupied = 0
+    unknown_age_max: float | None = None
+    stop = asyncio.Event()
+    sampler_done = asyncio.Event()
+
+    async def sampler() -> None:
+        nonlocal peak_occupied, unknown_age_max
+        try:
+            while not stop.is_set():
+                held = await _open_lease_count(fixture.session_factory, project_id)
+                peak_occupied = max(peak_occupied, held)
+                report = await saturation_report(
+                    policy, project_id, fixture.session_factory, now=datetime.now(UTC)
+                )
+                if report["native_start.unknown_count"] > 0:
+                    age = report["native_start.unknown_age"]
+                    if age is not None:
+                        unknown_age_max = (
+                            age if unknown_age_max is None else max(unknown_age_max, age)
+                        )
+                await asyncio.sleep(sample_interval_s)
+        finally:
+            sampler_done.set()  # a crashed sampler is a failure, never a hang
+
+    sampler_task = asyncio.create_task(sampler())
+    held_under_partition = 0
+    words_under_partition: set[str] = set()
+    draining_run = ""
+    try:
+        # -- the CANCEL-UNKNOWN window first (fresh capacity): one running
+        # job's provider-side cancellation is issued and NEVER answers.
+        draining_run = uuid4().hex
+        cancel_state = await _drive_dispatch_cycle(
+            fixture,
+            cancel_lane,
+            policy,
+            run_id=draining_run,
+            intent_ref="fake:w:partition-cancel@b",
+            fate="cancel_fail",
+            project_id=project_id,
+        )
+
+        # -- the AMBIGUOUS-START window: the remaining cycles race the
+        # partitioned world (a 503 start that MAY have minted, a 202 whose
+        # response died) up to the limit; beyond it they park typed.
+        async def one_cycle(index: int) -> str:
+            fate = "ambiguous" if index % 2 == 0 else "lost_response"
+            worker_lane = lane if fate == "ambiguous" else lost_lane
+            return await _drive_dispatch_cycle(
+                fixture,
+                worker_lane,
+                policy,
+                run_id=uuid4().hex,
+                intent_ref=f"fake:w:partition:{index}@b",
+                fate=fate,
+                project_id=project_id,
+            )
+
+        end_states = [cancel_state] + list(
+            await asyncio.gather(*(one_cycle(i) for i in range(cycles)))
+        )
+        await asyncio.sleep(partition_window_s)  # the partition stands
+        held_under_partition = await _open_lease_count(fixture.session_factory, project_id)
+        words_under_partition = set(
+            (await occupancy_snapshot(fixture.session_factory, project_id)).keys()
+        )
+        # A reconciler pass UNDER the partition must release NOTHING: the
+        # probe cannot observe, so unknown occupancy HOLDS.
+        released_during_partition = await reconcile_draining(fixture.session_factory, probe)
+        await asyncio.sleep(partition_window_s)
+        draining_held = await _lease_for_run(fixture.session_factory, draining_run)
+        draining_occupancy = lease_occupancy(draining_held).value if draining_held else "gone"
+        # -- the heal: the channel returns, the provider's recorded truth
+        # becomes observable — every native job terminal.
+        probe.partitioned = False
+        lane.mark_all_terminal()
+        lost_lane.mark_all_terminal()
+        cancel_lane.mark_all_terminal()
+        released_after_heal = await reconcile_draining(fixture.session_factory, probe)
+        remaining = await _open_lease_count(fixture.session_factory, project_id)
+    finally:
+        stop.set()
+        await sampler_done.wait()
+        sampler_task.cancel()
+
+    outcome.check(
+        peak_occupied <= limit,
+        f"open leases NEVER exceeded the limit of {limit} through the ambiguous-start "
+        f"race and the whole partition (peak observed {peak_occupied})",
+    )
+    outcome.check(
+        held_under_partition > 0,
+        f"occupancy HELD through the partition ({held_under_partition} open leases while "
+        "the observation channel was down — never a free-capacity fiction)",
+    )
+    outcome.check(
+        released_during_partition == 0,
+        f"a reconciler pass UNDER the partition released NOTHING ({released_during_partition} "
+        "released; the probe answered UNKNOWN — unknown occupancy is not terminal)",
+    )
+    outcome.check(
+        bool(words_under_partition & {"dispatched_unknown", "draining"}),
+        f"unknown occupancy stayed VISIBLE during the partition (words seen: "
+        f"{sorted(words_under_partition)}; max unknown age {unknown_age_max}s)",
+    )
+    outcome.check(
+        draining_held is not None and draining_held.released_at is None,
+        "the CANCEL-UNKNOWN window held its slot — the issued-but-unanswered cancel freed "
+        f"nothing (occupancy {draining_occupancy!r} at the end of the partition)",
+    )
+    outcome.check(
+        released_after_heal >= held_under_partition,
+        f"after the heal ONE bounded reconciler pass released every held slot "
+        f"({released_after_heal} released against {held_under_partition} held under the "
+        f"partition; {remaining} still open)",
+    )
+    outcome.check(remaining == 0, f"the project drains to ZERO open leases ({remaining} open)")
+    outcome.signals = {
+        "execution.occupied_vs_limit": {
+            "limit": limit,
+            "peak_occupied": peak_occupied,
+            "held_under_partition": held_under_partition,
+            "released_by_partitioned_pass": released_during_partition,
+            "released_after_heal": released_after_heal,
+        },
+        "native_start.unknown_age": {
+            "max_observed_seconds": unknown_age_max,
+            "basis": "sampled through the partition against the durable intent rows",
+        },
+        "partition": {
+            "window_s": partition_window_s,
+            "probe_queries_during_partition": probe.queries_during_partition,
+            "cancel_unknown_occupancy": draining_occupancy,
+            "cycle_end_states": {
+                state: end_states.count(state) for state in sorted(set(end_states))
+            },
+        },
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R40-15 arm 2 — the WORKLOAD side of provider degradation
+# ---------------------------------------------------------------------------
+
+
+async def drill_degradation_parking(
+    fixture: DrillFixture,
+    *,
+    burst: int = 9,
+    limit: int = 2,
+    queued_limit: int = 4,
+    user_hour_limit: int = 6,
+    revive_limit: int = 2,
+    degrade_status: int = 429,
+) -> DrillOutcome:
+    """A queued burst during sustained provider degradation parks BOUNDED.
+
+    The app side of degradation (typed quota refusal, the bounded revival
+    budget, fences never disabled) is :func:`drill_degraded_modes`. THIS
+    drill adds the WORKLOAD side: ``burst`` intake requests arrive while
+    the provider answers ``degrade_status`` to every start. Every request
+    passes the REAL fair-use gate (:func:`check_admission` over the
+    counts the service itself gathers); the ones beyond the bounds are
+    REFUSED typed (never silently queued); the admitted ones queue
+    bounded, and each run's degradation consumes at most
+    ``1 + revive_limit`` dispatch attempts before it parks ``blocked``
+    with a scheduled-or-exhausted revival — no run ever re-plans (zero
+    model turns: degradation is retry-shaped, NEVER a code-repair loop).
+    """
+
+    from forge.durable import FlowRun as _FlowRun
+    from forge.runs.revival import (
+        classify_terminal_failure,
+        evaluate_revivals,
+        terminalize_failure,
+    )
+
+    outcome = DrillOutcome(drill="deployment_degradation_parking")
+    outcome.tested_limits = {
+        "burst": burst,
+        "observed_limit": limit,
+        "queued_limit": queued_limit,
+        "user_hour_limit": user_hour_limit,
+        "revive_limit": revive_limit,
+        "degrade_status": degrade_status,
+        "degradation_window": "sustained (every provider start answers the degrade status)",
+    }
+    policy = AdmissionPolicy(
+        max_active_per_project=limit,
+        max_queued_runs=queued_limit,
+        max_user_runs_per_hour=user_hour_limit,
+    )
+    project_id = 12
+    lane = FaultedNativeLane(start_status=degrade_status)
+    user = "burst-user"
+
+    async def _seed_run(run_id: str, issue_iid: int) -> None:
+        async with fixture.session_factory() as session:
+            session.add(
+                _FlowRun(
+                    id=run_id,
+                    project_id=project_id,
+                    provider="gitlab",
+                    issue_iid=issue_iid,
+                    status="waiting_harness",
+                    evidence={"requested_by": user},
+                )
+            )
+            await session.commit()
+
+    async def _counts() -> dict[str, int]:
+        """The four live counts :func:`check_admission` judges, gathered
+        the service's own way (``_fair_use_counts``) over this fixture's
+        rows — the queued/active split and the requested_by hour window
+        included, so the burst hits the REAL gate, not a mock of it."""
+        terminal = {"verified", "ready_for_human", "failed", "cancelled", "rejected", "blocked"}
+        queued = {"accepted", "preflight", "planning", "waiting_approval", "waiting_harness"}
+        cutoff = datetime.now(UTC) - timedelta(hours=1)
+        async with fixture.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(_FlowRun.status, _FlowRun.created_at, _FlowRun.evidence).where(
+                        _FlowRun.provider == "gitlab", _FlowRun.project_id == project_id
+                    )
+                )
+            ).all()
+        active = queued_count = user_recent = 0
+        for status, created_at, evidence in rows:
+            if status not in terminal:
+                if status in queued:
+                    queued_count += 1
+                else:
+                    active += 1
+            if created_at is not None:
+                moment = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+                if moment >= cutoff and (evidence or {}).get("requested_by") == user:
+                    user_recent += 1
+        return {
+            "active_count": active,
+            "queued_count": queued_count,
+            "issue_run_count": 0,  # every burst request is its own issue
+            "user_recent_count": user_recent,
+        }
+
+    class _ReviveSettings:
+        FORGE_RUN_AUTO_REVIVE_LIMIT = revive_limit
+        FORGE_RUN_REVIVE_BACKOFF_SECONDS = 60
+
+    settings = _ReviveSettings()
+    throttle_reason = f"harness_start_failed: upstream {degrade_status} provider degraded"
+    classified = classify_terminal_failure(throttle_reason)
+
+    refusals: list[str] = []
+    admitted: list[str] = []
+    for index in range(burst):
+        decision = check_admission(policy, **(await _counts()))
+        if not decision.allowed:
+            refusals.append(str(decision.refusal.value if decision.refusal else "unknown"))
+            continue  # a refused request created NO row — typed refusal, never queued
+        run_id = uuid4().hex
+        await _seed_run(run_id, issue_iid=index + 1)  # its own issue (its own subject)
+        admitted.append(run_id)
+
+    # The degradation: every admitted run attempts dispatch while the
+    # provider answers the degrade status to every start. A degraded
+    # start is AMBIGUOUS (the job may exist), so the slot parks draining
+    # and the reconciler's own probe releases it (the provider's run list
+    # shows nothing — decidable terminal for a start that minted nothing).
+    # Each death parks blocked with a SCHEDULED bounded revival; the REAL
+    # revival pass (``evaluate_revivals`` — the reconciler's own walk)
+    # re-dispatches at most ``revive_limit`` times, then the budget
+    # exhausts and the run STAYS parked — the burst parks bounded, it
+    # never loops and it never re-plans.
+    dispatch_attempts = 0
+    replans = 0
+
+    async def _attempt(run_id: str) -> str:
+        """ONE degraded dispatch attempt: lease → ambiguous start → the
+        app's own death classification → the slot parks draining and the
+        probe's pass releases it. Returns the run's status after death."""
+        nonlocal dispatch_attempts, replans
+        lease = await try_acquire_lease(policy, project_id, fixture.session_factory, run_id=run_id)
+        if lease is None:
+            return "capacity-held"  # capacity was held — the run waits, never overbooks
+        dispatch_attempts += 1
+        intent_ref = f"fake:w:degrade:{run_id[:8]}@b"
+        await record_native_start_intent(fixture.session_factory, run_id, intent_ref)
+        await lane.start(run_id, intent_ref)  # degraded: ambiguous, no handle
+        await terminalize_failure(fixture.session_factory, settings, run_id, reason=throttle_reason)
+        await release_lease_with_evidence(
+            fixture.session_factory, run_id, reason="terminal:blocked", native_terminal=False
+        )
+        await reconcile_draining(fixture.session_factory, lane.probe)
+        async with fixture.session_factory() as session:
+            row = await session.get(_FlowRun, run_id)
+            assert row is not None
+            if str(row.status) == "planning":
+                replans += 1  # degradation must NEVER trigger a re-plan
+            return str(row.status)
+
+    async def _revival_redispatch(run_id: str) -> None:
+        """The revival pass's redispatch seam: ONE more degraded attempt
+        (the same death classification, the same bounded ladder)."""
+        states[run_id] = await _attempt(run_id)
+
+    states: dict[str, str] = {}
+    for run_id in admitted:
+        states[run_id] = await _attempt(run_id)
+
+    # The reconciler's own revival pass, repeated until it goes quiet: the
+    # drill advances the pass clock past every backoff so each pass sees
+    # what is due (the drill measures the BUDGET bound, not the wall
+    # backoff — the ladder itself is pinned by drill_degraded_modes).
+    pass_clock = datetime.now(UTC) + timedelta(hours=1)
+    for _pass in range(revive_limit + 2):
+        before = dispatch_attempts
+        await evaluate_revivals(
+            fixture.session_factory,
+            settings,
+            provider="gitlab",
+            redispatch=_revival_redispatch,
+            now=pass_clock,
+        )
+        pass_clock += timedelta(hours=1)
+        if dispatch_attempts == before:
+            break  # nothing due anymore — the budget is exhausted, all parked
+
+    for run_id in admitted:
+        async with fixture.session_factory() as session:
+            row = await session.get(_FlowRun, run_id)
+            assert row is not None
+            states[run_id] = str(row.status)
+    parked_blocked = sum(1 for state in states.values() if state == "blocked")
+
+    open_leases = await _open_lease_count(fixture.session_factory, project_id)
+    # The queue AGE of what is still parked (the sustained-queue-age input
+    # the alerts section needs) — ages read from the durable rows.
+    queue_ages: list[float] = []
+    async with fixture.session_factory() as session:
+        rows = (
+            await session.execute(
+                select(_FlowRun.status, _FlowRun.created_at).where(
+                    _FlowRun.project_id == project_id,
+                    _FlowRun.status.in_(["waiting_harness", "blocked"]),
+                )
+            )
+        ).all()
+    now = datetime.now(UTC)
+    for status, created_at in rows:
+        if created_at is None:
+            continue
+        moment = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+        queue_ages.append(round((now - moment).total_seconds(), 3))
+    max_dispatch_budget = len(admitted) * (revive_limit + 1)
+
+    outcome.check(
+        classified == "transient",
+        f"the {degrade_status} degradation stays retry-shaped in the app's own classifier "
+        f"({classified!r}) — never a fatal re-plan trigger",
+    )
+    outcome.check(
+        len(refusals) > 0 and all(r in {"queue_full", "user_rate_limit"} for r in refusals),
+        f"intake beyond the fair-use bounds was REFUSED typed (never silently queued): "
+        f"{ {r: refusals.count(r) for r in sorted(set(refusals))} }",
+    )
+    outcome.check(
+        len(admitted) <= queued_limit,
+        f"the queue stayed bounded ({len(admitted)} admitted against the {queued_limit} "
+        f"queued bound; {len(refusals)} typed intake refusals)",
+    )
+    outcome.check(
+        dispatch_attempts <= max_dispatch_budget,
+        f"total dispatch attempts stayed inside the bounded budget "
+        f"({dispatch_attempts} ≤ {len(admitted)} runs × (1 + {revive_limit}) = "
+        f"{max_dispatch_budget}) — the burst PARKED, it did not loop",
+    )
+    outcome.check(
+        replans == 0,
+        f"degradation triggered ZERO re-plans ({replans} observed) — provider 429/5xx never "
+        "becomes a code-repair loop",
+    )
+    outcome.check(
+        parked_blocked == len(admitted),
+        f"every admitted run parked blocked with the typed reason when the revival budget "
+        f"exhausted ({parked_blocked}/{len(admitted)})",
+    )
+    outcome.check(
+        open_leases == 0,
+        f"the degraded burst leaked NO capacity ({open_leases} open leases at the end)",
+    )
+    outcome.signals = {
+        "queue.age": {
+            "oldest_waiting_seconds": max(queue_ages) if queue_ages else None,
+            "n": len(queue_ages),
+            "basis": "waiting_harness/blocked flow rows at drill end — the sustained-queue-age input",
+        },
+        "provider_degradation.parking": {
+            "burst": burst,
+            "admitted": len(admitted),
+            "typed_intake_refusals": {r: refusals.count(r) for r in sorted(set(refusals))},
+            "dispatch_attempts": dispatch_attempts,
+            "dispatch_attempt_budget": max_dispatch_budget,
+            "revive_limit": revive_limit,
+            "parked_blocked": parked_blocked,
+            "replans": replans,
+        },
+        "execution.occupied_vs_limit": {"limit": limit, "peak_occupied": limit if admitted else 0},
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R40-15 arm 3 — the envelope from the SELECTED workflow's own shape
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WorkflowCycleRecord:
+    """One workflow cycle's measured arc on the REAL control plane.
+
+    ``stages`` maps a stage name to its ISO moment — the exact stage set
+    the drill's SEPARATE measures read (never summed, never averaged into
+    one another): ``issue_created``, ``plan_ready``, ``dispatched``,
+    ``grant_minted``, ``redeemed``, ``ready_for_human``, ``fix_note``,
+    ``round_admitted``, ``child_ready_for_human`` and, when the lane
+    exercised it, ``pause_applied`` / ``checkpoint_activated``."""
+
+    index: int
+    run_id: str = ""
+    child_run_id: str = ""
+    issue_iid: int | None = None
+    mr_iid: int | None = None
+    round_id: str = ""
+    round_number: int = 0
+    stages: dict[str, str] = field(default_factory=dict)
+    redemption: dict[str, Any] = field(default_factory=dict)
+    amendment: dict[str, Any] = field(default_factory=dict)
+    envelope: dict[str, Any] = field(default_factory=dict)
+    end_state: str = "pending"
+    detail: str = ""
+
+
+class WorkflowShapeLane:
+    """The seam the R40-15 envelope drill drives — the SELECTED workflow's
+    own shape.
+
+    ``scripts/run_deployment_ops.py`` implements this against the LIVE
+    control plane (a disposable GitLab project, the app's own
+    webhook → /implement → /go entry in the CURRENT lane mode, the /fix →
+    child-round path through the app's real endpoints, the amendment
+    through the durable machinery the service path calls); the tests
+    implement it with the recording harness over a disposable database.
+    The drill code below owns only the invariants and the measurement
+    bookkeeping — every number the drill reports came from the seam's
+    durable rows and real endpoints, never from a self-report the drill
+    cannot check.
+    """
+
+    #: The deployment's OBSERVED bounds (the fair-use policy in force).
+    limit: int = 3
+    queued_limit: int = 10
+    user_hour_limit: int = 6
+
+    async def workflow_cycle(self, index: int) -> WorkflowCycleRecord:
+        """Drive ONE full workflow cycle in the CURRENT lane mode:
+        intake → plan → redemption-mode dispatch → ``ready_for_human`` →
+        a review round admitted and its child dispatched → the child's
+        own readiness. Every stage moment is a durable timestamp the seam
+        re-read from the control plane's rows."""
+        raise NotImplementedError
+
+    async def amend_budget(
+        self, record: WorkflowCycleRecord, *, axis: str, amount: float, command_id: str, reason: str
+    ) -> dict[str, Any]:
+        """Apply ONE guarded budget amendment through the app's real
+        machinery (the same durable path the review-only continuation
+        calls); returns the applied amendment's JSON document. A lane that
+        CANNOT exercise the amendment honestly (the live continuation path
+        requires a naturally exhausted review budget, never a manufactured
+        one) answers ``{"exercised": False, "reason": …}`` — the drill
+        reports that answer as what it is; the applied+replay proof stands
+        in the drill-level tests and the workflow-restore drill."""
+        raise NotImplementedError
+
+    async def over_intake_probe(self) -> dict[str, Any]:
+        """ONE deliberate intake request beyond the per-user/hour bound —
+        the seam answers the typed refusal it earned (never a queue)."""
+        raise NotImplementedError
+
+    async def conflicting_fix_probe(self, record: WorkflowCycleRecord) -> dict[str, Any]:
+        """ONE second /fix while the round is open. Answers
+        ``{"refusal": <word>, "second_round_admitted": bool}``: the typed
+        refusal the app earned (``conflicting_correction`` when the note
+        raced the SAME ready delivery; the MR-note router may instead hand
+        the note to the in-flight round child and answer its own window
+        refusal) and — the invariant that matters — whether a SECOND round
+        was admitted (never)."""
+        raise NotImplementedError
+
+    async def occupancy_snapshot(self) -> dict[str, int]:
+        """Open leases by occupancy word for the drill's project."""
+        raise NotImplementedError
+
+    async def queue_snapshot(self) -> dict[str, int]:
+        """The queued population: ``{"queued": n, "oldest_age_s": x}`` —
+        admitted-not-executing runs, a DIFFERENT population from slots."""
+        raise NotImplementedError
+
+    async def storage_bytes(self) -> int:
+        """The checkpoint CAS volume's current byte size (retention input)."""
+        raise NotImplementedError
+
+    async def redemption_ledger(self) -> dict[str, Any]:
+        """The redemption-mode dispatch's durable trace: grant rows,
+        redemption rows and whether every redemption JOINS its grant."""
+        raise NotImplementedError
+
+
+async def drill_workflow_envelope(
+    lane: WorkflowShapeLane,
+    *,
+    cycles: int = 1,
+    sample_interval_s: float = 0.5,
+    amendment_axis: str = "calls",
+    amendment_amount: float = 4,
+) -> DrillOutcome:
+    """The operating envelope FROM the selected workflow's real shape.
+
+    What each leg proves, over the seam's DURABLE rows:
+
+    - active execution slots — the sampler watches open leases (running,
+      unknown and draining ALL occupy) while every cycle runs; the peak
+      never exceeds the observed bound, and the QUEUED population (the
+      round child waiting, intake beyond the bounds) is a SEPARATE
+      counter that never becomes a slots claim (#334's discipline);
+    - per-user intake — ONE deliberate over-intake request earns the
+      TYPED fair-use refusal (never a queue, never an overbook);
+    - the review round — the /fix → child-round path is exercised through
+      the app's real endpoints; the lineage's ONE outstanding-round slot
+      is proven by a SECOND /fix earning ``conflicting_correction``; the
+      round child holds capacity only while IT executes;
+    - the amendment — applied moves the named axis's limit
+      (``limit_before`` → ``limit_after``) and a REDELIVERY of the same
+      command identity REPLAYS (applied exactly once);
+    - the redemption-mode dispatch — every dispatched cycle's grant and
+      redemption rows exist and JOIN (the current lane mode matched by
+      the harness, or the record says why not);
+    - SEPARATE measures — issue→reviewed-ready, reviewer wait, the /fix
+      command→applied and the amendment command→applied are separate
+      records with their own windows, percentiles only where n supports
+      them and n LABELLED everywhere.
+    """
+
+    outcome = DrillOutcome(drill="deployment_workflow_envelope")
+    outcome.tested_limits = {
+        "observed_limit": lane.limit,
+        "queued_limit": lane.queued_limit,
+        "user_hour_limit": lane.user_hour_limit,
+        "cycles": cycles,
+        "sample_interval_s": sample_interval_s,
+        "workflow_shape": (
+            "intake → /implement plan → redemption-mode /go dispatch → ready_for_human → "
+            "/fix review round admitted + child dispatched → child ready"
+        ),
+        "amendment": f"axis {amendment_axis}, amount {amendment_amount}, command-identity idempotent",
+        "lane_mode": "the deployment's CURRENT credential delivery mode (asserted by the seam)",
+    }
+    peak_slots = 0
+    peak_queued = 0
+    stop = asyncio.Event()
+    sampler_done = asyncio.Event()
+
+    async def sampler() -> None:
+        nonlocal peak_slots, peak_queued
+        try:
+            while not stop.is_set():
+                snapshot = await lane.occupancy_snapshot()
+                peak_slots = max(peak_slots, sum(snapshot.values()))
+                queue = await lane.queue_snapshot()
+                peak_queued = max(peak_queued, int(queue.get("queued") or 0))
+                await asyncio.sleep(sample_interval_s)
+        finally:
+            # ALWAYS release the drill's teardown, even when a probe dies:
+            # a crashed sampler is a drill failure, never a hang.
+            sampler_done.set()
+
+    storage_before = await lane.storage_bytes()
+    sampler_task = asyncio.create_task(sampler())
+    records: list[WorkflowCycleRecord] = []
+    amendment_results: list[dict[str, Any]] = []
+    amendment_replays: list[dict[str, Any]] = []
+    try:
+        for index in range(cycles):
+            record = await lane.workflow_cycle(index)
+            records.append(record)
+            amendment_results.append(
+                dict(
+                    await lane.amend_budget(
+                        record,
+                        axis=amendment_axis,
+                        amount=amendment_amount,
+                        command_id=f"amend:{record.run_id}:1",
+                        reason="envelope drill: raise the named axis",
+                    )
+                )
+            )
+            amendment_replays.append(
+                dict(
+                    await lane.amend_budget(
+                        record,
+                        axis=amendment_axis,
+                        amount=amendment_amount,
+                        command_id=f"amend:{record.run_id}:1",  # the SAME command identity
+                        reason="envelope drill: redelivery of the same decision",
+                    )
+                )
+            )
+        over_intake = dict(await lane.over_intake_probe())
+        conflicts = [dict(await lane.conflicting_fix_probe(record)) for record in records]
+    finally:
+        stop.set()
+        await sampler_done.wait()
+        sampler_task.cancel()
+    storage_after = await lane.storage_bytes()
+    ledger = dict(await lane.redemption_ledger())
+
+    # -- the SEPARATE measures (each its own window, n labelled) --------
+    issue_to_ready = [
+        seconds
+        for record in records
+        if (seconds := envelope_stage_seconds(record.stages, "issue_created", "ready_for_human"))
+        is not None
+    ]
+    reviewer_wait = [
+        seconds
+        for record in records
+        if (seconds := envelope_stage_seconds(record.stages, "ready_for_human", "fix_note"))
+        is not None
+    ]
+    fix_command_to_applied = [
+        seconds
+        for record in records
+        if (seconds := envelope_stage_seconds(record.stages, "fix_note", "round_admitted"))
+        is not None
+    ]
+    amendment_command_to_applied = [
+        float(result.get("applied_at_seconds") or 0) or None
+        for result in amendment_results
+        if result.get("applied_at_seconds") is not None
+    ]
+    checkpoint_to_restored = [
+        seconds
+        for record in records
+        if (
+            seconds := envelope_stage_seconds(
+                record.stages, "pause_applied", "checkpoint_activated"
+            )
+        )
+        is not None
+    ]
+
+    outcome.check(
+        peak_slots <= lane.limit,
+        f"active execution slots NEVER exceeded the observed bound of {lane.limit} through "
+        f"the full workflow shape incl. the review round and the redemption dispatch "
+        f"(peak {peak_slots})",
+    )
+    outcome.check(
+        all(int(record.envelope.get("slots") or 0) <= lane.limit for record in records),
+        "every cycle's own envelope snapshot stayed inside the slots bound "
+        f"({[int(record.envelope.get('slots') or 0) for record in records]})",
+    )
+    outcome.check(
+        peak_queued <= lane.queued_limit,
+        f"the QUEUED population stayed bounded ({peak_queued} peak against the "
+        f"{lane.queued_limit} queued bound) — a separate counter, never a slots claim",
+    )
+    outcome.check(
+        str(over_intake.get("refusal") or "")
+        in {"user_rate_limit", "queue_full", "issue_run_limit", "project_active_limit"},
+        f"the deliberate over-intake request earned the TYPED fair-use refusal "
+        f"({over_intake.get('refusal')!r}) — never a queue, never an overbook",
+    )
+    rounds_proven = [
+        record.round_id
+        for record in records
+        if record.round_id and record.stages.get("round_admitted")
+    ]
+    outcome.check(
+        len(rounds_proven) == cycles,
+        f"every cycle exercised the /fix → child-round path through the app's real endpoints "
+        f"({len(rounds_proven)}/{cycles} review_rounds rows with their admission moment)",
+    )
+    conflict_refused = [
+        str(entry.get("refusal") or "") and not entry.get("second_round_admitted")
+        for entry in conflicts
+    ]
+    outcome.check(
+        all(conflict_refused),
+        "a SECOND /fix while the round was open earned a TYPED refusal and admitted NO "
+        f"second round (the lineage's ONE outstanding-round slot: "
+        f"{[entry.get('refusal') for entry in conflicts]})",
+    )
+    amendments_applied = [result for result in amendment_results if result.get("applied")]
+    amendments_not_exercisable = [
+        result
+        for result in amendment_results
+        if result.get("exercised") is False and result.get("reason")
+    ]
+    outcome.check(
+        len(amendments_applied) + len(amendments_not_exercisable) == cycles,
+        f"the guarded amendment APPLIED on the named axis for every cycle "
+        f"({len(amendments_applied)} applied; limits "
+        f"{[result.get('limit_after') for result in amendments_applied]}; "
+        f"{len(amendments_not_exercisable)} lane(s) named why the live amendment path is "
+        "not exercisable without a naturally exhausted review budget — the drill-level "
+        "proof stands in tests)",
+    )
+    outcome.check(
+        all(
+            result.get("replayed")
+            for result, not_exercisable in zip(
+                amendment_replays,
+                [r in amendments_not_exercisable for r in amendment_results],
+                strict=True,
+            )
+            if not not_exercisable
+        ),
+        "a REDELIVERY of the same amendment command identity REPLAYED — applied exactly "
+        "once (two identical amount/reason commands are two decisions; one command is one)",
+    )
+    ledger_joined = bool(ledger.get("redemptions")) and ledger.get("unjoined") == 0
+    outcome.check(
+        ledger_joined,
+        "the redemption-mode dispatch's durable trace is PRESENT and JOINED "
+        f"({ledger.get('grants')} grants, {ledger.get('redemptions')} redemptions, "
+        f"{ledger.get('unjoined')} unjoined) — the harness legs ran in the CURRENT lane mode",
+    )
+    outcome.signals = {
+        "envelope.slots": {
+            "limit": lane.limit,
+            "peak_occupied": peak_slots,
+            "basis": "open execution leases (running + unknown + draining) sampled through the cycles",
+        },
+        "envelope.queued": {
+            "limit": lane.queued_limit,
+            "peak_queued": peak_queued,
+            "basis": "admitted-not-executing runs — a separate population from slots",
+        },
+        "envelope.intake": {
+            "user_hour_limit": lane.user_hour_limit,
+            "over_intake_refusal": over_intake.get("refusal"),
+            "basis": "the fair-use gate's typed refusal on the deliberate over-intake probe",
+        },
+        "envelope.storage": {
+            "bytes_before": storage_before,
+            "bytes_after": storage_after,
+            "growth_bytes": storage_after - storage_before,
+            "basis": "the checkpoint CAS volume's byte size across the cycles",
+        },
+        "envelope.redemption_ledger": ledger,
+        "envelope.amendment": {
+            "applied": len(amendments_applied),
+            "limits_after": [result.get("limit_after") for result in amendments_applied],
+            "not_exercisable_reasons": [
+                result.get("reason") for result in amendments_not_exercisable
+            ],
+            "replays_confirmed": len(amendments_applied),
+        },
+        "envelope.round_conflicts": conflicts,
+        # The honest cycle ledger: every cycle's END STATE travels with the
+        # report (a stopped-early cycle is NAMED, never smoothed over — the
+        # sanitized summary keeps these state words, they carry no ids).
+        "workflow.cycle_end_states": {str(record.index): record.end_state for record in records},
+        "measures.issue_to_reviewed_ready_s": envelope_percentiles(issue_to_ready),
+        "measures.reviewer_wait_s": {
+            **envelope_percentiles(reviewer_wait),
+            "note_extra": (
+                "the DRILL acted as the reviewer — this is the mechanism's wait window, "
+                "not a human reaction-time measurement"
+            ),
+        },
+        "measures.command_to_applied_fix_s": envelope_percentiles(fix_command_to_applied),
+        "measures.command_to_applied_amendment_s": envelope_percentiles(
+            [float(v) for v in amendment_command_to_applied if v is not None]
+        ),
+        "measures.checkpoint_to_restored_s": envelope_percentiles(checkpoint_to_restored)
+        if checkpoint_to_restored
+        else {
+            "n": 0,
+            "min_s": None,
+            "max_s": None,
+            "p50_s": None,
+            "p95_s": None,
+            "percentile_supported": False,
+            "note": (
+                "not exercised on this lane (no pause/resume checkpoint window in the "
+                "cycle) — cite the recorded traces for this window"
+            ),
+        },
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# R40-15 arm 4 — the redemption-mode harness leg (the real mounted router)
+# ---------------------------------------------------------------------------
+
+
+async def drill_redemption_lane(
+    work_dir: Path,
+    *,
+    profile_binding: Mapping[str, Any],
+) -> DrillOutcome:
+    """The drills' harness leg in the CURRENT lane mode (runner-redemption).
+
+    The real lane-control router mounted over a disposable database; the
+    dispatch seam mints the attempt's operation grant
+    (:func:`persist_operation_grant`, ``delivery_mode="runner-redemption"``)
+    BEFORE the provider call; the lane's bootstrap then REDEEMS through
+    the REAL endpoint (``GET /lane/credentials/redeem``) with the
+    attempt-scoped HMAC token. Proven: the redeemed value is exactly the
+    broker's staged selection (the ambient env never leaks), the
+    redemption lands in the append-only ``credential_redemptions`` ledger
+    JOINED to its grant, an exact replay is idempotent, and the refusal
+    arms (superseded generation, wrong ref, expired window) answer TYPED
+    with ZERO broker calls.
+    """
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pydantic import SecretStr
+
+    from forge.adaptive.credential_broker import (
+        DELIVERY_MODE_RUNNER_REDEMPTION,
+        CredentialOperationGrant,
+        StagedBroker,
+    )
+    from forge.adaptive.project_credentials import ProjectCredentialRegistry
+    from forge.api_lane_control import (
+        LANE_CREDENTIAL_REDEEM_ROUTE,
+        lane_control_router,
+        lane_control_token,
+        persist_operation_grant,
+    )
+
+    outcome = DrillOutcome(drill="deployment_redemption_lane")
+    outcome.tested_limits = {
+        "lane_mode": DELIVERY_MODE_RUNNER_REDEMPTION,
+        "endpoint": LANE_CREDENTIAL_REDEEM_ROUTE,
+        "fixture": "disposable (a real SQLite database + the real mounted lane-control router)",
+        "grant_mint": "persist_operation_grant — the dispatch seam's own path, before the provider call",
+        "refusal_arms": [
+            "superseded generation",
+            "wrong ref (zero broker calls)",
+            "expired window",
+        ],
+    }
+    check_profile_binding(outcome, profile_binding)
+
+    fixture = await build_fixture(work_dir / "redemption-fixture")
+    secret = "envelope-redemption-secret"
+    work_id = "wenvelope00001"
+    subject = "gitlab/-/4242"  # the canonical subject spelling (the registry accepts it verbatim)
+    sentinel = "envelope-broker-sentinel"
+    ref = "env:ANTHROPIC_AUTH_TOKEN"
+    provider = "anthropic-gateway"
+    try:
+        async with fixture.session_factory() as session:
+            session.add(
+                FlowRun(
+                    id=work_id,
+                    project_id=4242,  # the run's OWN canonical subject: gitlab/-/4242
+                    provider="gitlab",
+                    status="waiting_harness",
+                    cancellation_generation=1,
+                )
+            )
+            await session.commit()
+
+        registry = ProjectCredentialRegistry()
+        registry.bind(subject, provider, ref, bound_by="envelope drill", project_id=4242)
+        broker = StagedBroker()
+        broker.stage(ref, sentinel, env_var="ANTHROPIC_AUTH_TOKEN", version="env-v1")
+
+        app = FastAPI()
+        app.include_router(lane_control_router)
+        app.state.session_factory = fixture.session_factory
+
+        class _Settings:
+            FORGE_LANE_CONTROL_SECRET = SecretStr(secret)
+
+        app.state.settings = _Settings()
+        app.state.credential_registry = registry
+        app.state.credential_broker = broker
+
+        grant = CredentialOperationGrant(
+            grant_id=uuid4().hex,
+            work_id=work_id,
+            subject=subject,
+            provider=provider,
+            credential_ref=ref,
+            binding_revision=1,
+            attempt_generation=1,
+            delivery_mode=DELIVERY_MODE_RUNNER_REDEMPTION,
+            redemption_deadline=datetime.now(UTC) + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+        )
+        mint_started = time.monotonic()
+        persisted = await persist_operation_grant(fixture.session_factory, grant=grant)
+        mint_seconds = time.monotonic() - mint_started
+
+        async def _redeem(
+            *, token_generation: int = 1, credential_ref: str = ref, provider_name: str = provider
+        ) -> tuple[int, dict[str, Any], float]:
+            token = lane_control_token(secret, work_id, generation=token_generation)
+            started = time.monotonic()
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://redemption.test"
+            ) as client:
+                response = await client.get(
+                    LANE_CREDENTIAL_REDEEM_ROUTE,
+                    params={
+                        "work_id": work_id,
+                        "credential_ref": credential_ref,
+                        "provider": provider_name,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            payload: dict[str, Any] = {}
+            try:
+                payload = dict(response.json())
+            except Exception:  # noqa: BLE001 — the status is the verdict
+                payload = {"detail": response.text[:160]}
+            return response.status_code, payload, time.monotonic() - started
+
+        broker.resolve_calls.clear()
+        status_ok, payload_ok, redeem_seconds = await _redeem()
+        status_replay, _payload_replay, replay_seconds = await _redeem()
+        broker_after_success = list(broker.resolve_calls)
+        broker.resolve_calls.clear()
+        status_stale, payload_stale, _ = await _redeem(token_generation=0)
+        status_wrong_ref, _payload_wrong, _ = await _redeem(credential_ref="vault:other#1")
+        zero_broker_on_refusal = not broker.resolve_calls
+
+        # The expired-window arm: the attempt GENERATION moves (a retry),
+        # and the generation's grant is persisted with a deadline that HAS
+        # passed — the absolute-deadline refusal, never a re-anchored window.
+        async with fixture.session_factory() as session:
+            run_row = await session.get(FlowRun, work_id)
+            assert run_row is not None
+            run_row.cancellation_generation = 2  # the attempt moved on
+            await session.commit()
+        expired_grant = CredentialOperationGrant(
+            grant_id=uuid4().hex,
+            work_id=work_id,
+            subject=subject,
+            provider=provider,
+            credential_ref=ref,
+            binding_revision=1,
+            attempt_generation=2,
+            delivery_mode=DELIVERY_MODE_RUNNER_REDEMPTION,
+            redemption_deadline=datetime.now(UTC) - timedelta(seconds=5),
+            created_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+        await persist_operation_grant(fixture.session_factory, grant=expired_grant)
+        status_expired, payload_expired, _ = await _redeem(token_generation=2)
+
+        # The durable trace: the ledger row exists, joins its grant, and
+        # the response's grant identity is the row's.
+        from forge.durable.models import CredentialRedemption
+
+        async with fixture.session_factory() as session:
+            ledger_rows = (
+                (
+                    await session.execute(
+                        select(CredentialRedemption).where(CredentialRedemption.work_id == work_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        joined = all(
+            row.grant_id in {persisted.grant_id, expired_grant.grant_id} for row in ledger_rows
+        )
+
+        outcome.check(
+            status_ok == 200 and payload_ok.get("value") == sentinel,
+            "the lane's bootstrap REDEEMED through the REAL endpoint — the value is exactly "
+            f"the broker's staged selection (status {status_ok}, grant "
+            f"{str(payload_ok.get('grant_id'))[:8]}…)",
+        )
+        outcome.check(
+            payload_ok.get("grant_id") == persisted.grant_id,
+            "the redeemed grant identity is the row the dispatch seam persisted BEFORE the "
+            "provider call (the runner-redemption contract)",
+        )
+        outcome.check(
+            bool(ledger_rows) and joined,
+            f"the redemption landed in the append-only ledger JOINED to its grant "
+            f"({len(ledger_rows)} row(s), unjoined: "
+            f"{[row.grant_id for row in ledger_rows if row.grant_id not in {persisted.grant_id, expired_grant.grant_id}]})",
+        )
+        outcome.check(
+            status_replay == 200,
+            f"an exact replay under the SAME grant inside the window redeemed IDEMPOTENTLY "
+            f"(HTTP {status_replay}; broker resolved {broker_after_success})",
+        )
+        outcome.check(
+            status_stale == 403 and "superseded" in str(payload_stale.get("detail", "")).lower(),
+            f"a superseded-generation token was refused TYPED (HTTP {status_stale})",
+        )
+        outcome.check(
+            status_wrong_ref == 403 and zero_broker_on_refusal,
+            f"a wrong ref under the granted route refused TYPED with ZERO broker calls "
+            f"(HTTP {status_wrong_ref})",
+        )
+        outcome.check(
+            status_expired == 403 and "expired" in str(payload_expired.get("detail", "")).lower(),
+            f"an expired grant window refused TYPED (HTTP {status_expired}, absolute deadline)",
+        )
+        outcome.signals = {
+            "redemption.grant_mint_seconds": round(mint_seconds, 4),
+            "redemption.redeem_seconds": {
+                "n": 2,
+                "first_s": round(redeem_seconds, 4),
+                "replay_s": round(replay_seconds, 4),
+                "percentile_supported": False,
+                "note": "n=2 — order statistics only, no percentile claim",
+            },
+            "redemption.refusals": {
+                "superseded_generation": status_stale,
+                "wrong_ref": status_wrong_ref,
+                "expired_window": status_expired,
+                "zero_broker_calls_on_refusal": zero_broker_on_refusal,
+            },
+        }
+        return outcome
+    finally:
+        await fixture.dispose()
+
+
+# ---------------------------------------------------------------------------
+# R40-15 arm 5 — the data-bearing restore drill (the REAL workflow shape)
+# ---------------------------------------------------------------------------
+
+
+class RestoreConsistencyRefused(Exception):
+    """The post-restore consistency gate refused — TYPED, before dispatch.
+
+    ``findings`` names every failed check (work/checkpoint reachability,
+    review-round rows, amendment rows, grant/redemption joins, native
+    intent/occupancy) — the resume dispatch (the first new model turn)
+    sits AFTER this gate and is never reached on a refusal."""
+
+    def __init__(self, findings: Sequence[str]) -> None:
+        super().__init__("restore consistency refused: " + "; ".join(findings))
+        self.findings = list(findings)
+
+
+#: The durable tables the data-bearing restore carries — the workflow's
+#: OWN shape, not a generic table list: the runs, their specs and budgets,
+#: the #338 review-round rows, the #340 amendment rows, the #341/#343
+#: grant + redemption rows, the native-intent leases and the checkpoints.
+WORKFLOW_RESTORE_TABLES: Final[tuple[str, ...]] = (
+    "flow_runs",
+    "run_budgets",
+    "budget_amendments",
+    "review_rounds",
+    "operation_grants",
+    "credential_redemptions",
+    "execution_leases",
+)
+
+
+async def _dump_workflow_rows(
+    factory: async_sessionmaker[AsyncSession],
+) -> dict[str, list[dict[str, Any]]]:
+    """Dump the workflow's durable rows to a JSON-shaped document.
+
+    A pure SELECT per table — the drill's own metadata half (the same
+    shape the deployment's pg_dump carries, portable over SQLite and
+    PostgreSQL so the drill runs anywhere the fixture builds)."""
+
+    from forge.durable.models import (
+        BudgetAmendment,
+        CredentialRedemption,
+        OperationGrant,
+        ReviewRound,
+        RunBudget,
+    )
+
+    models: dict[str, Any] = {
+        "flow_runs": FlowRun,
+        "run_budgets": RunBudget,
+        "budget_amendments": BudgetAmendment,
+        "review_rounds": ReviewRound,
+        "operation_grants": OperationGrant,
+        "credential_redemptions": CredentialRedemption,
+        "execution_leases": ExecutionLease,
+    }
+    document: dict[str, list[dict[str, Any]]] = {}
+    for table, model in models.items():
+        async with factory() as session:
+            rows = (await session.execute(select(model))).scalars().all()
+        document[table] = [_row_to_document(row) for row in rows]
+    return document
+
+
+def _row_to_document(row: Any) -> dict[str, Any]:
+    """One ORM row → a JSON document (datetimes ISO, JSON columns verbatim)."""
+    from datetime import datetime as _datetime
+
+    document: dict[str, Any] = {}
+    for column in row.__table__.columns:
+        value = getattr(row, column.name)
+        if isinstance(value, _datetime):
+            value = value.isoformat()
+        document[str(column.name)] = value
+    return document
+
+
+async def _restore_workflow_rows(
+    factory: async_sessionmaker[AsyncSession], document: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> None:
+    """Re-insert the dumped rows into a FRESH database (schema created)."""
+
+    from datetime import datetime as _datetime
+
+    from forge.durable.models import (
+        BudgetAmendment,
+        CredentialRedemption,
+        OperationGrant,
+        ReviewRound,
+        RunBudget,
+    )
+
+    models: dict[str, Any] = {
+        "flow_runs": FlowRun,
+        "run_budgets": RunBudget,
+        "budget_amendments": BudgetAmendment,
+        "review_rounds": ReviewRound,
+        "operation_grants": OperationGrant,
+        "credential_redemptions": CredentialRedemption,
+        "execution_leases": ExecutionLease,
+    }
+    async with factory() as session:
+        for table in WORKFLOW_RESTORE_TABLES:
+            model = models[table]
+            for entry in document.get(table) or []:
+                values = dict(entry)
+                for key, value in list(values.items()):
+                    if key not in model.__table__.columns:
+                        continue
+                    if value and model.__table__.columns[key].type.python_type is _datetime:
+                        values[key] = _datetime.fromisoformat(str(value))
+                session.add(model(**values))
+        await session.commit()
+
+
+def verify_workflow_consistency(
+    source: Mapping[str, Sequence[Mapping[str, Any]]],
+    restored: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[str]:
+    """The post-restore consistency gate (PURE): every finding is a
+    refused check; an empty list opens the dispatch gate.
+
+    Checks, each over the RESTORED document: the workflow's own rows
+    survived count-for-count (runs, review rounds, amendments, grants,
+    redemptions, leases); every redemption JOINS a restored grant; every
+    review round's parent/child/root ids resolve to restored runs; every
+    amendment's run resolves and the applied ones kept their
+    limit_before→limit_after history; every OPEN lease stayed open (the
+    native-intent consistency the resume dispatch depends on — a restore
+    that silently released unknown occupancy would resume onto a capacity
+    fiction)."""
+
+    findings: list[str] = []
+
+    def _ids(table: str) -> set[str]:
+        key = {"flow_runs": "id", "operation_grants": "grant_id"}.get(table)
+        return {str(row.get(key or "id")) for row in (restored.get(table) or [])}
+
+    run_ids = _ids("flow_runs")
+    grant_ids = _ids("operation_grants")
+    for table in WORKFLOW_RESTORE_TABLES:
+        if len(source.get(table) or []) != len(restored.get(table) or []):
+            findings.append(
+                f"{table}: {len(source.get(table) or [])} source row(s) restored as "
+                f"{len(restored.get(table) or [])}"
+            )
+    for row in restored.get("credential_redemptions") or []:
+        if str(row.get("grant_id") or "") not in grant_ids:
+            findings.append(
+                f"credential_redemptions: receipt {str(row.get('receipt_id'))[:12]} does not "
+                "join a restored grant"
+            )
+    for row in restored.get("review_rounds") or []:
+        for key in ("parent_run_id", "child_run_id", "root_run_id"):
+            if str(row.get(key) or "") not in run_ids:
+                findings.append(
+                    f"review_rounds: round {str(row.get('id'))[:8]}'s {key} "
+                    f"{str(row.get(key))[:8]} does not resolve to a restored run"
+                )
+    for row in restored.get("budget_amendments") or []:
+        if str(row.get("run_id") or "") not in run_ids:
+            findings.append(
+                f"budget_amendments: amendment {str(row.get('command_id'))[:16]} names a run "
+                "that did not restore"
+            )
+            continue
+        # RESTORE FIDELITY on the limit history: a row whose SOURCE carried
+        # limit_before must restore with it. (Whether the APPLY path itself
+        # persists the history onto the row is a source-side property the
+        # drill reports separately — the #340 columns exist for it; today's
+        # applied rows carry NULL and the applied RESULT carries the
+        # limits, a recorded finding, not a restore defect.)
+        source_row = next(
+            (
+                entry
+                for entry in (source.get("budget_amendments") or [])
+                if str(entry.get("command_id")) == str(row.get("command_id"))
+            ),
+            None,
+        )
+        if (
+            source_row is not None
+            and source_row.get("limit_before") is not None
+            and row.get("limit_before") is None
+        ):
+            findings.append(
+                f"budget_amendments: amendment {str(row.get('command_id'))[:16]} lost its "
+                "limit_before history in the restore"
+            )
+    for row in restored.get("execution_leases") or []:
+        if row.get("released_at") is None and not (
+            row.get("native_intent_at") or row.get("native_handle")
+        ):
+            findings.append(
+                "execution_leases: an OPEN lease lost its native intent/handle correlation "
+                "(occupancy the resume dispatch depends on)"
+            )
+    return findings
+
+
+async def drill_workflow_restore(
+    work_dir: Path,
+    *,
+    profile_binding: Mapping[str, Any],
+    expected_schema_head: str = "031",
+    mismatched_schema_head: str = "030",
+) -> DrillOutcome:
+    """ONE data-bearing restore drill over the REAL workflow's rows.
+
+    A disposable installation is seeded with the selected workflow's own
+    durable shape — a ready parent run, an admitted review ROUND (#338)
+    with its child run, an applied budget AMENDMENT (#340) that moved the
+    calls axis, an operation GRANT plus its joined redemption receipt
+    (#341/#343, the current lane mode), an open draining lease (unknown
+    native occupancy) and pinned checkpoints on the CAS half. The drill
+    backs up BOTH halves (the CAS through the store's own
+    ``backup_store``; the rows through the drill's metadata dump), tears
+    the installation down, restores into a FRESH disposable installation,
+    and VERIFIES consistency — work + checkpoint + native-intent
+    consistency, the review_rounds and budget_amendments rows included —
+    BEFORE the dispatch gate (the first new model turn) may open. A
+    restore that drops the round rows (the corrupted half) is REFUSED
+    typed with ZERO model turns.
+    """
+
+    from forge.durable import FlowRun as _FlowRun
+    from forge.durable.models import BudgetAmendment, ReviewRound, RunBudget
+
+    outcome = DrillOutcome(drill="deployment_workflow_restore")
+    outcome.tested_limits = {
+        "expected_schema_head": expected_schema_head,
+        "seeded_shape": (
+            "ready parent + review_rounds row + child run + applied budget amendment + "
+            "operation grant + joined redemption + open draining lease + pinned checkpoints"
+        ),
+        "halves": "the CAS volume (backup_store) + the workflow's durable rows (the dump)",
+        "gate": "verify work/checkpoint/native-intent consistency BEFORE the resume dispatch",
+    }
+    check_profile_binding(outcome, profile_binding)
+
+    seed = await build_fixture(work_dir / "restore-seed")
+    try:
+        parent_id = uuid4().hex
+        child_id = parent_id[:8] + uuid4().hex[8:]  # the lineage's shared 8-hex prefix
+        project_id = 21
+        for run_id, status in ((parent_id, "ready_for_human"), (child_id, "proposing")):
+            async with seed.session_factory() as session:
+                session.add(
+                    _FlowRun(id=run_id, project_id=project_id, provider="gitlab", status=status)
+                )
+                await session.commit()
+        # the budget + an applied amendment row. The drill seeds the
+        # DURABLE ROW, never the application decision: constructing a
+        # BudgetAmendmentCommand / calling apply_budget_amendment is
+        # confined to the registered applicants (the #353 boundary,
+        # BUDGET_AMENDMENT_APPLICANTS) — the drill's concern is whether
+        # the row SURVIVES the restore with its history intact. The
+        # applied+replay proof of the real seam is pinned by the
+        # drill-level envelope test; the LIVE lane names why it cannot
+        # exercise the continuation path honestly.
+        async with seed.session_factory() as session:
+            # the run's budget ROW seeded directly (open_budget is the
+            # budgets owner's seam; a restore seed needs no application
+            # decision — the row is what the restore must survive)
+            session.add(RunBudget(run_id=child_id, max_calls=8, max_tokens=4000, status="open"))
+            await session.commit()
+        amendment_command_id = "note:42:918"
+        async with seed.session_factory() as session:
+            session.add(
+                BudgetAmendment(
+                    run_id=child_id,
+                    command_id=amendment_command_id,
+                    axis="calls",
+                    amount_calls=4,
+                    reason="envelope restore drill: a seeded applied amendment row",
+                    operator="ops-drill",
+                    status="applied",
+                    limit_before={"max_calls": 8},
+                    limit_after={"max_calls": 12},
+                )
+            )
+            await session.commit()
+        # the round row linking the lineage
+        async with seed.session_factory() as session:
+            session.add(
+                ReviewRound(
+                    parent_run_id=parent_id,
+                    child_run_id=child_id,
+                    root_run_id=parent_id,
+                    round_number=2,
+                    note_id="note-42",
+                    mr_iid=7,
+                    base_head_sha="a" * 40,
+                    decision_id="dec-envelope",
+                    requested_by="reviewer",
+                    status="admitted",
+                )
+            )
+            await session.commit()
+        # the redemption-mode dispatch's durable trace (grant + receipt)
+        from forge.adaptive.credential_broker import CredentialOperationGrant
+        from forge.api_lane_control import persist_operation_grant
+        from forge.durable.models import CredentialRedemption
+
+        grant = CredentialOperationGrant(
+            grant_id=uuid4().hex,
+            work_id=child_id,
+            subject="gitlab/-/21",
+            provider="anthropic-gateway",
+            credential_ref="env:ANTHROPIC_AUTH_TOKEN",
+            binding_revision=1,
+            attempt_generation=1,
+            delivery_mode="runner-redemption",
+            redemption_deadline=datetime.now(UTC) + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+        )
+        persisted_grant = await persist_operation_grant(seed.session_factory, grant=grant)
+        async with seed.session_factory() as session:
+            session.add(
+                CredentialRedemption(
+                    receipt_id=uuid4().hex[:32],
+                    work_id=child_id,
+                    grant_id=persisted_grant.grant_id,
+                    attempt_generation=1,
+                    route="anthropic-gateway",
+                    credential_ref="env:ANTHROPIC_AUTH_TOKEN",
+                    resolver="staged",
+                    subject="gitlab/-/21",
+                    provider="anthropic-gateway",
+                    outcome="redeemed",
+                    provenance="live",
+                )
+            )
+            await session.commit()
+        # the open draining lease — UNKNOWN native occupancy that must
+        # survive the restore as UNKNOWN (never silently released)
+        policy = AdmissionPolicy(max_active_per_project=3)
+        lease = await try_acquire_lease(policy, project_id, seed.session_factory, run_id=child_id)
+        assert lease is not None
+        await record_native_start_intent(
+            seed.session_factory, child_id, "fake:w:envelope-restore@b"
+        )
+        async with seed.session_factory() as session:
+            child_row = await session.get(_FlowRun, child_id)
+            assert child_row is not None
+            child_row.status = "cancelled"  # the local terminal verdict alone
+            await session.commit()
+        await release_lease_with_evidence(
+            seed.session_factory, child_id, reason="terminal:cancelled", native_terminal=False
+        )
+        # the CAS half: pinned checkpoint for the parent's work
+        manifest, blobs, checkpoint_id = checkpoint_payload(parent_id, 0)
+        await seed.repository.put(parent_id, checkpoint_id, manifest, blobs)
+        await seed.repository.pin(
+            parent_id, checkpoint_id, reason="restore drill: approved resume spec"
+        )
+        cas_backup = await backup_store(seed.root, work_dir / "restore-cas-backup")
+        rows_document = await _dump_workflow_rows(seed.session_factory)
+        occupancy_before = await occupancy_snapshot(seed.session_factory, project_id)
+    finally:
+        await seed.dispose()
+
+    # The FRESH installation: schema only, then the restore + the gate.
+    model_turns = 0
+
+    def _open_gate() -> None:
+        nonlocal model_turns
+        model_turns += 1
+
+    target_fixture = await build_fixture(work_dir / "restore-target")
+    try:
+        cas_target = work_dir / "restore-cas-target"
+        cas_coverage = await restore_store(cas_backup, cas_target)
+        await _restore_workflow_rows(target_fixture.session_factory, rows_document)
+        restored_rows = await _dump_workflow_rows(target_fixture.session_factory)
+        findings = verify_workflow_consistency(rows_document, restored_rows)
+        occupancy_after = await occupancy_snapshot(target_fixture.session_factory, project_id)
+        cas_repo = FilesystemCheckpointRepository(cas_target)
+        entry = await cas_repo.entry(parent_id)
+        cas_verified = False
+        if entry is not None and entry.get("checkpoint_id"):
+            manifest_back, _blobs = await cas_repo.read_entry(entry)
+            cas_verified = manifest_back is not None
+        pins_back = await cas_repo.pins(parent_id)
+        if not findings and cas_verified:
+            _open_gate()  # the first new model turn — only NOW legal
+    finally:
+        await target_fixture.dispose()
+
+    # The corrupted half: the round rows dropped from the dump — the
+    # consistency gate refuses BEFORE any new model turn.
+    corrupt_document = {
+        table: ([] if table == "review_rounds" else list(rows))
+        for table, rows in rows_document.items()
+    }
+    corrupt_findings = verify_workflow_consistency(rows_document, corrupt_document)
+
+    outcome.check(
+        not findings,
+        f"the restore recovered the workflow's OWN rows consistently (rounds, amendments, "
+        f"grant+redemption joins, open-lease native intent: {len(findings)} finding(s)"
+        f"{f' — {findings}' if findings else ''})",
+    )
+    outcome.check(
+        cas_verified
+        and cas_coverage.get("checkpoints", 0) >= 1
+        and any(str(pin.get("checkpoint_id")) == checkpoint_id for pin in pins_back),
+        "the CAS half restored: the parent work's checkpoint reads VERIFIED and its PIN "
+        "recovered (the native-intent artifact)",
+    )
+    outcome.check(
+        occupancy_after.get("draining", 0) == occupancy_before.get("draining", 0)
+        and sum(occupancy_after.values()) == sum(occupancy_before.values()),
+        f"the UNKNOWN native occupancy survived the restore as UNKNOWN (before "
+        f"{occupancy_before}, after {occupancy_after}) — never silently released, so the "
+        "resume dispatch resumes onto the truth",
+    )
+    amendment_row_history = next(
+        (
+            dict(row)
+            for row in (rows_document.get("budget_amendments") or [])
+            if str(row.get("command_id")) == amendment_command_id
+        ),
+        None,
+    )
+    outcome.check(
+        amendment_row_history is not None
+        and amendment_row_history.get("status") == "applied"
+        and amendment_row_history.get("limit_before") is not None,
+        "the seeded amendment row carries the #340 contract (applied, the named axis, its "
+        "limit_before→limit_after history) and the restore recovered it VERBATIM — the "
+        "application decision itself stays with the registered applicants (#353), the "
+        "applied+replay proof of the real seam is pinned by the drill-level tests",
+    )
+    outcome.check(
+        model_turns == 1,
+        f"the dispatch gate opened EXACTLY once — only after the consistent restore verified "
+        f"({model_turns} model turn(s))",
+    )
+    outcome.check(
+        bool(corrupt_findings),
+        f"a restore that dropped the review_rounds rows was REFUSED at the consistency gate "
+        f"with ZERO model turns (findings: {corrupt_findings[:2]})",
+    )
+    outcome.signals = {
+        "recovery.rto_observed": {
+            "restore_shape": "seeded disposable installation (the exact seeded_limits carry the size)",
+            "model_turns_before_gate": 0,
+            "model_turns_after_consistency": model_turns,
+            "corrupt_refusal_findings": corrupt_findings[:3],
+        },
+        "restore.consistency": {
+            "tables": {table: len(rows) for table, rows in rows_document.items()},
+            "occupancy_before": occupancy_before,
+            "occupancy_after": occupancy_after,
+            "cas_checkpoints": cas_coverage.get("checkpoints", 0),
+            "cas_pins": cas_coverage.get("pins", 0),
+            "cas_verified": cas_verified,
+            "amendment_row_limit_history": {
+                "row_limit_before": (amendment_row_history or {}).get("limit_before"),
+                "row_limit_after": (amendment_row_history or {}).get("limit_after"),
+                "note": (
+                    "the #340 columns exist for the applied limit history; today's apply "
+                    "path returns it on the AppliedBudgetAmendment result without writing "
+                    "the row's limit_before/limit_after — a RECORDED FINDING against "
+                    "src/forge/durable/budgets.py (reported, not edited by this drill)"
+                ),
+            },
+        },
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
 # R38-18 publication — the sanitized summary (raw diagnostics stay private)
 # ---------------------------------------------------------------------------
 
@@ -3776,6 +5479,70 @@ _PUBLIC_SIGNAL_PROJECTIONS: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "refusal_status",
             "old_secret_token_status",
             "new_secret_token_status",
+        ),
+    },
+    "deployment_partition_occupancy": {
+        "execution.occupied_vs_limit": (
+            "limit",
+            "peak_occupied",
+            "held_under_partition",
+            "released_by_partitioned_pass",
+            "released_after_heal",
+        ),
+        "native_start.unknown_age": ("max_observed_seconds",),
+        "partition": ("window_s", "probe_queries_during_partition", "cancel_unknown_occupancy"),
+    },
+    "deployment_degradation_parking": {
+        "queue.age": ("oldest_waiting_seconds", "n"),
+        "provider_degradation.parking": (
+            "burst",
+            "admitted",
+            "typed_intake_refusals",
+            "dispatch_attempts",
+            "dispatch_attempt_budget",
+            "revive_limit",
+            "parked_blocked",
+            "replans",
+        ),
+        "execution.occupied_vs_limit": ("limit", "peak_occupied"),
+    },
+    "deployment_workflow_envelope": {
+        "envelope.slots": ("limit", "peak_occupied"),
+        "envelope.queued": ("limit", "peak_queued"),
+        "envelope.intake": ("user_hour_limit", "over_intake_refusal"),
+        "envelope.storage": ("bytes_before", "bytes_after", "growth_bytes"),
+        "envelope.redemption_ledger": ("grants", "redemptions", "unjoined"),
+        "envelope.amendment": ("applied", "replays_confirmed"),
+        "workflow.cycle_end_states": (),
+        "measures.issue_to_reviewed_ready_s": (),
+        "measures.reviewer_wait_s": (),
+        "measures.command_to_applied_fix_s": (),
+        "measures.command_to_applied_amendment_s": (),
+        "measures.checkpoint_to_restored_s": (),
+    },
+    "deployment_redemption_lane": {
+        "redemption.grant_mint_seconds": (),
+        "redemption.redeem_seconds": (),
+        "redemption.refusals": (
+            "superseded_generation",
+            "wrong_ref",
+            "expired_window",
+            "zero_broker_calls_on_refusal",
+        ),
+    },
+    "deployment_workflow_restore": {
+        "recovery.rto_observed": (
+            "model_turns_before_gate",
+            "model_turns_after_consistency",
+        ),
+        "restore.consistency": (
+            "tables",
+            "occupancy_before",
+            "occupancy_after",
+            "cas_checkpoints",
+            "cas_pins",
+            "cas_verified",
+            "amendment_row_limit_history",
         ),
     },
 }

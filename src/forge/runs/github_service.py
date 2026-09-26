@@ -64,6 +64,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     ActionLog,
+    AXIS_USD,
+    BudgetAmendmentCommand,
     BudgetLimits,
     BUDGET_EXHAUSTED,
     Controller,
@@ -79,7 +81,9 @@ from forge.durable import (
     SettleDecision,
     StepRun,
     UsageReceipt,
+    apply_budget_amendment,
     as_aware_utc,
+    budget_amendments_for_run,
     budget_block_reason,
     build_source_event_id,
     classify_probe,
@@ -102,6 +106,7 @@ from forge.durable import (
     resolve_budget_limits,
     settle_negative_probe,
     short_run_id,
+    usd_amendment_total,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.durable.claims import current_claim
@@ -6094,10 +6099,21 @@ class GitHubRunService:
         usage receipts; the block binds the decision to the candidate
         sha + tested identity and carries the five-field budget report
         with the reserve visible.
+
+        R40-17 (#353): the leg left behind by #340 is ON the amendment
+        table — the block's amendment ledger is the durable
+        ``budget_amendments`` rows through the ONE shared
+        :func:`forge.adaptive.closing_budget.amendment_ledger_document`
+        projection (the legacy ``top_ups`` view included), and the cap
+        the report checks is the EFFECTIVE cap (the policy cap plus the
+        run's APPLIED usd-axis amendments) — the same application
+        decision the GitLab leg's reviewer continuation consults, never
+        a GitHub-only evidence ledger again.
         """
         from forge.adaptive.closing_budget import (
             CandidateBinding,
             ClosingReservePolicy,
+            amendment_ledger_document,
             closing_budget_report,
             rows_from_durable_receipts,
         )
@@ -6108,12 +6124,12 @@ class GitHubRunService:
                 .scalars()
                 .all()
             )
-            run = await self._get_run(session, run_id)
-            standing = (run.evidence or {}).get("review_budget_block")
-            standing = dict(standing) if isinstance(standing, dict) else {}
+            amendments = await budget_amendments_for_run(session, run_id)
+            amended_usd = await usd_amendment_total(session, run_id)
         policy = ClosingReservePolicy.from_env()
+        effective_cap = policy.cap_usd + amended_usd if policy.cap_usd is not None else None
         report = closing_budget_report(
-            rows_from_durable_receipts(receipts), cap_usd=policy.cap_usd, policy=policy
+            rows_from_durable_receipts(receipts), cap_usd=effective_cap, policy=policy
         )
         budget = report.to_json()
         if budget["closing_reserve_usd"] is None:
@@ -6134,7 +6150,7 @@ class GitHubRunService:
                 f" cover the review (known {budget['known_subtotal_usd']} usd +"
                 f" reserved liability {budget['reserved_liability_usd']} usd vs the"
                 f" {budget['coder_ceiling_usd']} usd coder ceiling) — an explicit,"
-                " auditable top-up is required"
+                " auditable amendment on the limiting axis is required"
             )
         block = {
             "budget_decision": BUDGET_EXHAUSTED,
@@ -6143,11 +6159,11 @@ class GitHubRunService:
                 candidate_sha=candidate_sha, tested_identity=tested_identity
             ).to_json(),
             "released": False,
-            # the applied top-up ledger SURVIVES a re-recorded refusal —
-            # a retried operator command stays a replay across refusal
-            # cycles (the idempotency key is deterministic)
-            "top_ups": list(standing.get("top_ups") or []),
-            "top_up_total_usd": standing.get("top_up_total_usd") or 0.0,
+            # the amendment ledger SURVIVES a re-recorded refusal — the
+            # durable table is the source of truth (a retried command
+            # stays a replay across refusal cycles); the legacy #325 usd
+            # projection rides the SAME rows, never a second ledger.
+            **amendment_ledger_document(amendments),
             "short_reason": short_reason,
             "budget": budget,
         }
@@ -6159,28 +6175,65 @@ class GitHubRunService:
         run_id: str,
         *,
         operator: str,
+        command_id: str = "",
+        axis: str = AXIS_USD,
+        amount: float = 0.0,
+        reason: str = "",
         top_up_usd: float = 0.0,
         top_up_reason: str = "",
     ) -> dict[str, Any]:
-        """The explicit review-only continuation (Q39-06/#325 item 4).
+        """The explicit review-only continuation (Q39-06/#325 item 4,
+        rewired onto the budget amendment mechanism by R40-17/#353).
 
         After an explicit reviewer-leg budget decision, repeat ONLY the
         review of the SAME candidate/tested identity: no coder dispatch,
         no new commits — this path never touches the implementer or
         pushes anything. A moved PR head (or tested identity)
         invalidates the shortcut with the typed ``review_shortcut_stale``
-        and parks the run for the required fresh verification. A top-up
-        (amount + reason) is recorded BEFORE the re-drive and is
-        replay-idempotent. Returns the outcome document.
+        and parks the run for the required fresh verification.
+
+        R40-17 (#353) — the SECOND caller adoption of the ONE
+        application decision: an amendment rides the ORIGINATING NATIVE
+        COMMAND identity (*command_id*) through
+        :func:`forge.durable.budgets.apply_budget_amendment` — the same
+        durable ``budget_amendments`` table the GitLab leg's operator
+        route and reviewer continuation apply through — and the
+        GitHub-local evidence top-up ledger is GONE (removed in this
+        same change). The pinned #325 spelling (``top_up_usd`` /
+        ``top_up_reason``) aliases onto the usd axis with the legacy
+        content-derived key as its command identity — the legacy replay
+        semantics (same amount+reason+operator replays once) preserved
+        exactly; the native spelling names one DISTINCT axis and REQUIRES
+        the command identity. Returns the outcome document.
         """
         from forge.adaptive.closing_budget import (
+            OBSERVABLE_AMENDMENT_APPLIED,
+            OBSERVABLE_AMENDMENT_REPLAYED,
             OBSERVABLE_REVIEW_ONLY_RECOVERY,
             REVIEW_SHORTCUT_STALE,
             BudgetTopUp,
             CandidateBinding,
-            TopUpLedger,
+            amendment_ledger_document,
             review_only_continuation,
         )
+
+        # The pinned #325 spelling aliases onto the axis model: a usd
+        # top-up is a usd-axis amendment whose command identity is the
+        # legacy content-derived key (documented compat — the legacy
+        # ledger's replay semantics, now applied at the table).
+        if top_up_usd and not amount:
+            legacy_reason = reason or top_up_reason
+            axis, amount, reason = AXIS_USD, float(top_up_usd), legacy_reason
+            if not str(command_id or "").strip():
+                try:
+                    command_id = BudgetTopUp(
+                        run_id=run_id,
+                        amount_usd=float(top_up_usd),
+                        reason=str(legacy_reason),
+                        operator=operator,
+                    ).idempotency_key
+                except ValueError:
+                    command_id = ""  # the typed refusal below names the gap
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
@@ -6232,31 +6285,89 @@ class GitHubRunService:
                 )
             return decision.to_json()
 
-        # The explicit, auditable top-up — recorded BEFORE the re-drive,
-        # replay-idempotent by its derived key.
-        ledger = TopUpLedger(block.get("top_ups") or [])
-        if top_up_usd:
-            applied = ledger.apply(
-                BudgetTopUp(
+        # The explicit, auditable amendment — the ONE application
+        # decision (R40-17/#353): keyed by the ORIGINATING NATIVE COMMAND
+        # identity, applied ATOMICALLY to the enforcement resource BEFORE
+        # the re-drive, replay-idempotent by that key. A refused
+        # amendment is recorded typed and the block stays armed (the
+        # review never ran).
+        amendment_outcome: dict[str, Any] | None = None
+        if amount:
+            if not str(command_id or "").strip():
+                return {
+                    "allowed": False,
+                    "reason": "amendment_requires_command_identity",
+                    "detail": (
+                        "a budget amendment rides the originating native command's"
+                        " identity (the note/delivery id) — two identical"
+                        " amount/reason commands are two decisions, a redelivery"
+                        " of one applies once; content identity cannot tell them"
+                        " apart"
+                    ),
+                    "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+                }
+            try:
+                command = BudgetAmendmentCommand(
                     run_id=run_id,
-                    amount_usd=float(top_up_usd),
-                    reason=top_up_reason,
+                    command_id=command_id,
+                    axis=axis,
+                    amount=amount,
+                    reason=reason,
                     operator=operator,
                 )
-            )
+            except ValueError as exc:
+                return {
+                    "allowed": False,
+                    "reason": "amendment_refused",
+                    "detail": str(exc),
+                    "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+                }
+            async with self._session_factory() as session:
+                applied = await apply_budget_amendment(session, command)
+                await session.commit()
+            amendment_outcome = applied.to_json()
             logger.info(
-                "GitHub run %s budget top-up of %s usd by %s (%s) — applied=%s",
+                "GitHub run %s budget amendment %s on axis %s by %s (%s) —"
+                " applied=%s replayed=%s refusal=%s",
                 run_id[:8],
-                applied.top_up.amount_usd,
+                command.command_id,
+                command.axis,
                 operator,
-                applied.top_up.reason,
+                command.reason,
                 applied.applied,
+                applied.replayed,
+                applied.refusal_reason,
             )
+            if applied.replayed:
+                # A redelivery of the SAME command: its amount is already
+                # in — nothing moves a second time — but the command's
+                # continuation (the review re-drive) still proceeds.
+                logger.info(
+                    "GitHub run %s budget amendment %s replayed — applied exactly once",
+                    run_id[:8],
+                    command.command_id,
+                )
+            elif not applied.applied:
+                return {
+                    **decision.to_json(),
+                    "allowed": False,
+                    "reason": "amendment_refused",
+                    "detail": applied.refusal_reason or "the amendment was refused",
+                    "amendment": amendment_outcome,
+                }
+
+        async with self._session_factory() as session:
+            amendments = await budget_amendments_for_run(session, run_id)
+            amended_usd = await usd_amendment_total(session, run_id)
         block = {
             **block,
-            "top_ups": list(ledger.records()),
-            "top_up_total_usd": ledger.total_added_usd(),
-            "released": {"operator": operator, "top_up_usd": ledger.total_added_usd()},
+            **amendment_ledger_document(amendments),
+            "released": {
+                "operator": operator,
+                "command_id": str(command_id or ""),
+                "axis": axis,
+                "top_up_usd": round(amended_usd, 6),
+            },
         }
         await self._merge_run_evidence(run_id, {"review_budget_block": block})
 
@@ -6273,7 +6384,23 @@ class GitHubRunService:
             verified=verified,
             verification_evidence=verification,
         )
-        return decision.to_json()
+        outcome = {
+            **decision.to_json(),
+            "amendment": amendment_outcome,
+            "observables": [
+                name
+                for name, on in (
+                    (OBSERVABLE_AMENDMENT_APPLIED, bool(amendment_outcome)),
+                    (
+                        OBSERVABLE_AMENDMENT_REPLAYED,
+                        bool(amendment_outcome and amendment_outcome.get("replayed")),
+                    ),
+                    (OBSERVABLE_REVIEW_ONLY_RECOVERY, True),
+                )
+                if on
+            ],
+        }
+        return outcome
 
     async def _review_and_ready(
         self,

@@ -31,20 +31,36 @@ from dataclasses import dataclass
 import pytest
 
 from forge.adaptive.closing_budget import (
+    CLOSING_PARTITION_POLICY_VERSION,
     DEFAULT_CLOSING_RESERVE_FRACTION,
+    OBSERVABLE_ACCRUED_UNSETTLED,
+    OBSERVABLE_AMENDMENT_APPLIED,
+    OBSERVABLE_AMENDMENT_REPLAYED,
+    OBSERVABLE_CLOSING_CAPACITY,
     OBSERVABLE_CLOSING_RESERVE,
+    OBSERVABLE_REFUSED_AXIS,
+    OBSERVABLE_RETAINED_LIABILITY,
+    OBSERVABLE_REVIEW_ONLY_CALLS,
     OBSERVABLE_REVIEW_ONLY_RECOVERY,
+    OBSERVABLE_SETTLEMENT_RELEASE,
+    OBSERVABLE_UNBOUNDED_INTERVALS,
+    POLICY_AUTHORITY_TTL_ENV,
     POLICY_CAP_ENV,
     POLICY_FRACTION_ENV,
     POLICY_RESERVE_ENV,
+    REVIEW_SHORTCUT_AUTHORITY_EXPIRED,
     REVIEW_SHORTCUT_STALE,
+    REVIEW_SHORTCUT_UNVERIFIED,
     AppliedTopUp,
     BudgetTopUp,
     CandidateBinding,
+    ClosingPartition,
     ClosingReservePolicy,
     TopUpLedger,
+    amendment_ledger_document,
     coder_cap_check,
     closing_budget_report,
+    closing_partition,
     review_only_continuation,
     rows_from_durable_receipts,
 )
@@ -54,6 +70,7 @@ from forge.adaptive.usage_ingestion import (
     COST_BASIS_PROVIDER_REPORTED,
     IngestedUsageRow,
 )
+from forge.durable.budgets import BudgetLimits
 
 
 def row(
@@ -209,6 +226,74 @@ def test_the_report_names_the_unresolved_upper_bound():
 
 
 # ----------------------------------------------------------------------
+# R40-03 (#339) — finality settles: settled / accrued-unsettled /
+# retained liability separated in the honest report
+# ----------------------------------------------------------------------
+
+
+def test_the_report_separates_settled_accrued_and_retained_liability():
+    """The user-facing report distinguishes exact settled spend,
+    provisional accrued subtotals, and the remaining liability — and
+    renders the new ``budget.*`` observability names as report keys."""
+    policy = ClosingReservePolicy.from_env({POLICY_RESERVE_ENV: "1.00", POLICY_CAP_ENV: "10.0"})
+    rows = [
+        row("exact", cost=0.50, basis=COST_BASIS_PROVIDER_REPORTED),
+        row("partial", cost=0.25, lower=0.25, upper=2.00, final=False),
+        row("unknown", cost=None, lower=0.10, upper=0.40),
+    ]
+    report = closing_budget_report(rows, cap_usd=10.0, policy=policy)
+    document = report.to_json()
+    # settled: FINAL rows' costs only — the partial's 0.25 is NOT settled
+    assert document["settled_usd"] == pytest.approx(0.50)
+    # accrued-unsettled: the streamed subtotal, provisional
+    assert document["accrued_unsettled_usd"] == pytest.approx(0.25)
+    # retained liability: the envelopes (2.00 + 0.40) — the 0.25 rides
+    # INSIDE its envelope, never added on top
+    assert document["retained_liability_usd"] == pytest.approx(2.40)
+    assert document["settlement_release_usd"] == pytest.approx(0.0)
+    assert document["unbounded_intervals"] == 0
+    # the known subtotal stays every known figure (settled + accrued)
+    assert document["known_subtotal_usd"] == pytest.approx(0.75)
+    # the budget.* observability names as report keys
+    assert document[OBSERVABLE_ACCRUED_UNSETTLED.split(".", 1)[1]] == pytest.approx(0.25)
+    assert document[OBSERVABLE_RETAINED_LIABILITY.split(".", 1)[1]] == pytest.approx(2.40)
+    assert document[OBSERVABLE_SETTLEMENT_RELEASE.split(".", 1)[1]] == pytest.approx(0.0)
+    assert document[OBSERVABLE_UNBOUNDED_INTERVALS.split(".", 1)[1]] == 0
+
+
+def test_the_p01_partial_never_releases_the_envelope_in_the_closing_report():
+    """The P01 counterexample through the closing decision: exposure 11
+    against a cap of 10 — the review does not fit while the partial
+    holds its envelope; the settlement at 0.5 releases 2.5 exactly once
+    and the same projection then fits."""
+    policy = ClosingReservePolicy.from_env({POLICY_RESERVE_ENV: "0.60", POLICY_CAP_ENV: "10.0"})
+    held_rows = [
+        row("settled", cost=8.0, basis=COST_BASIS_PROVIDER_REPORTED),
+        row("partial", cost=0.5, lower=0.5, upper=3.0, final=False),
+    ]
+    held = closing_budget_report(held_rows, cap_usd=10.0, policy=policy, projection_usd=1.0)
+    assert held.cap_check["allowed"] is False  # 8 + 3 + 1 = 12 > 10
+    assert held.retained_liability_usd == pytest.approx(3.0)
+    assert held.accrued_unsettled_usd == pytest.approx(0.5)
+    assert held.reserve_intact is False  # exposure 11 ate the reserve
+    assert held.closing_review_fits is False
+
+    settled_rows = [
+        row("settled", cost=8.0, basis=COST_BASIS_PROVIDER_REPORTED),
+        row("partial", cost=0.5, lower=0.5, upper=3.0, final=True),
+    ]
+    settled = closing_budget_report(settled_rows, cap_usd=10.0, policy=policy, projection_usd=1.0)
+    assert settled.cap_check["allowed"] is True  # 8.5 + 1 = 9.5 <= 10
+    assert settled.settled_usd == pytest.approx(8.5)
+    assert settled.retained_liability_usd == pytest.approx(0.0)
+    assert settled.settlement_release_usd == pytest.approx(2.5)
+    document = settled.to_json()
+    assert document[OBSERVABLE_SETTLEMENT_RELEASE.split(".", 1)[1]] == pytest.approx(2.5)
+    assert settled.reserve_intact is True  # 8.5 <= 10 - 0.6
+    assert settled.closing_review_fits is True
+
+
+# ----------------------------------------------------------------------
 # Review-only continuation — zero dispatches, typed staleness
 # ----------------------------------------------------------------------
 
@@ -310,6 +395,177 @@ def test_the_ledger_rebuilds_from_recorded_evidence():
     replay = rebuilt.apply(top_up)
     assert replay.applied is False
     assert replay.total_added_usd == pytest.approx(0.25)
+
+
+# ----------------------------------------------------------------------
+# R40-17 (#353) — the ONE amendment-ledger projection both provider
+# legs compose (the duplicated decision removed)
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AmendmentRow:
+    """The durable ``budget_amendments`` row's shape (duck-typed — the
+    projection reads exactly these attributes)."""
+
+    command_id: str
+    axis: str
+    amount_usd: float | None = None
+    amount_calls: int | None = None
+    amount_tokens: int | None = None
+    amount_wallclock_s: int | None = None
+    reason: str = "recorded"
+    operator: str = ""
+    status: str = "applied"
+    refusal_reason: str | None = None
+    run_id: str = "w"
+
+
+def test_the_amendment_ledger_projects_both_views_of_one_table():
+    """The full audit view carries every command (applied AND refused);
+    the pinned #325 usd view carries only the APPLIED usd rows; the
+    total is the applied usd total — refused never counts."""
+    rows = [
+        _AmendmentRow(
+            command_id="run:continue_review:42:9101",
+            axis="usd",
+            amount_usd=0.50,
+            reason="close the review",
+            operator="human:alice",
+        ),
+        _AmendmentRow(
+            command_id="run:continue_review:42:9102",
+            axis="calls",
+            amount_calls=1,
+            reason="reopen the guard",
+            operator="human:alice",
+        ),
+        _AmendmentRow(
+            command_id="run:continue_review:42:9103",
+            axis="usd",
+            amount_usd=9.0,
+            status="refused",
+            refusal_reason="usd: ...",
+        ),
+    ]
+    document = amendment_ledger_document(rows)
+    assert len(document["amendments"]) == 3  # the audit keeps refusals
+    assert document["amendments"][0]["refusal_reason"] is None
+    assert [t["idempotency_key"] for t in document["top_ups"]] == [
+        "run:continue_review:42:9101"
+    ]  # only APPLIED usd rows ride the legacy view
+    assert document["top_up_total_usd"] == pytest.approx(0.50)  # refused never counts
+
+
+def test_the_amendment_ledger_over_no_rows_is_the_empty_ledger():
+    document = amendment_ledger_document([])
+    assert document == {
+        "amendments": [],
+        "top_ups": [],
+        "top_up_total_usd": 0.0,
+    }
+
+
+# ----------------------------------------------------------------------
+# R40-04 (#340) — the versioned closing partition + the pre-paid-review
+# shortcut guards (authority expiry, missing verification)
+# ----------------------------------------------------------------------
+
+
+def test_the_partition_sizes_each_numeric_axis_under_the_versioned_rule():
+    """v1: ceil(limit × fraction) per LIMITED axis; wall-clock is not
+    partitioned; the share is never the whole axis."""
+    policy = ClosingReservePolicy.from_env({POLICY_RESERVE_ENV: "0.60", POLICY_CAP_ENV: "2.00"})
+    partition = closing_partition(
+        BudgetLimits(max_calls=40, max_tokens=100_000, wallclock_s=1800), policy
+    )
+    assert partition is not None
+    assert partition.policy_version == CLOSING_PARTITION_POLICY_VERSION
+    assert partition.calls == 6  # ceil(40 * 0.15) — the provisional default
+    assert partition.tokens == 15_000  # ceil(100_000 * 0.15)
+    document = partition.to_json()
+    assert document["wallclock_partitioned"] is False  # the stated v1 rule
+    assert document["policy_version"] == CLOSING_PARTITION_POLICY_VERSION
+
+
+def test_the_partition_never_takes_the_whole_axis_or_partitions_units():
+    policy = ClosingReservePolicy.from_env({POLICY_FRACTION_ENV: "0.9", POLICY_CAP_ENV: "10"})
+    tiny = closing_partition(BudgetLimits(max_calls=4, max_tokens=1), policy)
+    assert tiny is not None
+    assert tiny.calls == 3  # min(ceil(4*0.9), 4-1) — never the whole axis
+    assert tiny.tokens is None  # a one-unit axis cannot share
+    unlimited = closing_partition(BudgetLimits(wallclock_s=60), policy)
+    assert unlimited is None  # nothing limited to partition — honest none
+
+
+def test_the_authority_ttl_degrades_to_the_default_never_to_forever():
+    default_env: dict[str, str] = {}
+    policy = ClosingReservePolicy.from_env(default_env)
+    assert policy.authority_ttl_seconds(default_env) > 0  # a documented default
+    tuned_env = {POLICY_AUTHORITY_TTL_ENV: "3600"}
+    tuned = ClosingReservePolicy.from_env(tuned_env)
+    assert tuned.authority_ttl_seconds(tuned_env) == 3600
+    for garbage in ("0", "-5", "not-a-number"):
+        env = {POLICY_AUTHORITY_TTL_ENV: garbage}
+        assert ClosingReservePolicy.from_env(env).authority_ttl_seconds(
+            env
+        ) == policy.authority_ttl_seconds(default_env)
+
+
+def test_an_expired_authority_invalidates_the_shortcut_before_paid_review():
+    from datetime import datetime, timedelta, timezone
+
+    binding = CandidateBinding(candidate_sha="a" * 40, tested_identity="a" * 40)
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    decision = review_only_continuation(
+        budget_decision="budget_exhausted",
+        recorded=binding,
+        current=binding,
+        authority_expires_at=past,
+    )
+    assert decision.allowed is False
+    assert decision.reason == REVIEW_SHORTCUT_AUTHORITY_EXPIRED
+    assert decision.coder_dispatches == 0
+    # a future deadline (and no deadline at all) keeps the shortcut open
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    assert (
+        review_only_continuation(
+            budget_decision="budget_exhausted",
+            recorded=binding,
+            current=binding,
+            authority_expires_at=future,
+        ).allowed
+        is True
+    )
+    assert (
+        review_only_continuation(
+            budget_decision="budget_exhausted", recorded=binding, current=binding
+        ).allowed
+        is True
+    )
+
+
+def test_missing_verification_invalidates_the_shortcut_before_paid_review():
+    binding = CandidateBinding(candidate_sha="a" * 40, tested_identity="a" * 40)
+    decision = review_only_continuation(
+        budget_decision="budget_exhausted", recorded=binding, current=binding, verified=False
+    )
+    assert decision.allowed is False
+    assert decision.reason == REVIEW_SHORTCUT_UNVERIFIED
+    assert "paid review" in decision.detail
+
+
+def test_the_r40_04_observability_names_exist():
+    """The amendment/review-only scope's observables are declared
+    constants — the evidence keys the service renders."""
+    assert OBSERVABLE_AMENDMENT_APPLIED == "budget.amendment_applied"
+    assert OBSERVABLE_AMENDMENT_REPLAYED == "budget.amendment_replayed"
+    assert OBSERVABLE_REFUSED_AXIS == "budget.refused_axis"
+    assert OBSERVABLE_REVIEW_ONLY_CALLS == "delivery.review_only_calls"
+    assert OBSERVABLE_CLOSING_CAPACITY == "budget.closing_capacity"
+    assert ClosingPartition(calls=1, tokens=None).policy_version == (
+        CLOSING_PARTITION_POLICY_VERSION
+    )
 
 
 # ----------------------------------------------------------------------

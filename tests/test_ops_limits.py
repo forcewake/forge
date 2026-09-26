@@ -84,16 +84,24 @@ from forge.adaptive.ops_limits import (
     NATIVE_OCCUPANCY,
     OPS_MEASURE_NAMES,
     RECOVERY_DURATION,
+    RECOVERY_ROUNDS,
+    TIME_TO_SAFE_ACTION,
+    UNRESOLVED_EFFECT_AGE,
     admission_accounting,
     assert_intake_never_slots,
     assert_measures_separate,
     capped_admission_verdict,
     customer_state,
+    delivery_round_block,
     manual_intervention_minutes,
     native_occupancy_measure,
+    ops_limits_read_model,
     ops_measures,
     recovery_duration,
+    recovery_rounds_measure,
     review_budget_distinction,
+    time_to_safe_action_measure,
+    unresolved_effect_age_measure,
 )
 from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.api_operator import operator_subject_scope_token
@@ -1093,3 +1101,295 @@ def test_the_support_agreement_names_its_pending_human_items() -> None:
     assert "excluded" in text.lower()  # the excluded failure domains
     for name in OPS_MEASURE_NAMES:  # the four measures are named, each separately
         assert name in text
+
+
+# ---------------------------------------------------------------------------
+# R40-13 (#349) — the delivery-round read-model arm: the operator.*
+# observability records and the lineage customer state
+# ---------------------------------------------------------------------------
+
+R40_ROUND = {
+    "round_id": "rr-1",
+    "parent_run_id": RUN_A,
+    "child_run_id": RUN_B,
+    "root_run_id": RUN_A,
+    "round_number": 2,
+    "note_id": "918",
+    "base_head_sha": "c" * 40,
+    "decision_id": "corr-1",
+    "status": "dispatched",
+    "status_reason": "",
+    "created_at": "2026-09-25T11:00:00+00:00",
+    "updated_at": "2026-09-25T11:05:00+00:00",
+}
+R40_READY_RUN = {
+    "id": RUN_A,
+    "status": "ready_for_human",
+    "base_sha": "b" * 40,
+    "candidate_shas": ["c" * 40],
+    "plan_digest": "p" * 64,
+    "evidence": {"verification": {"status": "passed", "tested_oid": "c" * 40}},
+    "blocked_reason": "",
+    "cancel_requested": False,
+    "created_at": "2026-09-25T09:00:00+00:00",
+    "updated_at": "2026-09-25T10:00:00+00:00",
+}
+
+
+class TestOperatorObservabilityRecords:
+    def test_recovery_rounds_counts_the_lineage_rounds(self) -> None:
+        record = recovery_rounds_measure({"rounds": [R40_ROUND], "run": R40_READY_RUN})
+
+        assert record["measure"] == RECOVERY_ROUNDS
+        assert record["recorded"] == 1
+        assert record["open"] == 1
+        assert record["newest"] == "round:2:corr-1"
+        assert record["kind"] == "gauge"
+
+    def test_recovery_rounds_reads_the_child_fragment_without_the_table(self) -> None:
+        child_run = {
+            **R40_READY_RUN,
+            "id": RUN_B,
+            "status": "proposing",
+            "candidate_shas": [],
+            "evidence": {
+                "review_round": {
+                    "parent_run_id": RUN_A,
+                    "root_run_id": RUN_A,
+                    "round_number": 2,
+                    "decision_id": "corr-1",
+                }
+            },
+        }
+        record = recovery_rounds_measure({"run": child_run})  # no rounds section
+
+        assert record["coverage"] == "present"
+        assert record["recorded"] == 1
+        assert record["newest"] == "round:2:corr-1"
+
+    def test_recovery_rounds_renders_unknown_never_zero(self) -> None:
+        record = recovery_rounds_measure({"run": R40_READY_RUN})
+
+        assert record["coverage"] == "unknown"
+        assert record["population"] == 0
+        assert "never a confident zero" in record["reason"]
+
+    def test_unresolved_effect_ages_are_per_row_lower_bounds(self) -> None:
+        record = unresolved_effect_age_measure(
+            {
+                "publications": [
+                    {
+                        "operation_key": "op-1",
+                        "status": "dispatched",
+                        "at": "2026-09-25T10:00:00+00:00",
+                    },
+                    {
+                        "operation_key": "op-2",
+                        "status": "committed",
+                        "at": "2026-09-25T09:00:00+00:00",
+                    },
+                    {
+                        "operation_key": "op-3",
+                        "status": "unknown",
+                        "at": "2026-09-25T10:30:00+00:00",
+                    },
+                ]
+            },
+            as_of="2026-09-25T11:00:00+00:00",
+        )
+
+        assert record["measure"] == UNRESOLVED_EFFECT_AGE
+        assert record["unresolved"] == 2  # the committed intent is not unresolved
+        ages = {sample["operation_key"]: sample["age_seconds"] for sample in record["samples"]}
+        assert ages["op-1"] == 3600.0
+        assert ages["op-3"] == 1800.0
+
+    def test_unresolved_effect_age_renders_unknown_when_not_queried(self) -> None:
+        record = unresolved_effect_age_measure({}, as_of="2026-09-25T11:00:00+00:00")
+
+        assert record["coverage"] == "unknown"
+
+    def test_time_to_safe_action_is_a_stated_lower_bound(self) -> None:
+        from forge.adaptive.operator_view import initial_projection
+
+        projection = initial_projection(
+            {
+                "run": R40_READY_RUN,
+                "verifications": [
+                    {
+                        "verification_id": "v1",
+                        "result": "passed",
+                        "candidate_sha": "c" * 40,
+                        "at": "2026-09-25T10:45:00+00:00",
+                    }
+                ],
+            },
+            NOW,
+        )
+        record = time_to_safe_action_measure(projection, as_of="2026-09-25T12:00:00+00:00")
+
+        assert record["measure"] == TIME_TO_SAFE_ACTION
+        assert record["stood_seconds"] is not None
+        assert record["stood_seconds"] >= 0
+        assert "LOWER BOUND" in record["definition"]
+        assert "never invented" in record["definition"]
+
+
+class TestDeliveryRoundBlock:
+    def _projection(self, rows: dict) -> Any:
+        from forge.adaptive.operator_view import initial_projection
+
+        return initial_projection(rows, NOW)
+
+    def test_an_open_round_makes_the_lineage_progressing(self) -> None:
+        rows = {"run": R40_READY_RUN, "rounds": [R40_ROUND]}
+        block = delivery_round_block(
+            rows, projection=self._projection(rows), as_of="2026-09-25T12:00:00+00:00"
+        )
+
+        assert block["round_ref"] == "round:2:corr-1"
+        assert block["superseded_by"] == "round:2:corr-1"
+        lineage = block["lineage_customer_state"]
+        assert lineage["state"] == "progressing"
+        assert "round's child" in lineage["basis"]
+        assert block["stale_action_refusal"] == "operator.stale_action_refusal"
+        assert block["acceptance"]["state"] == "none"  # green CI is not acceptance
+
+    def test_the_read_model_document_carries_the_delivery_round_arm(self) -> None:
+        from forge.adaptive.operator_view import initial_projection
+
+        rows = {
+            "run": R40_READY_RUN,
+            "rounds": [R40_ROUND],
+            "verifications": [
+                {
+                    "verification_id": "v1",
+                    "result": "passed",
+                    "candidate_sha": "c" * 40,
+                    "at": "2026-09-25T10:45:00+00:00",
+                }
+            ],
+        }
+        projection = initial_projection(rows, NOW)
+        document = ops_limits_read_model(
+            rows,
+            occupancy=[],
+            coverage={"run": "present", "rounds": "present"},
+            projection=projection,
+            as_of="2026-09-25T12:00:00+00:00",
+        )
+
+        assert document["delivery_round"]["round_ref"] == "round:2:corr-1"
+        assert document[RECOVERY_ROUNDS]["recorded"] == 1
+        assert UNRESOLVED_EFFECT_AGE in document
+        assert TIME_TO_SAFE_ACTION in document
+        # the four ops.* measures stay separate — the new records are
+        # their own keys, never blended into the measures document
+        assert set(document["measures"]) - {"schema", "as_of", "separation"} == set(
+            OPS_MEASURE_NAMES
+        )
+
+
+class TestQueueAgeMeasure:
+    """R40-15 (#351): ``operator.queue_age`` — the sustained-queue-age
+    alert's observable, over the QUEUED population only (the #334
+    separate population; a queue age is never a slots claim)."""
+
+    def test_queued_ages_are_per_run_with_the_oldest_named(self) -> None:
+        from forge.adaptive.ops_limits import QUEUE_AGE, queue_age_measure
+
+        rows = {
+            "runs": [
+                {
+                    "run_id": "r-queued-old",
+                    "status": "waiting_harness",
+                    "created_at": "2026-09-26T10:00:00+00:00",
+                },
+                {
+                    "run_id": "r-queued-new",
+                    "status": "waiting_ci",
+                    "created_at": "2026-09-26T11:50:00+00:00",
+                },
+                # NOT the queued population — never sampled
+                {
+                    "run_id": "r-executing",
+                    "status": "executing",
+                    "created_at": "2026-09-26T09:00:00+00:00",
+                },
+                {
+                    "run_id": "r-terminal",
+                    "status": "ready_for_human",
+                    "created_at": "2026-09-26T09:30:00+00:00",
+                },
+            ]
+        }
+        record = queue_age_measure(rows, as_of="2026-09-26T12:00:00+00:00")
+        assert record["measure"] == QUEUE_AGE
+        assert record["population"] == 2
+        assert record["queued"] == 2
+        assert record["oldest_seconds"] == 7200.0
+        assert {sample["run_id"] for sample in record["samples"]} == {
+            "r-queued-old",
+            "r-queued-new",
+        }
+        # the separation sentence travels with the record
+        assert "SEPARATE" in record["definition"]
+
+    def test_an_unreadable_clock_is_counted_never_synthesized(self) -> None:
+        from forge.adaptive.ops_limits import queue_age_measure
+
+        rows = {"runs": [{"run_id": "r-x", "status": "planning", "created_at": ""}]}
+        record = queue_age_measure(rows, as_of="2026-09-26T12:00:00+00:00")
+        assert record["queued"] == 1
+        assert record["oldest_seconds"] is None
+        assert record["ages_unknown"] == 1
+
+    def test_an_unqueried_runs_authority_renders_unknown_never_empty(self) -> None:
+        from forge.adaptive.ops_limits import QUEUE_AGE, queue_age_measure
+
+        record = queue_age_measure({}, as_of="2026-09-26T12:00:00+00:00")
+        assert record["measure"] == QUEUE_AGE
+        assert record["coverage"] == "unknown"
+        assert record["population"] == 0
+        assert "never a confident empty queue" in record["reason"]
+
+    def test_the_read_model_carries_the_queue_age_record(self) -> None:
+        from forge.adaptive.operator_view import initial_projection
+        from forge.adaptive.ops_limits import (
+            QUEUE_AGE,
+            ops_limits_read_model,
+        )
+
+        rows = {
+            "run": R40_READY_RUN,
+            "runs": [
+                {
+                    "run_id": "r-q",
+                    "status": "waiting_harness",
+                    "created_at": "2026-09-26T10:00:00+00:00",
+                }
+            ],
+        }
+        projection = initial_projection(
+            {
+                "run": R40_READY_RUN,
+                "verifications": [
+                    {
+                        "verification_id": "v1",
+                        "result": "passed",
+                        "candidate_sha": "c" * 40,
+                        "at": "2026-09-25T10:45:00+00:00",
+                    }
+                ],
+            },
+            NOW,
+        )
+        document = ops_limits_read_model(
+            rows,
+            occupancy=[],
+            coverage={"run": "present", "runs": "present"},
+            projection=projection,
+            as_of="2026-09-26T12:00:00+00:00",
+        )
+        assert document[QUEUE_AGE]["queued"] == 1
+        assert document[QUEUE_AGE]["coverage"] == "present"

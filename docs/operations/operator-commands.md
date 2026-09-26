@@ -9,7 +9,11 @@ note is never a trigger or an approval.
 
 Commands live on the run's subject. `/security` is the one exception: it is
 MR/PR-neutral by contract and also accepted on merge-request and pull-
-request notes (triage targets MRs, issues and PRs).
+request notes (triage targets MRs, issues and PRs). The review-feedback
+verbs (`/fix`, `/ask`) are the second exception, in the other direction:
+they are **MR-discussion-bound** — a reviewer comments on the Draft MR the
+candidate opened — and currently **GitLab-only** (see
+[Review feedback on the Draft MR](#review-feedback-on-the-draft-mr-gitlab)).
 
 ## The command table
 
@@ -23,6 +27,8 @@ request notes (triage targets MRs, issues and PRs).
 | `/why-blocked [run-id]` | **Read-only** explanation of a terminal/blocked cause: the parked reason, its transient/fatal classification, and the honest revive/retry verdict — quoting the SAME rejection table `/retry` enforces | None — read-only, as `/status` | All three |
 | `/reconcile <run-id>` | Drives the publication-intent recovery pass explicitly: probe → adopt / report duplicate / report unknown with manual instruction. Refuses runs with no publication intent — revival is `/retry`'s job, not this command's | Approver list only (it is the one mutating R29 command) | All three |
 | `/security` | Runs the durable triage pass over security findings for the subject; the AI verdict is a SUGGESTION (`suggested_verdict`) | Confirming/rejecting a suggestion requires a triager (`FORGE_SECURITY_TRIAGERS`); `FORGE_SECURITY_AUTO_ACCEPT=true` is the explicit opt-out of that human confirm — default OFF | Issue/MR/PR-neutral on all three |
+| `/fix <bounded description>` | Review feedback on the Draft MR (GitLab only, behind `FORGE_REVIEW_FEEDBACK_ENABLED`): classifies against the frozen write scope — every explicitly claimed path (backticked) inside it stages a bounded input revision through the EXISTING human gate; a human `/approve-revision` activates it and the reconciler's registered correction pass re-drives the run through the repair edge with the reviewer's text in the executor brief | Approver list only (the same authority as `/go`); unauthorized, deleted-discussion, conflicting, stale-head and closed-window cases are typed refusals with an operator-visible MR reply | GitLab MR note only |
+| `/ask <question>` | Review feedback, clarification class: a durable clarification record + a reply routed to the approvers — **no coding attempt, no coder reservation, no dispatch** (reviewer-only recovery consumes no implementation budget) | Approver list only, like `/fix` | GitLab MR note only |
 
 Approval authority is **connection-scoped** (ADR-0018 §3): GitHub reads
 `FORGE_GITHUB_APPROVERS` and Azure DevOps `FORGE_AZDO_APPROVERS` (empty →
@@ -31,12 +37,14 @@ username can never approve (or spend on) a GitHub run, and vice versa.
 
 ## Read-only vs mutating
 
-- **Read-only:** `/status`, `/why-blocked`. No transitions, no model calls,
-  no provider effects — the reply note itself is the only journaled write.
+- **Read-only:** `/status`, `/why-blocked`, and `/ask` (a clarification record
+  plus its reply — no transitions, no model calls, no coder reservation, no
+  dispatch). The reply note itself is the only journaled write.
 - **Mutating:** everything else. `/implement` spends model budget (hence
   the pre-spend admission gate, ADR-0018 §3); `/go` consumes a one-shot
   gate; `/cancel` revokes a publication grant; `/retry` and `/reconcile`
-  re-drive durable legs. Every external write stays intent-first in
+  re-drive durable legs; `/fix` stages an input revision behind the human
+  approval gate. Every external write stays intent-first in
   `action_log` (ADR-0005).
 
 ## The `forge` label (GitHub)
@@ -106,6 +114,49 @@ The rejection table (`/why-blocked` quotes the same one):
   with a note naming the successor. A `ready_for_human` predecessor's PR is
   the live deliverable and is never touched. Best-effort: one stale PR that
   cannot be closed is logged, never breaks the successor.
+
+## Review feedback on the Draft MR (GitLab)
+
+A reviewer reads the candidate and names an edit in a Draft-MR discussion. The
+surface is wired end to end (R40-01 / #337) behind ONE capability flag:
+
+- **`FORGE_REVIEW_FEEDBACK_ENABLED`** (default **OFF**). With the flag off the
+  GitLab ingress does not parse `/fix` or `/ask` at all — zero routing, the
+  classic workflow byte for byte (the `FORGE_ADAPTIVE_COMMANDS_ENABLED`
+  pattern). GitHub and Azure DevOps never parse the verbs; the capability
+  manifest (`forge doctor --capabilities`, row `operator-commands/review-feedback`)
+  reports the surface as wired for the GitLab MR-note profile only.
+- **The ingress**: a token-authenticated GitLab MR note with `/fix …` or
+  `/ask …` travels the SAME durable run-command path as every note command —
+  inbox row + scheduled step committed in ONE transaction, the 202 answered
+  only after the commit (ADR-0017). The logical request identity is the NOTE
+  (`(connection, project.id, mr.iid, note.id)` — a GitLab note id is unique
+  inside a project); dedup runs at TWO layers: the per-delivery
+  `X-Gitlab-Event-UUID` at the ingress (exact network replays) and the inbox
+  unique index over the note identity (manual redeliveries, worker-restart
+  replays). One logical note ⇒ one request, one journaled reply, one revision
+  decision id, at most one authorized correction start.
+- **The refusal posture**: a malformed verb (`/fix` with no description) is
+  answered **2xx with a typed payload** (`feedback: refused`,
+  `refusal_reason: malformed_feedback_command`) — never a 4xx, because GitLab
+  auto-disables a webhook after 4 consecutive failures (24 h backoff,
+  project-wide). Unauthorized reviewer, foreign-repository MR and the typed
+  lifecycle refusals all leave the run untouched: no revision activation, no
+  pipeline dispatch.
+- **The correction cycle**: an in-scope `/fix` stages through the EXISTING
+  approval route; `/approve-revision` (the adaptive verb) activates it; the
+  INSTALLED periodic reconciler's registered correction pass re-drives the run
+  through the repair edge — head-fenced (`stale_head` preserves human edits),
+  scope-fenced (out-of-scope is a material proposal, never a permission
+  expansion). The pass is also the recovery path when a delivery is lost:
+  discovery of requests lives in the ingress/step path, authorization to start
+  an attempt lives with the human approval.
+- **The bot never merges and never resolves the discussion** — the reviewer's
+  resolve is the human decision that gates readiness.
+
+Full trace: `tests/production_entry/test_feedback_ingress.py`
+(ASGI ingress → durable inbox → restarted worker → installed reconciler).
+Design doc: `docs/evaluation/2026-09-25-review-feedback/README.md`.
 
 ## Honest gaps
 

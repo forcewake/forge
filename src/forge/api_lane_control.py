@@ -109,8 +109,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -132,6 +134,15 @@ __all__ = [
     "LEGACY_CREDENTIAL_DEADLINE_ENV",
     "REDEMPTION_TTL_ENV",
     "DEFAULT_REDEMPTION_TTL_SECONDS",
+    "AUTHORITY_VERSION_CONFLICT_EVENT",
+    "BINDING_REVISION_MISMATCH_EVENT",
+    "GRANT_CREATE_CONFLICT_EVENT",
+    "GRANT_INVALID_FIELD_EVENT",
+    "GRANT_PROJECTION_LAG_EVENT",
+    "GRANT_REPLAYED_EVENT",
+    "OPERATION_GRANT_CAS_ATTEMPTS",
+    "REDEMPTION_LATENCY_EVENT",
+    "REDEMPTION_REFUSED_EVENT",
     "LaneAuthorityUnavailable",
     "LegacyWindow",
     "LegacyWindowInvalid",
@@ -1099,34 +1110,323 @@ async def _record_redemption_audit(
         ) from exc
 
 
+#: How many CAS rounds the grant authority row / evidence projection
+#: attempts before refusing (a busy authority or evidence document under
+#: continuous concurrent writes; the refusal is fail-closed — the caller
+#: parks the run, so a lane never boots against an authorization whose
+#: keyed row or projection could not be made consistent).
+OPERATION_GRANT_CAS_ATTEMPTS: Final = 5
+
+#: Observability labels (R40-05): the grant-authority seam's events.
+GRANT_CREATE_CONFLICT_EVENT: Final = "credential.grant_create_conflict"
+GRANT_REPLAYED_EVENT: Final = "credential.grant_replayed"
+GRANT_PROJECTION_LAG_EVENT: Final = "credential.grant_projection_lag"
+AUTHORITY_VERSION_CONFLICT_EVENT: Final = "authority.version_conflict"
+#: Observability labels (R40-06/#342): the redemption identity events.
+GRANT_INVALID_FIELD_EVENT: Final = "credential.grant_invalid_field"
+BINDING_REVISION_MISMATCH_EVENT: Final = "credential.binding_revision_mismatch"
+REDEMPTION_REFUSED_EVENT: Final = "credential.redemption_refused"
+REDEMPTION_LATENCY_EVENT: Final = "credential.redemption_latency"
+
+
 async def persist_operation_grant(session_factory: Any, *, grant: Any) -> Any:
-    """Persist the dispatch's operation grant into the run evidence
-    (Q39-01/#320) — idempotently, BEFORE the provider call.
+    """Persist the dispatch's operation grant — idempotently, BEFORE the
+    provider call (Q39-01/#320; R40-05/#341 makes the write safe).
 
-    The grant lives under ``credential_operation_grants`` keyed by
-    attempt+route; :func:`forge.adaptive.credential_broker.
-    merge_operation_grant` keeps the EXISTING document when this
-    attempt+route already authorized the SAME ref (a re-dispatch neither
-    widens nor re-anchors the redemption window), so the returned
-    EFFECTIVE grant is the one a redemption under this attempt will
-    load. Raises :class:`LaneAuthorityUnavailable` when the run row
-    cannot be read or written — the dispatch caller parks the run: a
-    lane must never boot able to dial a redemption endpoint that would
-    refuse it for a grant nobody persisted.
+    ONE transactional grant authority: the ``operation_grants`` row
+    UNIQUE per canonical (work, attempt, route) is the commit point —
+    creation races collapse at the index (``INSERT ... ON CONFLICT DO
+    NOTHING``, then the standing row decides), so every contender
+    returns the COMMITTED effective grant, never its own locally minted
+    object. An exact replay keeps the FIRST authorized grant id and
+    ABSOLUTE deadline (the window never re-anchors); a rotation (a
+    different credential ref at the same key) replaces the document
+    through a conditional UPDATE guarded by the row the writer judged —
+    the broker's :func:`forge.adaptive.credential_broker.
+    merge_operation_grant` rule, applied authority-side. A CORRUPT
+    persisted document and a REVOKED key are typed failures, never
+    silent replacements with a fresh window.
+
+    The ``credential_operation_grants`` run-evidence map is a DERIVED
+    PROJECTION of the authority, rewritten through a targeted
+    compare-and-swap that touches ONLY that key — a concurrent
+    checkpoint / native-handle / review write between the projection's
+    read and write is PRESERVED, never lost to the grant (the old
+    whole-document overwrite was exactly that loss, review b521e1a
+    R40-05/P02). Raises :class:`LaneAuthorityUnavailable` when the run
+    row cannot be read or written, or the authority/projection cannot
+    win its CAS — the dispatch caller parks the run: zero native
+    starts, zero credential returns under an authorization nobody could
+    persist.
     """
-    from forge.adaptive.credential_broker import merge_operation_grant
-    from forge.durable.models import FlowRun
+    from sqlalchemy import select, update
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    async with session_factory() as session:
-        run = await session.get(FlowRun, grant.work_id)
-        if run is None:
-            raise LaneAuthorityUnavailable(
-                f"work {grant.work_id!r} is unknown — the operation grant cannot be persisted"
+    from forge.adaptive.credential_broker import (
+        EVIDENCE_OPERATION_GRANTS_KEY,
+        CredentialOperationGrant,
+        CredentialRefusal,
+        merge_operation_grant,
+    )
+    from forge.durable.models import FlowRun, OperationGrant
+
+    effective: Any = None
+    for round_no in range(1, OPERATION_GRANT_CAS_ATTEMPTS + 1):
+        async with session_factory() as session:
+            run = await session.get(FlowRun, grant.work_id)
+            if run is None:
+                raise LaneAuthorityUnavailable(
+                    f"work {grant.work_id!r} is unknown — the operation grant cannot be persisted"
+                )
+            standing = (
+                await session.execute(
+                    select(OperationGrant).where(
+                        OperationGrant.work_id == grant.work_id,
+                        OperationGrant.attempt_generation == int(grant.attempt_generation),
+                        OperationGrant.provider == grant.provider,
+                    )
+                )
+            ).scalar_one_or_none()
+            if standing is None:
+                # No keyed row yet: the candidate authority is decided by
+                # the broker's merge rule over the live evidence — a
+                # pre-029 same-ref evidence grant is ADOPTED (its window
+                # stands; the upgrade is a no-op for in-flight attempts),
+                # a corrupt legacy document is replaced (the #320 rule).
+                _, effective = merge_operation_grant(dict(run.evidence or {}), grant)
+                inserted = await session.execute(
+                    pg_insert(OperationGrant)
+                    .values(
+                        work_id=effective.work_id,
+                        attempt_generation=int(effective.attempt_generation),
+                        provider=effective.provider,
+                        grant_id=effective.grant_id,
+                        credential_ref=effective.credential_ref,
+                        document=effective.as_document(),
+                        redemption_deadline=effective.redemption_deadline,
+                        status="active",
+                    )
+                    # The unique index IS the creation lock: two workers
+                    # minting the same allowed operation collapse onto the
+                    # FIRST committed row (portable across PostgreSQL and
+                    # SQLite, the #322 dialect-insert pattern).
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            OperationGrant.work_id,
+                            OperationGrant.attempt_generation,
+                            OperationGrant.provider,
+                        ]
+                    )
+                )
+                if inserted.rowcount == 1:  # type: ignore[attr-defined]
+                    await session.commit()
+                    break
+                logger.info(
+                    "%s: work %s attempt %d route %s lost the grant-create race to a "
+                    "concurrent creator — the committed keyed row decides",
+                    GRANT_CREATE_CONFLICT_EVENT,
+                    grant.work_id[:8],
+                    int(grant.attempt_generation),
+                    grant.provider,
+                )
+                await session.rollback()
+                continue
+            # The keyed row EXISTS: it is the authority, and recovery is
+            # TYPED — not-created / committed / revoked / corrupt are
+            # distinguished, never papered over.
+            try:
+                standing_grant = CredentialOperationGrant.from_document(
+                    dict(standing.document or {})
+                )
+            except CredentialRefusal as exc:
+                raise LaneAuthorityUnavailable(
+                    f"the persisted operation grant for work {grant.work_id!r} attempt "
+                    f"{int(grant.attempt_generation)} route {grant.provider!r} is corrupt "
+                    f"({exc.reason}) — a corrupt authorization is never silently replaced "
+                    "with a fresh window"
+                ) from exc
+            if standing.status == "revoked":
+                raise LaneAuthorityUnavailable(
+                    f"the operation grant key (work {grant.work_id!r}, attempt "
+                    f"{int(grant.attempt_generation)}, route {grant.provider!r}) is "
+                    f"revoked — a revoked authorization is never resurrected by a "
+                    "re-dispatch"
+                )
+            # The merge oracle over the STANDING authority document: same
+            # ref keeps the first grant (replay), a different ref
+            # replaces it (rotation).
+            _, effective = merge_operation_grant(
+                {
+                    EVIDENCE_OPERATION_GRANTS_KEY: {
+                        standing_grant.key(): standing_grant.as_document()
+                    }
+                },
+                grant,
             )
-        merged, effective = merge_operation_grant(dict(run.evidence or {}), grant)
-        run.evidence = merged
-        await session.commit()
-        return effective
+            if effective.grant_id == standing_grant.grant_id:
+                await session.commit()  # read-only round: the first window stands
+                logger.info(
+                    "%s: work %s attempt %d route %s replayed grant %s — the first "
+                    "authorized deadline is unchanged",
+                    GRANT_REPLAYED_EVENT,
+                    grant.work_id[:8],
+                    int(grant.attempt_generation),
+                    grant.provider,
+                    effective.grant_id[:8],
+                )
+                break
+            rotated = await session.execute(
+                update(OperationGrant)
+                .where(
+                    OperationGrant.id == standing.id,
+                    # Optimistic guard: the row THIS writer judged — a
+                    # concurrent rotation that already moved the row makes
+                    # the compare fail and the round re-reads.
+                    OperationGrant.grant_id == standing_grant.grant_id,
+                )
+                .values(
+                    grant_id=effective.grant_id,
+                    credential_ref=effective.credential_ref,
+                    document=effective.as_document(),
+                    redemption_deadline=effective.redemption_deadline,
+                    status="active",
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if rotated.rowcount == 1:  # type: ignore[attr-defined]
+                await session.commit()
+                break
+            logger.warning(
+                "%s: the operation-grant authority row for work %s attempt %d route %s "
+                "moved under a concurrent rotation (round %s/%s) — re-reading",
+                AUTHORITY_VERSION_CONFLICT_EVENT,
+                grant.work_id[:8],
+                int(grant.attempt_generation),
+                grant.provider,
+                round_no,
+                OPERATION_GRANT_CAS_ATTEMPTS,
+            )
+            await session.rollback()
+    else:
+        raise LaneAuthorityUnavailable(
+            f"the operation grant for work {grant.work_id!r} attempt "
+            f"{int(grant.attempt_generation)} route {grant.provider!r} could not commit "
+            f"its keyed authority row within {OPERATION_GRANT_CAS_ATTEMPTS} rounds — a "
+            "concurrent creator kept the key busy; the dispatch is parked"
+        )
+    await _project_operation_grant(session_factory, effective)
+    return effective
+
+
+async def _project_operation_grant(session_factory: Any, effective: Any) -> None:
+    """Project the keyed grant authority into the run evidence — a
+    TARGETED, CAS-guarded merge of ONLY the ``credential_operation_grants``
+    key, DERIVED from the CURRENT authority row.
+
+    Every CAS round re-reads the authority row beside the evidence text:
+    the document placed under the key is what the keyed row holds NOW,
+    never merely the caller's locally-effective object — a rotation that
+    committed while this projection was in flight is reflected, not
+    reverted (two racing projections converge on the row, and the
+    projection can never end up AHEAD-divergent from the authority it
+    derives from). The write lands only when the stored evidence TEXT
+    still equals the text this writer read — a concurrent evidence
+    writer (native handle, checkpoint, continuation, review) makes the
+    compare fail and the projection re-reads and retries, so nobody's
+    evidence is ever lost to the grant write. A projection that cannot
+    win within :data:`OPERATION_GRANT_CAS_ATTEMPTS` rounds refuses the
+    persistence (:class:`LaneAuthorityUnavailable`) even though the
+    keyed authority row stands: the dispatch parks, and a replay
+    converges the projection onto the standing grant.
+    """
+    from sqlalchemy import String, bindparam, cast, select, update
+
+    from forge.adaptive.credential_broker import (
+        EVIDENCE_OPERATION_GRANTS_KEY,
+        CredentialOperationGrant,
+        CredentialRefusal,
+    )
+    from forge.durable.models import FlowRun, OperationGrant
+
+    for attempt in range(1, OPERATION_GRANT_CAS_ATTEMPTS + 1):
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(FlowRun.id, cast(FlowRun.evidence, String).label("raw")).where(
+                        FlowRun.id == effective.work_id
+                    )
+                )
+            ).first()
+            if row is None:
+                raise LaneAuthorityUnavailable(
+                    f"work {effective.work_id!r} disappeared before the operation-grant projection"
+                )
+            standing = (
+                await session.execute(
+                    select(OperationGrant).where(
+                        OperationGrant.work_id == effective.work_id,
+                        OperationGrant.attempt_generation == int(effective.attempt_generation),
+                        OperationGrant.provider == effective.provider,
+                    )
+                )
+            ).scalar_one_or_none()
+            if standing is None:  # pragma: no cover — vanished mid-projection
+                raise LaneAuthorityUnavailable(
+                    f"the keyed operation-grant row for work {effective.work_id!r} "
+                    f"attempt {int(effective.attempt_generation)} route "
+                    f"{effective.provider!r} vanished before its projection"
+                )
+            try:
+                current = CredentialOperationGrant.from_document(dict(standing.document or {}))
+            except CredentialRefusal as exc:
+                raise LaneAuthorityUnavailable(
+                    f"the persisted operation grant for work {effective.work_id!r} attempt "
+                    f"{int(effective.attempt_generation)} route {effective.provider!r} is "
+                    f"corrupt ({exc.reason}) — a corrupt authorization is never projected "
+                    "nor silently replaced with a fresh window"
+                ) from exc
+            old_raw: str | None = row.raw
+            evidence: dict[str, Any] = (
+                json.loads(old_raw) if isinstance(old_raw, str) and old_raw else {}
+            )
+            if not isinstance(evidence, dict):  # pragma: no cover — corrupt document
+                raise LaneAuthorityUnavailable(
+                    f"work {effective.work_id!r} carries a non-object evidence document — "
+                    "the grant projection refuses to overwrite it"
+                )
+            grants = dict(evidence.get(EVIDENCE_OPERATION_GRANTS_KEY) or {})
+            grants[current.key()] = current.as_document()
+            projected = dict(evidence)
+            projected[EVIDENCE_OPERATION_GRANTS_KEY] = grants
+            guard = (
+                cast(FlowRun.evidence, String) == bindparam("raw_text", old_raw)
+                if old_raw is not None
+                else FlowRun.evidence.is_(None)
+            )
+            won = await session.execute(
+                update(FlowRun)
+                .where(FlowRun.id == effective.work_id, guard)
+                .values(evidence=projected)
+                .execution_options(synchronize_session=False)
+            )
+            if won.rowcount == 1:  # type: ignore[attr-defined]
+                await session.commit()
+                return
+            await session.rollback()
+            logger.warning(
+                "%s: the grant projection for work %s lost round %s/%s to a concurrent "
+                "evidence writer — re-reading and retrying",
+                GRANT_PROJECTION_LAG_EVENT,
+                effective.work_id,
+                attempt,
+                OPERATION_GRANT_CAS_ATTEMPTS,
+            )
+    raise LaneAuthorityUnavailable(
+        f"the operation-grant projection for work {effective.work_id!r} could not win "
+        f"its CAS within {OPERATION_GRANT_CAS_ATTEMPTS} rounds — a concurrent writer "
+        "kept the evidence document busy; the dispatch is parked (the keyed grant row "
+        "stands and a replay converges the projection)"
+    )
 
 
 def _redemption_refusal(reason: str, detail: str, *, work_id: str = "") -> HTTPException:
@@ -1139,6 +1439,72 @@ def _redemption_refusal(reason: str, detail: str, *, work_id: str = "") -> HTTPE
     return HTTPException(status_code=403, detail=f"{reason}: {detail}")
 
 
+def _grant_identity_refusal(exc: Any, *, work_id: str) -> HTTPException:
+    """A failed COMPLETE-identity validation (R40-06/#342) — the typed
+    403 for ``grant_invalid_field`` / ``operation_grant_invalid``, with
+    the observability event the refusal's own detail names (default
+    ``credential.grant_invalid_field``). Refs only, never a value."""
+    event = str(exc.detail.get("observability") or GRANT_INVALID_FIELD_EVENT)
+    field = str(exc.detail.get("field") or "")
+    logger.warning(
+        "%s reason=%s field=%s work=%s the persisted grant failed its identity "
+        "validation BEFORE any broker invocation",
+        event,
+        exc.reason,
+        field,
+        work_id[:8],
+    )
+    return _redemption_refusal(exc.reason, str(exc.detail), work_id=work_id)
+
+
+def _row_instant(moment: Any) -> datetime:
+    """One keyed-row datetime normalized to UTC (SQLite stores naive)."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _assert_grant_row_consistency(row: Any, grant: Any) -> None:
+    """KEY CONSISTENCY (R40-06/#342): the authority row's keyed columns
+    must say exactly what the document inside it says — the row IS the
+    authority, so a document that diverges from its own key columns is a
+    tampering signal, typed ``grant_invalid_field`` (field
+    ``authority_row.<name>``), never a pass on either half."""
+    from forge.adaptive.credential_broker import CredentialRefusal
+
+    expected = {
+        "grant_id": grant.grant_id,
+        "credential_ref": grant.credential_ref,
+        "attempt_generation": int(grant.attempt_generation),
+        "provider": grant.provider,
+        "redemption_deadline": grant.redemption_deadline.isoformat(),
+    }
+    found = {
+        "grant_id": str(row.grant_id or ""),
+        "credential_ref": str(row.credential_ref or ""),
+        "attempt_generation": int(row.attempt_generation),
+        "provider": str(row.provider or ""),
+        "redemption_deadline": _row_instant(row.redemption_deadline).isoformat(),
+    }
+    for name, want in expected.items():
+        got = found[name]
+        if got != want:
+            raise CredentialRefusal(
+                "grant_invalid_field",
+                {
+                    "observability": GRANT_INVALID_FIELD_EVENT,
+                    "field": f"authority_row.{name}",
+                    "grant_id": grant.grant_id[:16],
+                    "expected": str(want)[:64],
+                    "found": str(got)[:64],
+                    "instruction": (
+                        "the keyed operation-grant row and the document inside it "
+                        f"disagree on {name!r} — repair the authority row (the "
+                        "document is re-projected from it) before redeeming; a "
+                        "divergent authorization is never redeemed against"
+                    ),
+                },
+            )
+
+
 def _run_is_terminal(status: Any) -> bool:
     """Whether the run's status is terminal (ADR-0004: no outgoing
     transitions) — a finished attempt redeems nothing (Q39-01)."""
@@ -1148,17 +1514,25 @@ def _run_is_terminal(status: Any) -> bool:
 
 
 async def _authorize_operation_grant(
+    session_factory: Any,
     run: Any,
     *,
     work_id: str,
     generation: int | None,
     provider: str,
     credential_ref: str,
-) -> Any:
-    """Load and judge the attempt's persisted OPERATION GRANT (Q39-01).
+    subject_id: str = "",
+) -> tuple[Any, bool]:
+    """Load and judge the attempt's persisted OPERATION GRANT (Q39-01;
+    the identity validation and the authority-row home are R40-06/#342).
 
     THE authorization decision, in fail-closed order, every arm ZERO
-    broker calls:
+    broker calls. The grant's ONE authoritative home since #341 is the
+    keyed ``operation_grants`` row (the run-evidence map is its DERIVED
+    projection, consulted only for a pre-029 in-flight attempt that
+    holds no row yet): the standing row's FULL document is what this
+    ladder loads, validates and returns — an old in-memory or projected
+    copy never speaks for it.
 
     - ``attempt_terminal`` — the run reached a terminal status; a
       finished attempt redeems nothing, no matter what it holds;
@@ -1166,6 +1540,16 @@ async def _authorize_operation_grant(
       the REQUESTED provider route: the sibling binding of the same
       project is exactly the confused-deputy shape this closes (project
       membership ≠ operation authorization);
+    - ``grant_revoked`` — the keyed authority row's explicit operator
+      retirement (status ``revoked``): a revoked authorization never
+      redeems, and never resurrects through a lagging projection;
+    - ``grant_invalid_field`` (R40-06) — the COMPLETE persisted grant
+      identity is validated BEFORE the document is treated as
+      authority: the schema tag, the permitted operation, the delivery
+      mode, the work, the canonical subject, the INTERNAL attempt
+      generation, the requested route/ref — plus the row↔document KEY
+      CONSISTENCY. A wrong field is a typed refusal naming the field,
+      never a pass on the strength of the ref string alone;
     - ``grant_ref_mismatch`` — the route matches but the requested ref
       is not the grant's EXACT ref;
     - ``grant_absent_native_only`` — this attempt's dispatch selected a
@@ -1181,17 +1565,103 @@ async def _authorize_operation_grant(
       deadline (a fixed instant persisted at dispatch authorization —
       frozen across requests and restarts alike, never re-derived).
 
-    Returns the surviving grant; raises the typed 403 otherwise.
+    Returns ``(grant, from_authority_row)`` — the surviving grant and
+    whether it was loaded from the keyed authority row (the post-broker
+    fence re-reads exactly that row; an evidence-sourced pre-029 grant
+    has no row to re-read). Raises the typed 403 otherwise.
     """
+
     from forge.adaptive.credential_broker import (
         DELIVERY_MODE_RUNNER_REDEMPTION,
+        EVIDENCE_OPERATION_GRANTS_KEY,
+        CredentialOperationGrant,
+        CredentialRefusal,
         attempt_delivery_mode,
-        operation_grants_for_attempt,
+        validate_operation_grant_document,
     )
 
+    def _validated(document: Mapping[str, Any]) -> Any:
+        try:
+            return validate_operation_grant_document(
+                document,
+                work_id=work_id,
+                provider=provider,
+                attempt_generation=generation,
+                subject_id=subject_id,
+            )
+        except CredentialRefusal as exc:
+            raise _grant_identity_refusal(exc, work_id=work_id) from exc
+
+    rows: list[Any] = []
+    if generation is not None:
+        rows = await _authority_rows(session_factory, work_id, generation)
+    if rows:
+        matching_rows = [row for row in rows if str(row.provider or "") == provider]
+        if not matching_rows:
+            granted = ", ".join(sorted(str(row.provider) for row in rows))
+            raise _redemption_refusal(
+                "grant_route_mismatch",
+                (
+                    f"the requested provider route {provider!r} is not this attempt's "
+                    f"authorized route (granted: {granted}) — a sibling binding of "
+                    "the same project is not an authorization for THIS operation"
+                ),
+                work_id=work_id,
+            )
+        row = matching_rows[0]
+        if str(row.status or "") == "revoked":
+            raise _redemption_refusal(
+                "grant_revoked",
+                (
+                    "the attempt's operation grant was revoked at the keyed authority "
+                    "row — a revoked authorization never redeems and is never "
+                    "resurrected by a lagging projection"
+                ),
+                work_id=work_id,
+            )
+        grant = _validated(dict(row.document or {}))
+        try:
+            _assert_grant_row_consistency(row, grant)
+        except CredentialRefusal as exc:
+            raise _grant_identity_refusal(exc, work_id=work_id) from exc
+        if grant.credential_ref != credential_ref:
+            raise _redemption_refusal(
+                "grant_ref_mismatch",
+                (
+                    "the requested credential ref is not the exact ref this attempt's "
+                    f"grant authorized (granted route {grant.provider!r})"
+                ),
+                work_id=work_id,
+            )
+        if grant.expired_at(datetime.now(timezone.utc)):
+            raise _redemption_refusal(
+                "grant_expired",
+                (
+                    "the attempt's operation grant expired at its absolute deadline "
+                    f"{grant.redemption_deadline.isoformat()} — the deadline was fixed "
+                    "at dispatch authorization and never re-derives"
+                ),
+                work_id=work_id,
+            )
+        return grant, True
+
+    # The pre-029 bridge: an in-flight attempt whose dispatch predates the
+    # keyed authority row holds its grant only in the evidence projection.
+    # The projection is read ONLY when no row exists; the document gets the
+    # SAME complete identity validation before it is treated as authority.
     evidence = dict(run.evidence or {})
-    grants = operation_grants_for_attempt(evidence, generation)
-    if not grants:
+    loaded: list[tuple[Any, Mapping[str, Any]]] = []
+    raw = evidence.get(EVIDENCE_OPERATION_GRANTS_KEY)
+    if generation is not None and isinstance(raw, Mapping):
+        prefix = f"{int(generation)}:"
+        for key, document in sorted(raw.items(), key=lambda item: str(item[0])):
+            if not str(key).startswith(prefix) or not isinstance(document, Mapping):
+                continue
+            try:
+                loaded.append((CredentialOperationGrant.from_document(document), document))
+            except CredentialRefusal:
+                continue  # an unreadable document is absent (fail closed)
+    if not loaded:
         mode = attempt_delivery_mode(evidence, generation)
         if mode and mode != DELIVERY_MODE_RUNNER_REDEMPTION:
             raise _redemption_refusal(
@@ -1212,9 +1682,9 @@ async def _authorize_operation_grant(
             ),
             work_id=work_id,
         )
-    matching = [grant for grant in grants if grant.provider == provider]
+    matching = [pair for pair in loaded if pair[0].provider == provider]
     if not matching:
-        granted = ", ".join(sorted(grant.provider for grant in grants))
+        granted = ", ".join(sorted(str(pair[0].provider) for pair in loaded))
         raise _redemption_refusal(
             "grant_route_mismatch",
             (
@@ -1224,7 +1694,8 @@ async def _authorize_operation_grant(
             ),
             work_id=work_id,
         )
-    grant = matching[0]
+    grant_document = matching[0][1]
+    grant = _validated(grant_document)
     if grant.credential_ref != credential_ref:
         raise _redemption_refusal(
             "grant_ref_mismatch",
@@ -1244,7 +1715,23 @@ async def _authorize_operation_grant(
             ),
             work_id=work_id,
         )
-    return grant
+    return grant, False
+
+
+async def _authority_rows(session_factory: Any, work_id: str, generation: int) -> list[Any]:
+    """The attempt's keyed grant-authority rows (one per authorized route)."""
+    from sqlalchemy import select
+
+    from forge.durable.models import OperationGrant
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OperationGrant).where(
+                OperationGrant.work_id == work_id,
+                OperationGrant.attempt_generation == int(generation),
+            )
+        )
+        return list(result.scalars().all())
 
 
 @lane_control_router.get(LANE_CREDENTIAL_REDEEM_ROUTE)
@@ -1255,7 +1742,9 @@ async def redeem_lane_credential(
     provider: str = Query(min_length=1),
     authorization: str | None = Header(None),
 ) -> Any:
-    """Redeem THIS attempt's model credential (R38-02 profile b, Q39-01).
+    """Redeem THIS attempt's model credential (R38-02 profile b, Q39-01;
+    the complete-identity validation, the binding-revision comparison and
+    the linearization contract are R40-06/#342).
 
     Auth is the EXISTING attempt-scoped lane token — the same
     ``HMAC(secret, work_id:generation)`` the dispatch minted for this
@@ -1263,24 +1752,49 @@ async def redeem_lane_credential(
     secret, 401 no bearer, 403 wrong work / superseded generation, 503
     authority outage). The redemption is then authorized against the
     attempt's persisted **operation grant**
-    (:func:`_authorize_operation_grant`): the requested route and ref
-    must EQUAL the grant's, the run must not be terminal, and the
-    grant's ABSOLUTE deadline (fixed at dispatch authorization, frozen
-    across requests and restarts) must not have passed — a sibling
-    binding of the same project, a native-only dispatch, an unbound
-    legacy run and an expired window each refuse typed with ZERO broker
-    calls. The registry's fail-closed checks re-run against the WORK's
-    OWN canonical subject (a revoked binding or a rotated-away ref
-    refuses as ever); the broker resolves; and AUTHORITY IS RE-VALIDATED
-    after the awaited resolution and before the response publishes — a
-    cancellation, supersede, rotation or expiry that lands during the
-    await refuses typed, never emitting a value under retired authority.
+    (:func:`_authorize_operation_grant`), read from its ONE authoritative
+    home — the keyed ``operation_grants`` row: the requested route and
+    ref must EQUAL the grant's, the COMPLETE grant identity (schema,
+    operation, delivery mode, work, canonical subject, internal attempt
+    generation, row↔document key consistency) must validate, the run
+    must not be terminal, the row must not be revoked, and the grant's
+    ABSOLUTE deadline (fixed at dispatch authorization, frozen across
+    requests and restarts) must not have passed — every one of those
+    arms refuses typed with ZERO broker calls. R40-06 adds the BINDING
+    REVISION comparison: the live binding's revision must EQUAL the
+    revision the grant recorded at mint, so a same-ref revoke/regrant
+    (revision 1→2) never lets an old authorization decision silently
+    redeem against a NEW binding (``binding_revision_mismatch``); an
+    exact replay within the SAME revision redeems idempotently. The
+    broker then resolves; and AUTHORITY IS RE-VALIDATED after the
+    awaited resolution and before the response publishes — the grant is
+    RE-READ from the authority row (a revoked/replaced grant cannot be
+    made live by the older in-memory object), beside the run's state and
+    the binding, so a cancellation, supersede, rotation, revoke/regrant
+    or expiry that lands during the await refuses typed, never emitting
+    a value under retired authority.
+
+    THE LINEARIZATION CONTRACT (R40-06, documented as the issue demands):
+
+    - ISSUANCE linearizes at the redemption-audit COMMIT immediately
+      followed by the response publication — once the 200 body has left
+      the service, the credential is KNOWABLE to that runner forever
+      after; no later revocation makes it retroactively unknown (the
+      already-committed audit row names exactly what left).
+    - CANCELLATION linearizes at the authority-row commit (status
+      ``revoked``, a rotation's guarded replacement, or the absolute
+      deadline passing). A cancellation that commits BEFORE the
+      audit+publish refuses with ZERO emission; one that commits after
+      bounds only FUTURE redemptions — the runner's raw-key lifetime is
+      NOT the redemption authorization lifetime, and the response's
+      ``expires_at`` is always capped at the grant's absolute deadline.
 
     The lost-response retry window is the grant's own lifetime: a
     repeated request under the SAME grant inside the deadline is
     idempotent (the audit trail records separate observations, the
     receipts all join on the same ``grant_id``); past the deadline the
-    grant is expired, absolutely.
+    grant is expired, absolutely — an exact replay never extends the
+    persisted deadline.
 
     NOTE (Q39-01): the HMAC lane token stays THE authentication for this
     fix; a workload-OIDC ``id_token`` (Free-tier GitLab CE documented)
@@ -1288,6 +1802,43 @@ async def redeem_lane_credential(
     operation grant — authentication may change bearer, authorization
     never widens.
     """
+    started = time.monotonic()
+    try:
+        response = await _redeem_lane_credential(
+            request,
+            work_id=work_id,
+            credential_ref=credential_ref,
+            provider=provider,
+            authorization=authorization,
+        )
+    except HTTPException:
+        logger.info(
+            "%s work=%s seconds=%.4f outcome=refused",
+            REDEMPTION_LATENCY_EVENT,
+            work_id[:8],
+            time.monotonic() - started,
+        )
+        raise
+    logger.info(
+        "%s work=%s seconds=%.4f outcome=redeemed",
+        REDEMPTION_LATENCY_EVENT,
+        work_id[:8],
+        time.monotonic() - started,
+    )
+    return response
+
+
+async def _redeem_lane_credential(
+    request: Request,
+    *,
+    work_id: str,
+    credential_ref: str,
+    provider: str,
+    authorization: str | None,
+) -> Any:
+    """The redemption core behind :func:`redeem_lane_credential` (the
+    route keeps the latency observability seam; the ladder and the
+    linearization contract live in the route's docstring)."""
     import uuid
 
     from forge.adaptive.credential_broker import (
@@ -1337,18 +1888,27 @@ async def redeem_lane_credential(
             status_code=403,
             detail="the work names no credential binding subject — no credential is redeemed",
         )
-    grant = await _authorize_operation_grant(
+    grant, grant_from_row = await _authorize_operation_grant(
+        session_factory,
         run,
         work_id=work_id,
         generation=generation,
         provider=provider,
         credential_ref=credential_ref,
+        subject_id=subject.subject_id(),
     )
     registry = getattr(request.app.state, "credential_registry", None) or registry_from_env()
     broker = getattr(request.app.state, "credential_broker", None) or EnvBroker()
     try:
         dispatch_credential = resolve_dispatch_credential(
-            registry, subject=subject, provider=provider, presented_ref=credential_ref
+            registry,
+            subject=subject,
+            provider=provider,
+            presented_ref=credential_ref,
+            # R40-06 (#342): the LIVE binding revision must equal the
+            # revision the grant recorded — a same-ref revoke/regrant is a
+            # NEW decision the old grant never authorized.
+            presented_revision=grant.binding_revision,
         )
         resolved = await broker.resolve(
             grant.credential_ref,
@@ -1357,6 +1917,7 @@ async def redeem_lane_credential(
                 "attempt_generation": generation,
                 "operation": "credential-redemption",
                 "grant_id": grant.grant_id,
+                "binding_revision": int(grant.binding_revision),
             },
         )
         staged_keys = set(resolved.staged_env)
@@ -1370,7 +1931,14 @@ async def redeem_lane_credential(
                 },
             )
     except CredentialRefusal as exc:
-        logger.warning("credential redemption for work %s refused (%s)", work_id[:8], exc.reason)
+        event = str(exc.detail.get("observability") or REDEMPTION_REFUSED_EVENT)
+        logger.warning(
+            "%s reason=%s work=%s the registry refused before the broker resolved "
+            "(zero emitted credential values)",
+            event,
+            exc.reason,
+            work_id[:8],
+        )
         raise HTTPException(status_code=403, detail=f"{exc.reason}: {exc.detail}") from exc
     except BrokerCredentialRefusal as exc:
         logger.warning("credential redemption for work %s refused (%s)", work_id[:8], exc.reason)
@@ -1382,8 +1950,23 @@ async def redeem_lane_credential(
     # superseding generation, a rotation or an expiry that landed during
     # the await refuses typed here — no value is emitted (and no audit
     # row pretends one was) under retired authority.
+    #
+    # R40-06 (#342): the grant re-read is from the AUTHORITY ROW itself —
+    # a revoked or replaced grant cannot be made live by the older
+    # in-memory object this handler still holds. This re-read IS the
+    # cancellation linearization observation (see the route docstring):
+    # whatever committed to the row before this point refuses here;
+    # whatever commits after bounds only future requests.
     async with session_factory() as session:
         fresh = await session.get(FlowRun, work_id)
+    standing = (
+        await _authority_rows(session_factory, work_id, int(grant.attempt_generation))
+        if grant_from_row
+        else []
+    )
+    standing_row = next(
+        (row for row in standing if str(row.provider or "") == grant.provider), None
+    )
     if fresh is None:
         raise LaneAuthorityUnavailable(f"work {work_id!r} disappeared during resolution")
     fence_refusals: HTTPException | None = None
@@ -1413,15 +1996,56 @@ async def redeem_lane_credential(
                     "redemption_deadline": grant.redemption_deadline.isoformat(),
                 },
             )
+        if grant_from_row:
+            # The authority row, re-read: vanished, revoked or replaced
+            # during the await — each a typed fence refusal, and each
+            # provable because the row (not the in-memory grant) says so.
+            if standing_row is None:
+                raise CredentialRefusal(
+                    "grant_retired",
+                    {
+                        "fence": "the keyed operation-grant row vanished during the "
+                        "broker resolution",
+                        "grant_id": grant.grant_id,
+                    },
+                )
+            if str(standing_row.status or "") == "revoked":
+                raise CredentialRefusal(
+                    "grant_revoked",
+                    {
+                        "fence": "the operation grant was revoked during the broker resolution",
+                        "grant_id": grant.grant_id,
+                    },
+                )
+            if (
+                str(standing_row.grant_id or "") != grant.grant_id
+                or str(standing_row.credential_ref or "") != grant.credential_ref
+            ):
+                raise CredentialRefusal(
+                    "grant_superseded",
+                    {
+                        "fence": "the keyed authority row was replaced during the "
+                        "broker resolution (a rotation committed a new grant)",
+                        "authorized_grant_id": grant.grant_id,
+                        "standing_grant_id": str(standing_row.grant_id or ""),
+                    },
+                )
         # The binding, too: a rotation/revocation that landed while the
-        # broker was resolving refuses exactly as it would have before.
+        # broker was resolving refuses exactly as it would have before —
+        # INCLUDING the same-ref rebind (the revision comparison, R40-06).
         resolve_dispatch_credential(
-            registry, subject=subject, provider=provider, presented_ref=grant.credential_ref
+            registry,
+            subject=subject,
+            provider=provider,
+            presented_ref=grant.credential_ref,
+            presented_revision=grant.binding_revision,
         )
     except CredentialRefusal as exc:
+        event = str(exc.detail.get("observability") or REDEMPTION_REFUSED_EVENT)
         logger.warning(
-            "credential.redemption_refused reason=%s work=%s the authority fence refused "
-            "after the broker resolved (no value was emitted)",
+            "%s reason=%s work=%s the authority fence refused after the broker "
+            "resolved (no value was emitted)",
+            event,
             exc.reason,
             work_id[:8],
         )
@@ -1442,7 +2066,9 @@ async def redeem_lane_credential(
     # the credential policy in force. Q39-01 (#320) adds the GRANT id —
     # the foreign key into the operation grant (and #Q39-03's receipt
     # store when it lands) — plus the grant's age for observability.
-    # Refs/metadata only, as ever.
+    # R40-06 (#342) adds the GRANT's binding revision beside the live
+    # one, so the audit can prove the comparison held. Refs/metadata
+    # only, as ever.
     broker_receipt_id = str(resolved.receipt.get("receipt_id") or "")
     resolved_version_kind = str(resolved.version_kind or "")
     policy = credential_policy()
@@ -1459,6 +2085,7 @@ async def redeem_lane_credential(
         "provider": dispatch_credential.provider,
         "credential_ref": dispatch_credential.credential_ref,
         "binding_revision": int(dispatch_credential.binding_revision),
+        "grant_binding_revision": int(grant.binding_revision),
         "resolver": resolved.resolver_identity,
         "attempt_generation": generation,
         "expires_at": expires_at.isoformat(),
@@ -1491,6 +2118,12 @@ async def redeem_lane_credential(
         "binding_revision": int(dispatch_credential.binding_revision),
         "resolver_identity": resolved.resolver_identity,
         "resolved_version": resolved.version,
+        # R40-06 (#342) — the dispatched OPERATION identity for the
+        # consumer's typed verification: the one permitted operation this
+        # grant authorizes, and the grant's ABSOLUTE deadline (the
+        # presented expiry is capped at it; the runner re-checks both).
+        "operation": grant.operation,
+        "redemption_deadline": grant.redemption_deadline.isoformat(),
         # The consumer-receipt correlation fields (R38-04): the lane's
         # bootstrap echoes these into its value-free consumer receipt,
         # joining broker id ↔ redemption id ↔ attempt ↔ consumer — and,

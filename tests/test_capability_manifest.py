@@ -21,6 +21,7 @@ from forge.capability_manifest import (
     CAPABILITIES,
     CLASSIC_OPERATOR_COMMANDS,
     EVIDENCE_CLASSES,
+    REVIEW_FEEDBACK_OPERATOR_COMMANDS,
     TIER_LADDER,
     Capability,
     capabilities,
@@ -118,11 +119,14 @@ def test_classic_commands_match_the_live_ingress_sets():
     routed = ingress_routed_commands()
     classic = _by_name("operator-commands/classic")
     adaptive = _by_name("operator-commands/adaptive")
+    feedback = _by_name("operator-commands/review-feedback")
     # The live routed set is EXACTLY the classic verbs plus the adaptive
-    # verbs — nothing phantom, nothing missing.
-    assert set(routed) == set(classic.commands) | set(adaptive.commands)
+    # verbs plus the review-feedback verbs — nothing phantom, nothing missing.
+    assert set(routed) == set(classic.commands) | set(adaptive.commands) | set(feedback.commands)
     assert set(classic.commands) == set(CLASSIC_OPERATOR_COMMANDS)
-    assert set(CLASSIC_OPERATOR_COMMANDS) == set(routed) - set(ADAPTIVE_OPERATOR_COMMANDS)
+    assert set(CLASSIC_OPERATOR_COMMANDS) == set(routed) - set(ADAPTIVE_OPERATOR_COMMANDS) - set(
+        REVIEW_FEEDBACK_OPERATOR_COMMANDS
+    )
 
 
 def test_adaptive_commands_are_routed_behind_the_rollout_flag():
@@ -157,6 +161,46 @@ def test_adaptive_router_flag_defaults_off():
     assert adaptive_command_set({"FORGE_ADAPTIVE_COMMANDS_ENABLED": "on"}) == (
         ADAPTIVE_NOTE_COMMANDS
     )
+
+
+def test_review_feedback_row_is_wired_behind_its_own_flag():
+    """R40-01 (#337): /fix and /ask are wired on the GITLAB ingress behind
+    FORGE_REVIEW_FEEDBACK_ENABLED — wired code with an entry point and an
+    entry-point test, honestly platform-scoped (the row may not read as
+    GitHub/Azure parity) and gated default OFF (zero routing when off)."""
+    from forge.gateway.feedback import (
+        REVIEW_FEEDBACK_NOTE_COMMANDS,
+        review_feedback_command_set,
+        review_feedback_commands_enabled,
+    )
+
+    routed = ingress_routed_commands()
+    for command in REVIEW_FEEDBACK_OPERATOR_COMMANDS:
+        assert command in routed
+    row = _by_name("operator-commands/review-feedback")
+    assert row.tier == "production_wiring"
+    assert row.entry_point and "FORGE_REVIEW_FEEDBACK_ENABLED" in row.entry_point
+    assert row.entry_point and "run_reconciler" in row.entry_point
+    assert tuple(row.commands) == REVIEW_FEEDBACK_OPERATOR_COMMANDS
+    assert "default OFF" in row.note
+    assert "GitLab" in row.note  # platform-scoped, never read as parity
+    # the flag itself: default OFF, closed truthy set, zero routing off
+    assert review_feedback_commands_enabled({}) is False
+    assert review_feedback_command_set({}) == frozenset()
+    assert review_feedback_commands_enabled({"FORGE_REVIEW_FEEDBACK_ENABLED": "1"}) is True
+    assert review_feedback_command_set({"FORGE_REVIEW_FEEDBACK_ENABLED": "on"}) == (
+        REVIEW_FEEDBACK_NOTE_COMMANDS
+    )
+
+
+def test_removing_the_feedback_binding_breaks_the_claim(monkeypatch):
+    """The same honesty guard on the R40-01 surface: unbind /fix in the
+    GitLab router's feedback attribute and the row's claim must FAIL."""
+    bound = getattr(gateway_router, "_REVIEW_FEEDBACK_NOTE_COMMANDS", frozenset())
+    monkeypatch.setattr(gateway_router, "_REVIEW_FEEDBACK_NOTE_COMMANDS", bound - {"/fix"})
+    problems = manifest_problems(CAPABILITIES)
+    flagged = [p for p in problems if "/fix" in p and "does not route" in p]
+    assert flagged, f"a removed feedback binding must surface as a problem, got: {problems}"
 
 
 def test_helper_without_production_caller_is_library_level_only():

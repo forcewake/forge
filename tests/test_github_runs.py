@@ -4642,3 +4642,143 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         assert "no closing reserve policy" in (run.status_reason or "")
         block = (run.evidence or {})["review_budget_block"]
         assert block["budget"]["closing_reserve_usd"] is None
+
+    # ------------------------------------------------------------------
+    # R40-17 (#353): the SECOND caller adoption — the GitHub leg's
+    # operator top-up lands in the ONE durable amendment table
+    # ------------------------------------------------------------------
+
+    async def test_the_top_up_lands_in_the_one_amendment_table(self, db, fake, monkeypatch):
+        """The pinned #325 spelling (``top_up_usd``) is applied through
+        :func:`apply_budget_amendment` — a durable ``budget_amendments``
+        row with the legacy content-derived key as its command identity
+        — and the recorded block's ledger is the ONE shared projection
+        of those rows (never a GitHub-only evidence ledger)."""
+        from forge.adaptive.closing_budget import amendment_ledger_document
+        from forge.durable import budget_amendments_for_run
+
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,
+            top_up_reason="close the review within its reserve",
+        )
+        assert outcome["allowed"] is True, outcome
+        assert outcome["amendment"]["applied"] is True  # the table, not evidence
+        assert outcome["amendment"]["axis"] == "usd"
+
+        async with db() as session:
+            rows = await budget_amendments_for_run(session, run_id)
+        [row] = rows
+        assert row.status == "applied" and row.amount_usd == pytest.approx(0.50)
+        assert row.command_id.startswith("topup:")  # the legacy key, preserved
+        assert row.reason == "close the review within its reserve"
+
+        # the block's ledger is the shared projection of the SAME rows —
+        # byte-identical to what the GitLab leg records for its table.
+        block = (await get_run(db, run_id)).evidence["review_budget_block"]
+        assert block["amendments"] == amendment_ledger_document(rows)["amendments"]
+        assert block["top_ups"] == amendment_ledger_document(rows)["top_ups"]
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+        assert block["released"]["operator"] == "human:alice"
+
+    async def test_a_redelivered_top_up_after_release_adds_nothing(self, db, fake, monkeypatch):
+        """The legacy spelling's replay semantics ride the table now: a
+        second delivery of the same amount/reason/operator after the
+        review completed is refused honestly (the released block is
+        closed — the MG-2 semantics) and the ledger holds exactly ONE
+        applied row whose amount counted once."""
+        from forge.durable import budget_amendments_for_run, usd_amendment_total
+
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+
+        first = await service.continue_review_only(
+            run_id, operator="human:alice", top_up_usd=0.25, top_up_reason="one decision"
+        )
+        assert first["allowed"] is True and first["amendment"]["replayed"] is False
+
+        replay = await service.continue_review_only(
+            run_id, operator="human:alice", top_up_usd=0.25, top_up_reason="one decision"
+        )
+        assert replay["allowed"] is False
+        assert replay["reason"] == "no_review_budget_block"  # the released block is closed
+        assert len(reviewer.calls) == 1  # the review never ran twice
+
+        async with db() as session:
+            rows = await budget_amendments_for_run(session, run_id)
+            total = await usd_amendment_total(session, run_id)
+        assert len(rows) == 1  # exactly one decision
+        assert total == pytest.approx(0.25)  # its amount counted once
+
+    async def test_the_native_amendment_spelling_requires_command_identity(
+        self, db, fake, monkeypatch
+    ):
+        """The axis-bearing spelling (the #340 contract both legs share)
+        refuses typed without the ORIGINATING native command identity —
+        content identity cannot tell two identical commands apart."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            axis="usd",
+            amount=0.50,
+            reason="the native spelling names its command",
+        )
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "amendment_requires_command_identity"
+        # nothing applied and the block stays armed
+        from forge.durable import budget_amendments_for_run
+
+        async with db() as session:
+            assert await budget_amendments_for_run(session, run_id) == []
+        block = (await get_run(db, run_id)).evidence["review_budget_block"]
+        assert block["released"] is False
+
+    async def test_the_native_calls_axis_amendment_reopens_the_guard(self, db, fake, monkeypatch):
+        """A calls-axis amendment through the GitHub leg moves the REAL
+        ``run_budgets`` limits row (the enforcement resource) — the same
+        atomic apply the GitLab mutation gate MG-2 pins."""
+        from forge.durable import AXIS_CALLS, budget_for_run, open_budget
+
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        reviewer = BudgetRefusedPRReviewer(refusals=1)
+        run_id, candidate = await drive_to_review_refusal(db, service, fake, reviewer)
+        # a real one-call budget, already exhausted by the recorded leg
+        async with db() as session:
+            await open_budget(session, run_id=run_id, max_calls=1)
+            await session.commit()
+            budget = await budget_for_run(session, run_id)
+            assert budget is not None
+            budget.status = "exhausted"
+            await session.commit()
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:70010:9101",
+            axis=AXIS_CALLS,
+            amount=1,
+            reason="close the promised review",
+        )
+        assert outcome["allowed"] is True, outcome
+        assert outcome["amendment"]["limit_after"]["max_calls"] == 2  # the row moved
+        async with db() as session:
+            budget = await budget_for_run(session, run_id)
+        assert budget.status == "open"  # re-opened by the same atomic apply

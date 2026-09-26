@@ -192,6 +192,7 @@ COVERAGE_SECTIONS: tuple[str, ...] = (
     "approvals",
     "questions",
     "occupancy",
+    "rounds",
 )
 
 #: ActionLog statuses → the operator attempt vocabulary. A revival
@@ -477,6 +478,7 @@ SELECTABLE_SECTIONS: tuple[str, ...] = (
     "publications",
     "approvals",
     "occupancy",
+    "rounds",
 )
 
 #: The sections whose reads are windowed by a bounded ``section_limit``
@@ -1064,6 +1066,38 @@ class OperatorSnapshotReader:
                 rows["verifications"] = []
                 coverage["verifications"] = COVERAGE_MISSING
 
+        # -- review rounds: the linked follow-up corrections (R40-02/#338) --
+        # The rows naming THIS run on either side of the supersession
+        # relation (parent — the run's delivery is corrected; child — the
+        # run IS a round's work unit). The lineage identity (root_run_id)
+        # rides each row, so the view can bound the lineage without a
+        # second query.
+        if "rounds" in selected:
+            from forge.durable.models import ReviewRound
+            from sqlalchemy import or_
+
+            try:
+                rounds, total = await self._tail(
+                    session,
+                    select(ReviewRound).where(
+                        or_(
+                            ReviewRound.parent_run_id == run_id,
+                            ReviewRound.child_run_id == run_id,
+                        )
+                    ),
+                    journal_order=(ReviewRound.round_number.asc(), ReviewRound.id.asc()),
+                    window_order=(ReviewRound.round_number.desc(), ReviewRound.id.desc()),
+                    limit=section_limit,
+                )
+            except SQLAlchemyError:
+                logger.warning("review-round rows for run %s unreadable — coverage unknown", run_id)
+                rounds = None
+            if rounds is not None:
+                rows["rounds"] = [self._round_row(row) for row in rounds]
+                coverage["rounds"] = COVERAGE_PRESENT if rounds else COVERAGE_MISSING
+                totals["rounds"] = total
+                truncated["rounds"] = section_limit is not None and total > len(rounds)
+
         fence_end = await self._source_version(session, run_id)
         rows["_source_version"] = fence_end
         rows["_projection_inconsistent"] = fence_start != fence_end
@@ -1154,7 +1188,14 @@ class OperatorSnapshotReader:
         ``projection_inconsistent`` instead of a confident mixed state."""
         from forge.adaptive.mailbox_db import ControlCommandDeliveryRow, ControlCommandRow
         from forge.adaptive.pause_fence import PauseFenceRow
-        from forge.durable.models import ActionLog, FlowRun, GateApproval, PublicationIntent
+        from forge.durable.models import (
+            ActionLog,
+            FlowRun,
+            GateApproval,
+            PublicationIntent,
+            ReviewRound,
+        )
+        from sqlalchemy import or_
 
         run_updated = await session.scalar(select(FlowRun.updated_at).where(FlowRun.id == run_id))
         parts = [f"run:{_iso(run_updated)}"]
@@ -1188,6 +1229,10 @@ class OperatorSnapshotReader:
                 func.max(PauseFenceRow.cleared_at),
                 func.count(PauseFenceRow.work_id),
             ).where(PauseFenceRow.work_id == run_id),
+            select(
+                func.max(ReviewRound.updated_at),
+                func.count(ReviewRound.id),
+            ).where(or_(ReviewRound.parent_run_id == run_id, ReviewRound.child_run_id == run_id)),
         ):
             row = (await session.execute(statement)).one_or_none()
             parts.append("|".join("" if value is None else str(value) for value in row or ()))
@@ -1224,7 +1269,8 @@ class OperatorSnapshotReader:
         # top level), the run row carries it as the documented
         # ``lane_outcome`` shape the recovery surface's delivery outcome
         # derives from. Nothing is invented: no recorded marker, no slice.
-        harness = evidence.get("harness") if isinstance(evidence.get("harness"), Mapping) else {}
+        raw_harness = evidence.get("harness")
+        harness: Mapping[str, Any] = raw_harness if isinstance(raw_harness, Mapping) else {}
         lane_outcome: dict[str, Any] = {}
         for key in ("driver_exit", "collector_exit", "candidate_state"):
             for source in (harness, evidence):
@@ -1394,6 +1440,29 @@ class OperatorSnapshotReader:
             "candidate_sha": str(fragment.get("tested_oid") or ""),
             "producer": str(fragment.get("producer") or ""),
             "at": str(fragment.get("observed_at") or ""),
+        }
+
+    @staticmethod
+    def _round_row(row: Any) -> dict[str, Any]:
+        """One ReviewRound row → the view shape (R40-02/#338): the linked
+        follow-up correction's identity and lifecycle. Ids and shas only —
+        the reviewer's note TEXT never rides this row (value-free by
+        construction; the projection renders statuses and identities)."""
+        return {
+            "round_id": str(row.id or ""),
+            "parent_run_id": str(row.parent_run_id or ""),
+            "child_run_id": str(row.child_run_id or ""),
+            "root_run_id": str(row.root_run_id or ""),
+            "round_number": int(row.round_number or 0),
+            "note_id": str(row.note_id or ""),
+            "mr_iid": row.mr_iid,
+            "base_head_sha": str(row.base_head_sha or ""),
+            "decision_id": str(row.decision_id or ""),
+            "requested_by": str(row.requested_by or ""),
+            "status": str(row.status or ""),
+            "status_reason": str(row.status_reason or ""),
+            "created_at": _iso(row.created_at),
+            "updated_at": _iso(row.updated_at),
         }
 
     @staticmethod

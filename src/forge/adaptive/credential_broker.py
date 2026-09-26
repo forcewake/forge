@@ -103,6 +103,21 @@ silent alias). The additions:
   shipped template passes), with STRUCTURAL consumer checks over
   substring presence.
 
+R40-06 (#342) closes the remaining grant-identity contract: the grant
+document's COMPLETE identity is validated before it is treated as
+authority (:func:`validate_operation_grant_document` — the schema tag,
+the permitted operation, the delivery mode, the work, the canonical
+subject, the INTERNAL attempt generation; the keyed authority row's
+columns are checked against the document beside it), and the grant's
+recorded ``binding_revision`` — carried at mint from the plan's binding
+resolution, with an EXPLICIT version adapter
+(:data:`~forge.adaptive.project_credentials.BINDING_REVISION_UNKNOWN`)
+for pre-revision documents — is compared against the LIVE binding's
+revision at redemption (``credential.binding_revision_mismatch``): a
+same-ref revoke/regrant is a NEW decision, and an old authorization
+never silently applies to the new binding, while an exact replay within
+the same revision redeems idempotently.
+
 R38-04 (#305) adds the CONSUMPTION half — what the runner boundary
 proves and how rotation behaves around it:
 
@@ -149,6 +164,7 @@ from typing import Any, Iterator, Mapping, Protocol, runtime_checkable
 
 from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.adaptive.project_credentials import (
+    BINDING_REVISION_UNKNOWN,
     BINDING_SCHEMA,
     PROVIDER_ENV_VARS,
     PROVIDER_ROUTE_OF_DRIVER,
@@ -228,6 +244,7 @@ __all__ = [
     "reveal_secret",
     "stage_dispatch_credential",
     "template_identity_digest",
+    "validate_operation_grant_document",
     "version_is_unique_secret_proof",
 ]
 
@@ -2322,7 +2339,15 @@ class CredentialOperationGrant:
     def from_document(cls, document: Mapping[str, Any]) -> CredentialOperationGrant:
         """Load a persisted grant; a malformed document is the TYPED
         ``operation_grant_invalid`` refusal (fail closed — a corrupt
-        authorization object never degrades into a permissive read)."""
+        authorization object never degrades into a permissive read).
+
+        R40-06 (#342): the binding revision parses through the EXPLICIT
+        version adapter — a document from before the revision axis was
+        carried into the grant loads as :data:`BINDING_REVISION_UNKNOWN`
+        (a named legacy marker, never an inferred "must be 1" pass), and
+        a revision that is PRESENT but not an integer stays the typed
+        ``operation_grant_invalid`` refusal it always was.
+        """
         deadline = _grant_instant(document.get("redemption_deadline"))
         created = _grant_instant(document.get("created_at"))
         required = {
@@ -2343,12 +2368,12 @@ class CredentialOperationGrant:
             )
         try:
             generation = int(document.get("attempt_generation"))  # type: ignore[arg-type]
-            revision = int(document.get("binding_revision"))  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise CredentialRefusal(
                 "operation_grant_invalid",
-                {"grant_id": required["grant_id"][:16], "problem": "non-integer attempt/revision"},
+                {"grant_id": required["grant_id"][:16], "problem": "non-integer attempt"},
             ) from exc
+        revision = _binding_revision_from_document(document, grant_id=required["grant_id"])
         return cls(
             grant_id=required["grant_id"],
             work_id=required["work_id"],
@@ -2362,6 +2387,143 @@ class CredentialOperationGrant:
             created_at=created,
             operation=str(document.get("operation") or PERMITTED_OPERATION_REDEMPTION),
         )
+
+
+def _binding_revision_from_document(document: Mapping[str, Any], *, grant_id: str) -> int:
+    """The binding-revision VERSION ADAPTER (R40-06/#342).
+
+    A document persisted before the binding revision was carried into
+    the grant carries NO ``binding_revision`` slot: it loads as the
+    EXPLICIT unknown marker (:data:`BINDING_REVISION_UNKNOWN`) — a named
+    legacy state the redemption seam grandfathers through one documented
+    branch — never an inferred revision, and never a silent pass forged
+    by coercion. A revision that IS present must be an integer or the
+    load is the typed ``operation_grant_invalid`` refusal (fail closed).
+    """
+    raw = document.get("binding_revision")
+    if raw is None:
+        return BINDING_REVISION_UNKNOWN
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise CredentialRefusal(
+            "operation_grant_invalid",
+            {
+                "grant_id": grant_id[:16],
+                "problem": "non-integer binding_revision",
+                "instruction": (
+                    "repair the persisted grant document — the binding revision is "
+                    "either an integer or the explicit pre-revision legacy shape "
+                    "(the slot absent), never any other spelling"
+                ),
+            },
+        ) from exc
+
+
+def validate_operation_grant_document(
+    document: Mapping[str, Any],
+    *,
+    work_id: str,
+    provider: str,
+    credential_ref: str = "",
+    attempt_generation: int | None = None,
+    subject_id: str = "",
+) -> CredentialOperationGrant:
+    """Validate the COMPLETE persisted grant identity BEFORE the document
+    is treated as authority (R40-06/#342) — the validation entrypoint the
+    redemption seam calls on the ONE authoritative copy (the standing
+    ``operation_grants`` row's document; the evidence map is its derived
+    projection).
+
+    Every axis is a typed ``grant_invalid_field`` refusal (observability
+    ``credential.grant_invalid_field``) naming the field, performed
+    BEFORE any broker invocation — a wrong field never reaches paid I/O:
+
+    - ``schema`` — the persisted schema tag must be exactly
+      :data:`OPERATION_GRANT_SCHEMA` (a foreign document shape is not a
+      grant, however field-like it looks);
+    - the document must LOAD (a malformed one keeps its typed
+      ``operation_grant_invalid`` refusal — corrupt is corrupt, not a
+      field mismatch);
+    - ``operation`` — the one permitted operation a redemption grant
+      authorizes (:data:`PERMITTED_OPERATION_REDEMPTION`);
+    - ``delivery_mode`` — a redemption grant is minted ONLY for a
+      runner-redemption dispatch (:data:`DELIVERY_MODE_RUNNER_REDEMPTION`);
+    - ``work_id`` — the grant must name THIS work (a document from
+      another run under this key is a tampering signal, not a pass);
+    - ``subject`` — the grant's canonical subject must equal the work's
+      own (when *subject_id* is named);
+    - ``attempt_generation`` — the INTERNAL generation: the grant's own
+      attempt component must equal the verified attempt (when
+      *attempt_generation* is named) — the evidence-key/keyed-row prefix
+      agreeing is not proof the document inside does;
+    - ``provider`` — the grant's route must equal the requested one;
+    - ``credential_ref`` — when *credential_ref* is named, the grant's
+      EXACT ref must equal it (the endpoint keeps its own
+      ``grant_ref_mismatch`` arm ahead of this entrypoint; the check
+      here closes the validator for direct callers).
+
+    Returns the loaded grant; raises :class:`CredentialRefusal` typed.
+    """
+    if str(document.get("schema") or "") != OPERATION_GRANT_SCHEMA:
+        raise _grant_invalid_field(
+            "schema",
+            document,
+            expected=OPERATION_GRANT_SCHEMA,
+            found=str(document.get("schema") or ""),
+        )
+    grant = CredentialOperationGrant.from_document(document)
+    if grant.operation != PERMITTED_OPERATION_REDEMPTION:
+        raise _grant_invalid_field(
+            "operation", document, expected=PERMITTED_OPERATION_REDEMPTION, found=grant.operation
+        )
+    if grant.delivery_mode != DELIVERY_MODE_RUNNER_REDEMPTION:
+        raise _grant_invalid_field(
+            "delivery_mode",
+            document,
+            expected=DELIVERY_MODE_RUNNER_REDEMPTION,
+            found=grant.delivery_mode,
+        )
+    if grant.work_id != work_id:
+        raise _grant_invalid_field("work_id", document, expected=work_id, found=grant.work_id)
+    if subject_id and grant.subject != subject_id:
+        raise _grant_invalid_field("subject", document, expected=subject_id, found=grant.subject)
+    if attempt_generation is not None and grant.attempt_generation != int(attempt_generation):
+        raise _grant_invalid_field(
+            "attempt_generation",
+            document,
+            expected=int(attempt_generation),
+            found=grant.attempt_generation,
+        )
+    if grant.provider != provider:
+        raise _grant_invalid_field("provider", document, expected=provider, found=grant.provider)
+    if credential_ref and grant.credential_ref != credential_ref:
+        raise _grant_invalid_field(
+            "credential_ref", document, expected=credential_ref, found=grant.credential_ref
+        )
+    return grant
+
+
+def _grant_invalid_field(
+    field: str, document: Mapping[str, Any], *, expected: Any, found: Any
+) -> CredentialRefusal:
+    """One typed grant-identity mismatch — refs and metadata only."""
+    return CredentialRefusal(
+        "grant_invalid_field",
+        {
+            "observability": "credential.grant_invalid_field",
+            "field": field,
+            "grant_id": str(document.get("grant_id") or "")[:16],
+            "expected": str(expected)[:64],
+            "found": str(found)[:64],
+            "instruction": (
+                "the persisted operation grant fails its identity validation on "
+                f"{field!r} — repair the authorization document (re-dispatch the "
+                "attempt under the live binding) rather than redeeming against a "
+                "grant whose identity does not match the operation it is presented for"
+            ),
+        },
+    )
 
 
 def operation_grant_key(attempt_generation: int, provider: str) -> str:

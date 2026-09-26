@@ -31,9 +31,15 @@ all read-only by construction:
   ops_limits_read_model`): the six operating-limit quantities, the
   customer state, the four ``ops.*`` measures as separate records, the
   admission accounting (intake counters never claimed as execution
-  slots) and the review-budget distinction. Action hints rendered from a
-  snapshot whose consistency fence MOVED carry ``stale: true`` plus the
-  current state's safe alternative;
+  slots) and the review-budget distinction — plus the R40-13 (#349)
+  ``delivery`` block (:func:`~forge.adaptive.operator_view.
+  delivery_view`): the FIVE linked facts — CURRENT execution, review
+  round, candidate, verification, acceptance — each from its canonical
+  store, with the #338 head-fence refusals and the #340 limiting axis
+  rendered as explicit next-actions, superseded deliveries labelled
+  HISTORICAL, and acceptance attributed only to a real human decision.
+  Action hints rendered from a snapshot whose consistency fence MOVED
+  carry ``stale: true`` plus the current state's safe alternative;
 - ``GET /operator/runs/{run_id}/support-bundle?subject=<canonical>
   &max_bytes=&sections=`` — the exportable
   :class:`~forge.adaptive.support_bundle.SupportBundle` document
@@ -128,6 +134,7 @@ from forge.adaptive.operator_snapshot import (
 from forge.adaptive.admission import admission_report
 from forge.adaptive.operator_view import (
     action_hint_block,
+    delivery_view,
     explain_blocked,
     export_diagnostics,
     recovery_document,
@@ -731,6 +738,16 @@ async def get_operator_run(
         limit=_occupancy_limit(request),
         as_of=snapshot.computed_at,
         admission=await _admission_accounting_for(request, snapshot),
+    )
+    # The R40-13 five linked facts: CURRENT execution, review round,
+    # candidate, verification and acceptance as SEPARATE but LINKED
+    # records over the canonical rows this render already read — after a
+    # follow-up round starts, the old ready delivery and its green
+    # evidence render HISTORICAL, and acceptance is attributed only to a
+    # real human decision. The head-fence refusals and the budget block's
+    # limiting axis surface as explicit next-actions here.
+    document["delivery"] = delivery_view(
+        snapshot.rows, projection=projection, now=snapshot.computed_at
     )
     hints = action_hint_block(projection, snapshot_inconsistent=snapshot.projection_inconsistent)
     document["actions"] = hints["actions"]

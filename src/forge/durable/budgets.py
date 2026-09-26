@@ -40,23 +40,47 @@ NOTHING`` first, so the ledger row and the budget move exactly once per
 distinct receipt no matter how often the artifact is re-read. Its episode
 dispatches are gated by :func:`budget_block_reason` — wall clock and
 episode count are the only axes a non-intercepted lane can honestly enforce.
+
+R40-04 (#340) adds the AMENDMENT seam on top of the same discipline:
+USD exposure / calls / tokens / wall-clock are DISTINCT axes
+(:data:`BUDGET_AXES`); an operator amendment names one axis and rides the
+ORIGINATING NATIVE COMMAND identity (:func:`apply_budget_amendment`,
+``budget_amendments`` UNIQUE per ``(run, command)``) — two identical
+amount/reason commands are two decisions, a redelivery of one applies
+once. Count-axis amendments move the ``run_budgets`` limits ATOMICALLY in
+the insert's transaction (re-opening a budget that was exhausted because
+the limit was reached; the pre-amendment limits stay recorded as
+history); usd amendments raise the closing gate's effective cap
+(:func:`usd_amendment_total`). The mandatory closing share is partitioned
+at open time (``closing_reserved_*`` columns) and enforced HERE in
+:func:`reserve`: the implementation purpose cannot enter it, the closing
+purpose (the reviewer leg) can.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.controller import RunNotFound, as_aware_utc
-from forge.durable.models import BudgetReservation, FlowRun, LLMCall, RunBudget, UsageReceipt
+from forge.durable.models import (
+    BudgetAmendment,
+    BudgetReservation,
+    FlowRun,
+    LLMCall,
+    RunBudget,
+    UsageReceipt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +91,25 @@ BUDGET_EXHAUSTED = "budget_exhausted"
 #: The budget profile class every unknown budget class degrades to (R13):
 #: the same fallback rule as the harness selection's ``budget_class``.
 DEFAULT_BUDGET_CLASS = "standard"
+
+#: R40-04 (#340): the DISTINCT budget dimensions. USD exposure, dispatch
+#: calls, tokens and wall-clock are enforced by SEPARATE resources — the
+#: guard's counters for calls/tokens, the anchored deadline for
+#: wall-clock, the closing gate over usage receipts for USD — so a
+#: top-up names exactly ONE axis; converting between them would need a
+#: stated versioned policy, never an implicit guess.
+AXIS_USD = "usd"
+AXIS_CALLS = "calls"
+AXIS_TOKENS = "tokens"
+AXIS_WALLCLOCK = "wallclock"
+BUDGET_AXES = (AXIS_USD, AXIS_CALLS, AXIS_TOKENS, AXIS_WALLCLOCK)
+
+#: R40-04 (#340): who a reservation is for. ``implementation`` (the
+#: planner/implementer legs) cannot enter the protected closing share;
+#: ``closing`` (the reviewer leg) may spend the run's full limits — the
+#: share exists precisely so the mandatory closing review can use it.
+RESERVE_IMPLEMENTATION = "implementation"
+RESERVE_CLOSING = "closing"
 
 
 @dataclass(frozen=True)
@@ -223,6 +266,9 @@ async def open_budget(
     wallclock_s: int | None = None,
     max_calls: int | None = None,
     max_tokens: int | None = None,
+    closing_reserved_calls: int | None = None,
+    closing_reserved_tokens: int | None = None,
+    closing_partition_policy: str | None = None,
 ) -> RunBudget:
     """Open the run's budget — idempotent per run (UNIQUE ``run_id``).
 
@@ -234,6 +280,12 @@ async def open_budget(
     portable arbiter as the webhook inbox and the usage-receipt ingest —
     followed by a read-back, so BOTH callers end with the same row identity
     and the loser's outer transaction stays fully usable.
+
+    R40-04 (#340): the closing share (``closing_reserved_calls`` /
+    ``closing_reserved_tokens``, sized by the stated versioned policy named
+    in *closing_partition_policy*) is partitioned HERE — before coding
+    starts — and frozen with the limits: the implementation reservation
+    purpose cannot enter it (:func:`reserve`), the closing purpose can.
 
     A SAVEPOINT cannot arbitrate this: SQLAlchemy flushes all pending state
     *before* emitting the SAVEPOINT, so an ``add()`` before
@@ -257,6 +309,9 @@ async def open_budget(
             wallclock_s=wallclock_s,
             max_calls=max_calls,
             max_tokens=max_tokens,
+            closing_reserved_calls=closing_reserved_calls,
+            closing_reserved_tokens=closing_reserved_tokens,
+            closing_partition_policy=closing_partition_policy,
         )
         # ON CONFLICT DO NOTHING works identically on Postgres and SQLite
         # (tests) — the same portable arbiter as the webhook inbox.
@@ -284,6 +339,9 @@ async def open_budget_from_spec(
     run_id: str,
     spec_document: object,
     spec_digest: str | None = None,
+    closing_reserved_calls: int | None = None,
+    closing_reserved_tokens: int | None = None,
+    closing_partition_policy: str | None = None,
 ) -> RunBudget | None:
     """Open the run's budget when its RunSpec carries budget limits.
 
@@ -293,6 +351,12 @@ async def open_budget_from_spec(
     standard path opens it BEFORE the first paid call so the planner itself
     reserves — in which case the frozen limits stand and only the missing
     ``spec_digest`` provenance is backfilled (limits are never moved).
+
+    R40-04 (#340): the caller passes the closing share (sized by the
+    versioned partition policy it resolved — see
+    :func:`forge.adaptive.closing_budget.closing_partition`) so the
+    partition lands in the SAME frozen open, before any implementation
+    reservation exists.
     """
     limits = budget_limits_from_spec(spec_document)
     if limits is None:
@@ -304,6 +368,9 @@ async def open_budget_from_spec(
         wallclock_s=limits.wallclock_s,
         max_calls=limits.max_calls,
         max_tokens=limits.max_tokens,
+        closing_reserved_calls=closing_reserved_calls,
+        closing_reserved_tokens=closing_reserved_tokens,
+        closing_partition_policy=closing_partition_policy,
     )
     if spec_digest is not None and not budget.spec_digest:
         await session.execute(
@@ -322,6 +389,7 @@ async def reserve(
     calls: int = 1,
     tokens: int = 0,
     attempt_id: str | None = None,
+    purpose: str = RESERVE_IMPLEMENTATION,
 ) -> Reservation | None:
     """Reserve calls/tokens before a dispatch; ``None`` = refused.
 
@@ -334,6 +402,15 @@ async def reserve(
     again. A refused reservation marks an ``open`` budget ``exhausted`` (it
     cannot serve the standard reservation shape; ``closed``/``exhausted``
     budgets just refuse).
+
+    R40-04 (#340) — the closing partition: ``purpose=RESERVE_CLOSING``
+    (the reviewer leg) reserves against the FULL limits; the default
+    ``RESERVE_IMPLEMENTATION`` (planner/implementer) must additionally
+    keep its exposure within ``limit − closing_share`` when the share is
+    partitioned — the coder's reservation cannot enter the protected
+    portion, through this same admission path, BEFORE the review needs
+    it. The share is never re-derived here: it was frozen at open time
+    by the stated versioned partition policy the caller recorded.
 
     R13 wall clock: a budget whose ``created_at + wallclock_s`` deadline has
     passed refuses every reservation too — and is durably exhausted, so the
@@ -353,12 +430,27 @@ async def reserve(
     tokens = _usage_amount(tokens, "tokens")
     if calls < 1:
         raise ValueError("budget calls must reserve at least one call")
+    if purpose not in (RESERVE_IMPLEMENTATION, RESERVE_CLOSING):
+        raise ValueError(f"unknown reservation purpose {purpose!r}")
     deadline = wallclock_deadline(budget)
     if deadline is not None and _utcnow() > deadline:
         # Past the wall clock nothing is grantable any more — exhaust
         # durably so the stop is visible in every later read.
         await _exhaust_open(session, budget.id)
         return None
+    # The implementation purpose reserves against limit − closing share
+    # (NULL share = fully shared axes, the pre-#340 behavior); the closing
+    # purpose sees the full limits — the share is its authorized allowance.
+    implementation_ceiling_calls = (
+        RunBudget.max_calls - func.coalesce(RunBudget.closing_reserved_calls, 0)
+        if purpose == RESERVE_IMPLEMENTATION
+        else RunBudget.max_calls
+    )
+    implementation_ceiling_tokens = (
+        RunBudget.max_tokens - func.coalesce(RunBudget.closing_reserved_tokens, 0)
+        if purpose == RESERVE_IMPLEMENTATION
+        else RunBudget.max_tokens
+    )
     granted = await session.execute(
         update(RunBudget)
         .where(
@@ -370,7 +462,7 @@ async def reserve(
                 + RunBudget.reserved_calls
                 + RunBudget.unresolved_calls
                 + calls
-                <= RunBudget.max_calls,
+                <= implementation_ceiling_calls,
             ),
             or_(
                 RunBudget.max_tokens.is_(None),
@@ -378,7 +470,7 @@ async def reserve(
                 + RunBudget.reserved_tokens
                 + RunBudget.unresolved_tokens
                 + tokens
-                <= RunBudget.max_tokens,
+                <= implementation_ceiling_tokens,
             ),
         )
         .values(
@@ -390,9 +482,16 @@ async def reserve(
     # rowcount is the UPDATE's matched-row count; SQLAlchemy 2.0 stubs only
     # type it on CursorResult, so access it via the runtime attr.
     if granted.rowcount != 1:  # type: ignore[attr-defined]
-        # Refused: either already not open (nothing to do), or the limits
-        # cannot absorb the request — durably mark the budget exhausted.
-        await _exhaust_open(session, budget.id)
+        # Refused. The durable exhaust applies ONLY when the refusal was
+        # against the FULL limits: an implementation reservation refused
+        # at its lower (share-withholding) ceiling must not exhaust the
+        # budget the closing review still needs — the share exists
+        # precisely so the reviewer leg can spend it afterwards.
+        share_applies = purpose == RESERVE_IMPLEMENTATION and (
+            budget.closing_reserved_calls is not None or budget.closing_reserved_tokens is not None
+        )
+        if not share_applies:
+            await _exhaust_open(session, budget.id)
         return None
 
     row = BudgetReservation(
@@ -496,6 +595,469 @@ async def close_budget(session: AsyncSession, budget: RunBudget) -> bool:
     # rowcount is the UPDATE's matched-row count; SQLAlchemy 2.0 stubs only
     # type it on CursorResult, so access it via the runtime attr.
     return result.rowcount == 1  # type: ignore[attr-defined]
+
+
+# ----------------------------------------------------------------------
+# R40-04 (#340): budget amendments — persisted, command-identified,
+# applied atomically to the enforcement resource
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BudgetAmendmentCommand:
+    """One operator amendment: an axis, an amount, a reason, an operator
+    and the ORIGINATING NATIVE COMMAND identity — all required.
+
+    The command identity (``command_id``) is what makes redelivery apply
+    once: two identical amount/reason commands are TWO decisions (two
+    ids, two amendment rows); a redelivery of ONE command carries the
+    same id and hits the ``(run_id, command_id)`` unique index.
+    """
+
+    run_id: str
+    command_id: str
+    axis: str
+    amount: float | int
+    reason: str
+    operator: str = ""
+
+    def __post_init__(self) -> None:
+        if not str(self.command_id or "").strip():
+            raise ValueError(
+                "budget amendment requires the originating native command identity"
+                " (command_id) — content identity cannot tell two decisions apart"
+            )
+        if self.axis not in BUDGET_AXES:
+            raise ValueError(
+                f"budget amendment axis {self.axis!r} is not one of {BUDGET_AXES}"
+                " — the dimensions are distinct and never converted implicitly"
+            )
+        if not str(self.reason or "").strip():
+            raise ValueError("budget amendment requires an explicit reason (auditable)")
+        amount = self.amount
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ValueError("budget amendment amount must be a number")
+        if self.axis == AXIS_USD:
+            if not isinstance(amount, float) and not isinstance(amount, int):
+                raise ValueError("usd amendment amount must be a number")
+            if not math.isfinite(float(amount)) or float(amount) <= 0:
+                raise ValueError("usd amendment amount must be a positive number")
+        else:
+            if isinstance(amount, float) and (not math.isfinite(amount) or amount != int(amount)):
+                raise ValueError(
+                    f"{self.axis} amendment amount must be a whole number of units on that axis"
+                )
+            if int(amount) <= 0:
+                raise ValueError(f"{self.axis} amendment amount must be positive")
+
+    @property
+    def amount_usd(self) -> float | None:
+        return round(float(self.amount), 6) if self.axis == AXIS_USD else None
+
+    @property
+    def amount_calls(self) -> int | None:
+        return int(self.amount) if self.axis == AXIS_CALLS else None
+
+    @property
+    def amount_tokens(self) -> int | None:
+        return int(self.amount) if self.axis == AXIS_TOKENS else None
+
+    @property
+    def amount_wallclock_s(self) -> int | None:
+        return int(self.amount) if self.axis == AXIS_WALLCLOCK else None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "command_id": str(self.command_id),
+            "axis": self.axis,
+            "amount_usd": self.amount_usd,
+            "amount_calls": self.amount_calls,
+            "amount_tokens": self.amount_tokens,
+            "amount_wallclock_s": self.amount_wallclock_s,
+            "reason": str(self.reason).strip(),
+            "operator": str(self.operator or ""),
+        }
+
+
+@dataclass(frozen=True)
+class AppliedBudgetAmendment:
+    """What one apply did — applied, replayed, or refused with the
+    limiting axis named.
+
+    ``applied``: the enforcement capacity moved (the limits row, or the
+    effective USD cap via the durable amendment row itself) in the SAME
+    transaction that inserted the amendment. ``replayed``: the SAME
+    command identity had been applied before — nothing moved again.
+    ``refused``: the typed reason names the limiting axis (e.g.
+    ``calls``) — the amendment row is still recorded, status ``refused``,
+    so every successful/refused command stays visible for audit.
+    """
+
+    command: BudgetAmendmentCommand
+    applied: bool
+    replayed: bool
+    refusal_reason: str | None
+    limit_before: dict[str, Any] | None = None
+    limit_after: dict[str, Any] | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            **self.command.to_json(),
+            "applied": self.applied,
+            "replayed": self.replayed,
+            "refusal_reason": self.refusal_reason,
+            "limit_before": self.limit_before,
+            "limit_after": self.limit_after,
+        }
+
+
+def _budget_limits_json(budget: RunBudget) -> dict[str, Any]:
+    """The approved budget as it stands — the amendment's history record."""
+    return {
+        "max_calls": budget.max_calls,
+        "max_tokens": budget.max_tokens,
+        "wallclock_s": budget.wallclock_s,
+        "status": budget.status,
+        "closing_reserved_calls": budget.closing_reserved_calls,
+        "closing_reserved_tokens": budget.closing_reserved_tokens,
+    }
+
+
+async def budget_amendments_for_run(session: AsyncSession, run_id: str) -> list[BudgetAmendment]:
+    """The run's amendment rows, oldest first — the audit read."""
+    return list(
+        (
+            await session.execute(
+                select(BudgetAmendment)
+                .where(BudgetAmendment.run_id == run_id)
+                .order_by(BudgetAmendment.applied_at, BudgetAmendment.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def usd_amendment_total(session: AsyncSession, run_id: str) -> float:
+    """The run's APPLIED usd-axis amendments, summed.
+
+    The USD enforcement capacity the closing gate consults: effective
+    cap = policy cap + this total. Refused amendments never count, and a
+    replayed command is already inside the standing rows exactly once.
+    """
+    rows = await budget_amendments_for_run(session, run_id)
+    return math.fsum(
+        row.amount_usd for row in rows if row.status == "applied" and row.amount_usd is not None
+    )
+
+
+async def apply_budget_amendment(
+    session: AsyncSession, command: BudgetAmendmentCommand
+) -> AppliedBudgetAmendment:
+    """Apply one amendment ATOMICALLY to the enforcement resource.
+
+    The ``(run_id, command_id)`` INSERT is the arbiter: a redelivered
+    command loses the insert race and REPLAYS (nothing moves a second
+    time — ``budget.amendment_replayed``); the winning insert and the
+    enforcement move land in ONE transaction the caller commits.
+
+    Per axis:
+
+    - ``calls``/``tokens``/``wallclock``: a conditional UPDATE raises the
+      ``run_budgets`` limit and re-opens a budget that was ``exhausted``
+      — the refusal state existed only because the limit was reached. A
+      ``closed`` (terminal) budget refuses; an unlimited axis refuses
+      (there is nothing to amend — the limiting axis named); a missing
+      budget row refuses. The pre-application limits ride
+      ``limit_before`` — the original approved budget stays as history.
+    - ``usd``: no guard columns move — the USD axis is enforced over the
+      usage receipts by the closing gate, and the durable APPLIED row is
+      what raises the effective cap (:func:`usd_amendment_total`).
+
+    A refused amendment is RECORDED (status ``refused``, typed
+    ``refusal_reason`` naming the limiting axis) and its command identity
+    stands: a redelivery replays the recorded refusal.
+    """
+    inserted = await session.execute(
+        pg_insert(BudgetAmendment)
+        .values(
+            run_id=command.run_id,
+            command_id=str(command.command_id).strip(),
+            axis=command.axis,
+            amount_usd=command.amount_usd,
+            amount_calls=command.amount_calls,
+            amount_tokens=command.amount_tokens,
+            amount_wallclock_s=command.amount_wallclock_s,
+            reason=str(command.reason).strip(),
+            operator=str(command.operator or ""),
+            status="applied",
+        )
+        # The native-command identity is the idempotency key: a
+        # redelivery of ONE command applies once (portable on Postgres
+        # and SQLite — the same arbiter as the usage-receipt ingest).
+        .on_conflict_do_nothing(index_elements=[BudgetAmendment.run_id, BudgetAmendment.command_id])
+    )
+    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs
+    # only type it on CursorResult, so access it via the runtime attr.
+    if inserted.rowcount != 1:  # type: ignore[attr-defined]
+        # Lost the command-identity race (a redelivery): DO NOTHING left
+        # the transaction fully usable — no rollback, no session poison —
+        # and the standing row answers what the first delivery did.
+        standing = (
+            await session.execute(
+                select(BudgetAmendment).where(
+                    BudgetAmendment.run_id == command.run_id,
+                    BudgetAmendment.command_id == str(command.command_id).strip(),
+                )
+            )
+        ).scalar_one()
+        return AppliedBudgetAmendment(
+            command=command,
+            applied=False,
+            replayed=True,
+            refusal_reason=standing.refusal_reason,
+            limit_before=standing.limit_before,
+            limit_after=standing.limit_after,
+        )
+
+    if command.axis == AXIS_USD:
+        # The usd axis is enforced at the CLOSING GATE over the usage
+        # receipts, not by the guard's counters — the durable APPLIED row
+        # IS the enforcement record (the effective cap rises by it in
+        # :func:`usd_amendment_total`), so it needs no ``run_budgets`` row.
+        # The guard's own limits are still recorded beside it for audit
+        # when a budget exists.
+        budget = await budget_for_run(session, command.run_id)
+        before = _budget_limits_json(budget) if budget is not None else None
+        await _stamp_applied_history(session, command, before, before)
+        return AppliedBudgetAmendment(
+            command=command,
+            applied=True,
+            replayed=False,
+            refusal_reason=None,
+            limit_before=before,
+            limit_after=before,
+        )
+
+    budget = await budget_for_run(session, command.run_id)
+    if budget is None:
+        return await _record_refused_amendment(
+            session,
+            command,
+            f"{command.axis}: no run budget exists — the count axes are enforced"
+            " by the guard's run_budgets row and there is nothing to amend",
+        )
+
+    before = _budget_limits_json(budget)
+
+    limit_column = {
+        AXIS_CALLS: RunBudget.max_calls,
+        AXIS_TOKENS: RunBudget.max_tokens,
+        AXIS_WALLCLOCK: RunBudget.wallclock_s,
+    }[command.axis]
+    amount = {
+        AXIS_CALLS: command.amount_calls,
+        AXIS_TOKENS: command.amount_tokens,
+        AXIS_WALLCLOCK: command.amount_wallclock_s,
+    }[command.axis]
+    assert amount is not None
+    standing_limit = {
+        AXIS_CALLS: budget.max_calls,
+        AXIS_TOKENS: budget.max_tokens,
+        AXIS_WALLCLOCK: budget.wallclock_s,
+    }[command.axis]
+    if standing_limit is None:
+        return await _record_refused_amendment(
+            session,
+            command,
+            f"{command.axis}: the axis is unlimited — there is no cap for the"
+            " amendment to raise (name the axis that actually limits)",
+        )
+    if budget.status == "closed":
+        return await _record_refused_amendment(
+            session,
+            command,
+            f"{command.axis}: the budget is closed (terminal) — an amendment"
+            " never resurrects a finished run",
+        )
+    if command.axis == AXIS_WALLCLOCK:
+        await session.execute(
+            update(RunBudget)
+            .where(RunBudget.id == budget.id)
+            .values(
+                wallclock_s=limit_column + amount,
+                # The exhausted state existed only because the deadline
+                # passed; the extended window re-opens it (a closed
+                # budget was refused above).
+                status=case((RunBudget.status == "exhausted", "open"), else_=RunBudget.status),
+                updated_at=_utcnow(),
+            )
+        )
+        await session.flush()
+        # The Core UPDATE bypasses the identity map — reload the row so
+        # the after-picture reads the moved limits (refresh performs its
+        # IO inside the awaited greenlet, never at attribute access).
+        await session.refresh(budget)
+        deadline = wallclock_deadline(budget)
+        if deadline is not None and _utcnow() > deadline:
+            # The extension still does not reach the present — the budget
+            # stays exhausted and the amendment honestly says so.
+            await _exhaust_open(session, budget.id)
+            return await _record_refused_amendment(
+                session,
+                command,
+                f"{command.axis}: the extended deadline is still in the past"
+                " — the budget remains exhausted",
+                before=before,
+            )
+        after = _budget_limits_json(budget)
+        await _stamp_applied_history(session, command, before, after)
+        return AppliedBudgetAmendment(
+            command=command,
+            applied=True,
+            replayed=False,
+            refusal_reason=None,
+            limit_before=before,
+            limit_after=after,
+        )
+    else:
+        # AXIS_CALLS | AXIS_TOKENS: raise the numeric limit, re-opening an
+        # exhausted budget in the same atomic move (closed was refused
+        # above). The original limit stays recorded in ``limit_before``.
+        limit_name = "max_calls" if command.axis == AXIS_CALLS else "max_tokens"
+        reopen = case((RunBudget.status == "exhausted", "open"), else_=RunBudget.status)
+        await session.execute(
+            update(RunBudget)
+            .where(RunBudget.id == budget.id)
+            .values(
+                {
+                    limit_name: limit_column + amount,
+                    "status": reopen,
+                    "updated_at": _utcnow(),
+                }
+            )
+        )
+        await session.flush()
+        await session.refresh(budget)  # the moved limits, re-read
+        after_ct = _budget_limits_json(budget)
+        await _stamp_applied_history(session, command, before, after_ct)
+        return AppliedBudgetAmendment(
+            command=command,
+            applied=True,
+            replayed=False,
+            refusal_reason=None,
+            limit_before=before,
+            limit_after=after_ct,
+        )
+
+
+async def _stamp_applied_history(
+    session: AsyncSession,
+    command: BudgetAmendmentCommand,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> None:
+    """Write the enforcement history onto the freshly inserted row.
+
+    The result object always carried limit_before/limit_after; the ROW did
+    not (found live by the R40-15 restore drill: applied rows held NULL).
+    The row is what replays and audits read — stamp it in the same
+    transaction as the enforcement move.
+    """
+    await session.execute(
+        update(BudgetAmendment)
+        .where(
+            BudgetAmendment.run_id == command.run_id,
+            BudgetAmendment.command_id == str(command.command_id).strip(),
+            BudgetAmendment.status == "applied",
+        )
+        .values(limit_before=before, limit_after=after)
+    )
+    await session.flush()
+
+
+async def _record_refused_amendment(
+    session: AsyncSession,
+    command: BudgetAmendmentCommand,
+    refusal_reason: str,
+    *,
+    before: dict[str, Any] | None = None,
+) -> AppliedBudgetAmendment:
+    """Flip the freshly inserted amendment row to ``refused`` (typed reason).
+
+    The row was inserted by :func:`apply_budget_amendment` in this
+    transaction; recording the refusal keeps every refused command
+    visible for audit AND pins its command identity — a redelivery
+    replays the recorded refusal instead of re-evaluating.
+    """
+    await session.execute(
+        update(BudgetAmendment)
+        .where(
+            BudgetAmendment.run_id == command.run_id,
+            BudgetAmendment.command_id == str(command.command_id).strip(),
+            BudgetAmendment.status == "applied",
+        )
+        .values(status="refused", refusal_reason=refusal_reason[:300], limit_before=before)
+    )
+    await session.flush()
+    return AppliedBudgetAmendment(
+        command=command,
+        applied=False,
+        replayed=False,
+        refusal_reason=refusal_reason,
+        limit_before=before,
+    )
+
+
+async def limiting_axis(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    calls: int = 1,
+    tokens: int = 0,
+    purpose: str = RESERVE_CLOSING,
+    now: datetime | None = None,
+) -> str | None:
+    """Which axis would refuse a reservation of this shape, or ``None``.
+
+    The honest pre-check behind the review-only continuation's refusal
+    (``budget.refused_axis``): an amendment on one axis must not silently
+    pretend capacity opened on another. Reads the LIVE row (never a
+    previously loaded snapshot) and names the axis in check order —
+    ``status`` (closed, or exhausted without a reopening amendment),
+    ``wallclock``, ``calls``, ``tokens``.
+    """
+    budget = await budget_for_run(session, run_id)
+    if budget is None:
+        return None
+    if budget.status == "closed":
+        return "status"
+    deadline = wallclock_deadline(budget)
+    if deadline is not None and as_aware_utc(now or _utcnow()) > deadline:
+        return AXIS_WALLCLOCK
+    ceiling_calls = budget.max_calls
+    ceiling_tokens = budget.max_tokens
+    if purpose == RESERVE_IMPLEMENTATION:
+        if budget.closing_reserved_calls is not None and budget.max_calls is not None:
+            ceiling_calls = budget.max_calls - budget.closing_reserved_calls
+        if budget.closing_reserved_tokens is not None and budget.max_tokens is not None:
+            ceiling_tokens = budget.max_tokens - budget.closing_reserved_tokens
+    if ceiling_calls is not None and (
+        budget.consumed_calls + budget.reserved_calls + budget.unresolved_calls + calls
+        > ceiling_calls
+    ):
+        return AXIS_CALLS
+    if ceiling_tokens is not None and (
+        budget.consumed_tokens + budget.reserved_tokens + budget.unresolved_tokens + tokens
+        > ceiling_tokens
+    ):
+        return AXIS_TOKENS
+    if budget.status == "exhausted":
+        # Room on every numeric axis yet the row still says exhausted —
+        # the status itself is the blocker the operator sees named.
+        return "status"
+    return None
 
 
 async def budget_block_reason(
@@ -658,6 +1220,58 @@ async def reconcile_harness_receipt(
     return await _exhaust_if_over(session, budget.id)
 
 
+def _receipt_cost_columns(usage: Any, raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The canonical cost/finality columns for a receipt (R40-04 item 5).
+
+    Reconciles the older ``ingest_usage_receipt`` front door with the
+    canonical Q39-05 columns so live counters, USD projections and operator
+    reports describe the SAME observations:
+
+    - ``final`` — the receipt's own explicit finality (attribute or the
+      raw block's ``final``); absent everywhere means True (the R23 front
+      door receives complete artifacts — the pre-028 backfill shape).
+    - ``cost_usd`` — the receipt's own figure, else the RAW block's
+      figure (the legacy receipt with a raw cost but no new columns):
+      classified EXPLICITLY, never silently zero, never invented.
+    - ``cost_basis`` — only a value from the canonical vocabulary
+      (:data:`forge.adaptive.usage_ingestion.COST_BASES`), from the
+      attribute or the raw block; a garbage or missing basis stays NULL
+      (an unknown lineage is visible, not fabricated).
+    - ``rate_card_id`` / ``route_version`` / ``segment`` /
+      ``artifact_digest`` — the raw block's lineage projections when the
+      receipt carries them.
+    """
+    from forge.adaptive.usage_ingestion import COST_BASES
+
+    def _raw(name: str) -> Any:
+        return (raw or {}).get(name)
+
+    def _cost(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(float(value)) or float(value) < 0:
+            return None
+        return round(float(value), 6)
+
+    own_final = getattr(usage, "final", None)
+    if not isinstance(own_final, bool):
+        own_final = _raw("final")
+    final = own_final if isinstance(own_final, bool) else True
+    cost = _cost(getattr(usage, "cost_usd", None))
+    if cost is None:
+        cost = _cost(_raw("cost_usd"))
+    basis = str(getattr(usage, "cost_basis", "") or _raw("cost_basis") or "").strip()
+    return {
+        "final": final,
+        "cost_usd": cost,
+        "cost_basis": basis if basis in COST_BASES else None,
+        "rate_card_id": str(_raw("rate_card_id") or "")[:64] or None,
+        "route_version": str(_raw("route_version") or "")[:64] or None,
+        "segment": str(_raw("segment") or "")[:80] or None,
+        "artifact_digest": str(_raw("artifact_digest") or "")[:128] or None,
+    }
+
+
 async def ingest_usage_receipt(
     session: AsyncSession,
     *,
@@ -687,6 +1301,12 @@ async def ingest_usage_receipt(
     cost shows up in the unknown bucket, never silently as zero. The
     receipt row lands even when the run has no budget or a closed one: the
     ledger is honest, only the counters stand still.
+
+    R40-04 (#340) item 5: the row now carries the CANONICAL cost/finality
+    columns (:func:`_receipt_cost_columns`) — a legacy receipt whose raw
+    block holds a cost lands that figure explicitly classified, so the USD
+    projections and operator reports fold the SAME observation the counters
+    reconciled.
 
     ``record_ledger_call=False`` leaves the ``llm_calls`` write to the
     caller (the GitLab lane records every delivery honestly and dedupes the
@@ -719,6 +1339,7 @@ async def ingest_usage_receipt(
     # is the usage's own source label; an absent label is the empty
     # namespace, exactly what the pre-028 backfill gave legacy rows.
     namespace = str(getattr(usage, "source", "") or "")[:100]
+    cost_columns = _receipt_cost_columns(usage, raw if isinstance(raw, dict) else None)
     inserted = await session.execute(
         pg_insert(UsageReceipt)
         .values(
@@ -734,6 +1355,7 @@ async def ingest_usage_receipt(
             output_tokens=_int("output_tokens"),
             completeness=str(getattr(usage, "completeness", "") or "unknown"),
             source=str(getattr(usage, "source", "") or "") or None,
+            **cost_columns,
             raw=raw if isinstance(raw, dict) else None,
         )
         # ON CONFLICT DO NOTHING works identically on Postgres and SQLite
@@ -780,6 +1402,11 @@ class BudgetGuard:
     provider is contacted and the reconciliation committed AFTER the response,
     so the hold is visible to every other attempt in between. One guard per
     run budget; ``attempt_id`` stamps every audit row it creates.
+
+    R40-04 (#340): the guard carries its RESERVATION PURPOSE — the
+    implementation purpose (planner/implementer) cannot enter the
+    protected closing share, the closing purpose (the reviewer leg) sees
+    the full limits. :func:`load_budget_guard` mints either shape.
     """
 
     def __init__(
@@ -788,10 +1415,14 @@ class BudgetGuard:
         budget_id: str,
         *,
         attempt_id: str | None = None,
+        purpose: str = RESERVE_IMPLEMENTATION,
     ) -> None:
+        if purpose not in (RESERVE_IMPLEMENTATION, RESERVE_CLOSING):
+            raise ValueError(f"unknown reservation purpose {purpose!r}")
         self._session_factory = session_factory
         self.budget_id = budget_id
         self._attempt_id = attempt_id
+        self.purpose = purpose
 
     async def reserve(self, *, calls: int = 1, tokens: int = 0) -> Reservation | None:
         """Commit a pre-dispatch hold, or ``None`` when refused."""
@@ -800,7 +1431,12 @@ class BudgetGuard:
             if budget is None:
                 return None
             reservation = await reserve(
-                session, budget, calls=calls, tokens=tokens, attempt_id=self._attempt_id
+                session,
+                budget,
+                calls=calls,
+                tokens=tokens,
+                attempt_id=self._attempt_id,
+                purpose=self.purpose,
             )
             await session.commit()
             return reservation
@@ -833,15 +1469,20 @@ async def load_budget_guard(
     run_id: str,
     *,
     attempt_id: str | None = None,
+    purpose: str = RESERVE_IMPLEMENTATION,
 ) -> BudgetGuard | None:
     """The run's enforcement handle, or ``None`` when nothing is budgeted.
 
     The constructor hook RunService passes to the agents' ``LLMClient``:
     ``LLMClient(settings, session_factory, budget=guard)``. A closed budget
     yields no guard — the run is finished and no dispatch will happen.
+
+    R40-04 (#340): pass ``purpose=RESERVE_CLOSING`` for the reviewer leg —
+    that guard may spend the protected closing share; the default
+    implementation guard may not.
     """
     async with session_factory() as session:
         budget = await budget_for_run(session, run_id)
         if budget is None or budget.status == "closed":
             return None
-        return BudgetGuard(session_factory, budget.id, attempt_id=attempt_id)
+        return BudgetGuard(session_factory, budget.id, attempt_id=attempt_id, purpose=purpose)

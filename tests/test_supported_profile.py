@@ -112,7 +112,19 @@ class FakeReceiptProbe(TemplateReceiptProbe):
 
 def _inputs_from_repo(template_bytes: str | None = None) -> CaptureInputs:
     probe = FakeReceiptProbe(template_bytes or frozen_template(load_manifest(MANIFEST)))
-    return CaptureInputs.from_root(ROOT, probe)
+    # R40-07 (#343): the capture honors the manifest's OWN cited
+    # executed-lab receipts — a lab re-alignment re-freezes the bind
+    # through --alignment-receipts/--inventory (additive, never a rewrite
+    # of the traced receipts), so the reproduction test follows whatever
+    # the committed manifest cites.
+    committed = load_manifest(MANIFEST)
+    executed_receipts = committed["control_plane"]["executed_lab"]["receipts"]
+    return CaptureInputs.from_root(
+        ROOT,
+        probe,
+        alignment_receipt=executed_receipts[0],
+        inventory_receipt=executed_receipts[-1],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +140,12 @@ class TestFreezeFieldSourcing:
         trace = _load(
             ROOT / "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
         )
-        inventory = _load(ROOT / "qualification/inventory-2026-09-25-v2.json")
+        # R40-07 (#343): the executed-lab receipts are whatever the
+        # committed manifest CITES (the v2 snapshot until a lab
+        # re-alignment moves the bind through the freeze's additive
+        # --alignment-receipts/--inventory seams).
+        executed_receipts = document["control_plane"]["executed_lab"]["receipts"]
+        inventory = _load(ROOT / executed_receipts[-1])
         from scripts.freeze_supported_profile import CLOSURE_RECEIPT_CANDIDATES
 
         closure_path = next(
@@ -151,7 +168,9 @@ class TestFreezeFieldSourcing:
             executed["image_digest"]
             == inventory["stages"]["control-plane"]["image"]["image_digest"]
         )
-        assert executed["reported_version"] == "0.38.0"  # the v2 composition (Q39-07/#326)
+        assert executed["reported_version"] == str(
+            inventory["stages"]["control-plane"]["reported_version"]
+        )
 
         assert document["lane"]["executed_live"]["git_sha"] == trace["task"]["lane_ref"]
         assert document["lane"]["closure"]["closure_digest"] == closure["closure_digest"]
@@ -304,8 +323,16 @@ class TestManifestContract:
 
     def test_schema_predecessor_differs_from_head(self, manifest: dict[str, Any]) -> None:
         revision = manifest["control_plane"]["schema_revision"]
-        assert revision["head"] == "028"  # 028_credential_receipts (Q39-03/Q39-05)
-        assert revision["predecessor"] == "027"
+        # the head DERIVES from the alembic chain (a literal broke at the
+        # 029 bump); the freeze binds the chain's actual head and its
+        # predecessor, and a frozen profile must name a real transition.
+        heads = sorted(
+            path.name.split("_", 1)[0]
+            for path in (ROOT / "alembic" / "versions").glob("*.py")
+            if path.name[0].isdigit()
+        )
+        assert revision["head"] == heads[-1]
+        assert revision["predecessor"] == heads[-2]
         assert revision["head"] != revision["predecessor"]
 
     def test_load_manifest_refuses_a_stale_manifest(self, tmp_path: Path) -> None:

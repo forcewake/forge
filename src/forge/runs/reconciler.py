@@ -50,6 +50,23 @@ async def run_reconciler(
             # have landed while the worker was stalled (adopt / duplicate /
             # unknown — never a blind re-publish).
             service.evaluate_publication_intents,
+            # R40-01 (#337): the bounded review-correction pass — re-drive
+            # runs whose staged reviewer correction (/fix on the Draft MR)
+            # a human has since APPROVED via /approve-revision. The pass is
+            # the reconciler's own shape (a bounded scan over
+            # waiting_ci/evaluating_ci runs, one exception-isolated loop per
+            # run) and doubles as the RECOVERY path when the approving
+            # delivery was lost: discovery of requests stays in the
+            # ingress/step path and authorization to start an attempt
+            # stays with the human approval — this pass re-drives only what
+            # BOTH already decided, never more.
+            service.evaluate_review_corrections,
+            # R40-02 (#338): the bounded review-ROUND pass — close rounds
+            # whose child work unit reached a terminal status (freeing the
+            # lineage's ONE outstanding-correction slot) and re-drive the
+            # rounds a crash left between admission and the advance leg
+            # (head-fenced, at most one child + one effect intent).
+            service.evaluate_review_rounds,
         ):
             try:
                 await evaluate()

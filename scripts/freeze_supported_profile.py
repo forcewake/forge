@@ -432,15 +432,33 @@ class CaptureInputs:
     credential_modes: tuple[str, ...]
     composition_row: Mapping[str, Any]
     frozen_at: str
+    #: The RECEIPT PATHS actually loaded (R40-07: overridable so a lab
+    #: re-alignment re-freezes the executed-lab bind without rewriting
+    #: the v2 trace receipts) — cited in the manifest's receipts lists.
+    alignment_receipt_path: str = ALIGNMENT_RECEIPT
+    inventory_receipt_path: str = INVENTORY_RECEIPT
 
     @classmethod
-    def from_root(cls, root: Path, probe: TemplateReceiptProbe) -> CaptureInputs:
+    def from_root(
+        cls,
+        root: Path,
+        probe: TemplateReceiptProbe,
+        *,
+        alignment_receipt: str | None = None,
+        inventory_receipt: str | None = None,
+    ) -> "CaptureInputs":
+        # R40-07 (#343): the EXECUTED-LAB bind is overridable so a lab
+        # re-alignment (a new working-tree build, a moved schema head) can
+        # re-freeze without rewriting the v2 trace receipts — the ADDITIVE
+        # seam; every other receipt keeps its frozen default.
+        alignment_path = alignment_receipt or ALIGNMENT_RECEIPT
+        inventory_path = inventory_receipt or INVENTORY_RECEIPT
         promotion = _load_json(root, PROMOTION_RECEIPT)
         latest_promotion = _load_json(root, LATEST_PROMOTION_RECEIPT)
-        alignment = _load_json(root, ALIGNMENT_RECEIPT)
+        alignment = _load_json(root, alignment_path)
         trace = _load_json(root, LIVE_TRACE_RECEIPT)
         live_run = _load_json(root, LIVE_RUN_RECEIPT)
-        inventory = _load_json(root, INVENTORY_RECEIPT)
+        inventory = _load_json(root, inventory_path)
         closure = _load_json(root, _first_existing(root, CLOSURE_RECEIPT_CANDIDATES))
         record = _load_json(root, PROFILE_RECORD_RECEIPT)
         # The template bytes: recovered from the committed receipt (the v2
@@ -465,6 +483,8 @@ class CaptureInputs:
             inventory=inventory,
             closure=closure,
             record=record,
+            alignment_receipt_path=alignment_path,
+            inventory_receipt_path=inventory_path,
             template_bytes=template_bytes,
             working_tree_template_sha256=_sha256_bytes((root / LANE_TEMPLATE_PATH).read_bytes()),
             working_tree_wheel=_working_tree_wheel(root),
@@ -727,7 +747,10 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                         "artifact that predates them"
                     ),
                 },
-                "receipts": [ALIGNMENT_RECEIPT, INVENTORY_RECEIPT],
+                "receipts": [
+                    inputs.alignment_receipt_path,
+                    inputs.inventory_receipt_path,
+                ],
             },
             "schema_revision": {
                 "head": inputs.schema_head,
@@ -1212,6 +1235,27 @@ def main(argv: list[str] | None = None) -> int:
         help="re-verify the committed manifest (digest + validation) instead of capturing",
     )
     parser.add_argument("--root", type=Path, default=ROOT, help="the repository root")
+    parser.add_argument(
+        "--alignment-receipts",
+        default=None,
+        metavar="PATH",
+        help=(
+            "the alignment-receipts document the EXECUTED-LAB bind captures from "
+            "(default: the v2 qualification receipts). R40-07 (#343): point this at "
+            "the newest lab alignment's receipts when the lab digest legitimately "
+            "moved — additive, never a rewrite of the traced receipts"
+        ),
+    )
+    parser.add_argument(
+        "--inventory",
+        default=None,
+        metavar="PATH",
+        help=(
+            "the post-alignment inventory receipt (default: the v2 snapshot). Pair "
+            "with --alignment-receipts so the frozen image digest and the receipts "
+            "cite the same lab"
+        ),
+    )
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(args.root / "src"))
@@ -1237,7 +1281,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        inputs = CaptureInputs.from_root(args.root, TemplateReceiptProbe())
+        inputs = CaptureInputs.from_root(
+            args.root,
+            TemplateReceiptProbe(),
+            alignment_receipt=args.alignment_receipts,
+            inventory_receipt=args.inventory,
+        )
         document = capture_supported_profile(inputs)
     except FreezeRefused as error:
         print(f"freeze_supported_profile: REFUSED: {error}", file=sys.stderr)

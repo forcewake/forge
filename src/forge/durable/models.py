@@ -100,6 +100,38 @@ _USAGE_COMPLETENESS: tuple[str, ...] = ("exact", "aggregate", "partial", "unknow
 #: ADR-0018 §5 (F22): closed set of run-budget lifecycle statuses. ``exhausted``
 #: budgets stop granting reservations; ``closed`` is terminal (run finished).
 _BUDGET_STATUSES: tuple[str, ...] = ("open", "exhausted", "closed")
+#: R40-04 (#340): the DISTINCT budget dimensions an amendment can name.
+#: USD exposure, dispatch calls, tokens and wall-clock are separate
+#: enforcement axes — a top-up names exactly one; conversion between them
+#: requires a stated versioned policy, never an implicit guess.
+_BUDGET_AXES: tuple[str, ...] = ("usd", "calls", "tokens", "wallclock")
+#: R40-04 (#340): an amendment row is either applied to the enforcement
+#: resource or refused with the limiting axis named — every
+#: successful/refused command stays visible for audit.
+_BUDGET_AMENDMENT_STATUSES: tuple[str, ...] = ("applied", "refused")
+#: R40-02 (#338): the review-round lifecycle. ``admitted`` = the round row
+#: and its child run exist (the dispatch may not have started — the crash
+#: window the reconciler pass re-drives); ``dispatched`` = the correction
+#: cycle's advance leg ran; ``stale`` = the re-drive found the MR head moved
+#: (the typed stale-head conflict — human edits preserved, nothing
+#: dispatched); ``completed`` / ``ended`` close the round (the child run
+#: reached a terminal status — ready_for_human or anything else) and free
+#: the ONE outstanding round per lineage the partial unique index enforces.
+_REVIEW_ROUND_STATUSES: tuple[str, ...] = (
+    "admitted",
+    "dispatched",
+    "stale",
+    "completed",
+    "ended",
+)
+
+#: R40-02 (#338): the round statuses that still hold the lineage's ONE
+#: outstanding correction slot (the partial unique index below makes "one
+#: outstanding review round per delivery lineage" a DB invariant — two
+#: authorized /fix notes racing the same head collapse to one round at the
+#: index, never by hope).
+_REVIEW_ROUND_OPEN = text("status IN ('admitted', 'dispatched')")
+
 #: R11: closed set of publication-intent lifecycle states. ``requested`` rows
 #: exist before the HTTP effect (intent-before-I/O); ``dispatched`` rows have
 #: an effect in flight or one whose outcome was lost (crash / timeout); the
@@ -564,6 +596,14 @@ class RunBudget(Base):
     #: here so it keeps fencing capacity instead of reading as spendable.
     unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: R40-04 (#340): the closing share of the numeric axes, partitioned
+    #: BEFORE coding starts through the real reservation path — the
+    #: implementation purpose cannot reserve into it, the closing purpose
+    #: (the reviewer leg) can. NULL = no partition (every axis fully
+    #: shared); the versioned policy that sized it rides the column below.
+    closing_reserved_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    closing_reserved_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    closing_partition_policy: Mapped[str | None] = mapped_column(String(40), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
@@ -599,6 +639,100 @@ class BudgetReservation(Base):
     reserved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reserved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     released: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class BudgetAmendment(Base):
+    """ONE persisted budget amendment, keyed by the ORIGINATING NATIVE
+    COMMAND identity (R40-04, #340).
+
+    The recorded defect: ``continue_review_only`` recorded amount/reason/
+    operator into run EVIDENCE, released the marker and re-ran the review
+    against the SAME ``RunBudget`` limits — a dollar-only annotation
+    cannot reopen an exhausted call or token budget. From #340 an
+    amendment is a DURABLE row applied ATOMICALLY to the enforcement
+    resource in the same transaction that inserts it:
+
+    - ``command_id`` is the native command identity (the note/delivery id
+      the operator surface rode, e.g. ``run:continue_review:42:918``).
+      Two identical amount/reason commands are TWO decisions (two ids);
+      a redelivery of ONE command hits the UNIQUE ``(run_id,
+      command_id)`` index and replays — applied exactly once.
+    - ``axis`` names the DISTINCT dimension the amendment changes
+      (``usd`` | ``calls`` | ``tokens`` | ``wallclock``). Cross-axis
+      conversion is refused — it would need a stated versioned policy,
+      never an implicit guess.
+    - ``calls`` / ``tokens`` / ``wallclock`` raise the ``run_budgets``
+      limits and re-open a budget that was ``exhausted`` (a ``closed``
+      budget is terminal and refuses); ``usd`` changes the closing
+      gate's effective cap (the durable row IS the enforcement record —
+      the USD axis is enforced over the usage receipts, not the guard's
+      counters).
+    - ``limit_before``/``limit_after`` keep the original approved budget
+      as history: the moved limit is auditable against what stood
+      before, and a refused amendment keeps its typed
+      ``refusal_reason`` (the limiting axis named).
+    """
+
+    __tablename__ = "budget_amendments"
+    __table_args__ = (
+        CheckConstraint(
+            f"axis IN ({', '.join(f"'{value}'" for value in _BUDGET_AXES)})",
+            name="ck_budget_amendments_axis",
+        ),
+        CheckConstraint(
+            f"status IN ({', '.join(f"'{value}'" for value in _BUDGET_AMENDMENT_STATUSES)})",
+            name="ck_budget_amendments_status",
+        ),
+        CheckConstraint(
+            "(axis = 'usd' AND amount_usd IS NOT NULL"
+            " AND amount_calls IS NULL AND amount_tokens IS NULL"
+            " AND amount_wallclock_s IS NULL)"
+            " OR (axis = 'calls' AND amount_calls IS NOT NULL"
+            " AND amount_usd IS NULL AND amount_tokens IS NULL"
+            " AND amount_wallclock_s IS NULL)"
+            " OR (axis = 'tokens' AND amount_tokens IS NOT NULL"
+            " AND amount_usd IS NULL AND amount_calls IS NULL"
+            " AND amount_wallclock_s IS NULL)"
+            " OR (axis = 'wallclock' AND amount_wallclock_s IS NOT NULL"
+            " AND amount_usd IS NULL AND amount_calls IS NULL"
+            " AND amount_tokens IS NULL)",
+            name="ck_budget_amendments_one_axis_amount",
+        ),
+        UniqueConstraint("run_id", "command_id", name="uq_budget_amendment_command"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: The originating native command's identity — the delivery id the
+    #: operator surface carried (note id / inbox source event id). An
+    #: empty id never reaches this table: the applying surface refuses
+    #: an amendment without its command identity up front.
+    command_id: Mapped[str] = mapped_column(String(150), nullable=False)
+    axis: Mapped[str] = mapped_column(String(20), nullable=False)
+    amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amount_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_wallclock_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    operator: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="applied")
+    #: The typed refusal — names the limiting axis (``calls``, the
+    #: budget status, ...). NULL on applied rows.
+    refusal_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    #: The approved budget as it stood before / after the application —
+    #: the original limits stay visible as history, never overwritten.
+    limit_before: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    limit_after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+    )
 
 
 class UsageReceipt(Base):
@@ -834,6 +968,79 @@ class CredentialRedemption(Base):
     )
 
 
+class OperationGrant(Base):
+    """ONE keyed operation-grant authority row (R40-05, #341).
+
+    THE transactional authority behind dispatch-time authorization.
+    Q39-01 (#320) minted the grant and persisted it with an unconditional
+    whole-document evidence overwrite — the review b521e1a R40-05 defect:
+    a concurrent native-handle / checkpoint / review write between the
+    read and the write was silently erased, and two concurrent initial
+    grants could return different effective identities. From #341 the
+    grant lives HERE, UNIQUE per canonical (work, attempt, route), and
+    the ``run.evidence["credential_operation_grants"]`` map becomes a
+    DERIVED projection rewritten through a targeted compare-and-swap
+    (see :func:`forge.api_lane_control.persist_operation_grant`):
+
+    - creation is serialized by the unique index itself (INSERT ... ON
+      CONFLICT DO NOTHING, then read): every contender returns the
+      COMMITTED effective grant, never its own locally minted object;
+    - an exact replay keeps the first authorized ``grant_id`` and the
+      ABSOLUTE ``redemption_deadline`` (the window never re-anchors);
+    - a rotation (a DIFFERENT credential ref at the same key) replaces
+      the document through a conditional UPDATE guarded by the row the
+      writer judged — the broker's documented merge rule, applied
+      authority-side;
+    - a CORRUPT document is a typed persistence failure, never silently
+      replaced with a fresh window;
+    - ``revoked`` is the explicit operator retirement of the key: a
+      replay or a rotation against a revoked row refuses — a revocation
+      is never resurrected by a re-dispatch.
+
+    ``document`` is the full value-free grant document (the exact
+    ``CredentialOperationGrant.as_document()`` JSON shape); the columns
+    beside it are its queryable projections. No value slot, by
+    construction.
+    """
+
+    __tablename__ = "operation_grants"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_operation_grants_status"),
+        UniqueConstraint(
+            "work_id", "attempt_generation", "provider", name="uq_operation_grant_key"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    work_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: The attempt generation component of the canonical grant key.
+    attempt_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The provider ROUTE component of the canonical grant key (the
+    #: evidence key's ``"<attempt>:<provider>"`` second half).
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    grant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The full grant document — refs and metadata ONLY, never a value.
+    document: Mapped[dict] = mapped_column(JSON, nullable=False)
+    #: The ABSOLUTE redemption deadline (fixed at first authorization).
+    redemption_deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
 class PublicationIntent(Base):
     """The durable intent to produce ONE remote publication effect (R11).
 
@@ -925,6 +1132,97 @@ class PublicationIntent(Base):
     remote_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
+class ReviewRound(Base):
+    """ONE linked post-readiness review round (R40-02, #338).
+
+    The recorded gap: the correction window closed at ``ready_for_human``,
+    so reviewer feedback on the Draft MR earned ``correction_window_closed``
+    — while the natural journey asks for corrections AFTER readiness is
+    announced. The fix never reopens the terminal record: a follow-up round
+    is a LINKED attempt/work unit — a NEW child ``FlowRun`` with its own
+    admission, scope, numerical budget, base head and execution generation
+    — and supersession is a RELATIONSHIP between deliveries, recorded here,
+    never a rewrite of the earlier verified verdict or its evidence.
+
+    - ``parent_run_id`` — the terminal run whose ready delivery the round
+      corrects; its status, verdict, verification and candidate list are
+      immutable historical evidence for the whole round's life.
+    - ``child_run_id`` — the round's own work unit, created in the SAME
+      transaction as this row (walked to ``proposing``; the MR stays the
+      collaboration surface — the child carries the parent's ``mr_iid``
+      and a confirmed reservation on the SAME branch).
+    - ``root_run_id`` — the lineage root (delivery 1); round bounding and
+      the one-outstanding-correction slot key on the LINEAGE, so a round
+      two can itself be corrected by a round three without forking the
+      accounting.
+    - ``round_number`` — 1 is the original delivery (never a row here);
+      the first post-readiness round is 2.
+    - ``note_id`` — the originating /fix note (with ``parent_run_id`` the
+      admission's idempotency key: one reviewer comment admits at most one
+      round however many times the webhook replays).
+    - ``base_head_sha`` — the EXACT approved current MR head at admission
+      (human additions included); the child's ``base_sha``, so the round's
+      candidate descends from the human-approved head and any later move
+      is the existing stale-head / branch-drift conflict — never a
+      force-push, never a replay against the old base.
+    - ``decision_id`` — the deterministic correction decision identity
+      (``correction_decision_id``), the authority name the round's
+      active-plan seed and the request's lifecycle both carry.
+    """
+
+    __tablename__ = "review_rounds"
+    __table_args__ = (
+        _status_check("ck_review_rounds_status", _REVIEW_ROUND_STATUSES),
+        Index(
+            "uq_review_round_open_per_root",
+            "root_run_id",
+            unique=True,
+            postgresql_where=_REVIEW_ROUND_OPEN,
+            sqlite_where=_REVIEW_ROUND_OPEN,
+        ),
+        UniqueConstraint("parent_run_id", "note_id", name="uq_review_round_request"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    parent_run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    child_run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    root_run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    note_id: Mapped[str] = mapped_column(String(150), nullable=False)
+    mr_iid: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    decision_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="admitted")
+    status_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

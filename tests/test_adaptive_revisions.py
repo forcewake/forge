@@ -2065,3 +2065,76 @@ class TestStandingGuidancePromotion:
             )
             is None
         )
+
+
+# ----------------------------------------------------------------------
+# R40-02 (#338) — the classic-run adapter behind the review round
+# ----------------------------------------------------------------------
+
+
+class TestClassicRunAdapter:
+    """The verified adapter: frozen spec + accepted request → the round's
+    initial approved-input representation — nothing else contributes."""
+
+    @staticmethod
+    def _spec(**overrides) -> dict:
+        base = {
+            "task_title": "Add the validator",
+            "task_description": "Validate emails on entry.",
+            "plan_summary": "Create forge-demo/validator.py with the entry hook.",
+            "plan_digest": "p" * 64,
+            "policy_digest": "q" * 64,
+            "allowed_paths": ["forge-demo/**"],
+            "source_base_oid": "base-sha-1",
+            # noise the adapter must IGNORE (live settings never shape a
+            # derived plan — only the closed field set does)
+            "backend": "ci_harness",
+            "harness_driver": "claude-code",
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _request():
+        from forge.adaptive.revisions import ReviewFeedbackRequest
+
+        return ReviewFeedbackRequest(
+            note_id="9901",
+            run_id="c" * 32,
+            discussion_id="d-x",
+            mr_iid=7,
+            actor="alice",
+            head_sha="h" * 40,
+            classification="in_scope_correction",
+            text="handle `forge-demo/validator.py` empty input",
+            referenced_paths=("forge-demo/validator.py",),
+        )
+
+    def test_the_adapter_reads_only_the_closed_spec_field_set(self):
+        from forge.adaptive.revisions import classic_spec_revision
+
+        noisy = dict(self._spec(), backend="SOMETHING-ELSE", harness_driver="other-driver")
+        clean = self._spec()
+        assert plan_digest(
+            classic_spec_revision(work_id="c" * 32, spec=noisy, request=self._request())
+        ) == plan_digest(
+            classic_spec_revision(work_id="c" * 32, spec=clean, request=self._request())
+        )
+
+    def test_the_seed_round_trips_through_the_content_join(self):
+        from forge.adaptive.revisions import (
+            REVISION_CONTENT_KEY,
+            classic_spec_revision,
+            round_active_plan_seed,
+        )
+
+        revision = classic_spec_revision(
+            work_id="c" * 32, spec=self._spec(), request=self._request()
+        )
+        seed = round_active_plan_seed(
+            revision, revised_from_digest="p" * 64, decision_id="rd-review-x"
+        )
+        # the content parses back and digests identically — the #321 join
+        back = PlanRevision.model_validate(seed[REVISION_CONTENT_KEY])
+        assert plan_digest(back) == seed["plan_digest"]
+        assert back.work_id == "c" * 32

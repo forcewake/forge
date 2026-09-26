@@ -1,10 +1,13 @@
 """Q39-17 (issue #336): the closure matrix — per capability, the six
 closure levels with the CURRENT evidence class recorded as DATA.
 
-ADR-0033 §4's contract. A GitHub issue closed is not every level
-proven: each of the six decision owners (ADR-0033 §1 — which plan is
-approved, which credential, which attempt, which checkpoint, which
-candidate verified, which receipt counts) carries a small matrix over
+ADR-0033 §4's contract, extended by ADR-0034 (#353) with the seventh
+capability (the budget-amendment application decision). A GitHub issue
+closed is not every level proven: each of the decision owners
+(ADR-0033 §1 — which plan is approved, which credential, which
+attempt, which checkpoint, which candidate verified, which receipt
+counts; ADR-0034 §1 — whether an operator amendment applies) carries a
+small matrix over
 six levels — domain contract / wired caller / executed process /
 native execution / cross-process recovery / customer acceptance — and
 each cell names its evidence CLASS and the repo-relative PATH of the
@@ -588,6 +591,72 @@ def closure_matrix() -> ClosureMatrix:
                         "pending",
                         "docs/releases/profile-records.md",
                         "no customer economics record exists",
+                    ),
+                ),
+            ),
+            # ---------------------------------------------------------
+            # 7. whether an operator amendment applies (#340, #353)
+            # ---------------------------------------------------------
+            CapabilityClosure(
+                capability="budget-amendment",
+                decision=(
+                    "whether an operator budget amendment applies (one durable table,"
+                    " the originating command identity, the enforcement resource moved)"
+                ),
+                owner="forge.durable.budgets.apply_budget_amendment (+ closing_budget.amendment_ledger_document, the one projection)",
+                consumer_contract=(
+                    "BudgetAmendmentCommand (run, command_id, axis, amount, reason)"
+                    " — budget_amendments UNIQUE per (run, command)"
+                ),
+                evidence=(
+                    _ev(
+                        "domain-contract",
+                        "unit-proven",
+                        "tests/test_budget_amendment.py",
+                        "the command identity (two identical commands are two "
+                        "decisions, a redelivery applies once), per-axis atomic "
+                        "application, typed refusals naming the limiting axis, the "
+                        "closing partition's protected share",
+                    ),
+                    _ev(
+                        "wired-caller",
+                        "unit-proven",
+                        "tests/test_architecture_boundaries.py",
+                        "the applicants allow-set (R40-17/#353): only the owner and "
+                        "the two provider continuation routes construct/apply the "
+                        "command — the GitLab operator route and the GitHub leg "
+                        "migrated off its legacy evidence ledger in the same change "
+                        "(tests/test_github_runs.py pins the adoption)",
+                    ),
+                    _ev(
+                        "executed-process",
+                        "pe-proven",
+                        "tests/production_entry/test_mutation_gates.py",
+                        "MG-2: a calls-axis amendment re-opens the REAL guard for "
+                        "exactly one reviewer call; the evidence-only mutation "
+                        "cannot buy one",
+                    ),
+                    _ev(
+                        "native-execution",
+                        "pending",
+                        "docs/operations/closing-budget.md",
+                        "no live amendment record exists — the operator command "
+                        "surface is proven against the modeled native surface and "
+                        "the real guard only",
+                    ),
+                    _ev(
+                        "cross-process-recovery",
+                        "pe-proven",
+                        "tests/production_entry/test_mutation_gates.py",
+                        "MG-2's redelivery arm: the same command after completion "
+                        "refuses honestly and the ledger holds exactly ONE applied "
+                        "row — the provider stays quiet",
+                    ),
+                    _ev(
+                        "customer-acceptance",
+                        "pending",
+                        "docs/releases/profile-records.md",
+                        "no customer record exercises an operator amendment yet",
                     ),
                 ),
             ),

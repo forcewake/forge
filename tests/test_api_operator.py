@@ -49,7 +49,7 @@ from forge.api_lane_control import lane_control_token
 from forge.api_operator import operator_subject_scope_token
 from forge.config import Settings
 from forge.database import reset_engine
-from forge.durable.models import ActionLog, FlowRun, PublicationIntent
+from forge.durable.models import ActionLog, FlowRun, PublicationIntent, ReviewRound
 from forge.main import create_app
 
 SECRET = "operator-secret"  # noqa: S105 — fake value for tests
@@ -942,3 +942,256 @@ async def test_the_bundle_export_carries_bounded_allowlisted_diagnostics(app, cl
     assert diagnostics["export"]["raw_backups_excluded"] >= 1
     # the byte accounting includes the diagnostics slice
     assert bundle["export"]["bytes"] == len(response.content)
+
+
+# ---------------------------------------------------------------------------
+# R40-13 (#349) — the five linked facts on the API surface, the
+# foreign-subject matrix over the round linkage, and the three-surface
+# consistency (API / comment / native lines from ONE snapshot)
+# ---------------------------------------------------------------------------
+
+RUN_CHILD = "e" * 32
+CANDIDATE_A = "c" * 40
+DECISION_A = "corr-a1"
+
+
+def _round_row(status: str = "dispatched", **over) -> ReviewRound:
+    values: dict = {
+        "parent_run_id": RUN_A,
+        "child_run_id": RUN_CHILD,
+        "root_run_id": RUN_A,
+        "round_number": 2,
+        "note_id": "918",
+        "mr_iid": 7,
+        "base_head_sha": CANDIDATE_A,
+        "decision_id": DECISION_A,
+        "requested_by": "reviewer:op",
+        "status": status,
+    }
+    values.update(over)
+    return ReviewRound(**values)
+
+
+async def _seed_ready_parent_with_round(app) -> None:
+    """A READY delivery on repo A whose follow-up round dispatched: the
+    parent keeps its green verification, the child is the current
+    execution, and the round row links them."""
+    await _seed(
+        app,
+        _run(
+            RUN_A,
+            REPO_A,
+            status="ready_for_human",
+            candidate_shas=[CANDIDATE_A],
+            evidence={
+                "verification": {
+                    "status": "passed",
+                    "tested_oid": CANDIDATE_A,
+                    "observed_at": (NOW - timedelta(hours=1)).isoformat(),
+                    "producer": "github-checks",
+                },
+                "review_feedback_requests": {
+                    "918": {
+                        "note_id": "918",
+                        "status": "round_admitted",
+                        "classification": "in-scope_correction",
+                        "decision_id": DECISION_A,
+                    }
+                },
+            },
+        ),
+        _run(RUN_CHILD, REPO_A, status="proposing", base_sha=CANDIDATE_A),
+        _round_row(),
+    )
+
+
+async def test_the_detail_renders_the_five_linked_delivery_facts(app, client, repository):
+    await _seed_ready_parent_with_round(app)
+    headers = _scope_headers([SUBJECT_A])
+
+    response = await client.get(
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=headers
+    )
+
+    assert response.status_code == 200
+    document = response.json()
+    delivery = document["delivery"]
+    assert delivery["schema"] == "forge.operator.delivery/1"
+    facts = delivery["facts"]
+    # the round row IS the supersession: the ready delivery and its green
+    # evidence are HISTORY, and the current execution is the child run
+    assert facts["review_round"]["ref"] == f"round:2:{DECISION_A}"
+    assert facts["review_round"]["child_run_id"] == RUN_CHILD
+    assert facts["candidate"]["role"] == "historical"
+    assert facts["candidate"]["superseded_by"] == f"round:2:{DECISION_A}"
+    assert facts["verification"]["binding"] == "historical"
+    assert facts["acceptance"]["state"] == "none"  # green CI is not acceptance
+    assert document["round_ref"] == f"round:2:{DECISION_A}"
+    assert document["superseded_by_round"] == f"round:2:{DECISION_A}"
+    assert document["source_coverage"]["rounds"] == "present"
+
+
+async def test_the_child_detail_projects_its_own_round(app, client, repository):
+    await _seed_ready_parent_with_round(app)
+    headers = _scope_headers([SUBJECT_A])
+
+    response = await client.get(
+        f"/operator/runs/{RUN_CHILD}?{_subject_query([SUBJECT_A])}", headers=headers
+    )
+
+    assert response.status_code == 200
+    facts = response.json()["delivery"]["facts"]
+    assert facts["review_round"]["ref"] == f"round:2:{DECISION_A}"
+    assert facts["execution"]["role"] == "round-child"
+    assert facts["candidate"]["role"] == "none"
+    assert facts["candidate"]["superseded_by"] == ""
+
+
+async def test_the_rounds_section_is_selectable_and_refused_when_unknown(app, client, repository):
+    await _seed_ready_parent_with_round(app)
+    headers = _scope_headers([SUBJECT_A])
+    query = _subject_query([SUBJECT_A])
+
+    narrowed = await client.get(
+        f"/operator/runs/{RUN_A}?{query}&sections=run,verifications", headers=headers
+    )
+    assert narrowed.status_code == 200
+    narrowed_document = narrowed.json()
+    # the rounds authority was never queried — the round fact reads
+    # honestly absent, never invented
+    assert narrowed_document["source_coverage"]["rounds"] == "unknown"
+    assert narrowed_document["delivery"]["facts"]["review_round"] is None
+
+    unknown = await client.get(
+        f"/operator/runs/{RUN_A}?{query}&sections=run,rounds", headers=headers
+    )
+    assert unknown.status_code == 200  # a known name — selectable
+    refused = await client.get(
+        f"/operator/runs/{RUN_A}?{query}&sections=run,spurious", headers=headers
+    )
+    assert refused.status_code == 400
+
+
+async def test_a_foreign_subject_cannot_list_or_guess_the_round_lineage(app, client, repository):
+    """The scope matrix over the ROUND linkage: an operator from another
+    repository gets the SAME 404 on the parent, the child and the bundle
+    (indistinguishable from unknown), and their runs never appear in the
+    listing — the round relation leaks nothing to a guessed run id."""
+    await _seed_ready_parent_with_round(app)
+    await _seed(app, _run(RUN_B, REPO_B))
+    foreign = _scope_headers([SUBJECT_B])
+    foreign_query = _subject_query([SUBJECT_B])
+
+    listed = await client.get(f"/operator/runs?{foreign_query}", headers=foreign)
+    assert listed.status_code == 200
+    listed_ids = {run["run_id"] for run in listed.json()["runs"]}
+    assert listed_ids == {RUN_B}  # neither the parent NOR the round child leaks
+
+    for path in (
+        f"/operator/runs/{RUN_A}?{foreign_query}",
+        f"/operator/runs/{RUN_CHILD}?{foreign_query}",  # the guessed child id
+        f"/operator/runs/{RUN_A}/support-bundle?{foreign_query}",
+    ):
+        response = await client.get(path, headers=foreign)
+        assert response.status_code == 404, path
+        assert DECISION_A not in response.text  # no round identity leaks either
+
+
+async def test_one_snapshot_consistent_across_api_comment_and_native_lines(app, client, repository):
+    """The three surfaces agree because they read ONE snapshot: the API
+    detail document, the MR/issue status comment and the native /status
+    lines (the operator-command slice) all state the SAME round, the
+    SAME candidate role, the SAME verification binding and the SAME
+    acceptance, from the same reader rows."""
+    from forge.adaptive.operator_snapshot import OperatorSnapshotReader
+    from forge.adaptive.operator_view import render_status_comment, status_note_lines
+
+    await _seed_ready_parent_with_round(app)
+    reader = OperatorSnapshotReader(
+        app.state.session_factory, checkpoint_repository=repository, clock=lambda: NOW
+    )
+    snapshot = await reader.snapshot(RUN_A, [SUBJECT_A])
+    assert snapshot is not None
+    rows = snapshot.rows
+    projection = snapshot.projection()
+
+    headers = _scope_headers([SUBJECT_A])
+    query = _subject_query([SUBJECT_A])
+    api_detail = (await client.get(f"/operator/runs/{RUN_A}?{query}", headers=headers)).json()
+    comment = render_status_comment(rows)
+    native_lines = status_note_lines(projection)
+
+    # 1. the API surface: the delivery section derives from the SAME rows
+    api_delivery = api_detail["delivery"]
+    assert api_delivery["round_ref"] == projection.round_ref == f"round:2:{DECISION_A}"
+    assert api_delivery["facts"]["candidate"]["role"] == "historical"
+    assert api_delivery["facts"]["verification"]["binding"] == "historical"
+    assert api_delivery["facts"]["acceptance"]["state"] == "none"
+    # the ops_limits read-model arm agrees on the same subject
+    assert api_detail["ops_limits"]["delivery_round"]["round_ref"] == f"round:2:{DECISION_A}"
+
+    # 2. the comment surface: the SAME five facts, compactly
+    assert f"round:2:{DECISION_A}" in comment
+    assert "historical" in comment
+    assert "HISTORICAL" in comment
+    assert "**Acceptance:** none" in comment
+    assert f"run={RUN_A}" in comment  # the stable identity marker names the run
+
+    # 3. the native /status lines (the operator-command slice): the SAME
+    #    state and the SAME supersession sentence
+    assert native_lines[0] == f"Run {RUN_A} is {api_detail['state']}."
+    round_line = next(line for line in native_lines if line.startswith("Round:"))
+    assert f"round:2:{DECISION_A}" in round_line
+    assert "HISTORICAL" in round_line
+
+
+async def test_the_bundle_stays_allowlisted_and_value_free_with_rounds_present(
+    app, client, repository
+):
+    """R40-13 (#349): the support bundle's evidence sections keep their
+    allowlisted shapes with round data present, and no reviewer-note
+    VALUE (a pasted credential sentinel) reaches any export surface."""
+    sentinel = "glpat-round-secret-987654321"
+    await _seed(
+        app,
+        _run(
+            RUN_A,
+            REPO_A,
+            status="ready_for_human",
+            candidate_shas=[CANDIDATE_A],
+            evidence={
+                "verification": {"status": "passed", "tested_oid": CANDIDATE_A},
+                "review_feedback_requests": {
+                    "918": {
+                        "note_id": "918",
+                        "status": "round_admitted",
+                        "text": f"/fix rotate with {sentinel} in `src/app.py`",
+                    }
+                },
+            },
+        ),
+        _run(RUN_CHILD, REPO_A, status="proposing"),
+        _round_row(),
+    )
+    headers = _scope_headers([SUBJECT_A])
+    query = _subject_query([SUBJECT_A])
+
+    bundle = (
+        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
+    ).json()
+    detail = (await client.get(f"/operator/runs/{RUN_A}?{query}", headers=headers)).json()
+
+    assert bundle["schema"] == "forge.support.bundle/1"
+    assert sentinel not in json.dumps(bundle)
+    assert sentinel not in json.dumps(detail)
+    assert sentinel not in detail["delivery"]["facts"]["candidate"].get("note", "")
+    # the reviewer's TEXT never rides the delivery facts — ids + statuses only
+    requests = detail["delivery"]["facts"]["review_round"]["requests"]
+    assert requests and set(requests[0]) <= {
+        "note_id",
+        "status",
+        "classification",
+        "decision_id",
+        "head_sha",
+        "created_at",
+    }

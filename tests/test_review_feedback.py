@@ -721,6 +721,62 @@ class TestIngressClassificationAndIdempotency:
         assert PENDING_PROPOSAL_KEY not in (run.evidence or {})
         assert any("deleted_discussion" in n["body"] for n in review_fake.mr_notes)
 
+    async def test_a_transient_provider_failure_is_retried_never_read_as_deletion(
+        self, review_db, review_fake
+    ):
+        """R40-01 (#337): a 5xx from the discussions surface is TRANSIENT —
+        the command fails (the step runtime retries it with backoff) and
+        NOTHING is recorded; a confirmed deletion (the readable list without
+        the id, above) is the typed ``deleted_discussion`` refusal. The two
+        outcomes must never be confused."""
+
+        class FlakyDiscussions(ReviewFakeGitLab):
+            def __init__(self) -> None:
+                super().__init__()
+                self.failing = True
+
+            async def list_discussions(self, project_id: int, mr_iid: int) -> list[Discussion]:
+                if self.failing:
+                    raise GitLabAPIError(503, "discussions temporarily unavailable")
+                return await super().list_discussions(project_id, mr_iid)
+
+        fake = FlakyDiscussions()
+        fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
+        fake.seed_commit("main", "base-sha-1", "initial")
+        fake.seed_file(".forge.yml", "implement:\n  paths:\n    - forge-demo/**\n")
+        service = make_review_service(review_db, fake)
+        run_id, _ = await _landed_run(review_db, fake, service)
+        mr_iid = (await _get_run(review_db, run_id)).mr_iid
+        fake.seed_discussion(mr_iid, "d-flaky", note_id=9102, body="/fix rename `forge-demo/x.md`")
+
+        with pytest.raises(GitLabAPIError):
+            await service.run_command(
+                _feedback_command(
+                    mr_iid,
+                    "/fix rename `forge-demo/x.md`",
+                    note_id="9102",
+                    discussion_id="d-flaky",
+                )
+            )
+        # nothing recorded — a transient failure is retried, never guessed
+        run = await _get_run(review_db, run_id)
+        assert review_feedback_requests_of(run.evidence or {}) == {}
+        assert fake.mr_notes == []
+
+        # the recovery: the SAME delivery re-enters once the surface is back
+        fake.failing = False
+        await service.run_command(
+            _feedback_command(
+                mr_iid,
+                "/fix rename `forge-demo/x.md`",
+                note_id="9102",
+                discussion_id="d-flaky",
+            )
+        )
+        requests = review_feedback_requests_of((await _get_run(review_db, run_id)).evidence or {})
+        assert list(requests) == ["9102"]
+        assert requests["9102"].status == REQUEST_STAGED  # NOT deleted_discussion
+
     async def test_conflicting_reviewer_instructions_are_refused_typed(
         self, review_db, review_fake
     ):
@@ -788,11 +844,14 @@ class TestIngressClassificationAndIdempotency:
     async def test_feedback_after_the_window_records_but_never_reenters(
         self, review_db, review_fake
     ):
+        # R40-02 (#338): the round route owns the READY case (a linked
+        # round, see test_review_rounds.py); every OTHER terminal status
+        # keeps the honest window-closed refusal — no re-entry, no staging.
         service = make_review_service(review_db, review_fake)
         run_id, _ = await _landed_run(review_db, review_fake, service)
         async with review_db() as session:
             row = await session.get(FlowRun, run_id)
-            row.status = FlowStatus.READY_FOR_HUMAN.value  # the human decided
+            row.status = FlowStatus.FAILED.value  # terminal, not round-eligible
             await session.commit()
         mr_iid = (await _get_run(review_db, run_id)).mr_iid
         await service.run_command(
@@ -802,7 +861,7 @@ class TestIngressClassificationAndIdempotency:
         requests = review_feedback_requests_of(run.evidence or {})
         assert requests["9005"].status == REQUEST_WINDOW_CLOSED
         assert PENDING_PROPOSAL_KEY not in (run.evidence or {})
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status == FlowStatus.FAILED.value
 
 
 class TestCorrectionRedistribution:
@@ -1028,3 +1087,370 @@ class TestTheBotNeverMergesOrDecides:
         # the requests stay durable for the audit
         requests = review_feedback_requests_of(run.evidence or {})
         assert requests["9011"].classification == CLARIFICATION_CLASS
+
+
+# ----------------------------------------------------------------------
+# R40-01 (#337): the GATEWAY ingress — the parser, the flag, the typed
+# refusal and the durable inbox identity the note travels through
+# ----------------------------------------------------------------------
+
+
+def _mr_note_event(
+    body: str,
+    *,
+    note_id: int = 500,
+    project_id: int = PROJECT_ID,
+    mr_iid: int = 7,
+    discussion_id: str = "abc123def456",
+    author: str = "alice",
+):
+    """A GitLab MR Note Hook, typed the way ``parse_webhook`` produces it."""
+    from forge.gateway.parser import parse_webhook
+
+    payload = {
+        "object_kind": "note",
+        "event_type": "note",
+        "user": {"id": 11, "name": "Alice", "username": author, "email": ""},
+        "project": {
+            "id": project_id,
+            "name": "forge-demo",
+            "path_with_namespace": "acme/forge-demo",
+            "web_url": "https://gitlab.test/acme/forge-demo",
+        },
+        "object_attributes": {
+            "id": note_id,
+            "note": body,
+            "noteable_type": "MergeRequest",
+            "noteable_id": 100,
+            "author_id": 11,
+            "discussion_id": discussion_id,
+        },
+        "merge_request": {
+            "id": 100,
+            "iid": mr_iid,
+            "title": "Draft: the candidate",
+            "source_branch": "forge/factory-1",
+            "target_branch": "main",
+            "state": "opened",
+        },
+    }
+    return parse_webhook("Note Hook", payload)
+
+
+def _issue_note_event(body: str, *, author: str = "alice"):
+    from forge.gateway.parser import parse_webhook
+
+    payload = {
+        "object_kind": "note",
+        "event_type": "note",
+        "user": {"id": 11, "name": "Alice", "username": author, "email": ""},
+        "project": {
+            "id": PROJECT_ID,
+            "name": "forge-demo",
+            "path_with_namespace": "acme/forge-demo",
+            "web_url": "https://gitlab.test/acme/forge-demo",
+        },
+        "object_attributes": {
+            "id": 501,
+            "note": body,
+            "noteable_type": "Issue",
+            "noteable_id": 12,
+            "author_id": 11,
+        },
+        "issue": {"id": 12, "iid": ISSUE_IID, "title": ISSUE_TITLE},
+    }
+    return parse_webhook("Note Hook", payload)
+
+
+class TestFeedbackGatewayParsing:
+    """The parser widening: MR-bound verbs behind the capability flag."""
+
+    def test_the_flag_defaults_to_zero_routing(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.delenv("FORGE_REVIEW_FEEDBACK_ENABLED", raising=False)
+        assert (
+            _match_run_command(_mr_note_event("/fix rename `src/app.py`"), make_settings()) is None
+        )
+        assert _match_run_command(_mr_note_event("/ask why?"), make_settings()) is None
+
+    def test_a_flagged_mr_fix_note_matches_review_feedback(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        command = _match_run_command(
+            _mr_note_event("/fix rename the helper in `src/app.py` to validate_email"),
+            make_settings(),
+        )
+        assert command is not None
+        assert command["command"] == "review_feedback"
+        assert command["provider"] == "gitlab"
+        assert command["project_id"] == PROJECT_ID
+        assert command["mr_iid"] == 7
+        assert command["note_id"] == 500
+        assert command["discussion_id"] == "abc123def456"
+        assert command["author_username"] == "alice"
+        assert command["note_text"].startswith("/fix rename")
+
+    def test_a_flagged_mr_ask_note_matches_review_feedback(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        command = _match_run_command(
+            _mr_note_event("/ask why is the retry idempotent?"), make_settings()
+        )
+        assert command is not None
+        assert command["command"] == "review_feedback"
+        assert command["mr_iid"] == 7
+
+    def test_a_mentioned_verb_parses_too(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        command = _match_run_command(
+            _mr_note_event("@forge /fix tighten the guard in `src/app.py`"), make_settings()
+        )
+        assert command is not None and command["command"] == "review_feedback"
+
+    def test_a_malformed_verb_is_the_typed_ingress_refusal(self, monkeypatch):
+        """``/fix`` with no description: recognized, refused TYPED at the
+        ingress — never a run command, never a 4xx (hook auto-disable)."""
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        for body in ("/fix", "/fix   ", "/ask"):
+            command = _match_run_command(_mr_note_event(body), make_settings())
+            assert command is not None, body
+            assert command["command"] == "review_feedback_refused"
+            assert command["refusal_reason"] == "malformed_feedback_command"
+            assert command["note_id"] == 500  # the identity is still carried
+
+    def test_an_issue_bound_verb_is_not_a_run_command(self, monkeypatch):
+        """Review feedback lives on MR discussions only — zero routing on
+        issues, whatever the flag says."""
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        assert (
+            _match_run_command(_issue_note_event("/fix rename `src/app.py`"), make_settings())
+            is None
+        )
+        assert _match_run_command(_issue_note_event("/ask why?"), make_settings()) is None
+
+    def test_a_commit_bound_verb_without_an_mr_is_ignored(self, monkeypatch):
+        from forge.gateway.parser import parse_webhook
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        payload = {
+            "object_kind": "note",
+            "user": {"id": 11, "name": "A", "username": "alice"},
+            "project": {
+                "id": PROJECT_ID,
+                "name": "d",
+                "path_with_namespace": "a/d",
+                "web_url": "u",
+            },
+            "object_attributes": {
+                "id": 502,
+                "note": "/fix rename `src/app.py`",
+                "noteable_type": "Commit",
+                "discussion_id": "c1",
+            },
+        }
+        event = parse_webhook("Note Hook", payload)
+        assert _match_run_command(event, make_settings()) is None
+
+    def test_a_bot_authored_feedback_note_is_never_a_trigger(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        settings = make_settings(FORGE_BOT_USERNAME="forge-bot")
+        assert _match_run_command(_mr_note_event("/fix x", author="forge-bot"), settings) is None
+
+    # -- the regression arms: the classic surface is untouched -----------
+
+    def test_mr_security_keeps_its_route_whatever_the_feedback_flag(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        for value in (None, "1"):
+            if value is None:
+                monkeypatch.delenv("FORGE_REVIEW_FEEDBACK_ENABLED", raising=False)
+            else:
+                monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", value)
+            command = _match_run_command(_mr_note_event("/security"), make_settings())
+            assert command is not None
+            assert command["command"] == "security_triage"
+            assert command["mr_iid"] == 7
+
+    def test_issue_bound_implement_go_retry_keep_their_routes(self, monkeypatch):
+        from forge.gateway.router import _match_run_command
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        assert _match_run_command(_issue_note_event("/implement"), make_settings()) == {
+            "project_id": PROJECT_ID,
+            "issue_iid": ISSUE_IID,
+            "author_username": "alice",
+            "author_user_id": 11,
+            "note_id": 501,
+            "command": "start_run",
+        }
+        go = _match_run_command(_issue_note_event("/go ab12cd34"), make_settings())
+        assert go is not None and go["command"] == "go"
+        retry = _match_run_command(_issue_note_event("/retry"), make_settings())
+        assert retry is not None and retry["command"] == "retry"
+
+
+class _SetNXQueue:
+    """The Redis TaskQueue's dedup semantics (SET-NX, 5-minute window) with
+    the submit swallowed — the production shape where the queue is only a
+    wake-up accelerator and the wake-up is LOST (the worker died)."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self.submitted: list[dict] = []
+
+    async def is_duplicate(self, fingerprint: str, ttl: int = 300) -> bool:
+        if fingerprint in self._seen:
+            return True
+        self._seen.add(fingerprint)
+        return False
+
+    async def submit(self, task) -> None:
+        self.submitted.append(dict(getattr(task, "metadata", {}) or {}))
+
+
+class TestFeedbackIngressDurability:
+    """The ASGI ingress: inbox + step in ONE transaction, the two dedup
+    layers, and the typed malformed refusal — the ADR-0017 §1 contract the
+    production-entry trace then walks end to end."""
+
+    @pytest.fixture()
+    async def app(self, tmp_path, monkeypatch):
+        from forge.database import reset_engine
+        from forge.main import create_app
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        reset_engine()
+        application = create_app(
+            settings=make_settings(DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'ingress.db'}")
+        )
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = _SetNXQueue()
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app):
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    async def _post(self, client, body: str, *, uuid: str, note_id: int = 500):
+        return await client.post(
+            "/webhook",
+            json={
+                "object_kind": "note",
+                "event_type": "note",
+                "user": {"id": 11, "name": "Alice", "username": "alice"},
+                "project": {
+                    "id": PROJECT_ID,
+                    "name": "forge-demo",
+                    "path_with_namespace": "acme/forge-demo",
+                    "web_url": "https://gitlab.test/acme/forge-demo",
+                },
+                "object_attributes": {
+                    "id": note_id,
+                    "note": body,
+                    "noteable_type": "MergeRequest",
+                    "noteable_id": 100,
+                    "author_id": 11,
+                    "discussion_id": "abc123def456",
+                },
+                "merge_request": {
+                    "id": 100,
+                    "iid": 7,
+                    "title": "Draft: the candidate",
+                    "source_branch": "forge/factory-1",
+                    "target_branch": "main",
+                    "state": "opened",
+                },
+            },
+            headers={
+                "X-Gitlab-Token": "whsec",
+                "X-Gitlab-Event": "Note Hook",
+                "X-Gitlab-Event-UUID": uuid,
+            },
+        )
+
+    async def _rows(self, app):
+        from sqlalchemy import select
+
+        from forge.durable import EventInbox, StepRun
+
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        return inbox, steps
+
+    async def test_a_feedback_note_ingests_inbox_and_step_in_one_transaction(self, app, client):
+        response = await self._post(client, "/fix rename the helper in `src/app.py`", uuid="d-111")
+        assert response.status_code == 202
+        assert response.json() == {
+            "status": "accepted",
+            "event": "note",
+            "queued": True,
+            "run_command": True,
+        }
+        inbox, steps = await self._rows(app)
+        assert len(inbox) == 1 and len(steps) == 1
+        payload = inbox[0].payload
+        assert payload["command"] == "review_feedback"
+        assert payload["project_id"] == PROJECT_ID
+        assert payload["mr_iid"] == 7
+        assert payload["note_id"] == "500"
+        assert payload["discussion_id"] == "abc123def456"
+        assert payload["delivery_uuid"] == "d-111"  # the transport identity rides along
+        assert inbox[0].event_type == "run_command"
+        assert steps[0].source_event_id == inbox[0].source_event_id
+        assert steps[0].step_name == "review_feedback"
+        assert steps[0].status == "scheduled"
+
+    async def test_an_exact_replay_collapses_at_the_transport_layer(self, app, client):
+        await self._post(client, "/fix rename `src/app.py`", uuid="d-222")
+        replay = await self._post(client, "/fix rename `src/app.py`", uuid="d-222")
+        assert replay.status_code == 202
+        assert replay.json()["deduplicated"] is True
+        inbox, steps = await self._rows(app)
+        assert len(inbox) == 1 and len(steps) == 1
+
+    async def test_a_manual_redelivery_collapses_at_the_logical_layer(self, app, client):
+        """A different delivery uuid, the SAME note id — one logical request."""
+        await self._post(client, "/fix rename `src/app.py`", uuid="d-333")
+        redelivery = await self._post(client, "/fix rename `src/app.py`", uuid="d-444")
+        assert redelivery.status_code == 202
+        assert redelivery.json()["deduplicated"] is True
+        inbox, steps = await self._rows(app)
+        assert len(inbox) == 1 and len(steps) == 1
+
+    async def test_a_malformed_note_is_refused_typed_without_any_row(self, app, client):
+        response = await self._post(client, "/fix", uuid="d-555")
+        assert response.status_code == 202  # never a 4xx — hook auto-disable
+        assert response.json() == {
+            "status": "accepted",
+            "event": "note",
+            "feedback": "refused",
+            "refusal_reason": "malformed_feedback_command",
+        }
+        inbox, steps = await self._rows(app)
+        assert inbox == [] and steps == []
+
+    async def test_the_disabled_flag_leaves_no_trace_at_all(self, app, client, monkeypatch):
+        monkeypatch.delenv("FORGE_REVIEW_FEEDBACK_ENABLED", raising=False)
+        response = await self._post(client, "/fix rename `src/app.py`", uuid="d-666")
+        assert response.status_code == 202
+        assert "run_command" not in response.json()
+        inbox, steps = await self._rows(app)
+        assert inbox == [] and steps == []

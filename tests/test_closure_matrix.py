@@ -38,7 +38,7 @@ ADR = REPO_ROOT / "docs" / "adr" / "0033-execution-ownership-consolidation.md"
 
 
 class TestTheMatrixData:
-    def test_the_six_decision_owners_are_the_capabilities(self) -> None:
+    def test_the_decision_owners_are_the_capabilities(self) -> None:
         assert closure_matrix().capability_names() == (
             "approved-plan",
             "operation-grant",
@@ -46,6 +46,9 @@ class TestTheMatrixData:
             "checkpoint",
             "verified-candidate",
             "usage-receipt",
+            # R40-17 (#353, ADR-0034): the amendment application decision
+            # joined the map as the seventh capability.
+            "budget-amendment",
         )
 
     def test_every_capability_carries_exactly_the_six_levels_in_order(self) -> None:

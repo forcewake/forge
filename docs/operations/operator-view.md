@@ -580,3 +580,92 @@ noted here (API availability is not usability proof).
 All of this is diagnosable from the supported surfaces without database
 edits; the action verbs route through the guarded command routes and
 runbooks named above.
+
+## 14. The delivery and review-round state (R40-13, #349)
+
+The core promise ends at a reviewed candidate, but real use continues
+through corrections and acceptance. The detail route's `delivery` block
+(`forge.operator.delivery/1`, folded by
+`forge.adaptive.operator_view.delivery_view` from the SAME snapshot
+rows) projects FIVE facts — SEPARATE but LINKED:
+
+| Fact | Canonical store | What it states |
+|---|---|---|
+| `execution` | `FlowRun` (the run row + derived attempt) | which run currently executes (an open round's child), its flow status and operator state |
+| `review_round` | `review_rounds` (#338) + the child's evidence fragment + the #337 requests | the newest round's number/status/decision/head, the lineage root, and the request lifecycle words (`round_admitted`, `mr_closed`, `round_limit`, …) |
+| `candidate` | the run's `candidate_shas` + `active_candidate_sha` | the candidate's sha and its ROLE — `current` or `historical` (superseded by `round:N:decision`) |
+| `verification` | the verification records | the binding — `current` (a pass on the current candidate), `historical` (the green evidence covers a superseded delivery) or `none` |
+| `acceptance` | the run evidence's `acceptance` fragment (R24) | `accepted_by_human` / `rejected_by_human` (the human's own merge/close decision), `pending_human_decision`, or honestly `none` — **green CI is never acceptance** |
+
+**Supersession** follows #338 exactly: the round row IS the
+supersession — once a round in a superseding status (`admitted`,
+`dispatched`, `completed`, `ended`) names a run as parent, that run's
+ready delivery and its green evidence render HISTORICAL (the
+projection carries `superseded_by_round`; `status_note_lines` says it
+out loud). A `stale` round supersedes NOTHING (nothing was dispatched —
+human edits preserved); it surfaces as an explicit next-action instead.
+The head-fence refusals and unavailable prerequisites render as named
+`next_actions` rows (`stale_head`, `round_limit`, `mr_closed`,
+`conflicting_correction`, `budget_blocked_review`,
+`pending_human_merge_decision`), each with its one-line remediation and
+guarded route.
+
+**Budget-blocked review** (`budget_blocked_review`): the recorded
+review-budget decision names the ACTUAL limiting axis — the axis a
+refused amendment's typed refusal names, else `usd` when the recorded
+closing report says the reserve cannot cover the review, else honestly
+none (the live `limiting_axis()` read decides at continuation time).
+The supported amendment route beside it is the #340 command shape: ONE
+axis (`usd|calls|tokens|wallclock`), an amount, a reason, riding the
+originating native command identity (`run:continue_review:<project>:<note-id>`)
+through `runs-service:continue_review_only` — never a silent re-plan,
+never a cross-axis conversion.
+
+**Action versioning**: every offered action names the expected
+CANDIDATE (`expected_candidate`), the expected ROUND
+(`expected_round`, e.g. `round:2:<decision>`) and the expected
+projection version. `RecoveryActions.decide` refuses with the typed
+`operator.stale_action_refusal` when the candidate or round moved under
+the version number — an action planned for the parent's superseded
+delivery never applies to the round's new world. The two post-readiness
+recovery verbs are DIFFERENT actions from the implementation restart
+and the WIP discard, each with its one-line safe-action description
+(`SAFE_ACTION_DESCRIPTIONS` — what it WILL and WILL NOT do):
+`continue_review_only` (repeats ONLY the review of the same verified
+candidate — zero coder dispatches, zero commits) and
+`follow_up_correction` (admits ONE linked round from the approved head;
+preserves history and WIP; never reuses the parent's ready evidence as
+current readiness), against `retry` (IMPLEMENTATION RESTART) and
+`cancel` (WIP DISCARD).
+
+**The status comment identity**: the `/status` note (and
+`render_status_comment`) carries a machine-readable marker
+`<!-- forge-status:1 run=<id> identity=<digest> ... -->` — a stable
+digest over the FACTS the comment states. A replayed delivery of the
+same world produces the SAME identity (one current status, no
+contradictory ready/pending comment identities); a moved world produces
+a different one, so an old comment is identifiable as superseded by
+comparing its identity against the current rows.
+
+**Scope**: the round linkage changes nothing about the fail-closed
+matrix — a foreign-repository operator gets the same 404 on the parent,
+the guessed child id and the bundle, and neither run appears in their
+listing (pinned by the scope-matrix tests).
+
+### 14.1 The read-model arm (Q39-15 extension)
+
+`ops_limits.delivery_round` folds the same facts into the read-model:
+the round subject, the supersession, the LINEAGE customer state (an
+open round makes the lineage `progressing` whatever the parent's own
+record says; a superseded parent never reports its old `verified`
+readiness as current) and the typed next-actions. Three additional
+`operator.*` observability records ride the read-model as their own
+keys: `operator.recovery_rounds` (the lineage's recorded rounds —
+`unknown` when the rounds authority was not queried, never a confident
+zero), `operator.unresolved_effect_age` (per unresolved publication
+intent, the seconds it has stood unresolved) and
+`operator.time_to_safe_action` (how long the current world has stood —
+a stated LOWER BOUND on how long a safe action has been decidable;
+human reaction time is recorded nowhere and is never invented).
+`operator.stale_action_refusal` is the typed refusal code above — an
+event, not a quantity, so it renders in refusal reasons only.

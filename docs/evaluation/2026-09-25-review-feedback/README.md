@@ -1,12 +1,15 @@
 # Q39-13 (#332) — Post-MR review feedback as a bounded revision on the current candidate
 
 **Date:** 2026-09-25 · **Issue:** [#332 / backlog Q39-13](https://github.com/forcewake/forge/issues/332)
+**Wired:** [#337 / R40-01](https://github.com/forcewake/forge/issues/337) (2026-09-26 — the §8 ingress seams closed; §8 now records the wired path)
 **Prior art:** #321 / Q39-02 (the `ApprovedInput` rebind — the correction becomes the active
 revision TEXT through that machinery), #288 (the GitLab lane-resume envelope), the #313
 combined-steering trace (the live counterexample that motivated the revision-content join)
 **Offline pins:** `tests/test_review_feedback.py` (the classification/record rules + the
-service lane), `tests/test_adaptive_revisions.py` (the revision machinery this extends),
-`tests/production_entry/test_review_feedback.py` (RF-1 / RF-2 traces)
+service lane + the R40-01 gateway-parse arms), `tests/test_adaptive_revisions.py` (the
+revision machinery this extends), `tests/production_entry/test_review_feedback.py`
+(RF-1 / RF-2 traces), `tests/production_entry/test_feedback_ingress.py`
+(R40-01: the REAL ASGI ingress → inbox → restarted worker → installed reconciler trace FI-1..FI-5)
 
 ## 1. The scenario
 
@@ -92,11 +95,12 @@ rendered text; the agent sees the referenced diff + the current head, never an o
 source).
 
 **Head binding:** the request records `head_sha` at request time; the correction's dispatch
-entry (`RunService.evaluate_review_corrections` → `_begin_review_correction`) re-reads the
-live branch head and runs `head_binding_guard` — an unexpected head move (a human edit
-between request and publication) is the typed **`stale_head`** conflict: the request is
-durably marked, the operator note explains, and NOTHING dispatches (human edits preserved,
-never force-overwritten; proven in RF-2).
+entry (`RunService.evaluate_review_corrections` → `_begin_review_correction` — **registered in
+the installed periodic reconciler since #337**, see §8) re-reads the live branch head and
+runs `head_binding_guard` — an unexpected head move (a human edit between request and
+publication) is the typed **`stale_head`** conflict: the request is durably marked, the
+operator note explains, and NOTHING dispatches (human edits preserved, never
+force-overwritten; proven in RF-2).
 
 The re-dispatch itself is the repair edge (ADR-0004: `waiting_ci → evaluating_ci →
 proposing`), the same production leg every repair/revival funnels through, with the bounded
@@ -153,33 +157,81 @@ candidate (byte-identical legacy comment for runs without feedback).
   and publication → `stale_head`, the request durably marked, the conflict note posted, ZERO
   dispatches.
 
-## 8. Honest seams and upstream wiring (disclosed)
+## 8. The wired path (R40-01 / #337) and the remaining disclosed seams
 
-- **The gateway parse for MR-note verbs.** `forge/gateway/router.py` (read-only for this
-  slice) currently parses `/security` only on MR notes; a `/fix`/`/ask` MR note needs the
-  same one-line widening (`_match_run_command`'s MR gate + the `review_feedback` command
-  emission) for the production webhook path. The service ingress is complete and tested
-  through the SAME dispatch the gateway feeds (`execute_run_command` → `run_command` — the
-  RF-1 trace drives exactly that executor), with the metadata shape the gateway's NoteEvent
-  produces (`note_id`, `mr_iid`, `discussion_id` — all fields the event model already
-  carries).
-- **The reconciler registration.** `forge/runs/reconciler.py` (read-only for this slice)
-  schedules the service passes; `evaluate_review_corrections` needs the same one-line
-  registration (`service.evaluate_review_corrections`) in `run_reconciler`'s pass list for
-  production cadence. The pass is the reconciler's own shape (a durable scan, one
-  exception-isolated loop) and the traces drive it directly, exactly as the existing tests
-  drive `evaluate_waiting_ci`/`evaluate_accepted`.
+The two seams this document used to disclose as gaps are CLOSED (2026-09-26):
+
+- **The gateway parse for MR-note verbs — WIRED.**
+  `forge/gateway/router.py::_match_run_command` parses `/fix` and `/ask` on MR notes
+  (MR-discussion-bound: an issue- or commit-bound verb is not a run command at all) and
+  emits the `review_feedback` run command through the SAME durable ingress every note
+  command travels (`_ingest_run_command` → inbox + scheduled step in ONE transaction, the
+  202 acknowledged only after the commit). The surface sits behind ONE capability flag,
+  `FORGE_REVIEW_FEEDBACK_ENABLED` (default OFF — zero routing when off, the
+  `adaptive_command_set()` pattern; `forge/gateway/feedback.py`). The transport identity
+  (`X-Gitlab-Event-UUID`) rides the metadata and is deduped at the ingress
+  (`delivery:{uuid}`, Redis SET-NX); the LOGICAL identity — the note id, unique inside a
+  project, so `(connection, project.id, mr.iid, note.id)` is collision-free — is deduped
+  by the inbox unique index and keys the request, the reply journal and the revision
+  decision: a manual redelivery (new uuid, same note) collapses onto ONE request, never a
+  second paid correction run. A malformed verb (`/fix` with no description) is the TYPED
+  ingress refusal — 2xx with `refusal_reason: malformed_feedback_command`, no run
+  command — because a 4xx spike counts toward GitLab's hook auto-disable
+  (4 failures → 24 h backoff project-wide). Proven end to end by FI-1..FI-5
+  (`tests/production_entry/test_feedback_ingress.py`): the real ASGI ingress → durable
+  inbox → the wake LOST (worker died after the inbox commit) → the INSTALLED
+  `run_step_worker` resuming over a fresh engine → the existing handler classifies → the
+  INSTALLED `run_reconciler` re-drives the approved correction — no direct
+  handle/evaluate call anywhere in the positive arms.
+- **The reconciler registration — WIRED.** `forge/runs/reconciler.py::run_reconciler`
+  (the exact loop `worker/app.py` gathers) schedules `evaluate_review_corrections` in its
+  pass list: a bounded scan over `waiting_ci`/`evaluating_ci` runs, one
+  exception-isolated loop per run. It doubles as the recovery path when the approving
+  delivery was lost. Discovery of requests stays in the ingress/step path; authorization
+  to start an attempt stays with the human `/approve-revision` — the pass re-drives only
+  what BOTH already decided. FI-5 proves both registrations load-bearing: with the parser
+  registration reverted (flag off) nothing is ever ingested; with the reconciler pass
+  neutralized the approved correction never re-drives.
+- **The capability output.** `forge.capability_manifest` carries
+  `operator-commands/review-feedback` (`production_wiring`, commands `/fix` `/ask`) —
+  platform-scoped to GitLab MR notes and explicitly behind the default-OFF flag, so the
+  operator view never reports feedback as wired for a platform/profile that did not pass
+  the trace. Unbinding the verbs in the gateway breaks the manifest row (doctor fails),
+  never a silent over-claim.
+
+Still disclosed (unchanged):
+
 - **The discussions surface.** The fake native server has no `/discussions` route; the
-  auxiliary discussions reads degrade exactly as designed (a 404 marks the surface down for
-  the process, logged, never a silent guess). The resolution accounting and the readiness
-  gate are proven at the service level (`tests/test_review_feedback.py`), where the fake
+  auxiliary discussions reads degrade exactly as designed (a 404 marks the surface down
+  for the process, logged, never a silent guess). FI-4 pins the distinction end to end: a
+  transient failure (404-surface-down or a 5xx, which fails the step for retry) is NEVER
+  recorded as a deletion; a confirmed deletion (the readable list without the id) is the
+  typed `deleted_discussion` refusal. The resolution accounting and the readiness gate
+  are proven at the service level (`tests/test_review_feedback.py`), where the fake
   serves the surface.
 - **The revision world.** As in #321: the live GitLab planner does not emit plan revisions —
   revision 1 is staged through the app's own durable shape in the traces; the staging, the
   approval and the activation are fully native.
+- **Platform scope.** ONE native platform is qualified (GitLab MR notes). GitHub and
+  Azure DevOps do not parse the verbs — parity deliberately unclaimed (#337 out of
+  scope) until one native path is qualified.
 
 ## 9. Observability (the backlog's names)
 
+- `feedback.ingress_received` — a structured log line at the GitLab ingress for every
+  parsed feedback note (note id, project, MR, delivery uuid — R40-01).
+- `feedback.duplicate_delivery` — the dedup answers, naming the LAYER: `transport`
+  (the delivery uuid, exact network replays) or `logical` (the note identity — manual
+  redeliveries and worker-restart replays).
+- `feedback.refusal_reason` — the typed ingress refusal (`malformed_feedback_command`);
+  the service-side typed refusals (`refused_unauthorized`, `deleted_discussion`,
+  `stale_head`, …) are the request's durable status + their existing log lines.
+- `feedback.request_created` / `feedback.dispatch_count` — the durable surface already
+  records them: the `review_feedback.request` outbox row carries every status change with
+  its payload (creation → staging → dispatch), and the correction dispatch is the run's
+  `commit_cycle` bump + the native dispatch ledger entry.
+- `feedback.queue_age` — derivable from the persisted step (`due_at` at ingress) against
+  the claim time; the step IS the queue (ADR-0017 — Postgres owns the work).
 - `review_feedback.resolution_time` — derivable from the request's `created_at` and the
   lifecycle transitions (the outbox row `review_feedback.request` carries every status
   change with its payload).

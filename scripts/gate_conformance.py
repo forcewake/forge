@@ -1904,6 +1904,20 @@ async def _drive_grant_asgi(seams: dict[str, Any], workroot: Path) -> list[ArmRe
                     evidence.pop(seams["grants_key"], None)
                     row.evidence = evidence
                     await session.commit()
+                # R40-06 (#342): the grant's ONE authoritative home is the
+                # KEYED row; orphaning only the (derived) evidence
+                # projection disconnects nothing anymore. The disconnect
+                # takes the authority row too — every DTO value stays
+                # intact, parked where the production caller cannot load it.
+                from sqlalchemy import delete  # noqa: PLC0415
+
+                from forge.durable.models import OperationGrant  # noqa: PLC0415
+
+                async with application.state.session_factory() as session:
+                    await session.execute(
+                        delete(OperationGrant).where(OperationGrant.work_id == GRANT_WORK_ID)
+                    )
+                    await session.commit()
                 try:
                     orphan = await _redeem(client, ref=GRANT_REF, provider=GRANT_PROVIDER)
                     orphan_detail = orphan.text[:200] if orphan.status_code != 200 else ""
@@ -1922,6 +1936,12 @@ async def _drive_grant_asgi(seams: dict[str, Any], workroot: Path) -> list[ArmRe
                         )
                         row.evidence = evidence
                         await session.commit()
+                    # Restore the authority row EXACTLY: the same grant id
+                    # and deadline re-persist (the replay keeps the first
+                    # window — nothing downstream observes the mutation).
+                    await seams["persist_operation_grant"](
+                        application.state.session_factory, grant=effective
+                    )
                 caught = all(expectations.values())
                 arms.append(
                     ArmRecord(

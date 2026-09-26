@@ -46,7 +46,7 @@ over the canonical document) vouches for the whole file.
 | Runner | GitLab runner **id 4 `unraid`**, docker executor, online | `qualification/inventory-2026-09-25-v2.json` |
 | Harness | **claude-code 2.1.273** | `qualification/records/gitlab-ce-v1@0.37.0.json` |
 | Model route | litellm **`fast`** → `openai/glm-5.3-flash`; lane model `glm-5.3-flash` via the z.ai Anthropic-compatible gateway | `litellm-config.yaml` + the record |
-| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) — the v2 trace rode the protected-variable mode (no operation grant minted; recorded in the trace) | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` |
+| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) — BOTH live-qualified: the v2 trace rode the protected-variable mode; the 2026-09-26 redemption trace (R40-07/#343) rode runner-redemption end-to-end (§8a) | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` + `qualification/records/redemption-2026-09-26.json` |
 | Closing budget policy | `FORGE_CLOSING_RESERVE_USD=0.50`, `FORGE_SPEND_CAP_USD=2.50` on BOTH consumers; standard budget profile 40 calls / **480 000 tokens** / 3600 s | the v2 alignment receipts (`--extra-env` + `--budget-profiles`) |
 | Verification contract | required job **`smoke`**: six exact slugify cases + app rewired + legacy deleted; candidate may not touch `.gitlab-ci.yml` or `tests/`; PLUS the v2 revision marker (`__all__ = ["slugify"]` in `src/utils/text.py`) | the v2 live trace + the record |
 
@@ -234,6 +234,70 @@ The manifest's `exclusions` list is normative; in short:
   refuses in the template); only the SDK lane recipes are in scope.
 - No enterprise/fleetwide readiness; merge/deploy stay human.
 
+## 8a. The runner-redemption credential route (R40-07 / #343)
+
+The profile's second delivery mode is **live-qualified**: the
+[redemption-2026-09-26 record](../../qualification/records/redemption-2026-09-26.json)
+and its evidence bundle
+([docs/evaluation/2026-09-26-redemption-qualification/](../../docs/evaluation/2026-09-26-redemption-qualification/))
+prove the full chain on the real lab: native dispatch → minted operation
+grant (never seeded) → lane bootstrap redemption → the model consumer
+presenting the BROKER-selected credential.
+
+**Selecting the route (explicit, never defaulted).** Pin on BOTH
+consumers through `scripts/align_lab.py --extra-env` (receipted):
+
+```bash
+uv run python scripts/align_lab.py --apply \
+  --extra-env FORGE_CREDENTIAL_DELIVERY=runner-redemption \
+  --extra-env FORGE_CREDENTIAL_BINDINGS=/app/data/credential-bindings.json \
+  --extra-env FORGE_CREDENTIAL_TEMPLATE_DIR=/app/data/credential-templates \
+  --extra-env ANTHROPIC_AUTH_TOKEN=<the broker-held model credential>
+```
+
+- `FORGE_CREDENTIAL_BINDINGS` names the persisted registry document (the
+  `data/` volume — gitignored, REFS only). Bind the run's canonical
+  subject (`gitlab/-/<project_id>`) per provider route with the shipped
+  registry API — never by hand-editing a value.
+- **The ref invariant (LIVE-FOUND, #343):** under the default
+  `EnvBroker`, the credential ref's env NAME must BE the binding's env
+  slot — bind `env:ANTHROPIC_AUTH_TOKEN` for the `anthropic-gateway`
+  route, and hold the value in the consumers' `ANTHROPIC_AUTH_TOKEN`.
+  A ref named for anything else (e.g. `env:FORGE_BROKER_MODEL_TOKEN`)
+  stages under its own name, and the redemption endpoint refuses typed
+  `staged_slot_mismatch` with ZERO emitted values — the guard held on
+  the first live dispatch; the configuration was wrong.
+- `FORGE_CREDENTIAL_TEMPLATE_DIR` must point at the SHIPPED templates
+  (the wheel ships no `ci/templates/`; the containers get them through
+  the shared `data/` volume).
+- The grant window / redemption TTL knobs:
+  `FORGE_CREDENTIAL_GRANT_WINDOW_SECONDS` (default 3600 — the ABSOLUTE
+  deadline fixed at dispatch authorization, frozen across restarts) and
+  `FORGE_CREDENTIAL_REDEEM_TTL_SECONDS` (default 3600 — caps the
+  response's `expires_at`). A 20 s window is the documented expiry-drill
+  posture; restore the default after the drill.
+
+**Operating facts the live trace established (all receipted):**
+
+- The grant is minted by the native dispatch path BEFORE the provider
+  call (assert zero `operation_grants` rows before `/go` when
+  re-verifying); the keyed row (work, attempt, route) is the authority.
+- Every successful redemption lands in the append-only
+  `credential_redemptions` ledger; every typed refusal leaves NO row and
+  emits nothing (`staged_slot_mismatch`, `grant_ref_mismatch`,
+  `grant_route_mismatch`, `binding_revision_mismatch`, `grant_expired`,
+  `attempt_terminal`, superseded-generation tokens).
+- The registry document is re-read on EVERY dispatch command and EVERY
+  redemption request — a rotation binds the next dispatch immediately,
+  no consumer restart; an already-minted grant keeps the revision it
+  recorded and is refused on mismatch (the confused-deputy guard).
+- A finished (blocked/terminal) attempt redeems nothing — replay
+  survival across a cold control-plane restart is proven on a LIVE
+  attempt's window (restart mid-lane, then the idempotent replay).
+- A lane whose redemption is refused fails CLOSED
+  (`credential_redemption_failed`, zero model turns) — there is NO ambient
+  fallback; the native `/retry <run> restart` continuation re-enters it.
+
 ## 9. Re-freezing (when the composition legitimately moves)
 
 1. Land the new promotion record under `docs/releases/evidence/` and
@@ -284,3 +348,39 @@ failure mode; the native /retry re-entered), one drill-side waiter
 defect fixed mid-run (root-caused in the trace's `failures`), zero
 product patches, zero manual YAML edits. Spend: $0.4032 SDK lane
 receipts + the planner/reviewer gateway calls inside the run budget.
+
+## 11. The second engineer's kit (R40-12 / #348 — cross-link)
+
+The installer-facing ENTRY document is
+[`docs/onboarding/cold-install-runbook.md`](../onboarding/cold-install-runbook.md):
+one document a second engineer follows start-to-finish WITHOUT reading
+source — prerequisites (versions, tokens, network reachability), every
+command verbatim, every expected observable (wheel sha, template sha,
+schema head), the failure table with each TYPED refusal, and the
+observation-report template they fill with OBSERVED timings. It pins
+the same composition this file freezes (the manifest is normative for
+both) and keeps the honest split explicit: the second engineer's own
+install, their observed setup effort, and the bounded support decision
+are HUMAN deliverables — the package is "ready for the second
+engineer", never "second-engineer-verified".
+
+The kit's machine path is executable AS WRITTEN (the mode parses the
+runbook's own marked command blocks — never a parallel implementation):
+
+```bash
+uv run python scripts/cold_install_check.py --mode from-runbook
+```
+
+Current freeze: 9 machine steps executed as written, 4 human-step
+markers counted, 3 blocked-on-lab markers recorded (the shared-lab
+GitLab smoke leg, the read-only verify, the #326 useful-WIP
+continuation). The sibling modes the kit adds to this file's §3/§4/§5:
+`--mode oracle-replay` (the initial-delivery install-level trace from
+the installed artifacts), `--mode negative-arms` (missing permission /
+unavailable runner / stale wheel / incompatible schema N-2 — each
+refusing BEFORE the unsafe or paid action), `--mode upgrade
+--rollback-rehearsal` (rollback + forward recovery on the disposable
+DB), and `scripts/cold_install_restore_rehearsal.py` (the data-bearing
+restore drill with the zero-model-turn dispatch gate). This file stays
+the maintenance-side runbook (freeze / verify / re-freeze); the
+onboarding file is the kit.

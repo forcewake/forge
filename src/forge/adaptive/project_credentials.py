@@ -67,6 +67,7 @@ from forge.adaptive.operator_snapshot import (
 )
 
 __all__ = [
+    "BINDING_REVISION_UNKNOWN",
     "BINDING_SCHEMA",
     "BINDING_SCHEMA_V1",
     "DISPATCH_PROOF_SCHEMA",
@@ -91,6 +92,17 @@ BINDING_SCHEMA_V1 = "forge.project.credential-binding/1"
 
 #: The schema discriminator of the dispatch-time proof document.
 DISPATCH_PROOF_SCHEMA = "forge.project.dispatch-credential-proof/2"
+
+#: R40-06 (#342) — the EXPLICIT "revision unknown" marker. Revisions count
+#: from 1 (a first bind IS revision 1), so 0 can never name a real binding
+#: generation. A grant/binding-side document persisted before the binding
+#: revision axis was carried into it loads through the version adapter as
+#: THIS marker — an explicit, named legacy state. Sameness of a binding is
+#: NEVER inferred from a locator (ref) string alone: a caller comparing
+#: revisions skips the comparison ONLY against this marker (the documented
+#: grandfather), never by accident of a missing field.
+BINDING_REVISION_UNKNOWN: int = 0
+
 
 #: The closed provider-route → env-var table: the AMBIENT variable the
 #: lane consumes for each provider (the same surfaces
@@ -458,6 +470,7 @@ def resolve_dispatch_credential(
     provider: str,
     presented_ref: str = "",
     environ: dict[str, str] | None = None,
+    presented_revision: int | None = None,
 ) -> DispatchCredential:
     """Check the credential a dispatch is about to stage (fail closed).
 
@@ -476,6 +489,18 @@ def resolve_dispatch_credential(
       the rotated-in ref — never a silent substitution); any other
       foreign ref is the cross-subject leak and refuses
       ``wrong_project_ref``;
+    - R40-06 (#342): when the caller also names the BINDING REVISION its
+      authorization was decided against (*presented_revision* — an
+      operation grant's recorded revision), it must EQUAL the live
+      binding's revision. A same-ref rebind (revoke/regrant at the same
+      locator) bumps the revision, so the ref string alone can no longer
+      make an old authorization decision applicable to a NEW binding:
+      ``binding_revision_mismatch`` is the typed refusal. The ONE
+      explicit exception is :data:`BINDING_REVISION_UNKNOWN` — a grant
+      persisted before the revision axis (the version adapter's legacy
+      marker) grandfathers through THIS named branch, never an inferred
+      pass. An exact replay within the SAME revision verifies equal and
+      passes — that is the idempotent redemption contract;
     - the ambient env var NAME is carried into the proof. When *environ*
       is supplied (the dispatch environment), the var's PRESENCE is
       checked — the value is never read, never logged, never exported;
@@ -527,6 +552,35 @@ def resolve_dispatch_credential(
                 "provider": provider,
                 "presented": presented_ref,
                 "bound": binding.credential_ref,
+            },
+        )
+    if (
+        presented_revision is not None
+        and int(presented_revision) != BINDING_REVISION_UNKNOWN
+        and int(presented_revision) != int(binding.revision)
+    ):
+        # R40-06 (#342): the ref string matches but the binding GENERATION
+        # moved — a revoke/regrant at the same locator is a NEW decision,
+        # and the old authorization (the grant holding the old revision)
+        # does not silently apply to it. The ONLY revision that skips this
+        # comparison is the EXPLICIT unknown marker (the version adapter's
+        # grandfather), never an absent-field accident.
+        raise CredentialRefusal(
+            "binding_revision_mismatch",
+            {
+                "observability": "credential.binding_revision_mismatch",
+                "subject": key_subject,
+                "provider": provider,
+                "credential_ref": binding.credential_ref,
+                "authorized_binding_revision": int(presented_revision),
+                "live_binding_revision": int(binding.revision),
+                "instruction": (
+                    "the binding was re-decided at this locator (revoke/regrant or "
+                    "rotation) after the authorization was recorded — the exact "
+                    "binding revision the grant named no longer matches; a NEW "
+                    "authorization (a re-dispatch of the current attempt under the "
+                    "live binding) is required, never a silent reuse of the old one"
+                ),
             },
         )
     proof = {

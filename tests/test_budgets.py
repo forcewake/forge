@@ -1034,6 +1034,11 @@ class TestMigration009:
             # 011: unresolved usage liability (unknown ≠ zero, never spendable).
             "unresolved_calls",
             "unresolved_tokens",
+            # 030 (R40-04/#340): the closing share of the numeric axes,
+            # partitioned at open time under the stated versioned policy.
+            "closing_reserved_calls",
+            "closing_reserved_tokens",
+            "closing_partition_policy",
             "status",
             "created_at",
             "updated_at",

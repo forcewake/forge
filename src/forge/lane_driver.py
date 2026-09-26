@@ -192,6 +192,7 @@ from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "ATTEMPT_GENERATION_ENV",
+    "BINDING_REVISION_ENV",
     "CODEX_LANE_DRIVER_ID",
     "CONSUMPTION_STATUS_CONSUMED",
     "CONSUMPTION_STATUS_UNRESOLVED",
@@ -382,6 +383,24 @@ CREDENTIAL_REF_ENV = "FORGE_CREDENTIAL_REF"
 #: shape, equal on identity wherever the dispatch named it).
 ATTEMPT_GENERATION_ENV = "FORGE_ATTEMPT_GENERATION"
 
+#: The dispatched credential BINDING revision (R40-06/#342) — the
+#: OPTIONAL envelope variable naming the exact binding generation the
+#: dispatch's operation grant recorded (the same revision axis the
+#: redemption endpoint compares against the live binding). When the
+#: envelope names it, the bootstrap verifies the redemption's
+#: ``binding_revision`` EQUALS it; when it does not (a dispatch leg that
+#: predates the variable), the verification only demands the response
+#: carry a well-formed integer revision — the endpoint's own comparison
+#: is the authority either way.
+BINDING_REVISION_ENV = "FORGE_CREDENTIAL_BINDING_REVISION"
+
+#: The one operation a redemption response may speak of (R40-06/#342) —
+#: mirrored locally (the lane package never imports the control plane)
+#: from ``forge.adaptive.credential_broker.PERMITTED_OPERATION_REDEMPTION``.
+#: A response naming any other operation is not this lane's credential
+#: redemption and never touches the environment.
+REDEMPTION_OPERATION = "credential-redemption"
+
 #: The redemption route on the lane-control router (mirror of
 #: :data:`forge.api_lane_control.LANE_CREDENTIAL_REDEEM_ROUTE` — mirrored
 #: locally because the lane package never imports the control plane).
@@ -429,12 +448,13 @@ def _lane_provider_route(env: Mapping[str, str]) -> str:
 
 
 def expected_redemption_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """WHAT THIS LANE may be handed (Q39-01) — the expected redemption
-    identity derived from the dispatch envelope: the work id, the
-    provider route the dispatched driver consumes, the dispatched
-    credential ref, the route's env slot, and the attempt generation
-    (``None`` when the envelope never named one — the verification then
-    checks the response CARRIES a generation instead of matching it)."""
+    """WHAT THIS LANE may be handed (Q39-01; the revision axis is
+    R40-06/#342) — the expected redemption identity derived from the
+    dispatch envelope: the work id, the provider route the dispatched
+    driver consumes, the dispatched credential ref, the route's env
+    slot, the attempt generation and the binding revision (each ``None``
+    when the envelope never named it — the verification then checks the
+    response CARRIES the field instead of matching it)."""
     from forge.adaptive.project_credentials import PROVIDER_ENV_VARS
 
     source = os.environ if env is None else env
@@ -445,12 +465,18 @@ def expected_redemption_identity(env: Mapping[str, str] | None = None) -> dict[s
         generation: int | None = int(raw_generation) if raw_generation else None
     except ValueError:
         generation = None
+    raw_revision = (source.get(BINDING_REVISION_ENV) or "").strip()
+    try:
+        revision: int | None = int(raw_revision) if raw_revision else None
+    except ValueError:
+        revision = None
     return {
         "work_id": work_id,
         "provider": route,
         "credential_ref": (source.get(CREDENTIAL_REF_ENV) or "").strip(),
         "env_var": PROVIDER_ENV_VARS.get(route, ""),
         "attempt_generation": generation,
+        "binding_revision": revision,
     }
 
 
@@ -471,6 +497,23 @@ def verify_redemption_response(
       the envelope named one, and must be an integer regardless;
     - ``grant_id`` must be present (the join every receipt keys on);
     - ``expires_at`` must parse to a timezone-aware FUTURE instant.
+
+    R40-06 (#342) extends the typed verification to the dispatched
+    OPERATION identity, the authorization deadline and the binding
+    revision:
+
+    - ``operation`` must carry exactly :data:`REDEMPTION_OPERATION` —
+      the one operation a redemption grant authorizes; anything else is
+      not this lane's credential redemption, however field-like;
+    - ``binding_revision`` must be a well-formed integer, and must EQUAL
+      the dispatched revision when the envelope named one
+      (:data:`BINDING_REVISION_ENV`) — a same-ref rebind's NEW revision
+      never silently applies to a lane dispatched under the old one;
+    - ``redemption_deadline`` (the grant's ABSOLUTE deadline) must parse
+      to a timezone-aware instant, and the presented ``expires_at`` may
+      never OUTLIVE it — the value is not current beyond the
+      authorization window that produced it, exactly as the endpoint
+      caps it.
 
     Any mismatch or expiry raises ``LaneCredentialRedemptionError`` with
     the ``credential_redemption_failed`` marker — the caller halts the
@@ -505,6 +548,27 @@ def verify_redemption_response(
             f"the response names attempt {responded_generation}, this attempt is "
             f"{int(wanted_generation)}",
         )
+    # R40-06 (#342) — the operation word: the response must speak of the
+    # one operation a redemption grant authorizes, nothing else.
+    if str(document.get("operation") or "") != REDEMPTION_OPERATION:
+        raise _fail(
+            "operation",
+            f"the response names {str(document.get('operation'))!r}, the only "
+            f"permitted operation is {REDEMPTION_OPERATION!r}",
+        )
+    # R40-06 (#342) — the binding revision: well-formed always, EQUAL to
+    # the dispatched revision whenever the envelope named one.
+    try:
+        responded_revision = int(document.get("binding_revision"))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise _fail("binding_revision", "the response carries no integer binding revision") from exc
+    wanted_revision = expected.get("binding_revision")
+    if wanted_revision is not None and responded_revision != int(wanted_revision):
+        raise _fail(
+            "binding_revision",
+            f"the response names binding revision {responded_revision}, this attempt "
+            f"was dispatched under {int(wanted_revision)}",
+        )
     try:
         expires = datetime.fromisoformat(str(document.get("expires_at")))
     except ValueError as exc:
@@ -513,6 +577,20 @@ def verify_redemption_response(
         expires = expires.replace(tzinfo=timezone.utc)
     if expires <= moment:
         raise _fail("expires_at", f"the redeemed value already expired at {expires.isoformat()}")
+    # R40-06 (#342) — the authorization deadline: the presented expiry is
+    # never current beyond the grant's ABSOLUTE deadline.
+    try:
+        deadline = datetime.fromisoformat(str(document.get("redemption_deadline")))
+    except ValueError as exc:
+        raise _fail("redemption_deadline", "the deadline is not a readable instant") from exc
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    if expires > deadline:
+        raise _fail(
+            "redemption_deadline",
+            "the presented expiry outlives the grant's absolute deadline "
+            f"({expires.isoformat()} > {deadline.isoformat()})",
+        )
 
 
 def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[str, Any]:
@@ -610,7 +688,9 @@ def apply_redeemed_credential(
     documents, echoed empty — so the consumer receipt can join broker
     id ↔ redemption id ↔ attempt ↔ consumer without another call.
     Q39-01 (#320) adds ``grant_id`` — the operation-grant foreign key
-    every receipt join keys on."""
+    every receipt join keys on. R40-06 (#342) adds the operation word
+    and the grant's ABSOLUTE ``redemption_deadline`` — the join the
+    linearization contract names (what window authorized THIS value)."""
     target = os.environ if env is None else env
     env_var = str(document["env_var"])
     value = str(document["value"])
@@ -634,6 +714,10 @@ def apply_redeemed_credential(
         "resolved_version_kind": str(document.get("resolved_version_kind") or ""),
         "attempt_generation": document.get("attempt_generation"),
         "credential_policy": str(document.get("credential_policy") or ""),
+        # R40-06 (#342) — the dispatched operation identity and the
+        # authorization deadline (refs/metadata only).
+        "operation": str(document.get("operation") or ""),
+        "redemption_deadline": str(document.get("redemption_deadline") or ""),
     }
 
 

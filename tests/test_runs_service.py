@@ -1454,9 +1454,19 @@ class BudgetRefusedReviewer(StubReviewer):
         return await super().review(**kwargs)
 
 
+def _verified_service(db, fake_gitlab, reviewer) -> RunService:
+    """A service whose runs freeze a REAL verification contract (the
+    required ``tests`` job) — R40-04: the review-only shortcut only ever
+    fires on a verification bound to the tested candidate."""
+    return make_service(
+        db, fake_gitlab, reviewer=reviewer, settings=make_settings(FORGE_REQUIRED_JOBS="tests")
+    )
+
+
 async def drive_to_review_refusal(db, service, fake_gitlab) -> str:
-    """start → /go → green pipeline on the candidate → the review leg,
-    where the reviewer's call is refused by the budget guard."""
+    """start → /go → green pipeline (required job passed) on the candidate
+    → the review leg, where the reviewer's call is refused by the budget
+    guard."""
     run_id = await start_issue_run(service)
     await service.handle_command_note(
         PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
@@ -1465,6 +1475,7 @@ async def drive_to_review_refusal(db, service, fake_gitlab) -> str:
     branch = factory_branch(ISSUE_IID, run_id)
     pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
     fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)
+    fake_gitlab.set_pipeline_jobs(pipeline_id, [{"id": 556, "name": "tests", "status": "success"}])
     fake_gitlab.seed_commit(branch, sha, "forge commit")  # head == candidate
     await service.evaluate_waiting_ci()
     return run_id
@@ -1485,7 +1496,7 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=1)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
 
         run = await get_run(db, run_id)
@@ -1519,7 +1530,7 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=1)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
         assert reviewer.calls == []  # the refused call never recorded
 
@@ -1538,7 +1549,7 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         monkeypatch.delenv("FORGE_SPEND_CAP_USD", raising=False)
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=1)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
 
         run = await get_run(db, run_id)
@@ -1552,13 +1563,14 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         self, db, fake_gitlab, monkeypatch
     ):
         """AC-04: after the explicit budget decision + an explicit,
-        auditable top-up, the continuation repeats ONLY the review of the
-        SAME candidate — zero coder dispatches, zero new commits."""
+        auditable amendment (R40-04: keyed by the native command identity),
+        the continuation repeats ONLY the review of the SAME candidate —
+        zero coder dispatches, zero new commits."""
         monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
         monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=1)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
         writer_calls_before = len(FakeWriter.instances[0].calls)
         shas_before = list((await get_run(db, run_id)).candidate_shas or [])
@@ -1566,12 +1578,16 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         outcome = await service.continue_review_only(
             run_id,
             operator="human:alice",
-            top_up_usd=0.50,
-            top_up_reason="close the review within its reserve",
+            command_id="run:continue_review:42:9101",
+            axis="usd",
+            amount=0.50,
+            reason="close the review within its reserve",
         )
         assert outcome["allowed"] is True
         assert outcome["coder_dispatches"] == 0  # ZERO coder dispatches
         assert outcome["commits"] == 0  # ZERO commits
+        assert outcome["amendment"]["applied"] is True  # the usd amendment
+        assert outcome["delivery.review_only_calls"] == 1  # the observable
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
@@ -1580,9 +1596,11 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         assert len(reviewer.calls) == 1  # the review ran exactly once more
         block = (run.evidence or {})["review_budget_block"]
         assert block["released"]["operator"] == "human:alice"
+        assert block["released"]["command_id"] == "run:continue_review:42:9101"
         assert block["top_up_total_usd"] == pytest.approx(0.50)
-        assert len(block["top_ups"]) == 1
-        assert block["top_ups"][0]["reason"] == "close the review within its reserve"
+        assert len(block["amendments"]) == 1
+        assert block["amendments"][0]["axis"] == "usd"
+        assert block["amendments"][0]["reason"] == "close the review within its reserve"
 
     async def test_a_moved_head_invalidates_the_review_shortcut(self, db, fake_gitlab, monkeypatch):
         """AC-05: a human push past the reviewed candidate invalidates
@@ -1592,7 +1610,7 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=2)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
         # the human push lands while the run is held in reviewing
         branch = factory_branch(ISSUE_IID, run_id)
@@ -1608,30 +1626,38 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         assert reviewer.calls == []  # the stale shortcut never reviewed
 
     async def test_the_service_top_up_is_replay_idempotent(self, db, fake_gitlab, monkeypatch):
-        """A still-refusing guard (the top-up did not reach the call
+        """A still-refusing guard (the amendment did not reach the call
         axis yet): the SAME operator command retried adds its amount
-        exactly once across refusal cycles."""
+        exactly once across refusal cycles — the native command identity,
+        never the content, decides (R40-04)."""
         monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
         monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
         FakeWriter.reset()
         reviewer = BudgetRefusedReviewer(refusals=99)
-        service = make_service(db, fake_gitlab, reviewer=reviewer)
+        service = _verified_service(db, fake_gitlab, reviewer)
         run_id = await drive_to_review_refusal(db, service, fake_gitlab)
 
         first = await service.continue_review_only(
             run_id,
             operator="human:alice",
-            top_up_usd=0.50,
-            top_up_reason="explicit closing allowance",
+            command_id="run:continue_review:42:9102",
+            axis="usd",
+            amount=0.50,
+            reason="explicit closing allowance",
         )
         assert first["allowed"] is True  # the shortcut itself is sound
+        assert first["amendment"]["applied"] is True
         replay = await service.continue_review_only(
             run_id,
             operator="human:alice",
-            top_up_usd=0.50,
-            top_up_reason="explicit closing allowance",
+            command_id="run:continue_review:42:9102",  # the SAME command
+            axis="usd",
+            amount=0.50,
+            reason="explicit closing allowance",
         )
         assert replay["allowed"] is True
+        assert replay["amendment"]["applied"] is False
+        assert replay["amendment"]["replayed"] is True  # applied ONCE
 
         run = await get_run(db, run_id)
         # the reviewer kept refusing, so the run is held again — but the
@@ -1639,4 +1665,208 @@ class TestReviewerBudgetDecisionConsultsTheClosingReserve:
         assert run.status == FlowStatus.REVIEWING.value
         block = (run.evidence or {})["review_budget_block"]
         assert block["top_up_total_usd"] == pytest.approx(0.50)
-        assert len(block["top_ups"]) == 1
+        assert len(block["amendments"]) == 1
+
+    async def test_two_identical_amount_reason_commands_are_two_decisions(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R40-04 acceptance 4: two distinct top-up commands with identical
+        amount/reason are TWO decisions — both apply; only a redelivery of
+        ONE command (the same id) applies once."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=99)
+        service = _verified_service(db, fake_gitlab, reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        first = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:42:9201",
+            axis="usd",
+            amount=0.50,
+            reason="identical wording",
+        )
+        second = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:42:9202",  # a DIFFERENT note
+            axis="usd",
+            amount=0.50,
+            reason="identical wording",  # identical amount + reason
+        )
+        assert first["amendment"]["applied"] is True
+        assert second["amendment"]["applied"] is True  # a second decision
+        assert second["amendment"]["replayed"] is False
+
+        block = ((await get_run(db, run_id)).evidence or {})["review_budget_block"]
+        assert block["top_up_total_usd"] == pytest.approx(1.00)  # both applied
+        assert len(block["amendments"]) == 2
+
+    async def test_an_amendment_without_a_command_identity_is_refused(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """The amendment rides the ORIGINATING NATIVE COMMAND identity —
+        a bare amount/reason cannot tell two decisions apart and is
+        refused before anything moves."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=99)
+        service = _verified_service(db, fake_gitlab, reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            top_up_usd=0.50,  # the legacy spelling, no command identity
+            top_up_reason="anonymous",
+        )
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "amendment_requires_command_identity"
+        # nothing moved and the review never ran
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.REVIEWING.value
+        assert reviewer.calls == []
+
+    async def test_an_expired_authority_invalidates_the_shortcut_before_paid_review(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R40-04 acceptance 6: the recorded decision's authority window
+        passed — the shortcut refuses BEFORE any amendment or paid
+        review; the run re-enters its normal gate, never a stale replay."""
+        from datetime import datetime, timedelta, timezone
+
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=99)
+        service = _verified_service(db, fake_gitlab, reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+        run = await get_run(db, run_id)
+        stale_block = dict((run.evidence or {})["review_budget_block"])
+        stale_block["authority_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        await service._merge_run_evidence(run_id, {"review_budget_block": stale_block})
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:42:9301",
+            axis="usd",
+            amount=0.50,
+            reason="late",
+        )
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "review_shortcut_authority_expired"
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.REVIEWING.value  # parked, not blocked
+        assert reviewer.calls == []  # the paid review never ran
+        assert (
+            "amendments"
+            not in (  # no amendment was even attempted
+                (run.evidence or {})["review_budget_block"]
+            )
+            or not (run.evidence or {})["review_budget_block"]["amendments"]
+        )
+
+    async def test_missing_verification_invalidates_the_shortcut_before_paid_review(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R40-04 acceptance 6: no verification bound to the tested
+        candidate — the shortcut refuses; a paid review must not ride an
+        unproven candidate."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=99)
+        service = _verified_service(db, fake_gitlab, reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+        run = await get_run(db, run_id)
+        evidence = dict(run.evidence or {})
+        evidence.pop("verification", None)  # the fragment is GONE
+        await service._merge_run_evidence(run_id, {"verification": None})
+        from sqlalchemy import update
+
+        from forge.durable import FlowRun as _FlowRun
+
+        async with db() as session:
+            await session.execute(
+                update(_FlowRun).where(_FlowRun.id == run_id).values(evidence=evidence)
+            )
+            await session.commit()
+
+        outcome = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:42:9302",
+            axis="usd",
+            amount=0.50,
+            reason="unproven",
+        )
+        assert outcome["allowed"] is False
+        assert outcome["reason"] == "review_shortcut_unverified"
+        assert reviewer.calls == []  # nothing paid happened
+
+    async def test_a_restart_between_amendment_commit_and_review_dispatch(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R40-04 acceptance 7: the amendment commits durably BEFORE the
+        re-drive; a crash right after the commit loses neither the top-up
+        nor runs the review twice — the recovery scanner completes the
+        review exactly once on the restarted service."""
+        monkeypatch.setenv("FORGE_CLOSING_RESERVE_USD", "0.60")
+        monkeypatch.setenv("FORGE_SPEND_CAP_USD", "2.00")
+        FakeWriter.reset()
+        reviewer = BudgetRefusedReviewer(refusals=1)
+        service = _verified_service(db, fake_gitlab, reviewer)
+        run_id = await drive_to_review_refusal(db, service, fake_gitlab)
+
+        # Crash the re-drive leg AFTER the amendment's commit: the
+        # continuation has applied + released, then the process dies.
+        real_review_and_ready = service._review_and_ready
+
+        async def crash_after_amendment(*args, **kwargs):
+            raise RuntimeError("simulated crash between amendment and review")
+
+        monkeypatch.setattr(service, "_review_and_ready", crash_after_amendment)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            await service.continue_review_only(
+                run_id,
+                operator="human:alice",
+                command_id="run:continue_review:42:9303",
+                axis="usd",
+                amount=0.50,
+                reason="pre-crash decision",
+            )
+        # The crash happened AFTER the amendment + release committed:
+        run = await get_run(db, run_id)
+        block = (run.evidence or {})["review_budget_block"]
+        assert block["amendments"][0]["command_id"] == "run:continue_review:42:9303"
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+
+        # The restarted service (a fresh scanner pass) resumes the review.
+        monkeypatch.setattr(service, "_review_and_ready", real_review_and_ready)
+        await service._resume_review(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert len(reviewer.calls) == 1  # the review ran EXACTLY once
+        block = (run.evidence or {})["review_budget_block"]
+        assert len(block["amendments"]) == 1  # the top-up survived
+        assert block["top_up_total_usd"] == pytest.approx(0.50)
+
+        # A redelivery of the same command after the restart replays.
+        replay = await service.continue_review_only(
+            run_id,
+            operator="human:alice",
+            command_id="run:continue_review:42:9303",
+            axis="usd",
+            amount=0.50,
+            reason="pre-crash decision",
+        )
+        assert replay["reason"] == "no_review_budget_block"  # run is ready —
+        # the shortcut closed; the amendment was never re-applied.

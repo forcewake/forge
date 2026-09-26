@@ -833,3 +833,31 @@ def test_provider_services_never_reimplement_recovery_scans() -> None:
                 continue
             offenders.append(f"{service}: own blocked-run scan near offset {match.start()}")
     assert offenders == [], offenders
+
+
+# ----------------------------------------------------------------------
+# R40-13 (#349): the /status note carries the stable status identity
+# ----------------------------------------------------------------------
+
+
+async def test_status_note_carries_the_stable_identity_marker(db, service, fake_gitlab):
+    """The one wiring of the status-comment identity: every /status note
+    ends with the machine-readable marker naming the run and the digest
+    over the facts the note states — a replayed /status of an unchanged
+    world re-posts the SAME identity, so downstream consumers can
+    collapse replays instead of accumulating contradictory statuses."""
+    run_id = await make_run(db, status=FlowStatus.WAITING_CI.value, candidate_shas=["c1"])
+
+    await service.handle_status_note(PROJECT_ID, "@forge /status", "alice", ISSUE_IID)
+
+    assert fake_gitlab.notes_containing(f"<!-- forge-status:1 run={run_id} identity=sha256:")
+
+    # the identity is a digest over the FACTS: replaying the same world
+    # produces the same marker bytes
+    def marker_of(note: dict) -> str:
+        return str(note["body"]).split("identity=", 1)[1].split()[0]
+
+    first = fake_gitlab.notes_containing("forge-status:1")[-1]
+    await service.handle_status_note(PROJECT_ID, "@forge /status", "alice", ISSUE_IID)
+    second = fake_gitlab.notes_containing("forge-status:1")[-1]
+    assert marker_of(first) == marker_of(second)

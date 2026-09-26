@@ -119,10 +119,12 @@ __all__ = [
     "BlockedReason",
     "DELIVERY_FAILED_OUTCOMES",
     "DELIVERY_OUTCOMES",
+    "DELIVERY_VIEW_SCHEMA",
     "DIAGNOSTIC_MAX_ENTRIES",
     "DIAGNOSTIC_SECTION_FIELDS",
     "DIAGNOSTICS_SCHEMA",
     "DeliveryOutcome",
+    "FEEDBACK_REFUSAL_NEXT_ACTIONS",
     "NON_RETRYABLE_CODES",
     "OperatorAction",
     "OperatorProjection",
@@ -131,16 +133,23 @@ __all__ = [
     "OperatorState",
     "RECOVERY_MILESTONES",
     "RECOVERY_SCHEMA",
+    "REVIEW_ROUND_OPEN_STATUSES",
+    "REVIEW_ROUND_SUPERSEDING_STATUSES",
     "RecoveryActions",
     "RecoveryHint",
+    "SAFE_ACTION_DESCRIPTIONS",
+    "STALE_ACTION_REFUSAL",
+    "STATUS_COMMENT_SCHEMA",
     "StateDerivation",
     "StaleProjectionRejected",
     "UNRESOLVED_PUBLICATION_STATUSES",
     "WEDGED_AFTER",
     "action_hint_block",
     "apply_update",
+    "budget_blocked_review",
     "current_candidate",
     "delivery_outcome_of",
+    "delivery_view",
     "derive_state",
     "export_diagnostics",
     "explain_blocked",
@@ -149,9 +158,13 @@ __all__ = [
     "recovery_hint",
     "recovery_ladder",
     "render",
+    "render_status_comment",
+    "review_round_fact",
     "source_digest",
+    "status_comment_identity",
     "status_note_lines",
     "verification_binding",
+    "with_status_comment_identity",
 ]
 
 #: The schema discriminator every rendered projection carries (versioned:
@@ -502,7 +515,8 @@ def derive_state(
         if str(_first(pub, "status") or "") in UNRESOLVED_PUBLICATION_STATUSES
     ]
     candidate_shas = list(run.get("candidate_shas") or [])
-    run_evidence = run.get("evidence") if isinstance(run.get("evidence"), Mapping) else {}
+    raw_evidence = run.get("evidence")
+    run_evidence: Mapping[str, Any] = raw_evidence if isinstance(raw_evidence, Mapping) else {}
     if not candidate_shas and isinstance(_first(run_evidence, "candidate_sha"), str):
         candidate_shas = [run_evidence["candidate_sha"]]
     # R36-15/#274: a passed verification DECORATES only the candidate it
@@ -568,7 +582,7 @@ def derive_state(
         )
     elif resume_requested and activated:
         state = "resumed"
-        link("resume command", _first(resume, "command_id"), resume)
+        link("resume command", _first(resume or {}, "command_id"), resume)
         activated_cp = checkpoint if checkpoint else (checkpoints[-1] if checkpoints else None)
         link("checkpoint", _first(activated_cp or {}, "checkpoint_id", "id"), activated_cp)
         reasons.append("resume accepted and the checkpoint bytes were activated")
@@ -675,6 +689,18 @@ class OperatorProjection:
     source_digest: str
     rows_observed: dict[str, str]
     verification_history: tuple[dict[str, Any], ...] = ()
+    #: R40-13 (#349): the CURRENT delivery/round subject the projection's
+    #: actions name — ``delivery:1`` (the original delivery) or
+    #: ``round:<n>:<decision_id>`` (a linked follow-up round, whether this
+    #: run is its parent or its child). The action-versioning ticket an
+    #: offered action carries as ``expected_round``; ``""`` when no round
+    #: row and no evidence names one (hand-built rows without rounds).
+    round_ref: str = "delivery:1"
+    #: The round that SUPERSEDED this run's delivery (``""`` when none):
+    #: a round row naming this run as parent in a superseding status. The
+    #: render labels the run's ready delivery and its green evidence
+    #: HISTORICAL through this field — never as current readiness.
+    superseded_by_round: str = ""
 
     @property
     def action_digest(self) -> str:
@@ -805,6 +831,7 @@ def _assemble(
         }
     )
     _, historical_passes = verification_binding(verifications, candidate_history, candidate_now)
+    round_view = review_round_fact(source_rows)
     return OperatorProjection(
         schema=OPERATOR_VIEW_SCHEMA,
         run_id=run_id,
@@ -823,6 +850,8 @@ def _assemble(
         source_digest=source_digest(source_rows),
         rows_observed=_rows_observed(source_rows),
         verification_history=tuple(redact(entry) for entry in historical_passes),
+        round_ref=round_view["ref"] if round_view else "delivery:1",
+        superseded_by_round=str(round_view.get("supersedes", "") or "") if round_view else "",
     )
 
 
@@ -914,6 +943,11 @@ def render(projection: OperatorProjection) -> dict[str, Any]:
             "last_transition_at": projection.last_transition_at,
             "computed_at": projection.computed_at,
             "rows_observed": dict(projection.rows_observed),
+            # R40-13 (#349): the delivery/round subject + the supersession —
+            # the fields the round-aware surfaces (the API's delivery
+            # section, the status comment) agree through.
+            "round_ref": projection.round_ref,
+            "superseded_by_round": projection.superseded_by_round,
         }
     )
 
@@ -968,6 +1002,16 @@ def status_note_lines(projection: OperatorProjection) -> list[str]:
             f"{len(projection.unresolved_effects)} unresolved external effect(s) — "
             "reconcile before retry."
         )
+    # R40-13 (#349): the round line — which delivery/round is CURRENT.
+    # A superseded delivery says so OUT LOUD (the old ready evidence is
+    # history, never current readiness).
+    if projection.superseded_by_round:
+        lines.append(
+            f"Round: delivery superseded by {projection.superseded_by_round} — "
+            "the green evidence above is HISTORICAL."
+        )
+    elif projection.round_ref and projection.round_ref != "delivery:1":
+        lines.append(f"Round: {projection.round_ref} is the current delivery.")
     if projection.last_transition_at:
         lines.append(f"Last transition: {projection.last_transition_at}")
     return lines
@@ -1377,10 +1421,12 @@ def delivery_outcome_of(source_rows: Mapping[str, Any]) -> DeliveryOutcome:
 
     lane_view = run.get("lane_outcome")
     lane: Mapping[str, Any] = lane_view if isinstance(lane_view, Mapping) else {}
-    run_evidence = run.get("evidence") if isinstance(run.get("evidence"), Mapping) else {}
-    evidence_lane = (
-        run_evidence.get("harness") if isinstance(run_evidence.get("harness"), Mapping) else {}
+    raw_run_evidence = run.get("evidence")
+    run_evidence: Mapping[str, Any] = (
+        raw_run_evidence if isinstance(raw_run_evidence, Mapping) else {}
     )
+    raw_harness = run_evidence.get("harness")
+    evidence_lane: Mapping[str, Any] = raw_harness if isinstance(raw_harness, Mapping) else {}
 
     def _recorded(key: str) -> Any:
         for source in (lane, evidence_lane, run_evidence):
@@ -1521,7 +1567,8 @@ def recovery_ladder(
     if not occupancy_observed:
         ladder["runner_stopped"] = _milestone("runner_stopped", "unknown")
     else:
-        stopped = [row for row in occupancy if str(row.get("released_at") or "")]
+        observed_occupancy: Sequence[Mapping[str, Any]] = occupancy or ()
+        stopped = [row for row in observed_occupancy if str(row.get("released_at") or "")]
         if stopped:
             latest = stopped[-1]
             ladder["runner_stopped"] = _milestone(
@@ -1806,7 +1853,13 @@ def recovery_document(
 #: EXISTING guarded paths (the command router's authenticated ingress for
 #: pause/resume/steer/answer; the classic operator commands for
 #: retry/cancel/reconcile); ``probe`` is the read-only reconciliation
-#: query the research mandates before any retry.
+#: query the research mandates before any retry. R40-13 (#349) adds the
+#: two post-readiness recovery verbs — ``continue_review_only`` (the
+#: #325/#340 review-only continuation) and ``follow_up_correction`` (the
+#: #337/#338 linked follow-up round) — as DIFFERENT actions from the
+#: implementation restart (``retry``) and the WIP discard (``cancel``):
+#: each carries its own one-line safe-action description in
+#: :data:`SAFE_ACTION_DESCRIPTIONS`.
 ACTIONS: Final[tuple[str, ...]] = (
     "pause",
     "resume",
@@ -1816,7 +1869,16 @@ ACTIONS: Final[tuple[str, ...]] = (
     "cancel",
     "reconcile",
     "probe",
+    "continue_review_only",
+    "follow_up_correction",
 )
+
+#: The typed refusal code when an action is replayed against a candidate
+#: or round it was not planned for (R40-13's ``operator.stale_action_
+#: refusal`` observability): the action named an expected candidate /
+#: round / version and the current world moved — the refusal names the
+#: CURRENT subject and the safe next action, never a silent apply.
+STALE_ACTION_REFUSAL: Final = "operator.stale_action_refusal"
 
 #: Which guarded path an action links to — the view NEVER duplicates the
 #: path, it names it.
@@ -1829,6 +1891,56 @@ ACTION_VIA: Final[Mapping[str, str]] = {
     "cancel": "operator-commands:/cancel",
     "reconcile": "operator-commands:/reconcile",
     "probe": "read-only:/status",
+    "continue_review_only": "runs-service:continue_review_only",
+    "follow_up_correction": "native-note:/fix",
+}
+
+#: R40-13 (#349): the one-line SAFE-ACTION description for every offered
+#: action — what it WILL and what it WILL NOT do. Review-only recovery and
+#: follow-up correction are DIFFERENT verbs from the implementation
+#: restart and the WIP discard, and the operator reads the difference
+#: here, before clicking.
+SAFE_ACTION_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "pause": (
+        "will pause safely at the next boundary and commit a checkpoint; "
+        "it will not cancel the run or discard work"
+    ),
+    "resume": (
+        "will restore the exact committed checkpoint bytes; it will not "
+        "re-plan, re-run finished legs, or touch the base"
+    ),
+    "steer": (
+        "will add corrected guidance to the RUNNING attempt; it will not "
+        "restart it or discard its WIP"
+    ),
+    "answer": ("will answer one open question; it will never write code or dispatch"),
+    "retry": (
+        "IMPLEMENTATION RESTART: re-runs the failed implementation in place "
+        "(one commit cycle, same branch); it will not preserve the failed "
+        "attempt's WIP and will not re-plan the task"
+    ),
+    "cancel": (
+        "WIP DISCARD: cancels the run and abandons uncommitted work; it will "
+        "not checkpoint, and a new task needs a new implement request"
+    ),
+    "reconcile": (
+        "will probe lost publication intents by identity; it will not "
+        "re-dispatch anything the probe cannot attribute"
+    ),
+    "probe": ("read-only: re-reads the current state; it changes nothing"),
+    "continue_review_only": (
+        "REVIEW-ONLY RECOVERY: repeats ONLY the review of the SAME verified "
+        "candidate — zero coder dispatches, zero new commits, no replacement "
+        "MR; it will not fix code, and it refuses if the candidate or its "
+        "verification moved"
+    ),
+    "follow_up_correction": (
+        "FOLLOW-UP CORRECTION: admits ONE linked round from the approved MR "
+        "head (a NEW child work unit with its own budget); it preserves "
+        "human edits and the prior delivery as immutable history — it will "
+        "not discard WIP, restart implementation in place, or reuse the "
+        "parent's ready evidence as current readiness"
+    ),
 }
 
 #: The exact command shapes the recovery hints name (R38-15) — every one
@@ -1897,6 +2009,15 @@ class OperatorAction:
     LINKS to the guarded path (``via``); it never executes anything, and
     ``expected_version`` is the version it must still match at execution
     time or be refused.
+
+    R40-13 (#349) widens the CAS ticket to the SUBJECT the action was
+    planned against: ``expected_candidate`` (the exact candidate sha)
+    and ``expected_round`` (the delivery/round reference, e.g.
+    ``round:2:<decision>``). :meth:`RecoveryActions.decide` refuses with
+    :data:`STALE_ACTION_REFUSAL` when either moved — an action planned
+    for the parent's superseded delivery never applies to the round's
+    new candidate. ``safe_action`` carries the one-line will/will-not
+    description from :data:`SAFE_ACTION_DESCRIPTIONS`.
     """
 
     action: str
@@ -1908,6 +2029,15 @@ class OperatorAction:
     linkage: str
     expected_version: int
     via: str
+    expected_candidate: str = ""
+    expected_round: str = "delivery:1"
+
+    @property
+    def safe_action(self) -> str:
+        """The one-line safe-action description (what it will and will
+        not do) — the operator reads the verb's meaning BEFORE
+        executing it."""
+        return SAFE_ACTION_DESCRIPTIONS.get(self.action, "")
 
     def audit_fact(self) -> dict[str, Any]:
         """The four facts as one record (what an executed action journals)."""
@@ -1919,6 +2049,8 @@ class OperatorAction:
             "action": self.action,
             "state": self.state,
             "expected_version": self.expected_version,
+            "expected_candidate": self.expected_candidate,
+            "expected_round": self.expected_round,
         }
 
 
@@ -1969,7 +2101,8 @@ class RecoveryActions:
         linkage: str = "",
     ) -> tuple[OperatorAction, ...]:
         """Plan every action valid right now for *actor* — each carrying
-        the four facts and the CAS ticket (the projection's version)."""
+        the four facts and the CAS ticket (the projection's version, the
+        exact candidate and the delivery/round reference)."""
         moment = at if at is not None else datetime.now(timezone.utc)
         when = _iso(moment)
         trace = linkage or f"run:{projection.run_id}"
@@ -1984,6 +2117,8 @@ class RecoveryActions:
                 linkage=f"{trace} projection:v{projection.projection_version}",
                 expected_version=projection.projection_version,
                 via=ACTION_VIA[action],
+                expected_candidate=str(projection.identity.get("active_candidate") or ""),
+                expected_round=projection.round_ref,
             )
             for action in RecoveryActions.valid_for(projection.state, actor_role)
         )
@@ -2000,6 +2135,13 @@ class RecoveryActions:
         and refused as such. A fresh version whose action is no longer
         valid in the current state (or for the actor's role) is refused
         the same honest way.
+
+        R40-13 (#349) adds the SUBJECT fence: an action whose
+        ``expected_candidate`` or ``expected_round`` names a different
+        candidate/delivery than the current projection holds is refused
+        with :data:`STALE_ACTION_REFUSAL` — the parent's superseded
+        delivery and its actions never apply to the round's new world,
+        whatever the projection version says.
         """
         actions_now = RecoveryActions.valid_for(current.state, action.actor_role)
         safe_next = actions_now[0] if actions_now else ""
@@ -2025,6 +2167,25 @@ class RecoveryActions:
                 ),
                 current_state=current.state,
                 safe_next_action=safe_next,
+                action=action,
+            )
+        # the SUBJECT fence (R40-13): same version, different world — the
+        # candidate or the round moved under the version number.
+        current_candidate = str(current.identity.get("active_candidate") or "")
+        if (action.expected_candidate and action.expected_candidate != current_candidate) or (
+            action.expected_round and action.expected_round != current.round_ref
+        ):
+            return ActionDecision(
+                allowed=False,
+                reason=(
+                    f"{STALE_ACTION_REFUSAL}: the action was planned for candidate "
+                    f"{action.expected_candidate[:12] or '(none)'} on {action.expected_round} "
+                    f"but the current subject is candidate {current_candidate[:12] or '(none)'} "
+                    f"on {current.round_ref} — the delivery or round moved; re-decide "
+                    "against the current world"
+                ),
+                current_state=current.state,
+                safe_next_action=safe_next or "probe",
                 action=action,
             )
         if action.action not in actions_now:
@@ -2074,6 +2235,9 @@ def action_hint_block(
             "via": action.via,
             "digest": action.digest,
             "expected_version": action.expected_version,
+            "expected_candidate": action.expected_candidate,
+            "expected_round": action.expected_round,
+            "safe_action": action.safe_action,
             "at": action.at,
             "linkage": action.linkage,
         }
@@ -2220,18 +2384,18 @@ def export_diagnostics(
         )
     ]
     ladder_rows, ladder_cut = _bounded(
-        (
+        [
             _allowlisted(dict(entry), DIAGNOSTIC_SECTION_FIELDS["recovery_ladder"])
             for entry in recovery["ladder"].values()
-        ),
+        ],
         max_entries,
     )
     hint = recovery["hint"]
     blocked_rows, blocked_cut = _bounded(
-        (
+        [
             _allowlisted(reason, DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"])
             for reason in blocked_reasons
-        ),
+        ],
         max_entries,
     )
     sections: dict[str, Any] = {
@@ -2257,3 +2421,831 @@ def export_diagnostics(
             },
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# R40-13 (#349) — the five linked facts: execution, review round,
+# candidate, verification, acceptance — and the stable status comment
+# ---------------------------------------------------------------------------
+
+#: The delivery view's schema discriminator (versioned like the view's).
+DELIVERY_VIEW_SCHEMA: Final = "forge.operator.delivery/1"
+
+#: The status comment's schema discriminator + the machine-readable marker
+#: prefix every rendered status comment carries.
+STATUS_COMMENT_SCHEMA: Final = "forge.operator.status-comment/1"
+STATUS_COMMENT_MARKER: Final = "forge-status"
+
+#: R40-02 (#338): the round statuses that still hold the lineage's ONE
+#: outstanding correction slot (the partial unique index's own set).
+REVIEW_ROUND_OPEN_STATUSES: Final[tuple[str, ...]] = ("admitted", "dispatched")
+
+#: R40-13 (#349): the round statuses that SUPERSEDE the parent's ready
+#: delivery — a child work unit exists (or existed), so the parent's
+#: candidate and its green evidence are HISTORY. ``stale`` is deliberately
+#: ABSENT: a stale round dispatched nothing (human edits preserved) — the
+#: parent's delivery is still the current one and the operator re-raises
+#: the correction against the moved head.
+REVIEW_ROUND_SUPERSEDING_STATUSES: Final[tuple[str, ...]] = (
+    "admitted",
+    "dispatched",
+    "completed",
+    "ended",
+)
+
+#: R40-13 (#349): the #337 feedback-request refusal statuses that surface
+#: as EXPLICIT next-actions (the unavailable prerequisites and the #338
+#: head-fence refusals an operator must see named, never discover): each
+#: maps to its one-line remediation and the guarded route it runs through.
+FEEDBACK_REFUSAL_NEXT_ACTIONS: Final[Mapping[str, dict[str, str]]] = {
+    "stale_head": {
+        "code": "stale_head",
+        "description": (
+            "the MR head moved before the correction dispatched — human edits are "
+            "preserved and nothing was dispatched; re-raise the correction against "
+            "the CURRENT head"
+        ),
+        "via": "native-note:/fix",
+    },
+    "round_limit": {
+        "code": "round_limit",
+        "description": (
+            "the bounded review-round count for this lineage is exhausted — further "
+            "corrections need an operator policy change (FORGE_MAX_REVIEW_ROUNDS), "
+            "not another note"
+        ),
+        "via": "operator-policy:FORGE_MAX_REVIEW_ROUNDS",
+    },
+    "mr_closed": {
+        "code": "mr_closed",
+        "description": (
+            "the MR is merged or closed — the human decision already ended the "
+            "collaboration surface; there is nothing to correct"
+        ),
+        "via": "none",
+    },
+    "conflicting_correction": {
+        "code": "conflicting_correction",
+        "description": (
+            "ONE outstanding correction per lineage — the open round holds the "
+            "slot; wait for it to complete before raising the next"
+        ),
+        "via": "read-only:/status",
+    },
+    "correction_window_closed": {
+        "code": "correction_window_closed",
+        "description": (
+            "the correction window for this run is closed — a follow-up needs the "
+            "post-readiness round route or a fresh task"
+        ),
+        "via": "native-note:/fix",
+    },
+    "refused_unauthorized": {
+        "code": "refused_unauthorized",
+        "description": (
+            "the note's author may not request corrections on this run — the "
+            "authorized reviewer set is configured approver-side"
+        ),
+        "via": "operator-policy:FORGE_APPROVERS",
+    },
+}
+
+
+def _round_ref_of(number: Any, decision_id: Any) -> str:
+    """``round:<n>:<decision>`` — the stable round reference actions name."""
+    try:
+        numbered = int(number)
+    except (TypeError, ValueError):
+        return ""
+    if numbered <= 0:
+        return ""
+    return f"round:{numbered}:{str(decision_id or '')}"
+
+
+def _evidence_mapping(run: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """One run-evidence fragment as a mapping (``{}`` when absent)."""
+    evidence = run.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return {}
+    fragment = evidence.get(key)
+    return fragment if isinstance(fragment, Mapping) else {}
+
+
+def _feedback_requests_of(run: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The #337 feedback requests recorded on the run's evidence — the
+    durable request documents keyed by note id. Value-free by
+    construction: only the identity + lifecycle status ride out (the
+    reviewer's TEXT never renders on the operator surface)."""
+    evidence = run.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return []
+    requests = evidence.get("review_feedback_requests")
+    if not isinstance(requests, Mapping):
+        return []
+    rows: list[dict[str, Any]] = []
+    for note_id, document in sorted(requests.items(), key=lambda pair: str(pair[0])):
+        if not isinstance(document, Mapping):
+            continue
+        rows.append(
+            {
+                "note_id": str(document.get("note_id") or note_id),
+                "status": str(document.get("status") or ""),
+                "classification": str(document.get("classification") or ""),
+                "decision_id": str(document.get("decision_id") or ""),
+                "head_sha": str(document.get("head_sha") or ""),
+                "created_at": _iso(document.get("created_at")),
+            }
+        )
+    return rows
+
+
+def review_round_fact(source_rows: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The CURRENT review-round fact over one snapshot's rows (pure).
+
+    Sources, composed — never re-derived:
+
+    - the ``rounds`` section (the #338 ``review_rounds`` table rows the
+      snapshot reader read: the rounds naming THIS run as parent or
+      child, round order);
+    - the run evidence's ``review_round`` fragment (the CHILD's own copy
+      of its admission — present exactly when this run IS a round's work
+      unit);
+    - the run evidence's ``review_feedback_requests`` (#337 — the
+      requests' lifecycle statuses, incl. the R40-02 refusal words).
+
+    The returned fact carries: ``ref`` (the lineage's CURRENT
+    delivery/round reference — ``delivery:1`` when no round exists),
+    ``role`` (how THIS run stands in the newest round: parent / child /
+    ``""``), the newest round's identity + status with its thin evidence
+    link, the supersession reference (``supersedes`` — set when a
+    SUPERSEDING round names this run as parent), the lineage root and
+    round count, and the request rows. ``None`` when neither source
+    names a round.
+    """
+    run = _norm(source_rows.get("run") or {})
+    if not run:
+        return None
+    run_id = str(_first(run, "id", "run_id") or "")
+    rounds = [_norm(row) for row in source_rows.get("rounds") or [] if _norm(row)]
+    own = _evidence_mapping(run, "review_round")
+    if not rounds and not own:
+        return None
+
+    def _latest(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        def key(row: dict[str, Any]) -> tuple[int, str]:
+            try:
+                number = int(row.get("round_number") or 0)
+            except (TypeError, ValueError):
+                number = 0
+            return (number, str(row.get("decision_id") or ""))
+
+        return max(rows, key=key) if rows else None
+
+    newest_table = _latest(rounds)
+    newest: dict[str, Any] = dict(newest_table) if newest_table is not None else {}
+    role = ""
+    if newest_table is not None:
+        if str(newest_table.get("parent_run_id") or "") == run_id:
+            role = "parent"
+        elif str(newest_table.get("child_run_id") or "") == run_id:
+            role = "child"
+    if own:
+        # the child's own copy: authoritative for THIS run's role even
+        # when the rounds table section was not selected (coverage
+        # unknown, never guessed).
+        role = "child"
+        newest = {**newest, **{str(k): v for k, v in own.items()}}
+        newest["round_number"] = own.get("round_number") or newest.get("round_number")
+        newest["decision_id"] = own.get("decision_id") or newest.get("decision_id")
+        newest["root_run_id"] = own.get("root_run_id") or newest.get("root_run_id")
+        newest["parent_run_id"] = own.get("parent_run_id") or newest.get("parent_run_id")
+
+    ref = _round_ref_of(newest.get("round_number"), newest.get("decision_id"))
+    supersedes = ""
+    if role == "parent" and str(newest.get("status") or "") in REVIEW_ROUND_SUPERSEDING_STATUSES:
+        supersedes = ref
+    round_row: dict[str, Any] = {
+        "round_number": newest.get("round_number"),
+        "status": str(newest.get("status") or ""),
+        "status_reason": str(newest.get("status_reason") or ""),
+        "decision_id": str(newest.get("decision_id") or ""),
+        "note_id": str(newest.get("note_id") or ""),
+        "base_head_sha": str(newest.get("base_head_sha") or ""),
+        "parent_run_id": str(newest.get("parent_run_id") or ""),
+        "child_run_id": str(newest.get("child_run_id") or ""),
+        "root_run_id": str(newest.get("root_run_id") or ""),
+        "open": str(newest.get("status") or "") in REVIEW_ROUND_OPEN_STATUSES,
+        "evidence": (
+            {
+                "of": "review round",
+                "id": str(newest.get("decision_id") or ""),
+                "ref": _row_digest(newest),
+            }
+            if newest
+            else None
+        ),
+    }
+    return {
+        "ref": ref or "delivery:1",
+        "run_id": run_id,
+        "role": role,
+        "round": round_row,
+        "rounds_recorded": len(rounds) or (1 if own else 0),
+        "root_run_id": str(newest.get("root_run_id") or "") or run_id,
+        "supersedes": supersedes,
+        "requests": _feedback_requests_of(run),
+    }
+
+
+def acceptance_fact(
+    run: Mapping[str, Any],
+    *,
+    verified_current: bool,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    """The ACCEPTANCE fact — attributed to a real HUMAN decision or
+    honestly absent (never to green CI).
+
+    The only durable acceptance record is the run evidence's
+    ``acceptance`` fragment (the R24 reconciliation): the human's OWN
+    merge/close decision on the MR, observed provider-side (forge never
+    merges — ADR-0003). Green CI, a passed verification, a ready status
+    are NONE of them acceptance: they render ``pending_human_decision``
+    at best, and the document says so — the operator never confuses a
+    verified candidate with an accepted one.
+    """
+    recorded = _evidence_mapping(run, "acceptance")
+    state = str(recorded.get("state") or "").strip().lower()
+    link = (
+        {
+            "of": "acceptance",
+            "id": f"mr:{str(run.get('mr_iid') or '')}",
+            "ref": _row_digest(dict(recorded)),
+        }
+        if recorded
+        else None
+    )
+    if state == "merged":
+        return {
+            "state": "accepted_by_human",
+            "decided_by": "human",
+            "basis": (
+                "the MR was MERGED by a human — the merge IS the acceptance "
+                "decision, observed provider-side (forge never merges)"
+            ),
+            "at": _iso(_first(recorded, "merged_at", "observed_at")),
+            "evidence": link,
+        }
+    if state == "closed":
+        return {
+            "state": "rejected_by_human",
+            "decided_by": "human",
+            "basis": "the MR was CLOSED by a human — an honest rejection, recorded once",
+            "at": _iso(_first(recorded, "observed_at")),
+            "evidence": link,
+        }
+    if verified_current and candidate_sha:
+        return {
+            "state": "pending_human_decision",
+            "decided_by": None,
+            "basis": (
+                "the candidate is verified and awaits the HUMAN merge decision — "
+                "green CI and a passed verification are NOT acceptance"
+            ),
+            "at": "",
+            "evidence": None,
+        }
+    return {
+        "state": "none",
+        "decided_by": None,
+        "basis": (
+            "no human decision is recorded — acceptance is attributed only to a "
+            "real human merge/close decision, never to green CI"
+        ),
+        "at": "",
+        "evidence": None,
+    }
+
+
+#: The amendment route's command shape (the #340 contract): an amendment
+#: names EXACTLY ONE axis and rides the ORIGINATING native command's
+#: identity — two identical amount/reason commands are two decisions; a
+#: redelivery of one applies exactly once.
+AMENDMENT_COMMAND_SHAPE: Final[Mapping[str, str]] = {
+    "identity": "run:continue_review:<project>:<note-id> (the originating native command)",
+    "fields": "axis=<usd|calls|tokens|wallclock> amount=<n> reason=<text>",
+    "rule": (
+        "ONE axis per amendment — cross-axis conversion is refused (it would "
+        "need a stated versioned policy); count axes move the run_budgets "
+        "limits atomically, usd raises the closing gate's effective cap"
+    ),
+}
+
+
+def budget_blocked_review(source_rows: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The review-budget block as the operator reads it (R40-13 over
+    #325/#340): the ACTUAL limiting axis and the SUPPORTED amendment
+    route, or ``None`` when no review-budget decision is recorded.
+
+    A pure fold over the recorded rows (the run evidence's
+    ``review_budget_block`` — the durable decision the reviewer leg
+    wrote; the run row's own blocked reason). The limiting axis, in
+    priority order: the axis a REFUSED amendment's typed refusal_reason
+    names (the guard's own recording), else ``usd`` when the recorded
+    closing report says the reserve cannot cover the review (the closing
+    gate's cap is the refusing axis), else honestly ``None`` with the
+    basis saying the durable rows name no single axis — the LIVE
+    :func:`forge.durable.budgets.limiting_axis` read decides at
+    continuation time. The amendment route is the #340 command shape
+    (one axis, one amount, a reason, the originating command identity) —
+    never a silent re-plan.
+    """
+    run = _norm(source_rows.get("run") or {})
+    if not run:
+        return None
+    block = _evidence_mapping(run, "review_budget_block")
+    blocked_reason = str(run.get("blocked_reason") or "")
+    if not block and "budget_exhausted" not in blocked_reason:
+        return None
+    if not block:
+        return {
+            "blocked": True,
+            "limiting_axis": None,
+            "limiting_axis_basis": (
+                "the run's blocked reason names a budget refusal but no recorded "
+                "review-budget decision carries the axis — consult the live "
+                "limiting-axis read before amending"
+            ),
+            "amendment_route": None,
+            "amendments_recorded": 0,
+            "short_reason": blocked_reason,
+        }
+    amendments = block.get("amendments")
+    amendment_rows = [dict(row) for row in amendments] if isinstance(amendments, list) else []
+    refused_axes = [
+        str(row.get("refusal_reason") or "").split(":", 1)[0].strip()
+        for row in amendment_rows
+        if row.get("status") == "refused" and str(row.get("refusal_reason") or "").strip()
+    ]
+    raw_report = block.get("budget")
+    budget_report: Mapping[str, Any] = raw_report if isinstance(raw_report, Mapping) else {}
+    fits = budget_report.get("closing_review_fits")
+    axis: str | None = None
+    basis = ""
+    if refused_axes:
+        axis = refused_axes[-1]
+        basis = (
+            f"the refused amendment's typed refusal names the {axis} axis — amend "
+            "the LIMITING axis; an amendment on another axis does not permit the review"
+        )
+    elif fits is False:
+        axis = "usd"
+        basis = (
+            "the recorded closing report says the reserve cannot cover the review — "
+            "the closing gate's usd cap is the refusing axis"
+        )
+    else:
+        basis = (
+            "the recorded decision names no single limiting axis — the live "
+            "limiting_axis read at continuation time decides; probe before amending"
+        )
+    released = bool(block.get("released"))
+    return {
+        "blocked": not released,
+        "released": released,
+        "limiting_axis": axis,
+        "limiting_axis_basis": basis,
+        "amendment_route": (
+            {
+                "command": "continue_review_only: amend the limiting axis",
+                "shape": dict(AMENDMENT_COMMAND_SHAPE),
+                "via": ACTION_VIA["continue_review_only"],
+                "safe_action": SAFE_ACTION_DESCRIPTIONS["continue_review_only"],
+            }
+            if not released
+            else None
+        ),
+        "amendments_recorded": len(amendment_rows),
+        "refused_amendments": sum(1 for row in amendment_rows if row.get("status") == "refused"),
+        "short_reason": str(block.get("short_reason") or ""),
+        "evidence": {
+            "of": "review budget block",
+            "id": str(_first(run, "id", "run_id") or ""),
+            "ref": _row_digest(dict(block)),
+        },
+    }
+
+
+def delivery_next_actions(
+    requests: Sequence[Mapping[str, Any]],
+    round_row: Mapping[str, Any] | None,
+    budget_block: Mapping[str, Any] | None,
+    *,
+    acceptance: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The EXPLICIT next-actions over the request/round/budget facts
+    (pure): unavailable prerequisites and the #338 head-fence refusals
+    render as named rows — each carrying its one-line remediation and
+    the guarded route — never as silence the operator must debug.
+
+    *requests* are the #337 feedback-request rows read from the run's
+    own evidence (they exist even when the rounds-table section was not
+    selected); *round_row* is the newest round fact (``None`` when no
+    round identity is observed)."""
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for request in requests:
+        status = str(request.get("status") or "")
+        entry = FEEDBACK_REFUSAL_NEXT_ACTIONS.get(status)
+        if entry is None or status in seen:
+            continue
+        seen.add(status)
+        actions.append(
+            {
+                "code": entry["code"],
+                "description": entry["description"],
+                "via": entry["via"],
+                "available": False,
+                "evidence": {
+                    "of": "feedback request",
+                    "id": str(request.get("note_id") or ""),
+                    "ref": _row_digest(dict(request)),
+                },
+            }
+        )
+    if round_row is not None and str(round_row.get("status") or "") == "stale":
+        entry = FEEDBACK_REFUSAL_NEXT_ACTIONS["stale_head"]
+        actions.append(
+            {
+                "code": entry["code"],
+                "description": (
+                    f"round {round_row.get('round_number')} went stale — " + entry["description"]
+                ),
+                "via": entry["via"],
+                "available": False,
+                "evidence": round_row.get("evidence"),
+            }
+        )
+    if budget_block is not None and budget_block.get("blocked"):
+        axis = budget_block.get("limiting_axis")
+        actions.append(
+            {
+                "code": "budget_blocked_review",
+                "description": (
+                    "the closing review is budget-blocked on the "
+                    f"{axis or 'undetermined'} axis — "
+                    + str(budget_block.get("limiting_axis_basis") or "")
+                ),
+                "via": str((budget_block.get("amendment_route") or {}).get("via") or ""),
+                "available": True,
+                "amendment_route": budget_block.get("amendment_route"),
+                "evidence": budget_block.get("evidence"),
+            }
+        )
+    if acceptance is not None and str(acceptance.get("state") or "") == "pending_human_decision":
+        actions.append(
+            {
+                "code": "pending_human_merge_decision",
+                "description": (
+                    "the candidate is verified — the MERGE decision is a human's; "
+                    "forge never merges (a /fix note admits a follow-up round instead)"
+                ),
+                "via": "human:merge-decision",
+                "available": False,
+            }
+        )
+    return actions
+
+
+def delivery_view(
+    source_rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """The FIVE linked facts of one delivery lineage (R40-13, pure).
+
+    CURRENT execution, review round, candidate, verification and
+    acceptance are SEPARATE facts — each derived from its own canonical
+    rows and carrying its own evidence links — and LINKED: the candidate
+    names the round that supersedes it, the verification names the
+    candidate it tested, the acceptance names the human who decided, and
+    the execution names the run that currently executes. After a
+    follow-up round starts, the old ready delivery renders HISTORICAL
+    (its candidate role and its green verdict both labelled) and is
+    never presented as current readiness; acceptance is attributed only
+    to a real human decision.
+
+    Supersession rule (#338): the round row IS the supersession — the
+    parent's terminal record, verdict and evidence stay immutable
+    history; a ``stale`` round (nothing dispatched, human edits
+    preserved) supersedes nothing.
+    """
+    run = _require_run(source_rows)
+    run_id = str(_first(run, "id", "run_id") or "")
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if projection is None:
+        projection = initial_projection(source_rows, moment)
+    round_fact = review_round_fact(source_rows)
+    round_row = dict(round_fact.get("round") or {}) if round_fact else {}
+    open_round = bool(round_row.get("open"))
+    superseded_by = str((round_fact or {}).get("supersedes") or "")
+
+    candidate_history = [str(sha) for sha in run.get("candidate_shas") or [] if str(sha or "")]
+    candidate_now = current_candidate(run, candidate_history)
+    verifications = [_norm(row) for row in source_rows.get("verifications") or []]
+    current_passes, _ = verification_binding(verifications, candidate_history, candidate_now)
+
+    # the candidate fact: HISTORICAL when a superseding round names this
+    # run's delivery — the current candidate of the LINEAGE lives on the
+    # round's child run (named by id), never re-presented as this run's.
+    if superseded_by:
+        candidate_fact: dict[str, Any] = {
+            "sha": candidate_now,
+            "role": "historical",
+            "superseded_by": superseded_by,
+            "note": (
+                "superseded by a follow-up round — this delivery and its green "
+                "evidence are immutable HISTORY, never current readiness"
+            ),
+            "lineage_current_run": str(round_row.get("child_run_id") or ""),
+            "evidence": {
+                "of": "run",
+                "id": run_id,
+                "ref": _row_digest(run),
+            },
+        }
+    else:
+        candidate_fact = {
+            "sha": candidate_now,
+            "role": "current" if candidate_now else "none",
+            "superseded_by": "",
+            "note": (
+                "the run's current candidate (the active pointer, else the newest member)"
+                if candidate_now
+                else "no candidate recorded"
+            ),
+            "lineage_current_run": run_id,
+            "evidence": {"of": "run", "id": run_id, "ref": _row_digest(run)},
+        }
+
+    # the verification fact: bound to the candidate it tested, HISTORICAL
+    # when that candidate's delivery was superseded — the current
+    # candidate is never presented as verified through old green evidence.
+    if superseded_by and candidate_now:
+        verification_fact: dict[str, Any] = {
+            "binding": "historical",
+            "verdict": "pass" if current_passes else "none",
+            "candidate_sha": candidate_now,
+            "note": (
+                "the green evidence covers a SUPERSEDED delivery — it is history; "
+                "the lineage's current candidate is not verified by it"
+            ),
+            "evidence": (
+                {
+                    "of": "verification",
+                    "id": str(_first(current_passes[-1], "verification_id", "id") or ""),
+                    "ref": _row_digest(current_passes[-1]),
+                }
+                if current_passes
+                else None
+            ),
+        }
+    elif current_passes:
+        verification_fact = {
+            "binding": "current",
+            "verdict": "pass",
+            "candidate_sha": candidate_now,
+            "note": "a passed verification bound to the CURRENT candidate",
+            "evidence": {
+                "of": "verification",
+                "id": str(_first(current_passes[-1], "verification_id", "id") or ""),
+                "ref": _row_digest(current_passes[-1]),
+            },
+        }
+    else:
+        verification_fact = {
+            "binding": "none",
+            "verdict": "none",
+            "candidate_sha": candidate_now,
+            "note": (
+                "no passed verification binds the current candidate"
+                + (" (earlier passes render as history)" if projection.verification_history else "")
+            ),
+            "evidence": None,
+        }
+
+    acceptance = acceptance_fact(
+        run,
+        verified_current=bool(current_passes) and not superseded_by,
+        candidate_sha=candidate_now,
+    )
+    budget_block = budget_blocked_review(source_rows)
+    execution_subject = str(round_row.get("child_run_id") or "") if open_round else run_id
+    execution_is_this_run = execution_subject == run_id
+    execution_fact: dict[str, Any] = {
+        "run_id": execution_subject,
+        "role": (
+            "round-child"
+            if (round_fact or {}).get("role") == "child"
+            else ("round-parent-superseded" if superseded_by else "delivery")
+        ),
+        "flow_status": str(run.get("status") or "") if execution_is_this_run else "",
+        "status_scope": (
+            "this-run"
+            if execution_is_this_run
+            else "separate-run — the round's child is its own snapshot; its status lives on its own run"
+        ),
+        "operator_state": projection.state,
+        "blocked_reason": projection.blocked_reason,
+        "attempt_id": str(projection.identity.get("attempt_id") or ""),
+        "generation": projection.identity.get("generation"),
+        "updated_at": _iso(run.get("updated_at")),
+        "evidence": {"of": "run", "id": run_id, "ref": _row_digest(run)},
+    }
+    document: dict[str, Any] = {
+        "schema": DELIVERY_VIEW_SCHEMA,
+        "run_id": run_id,
+        "computed_at": _iso(moment),
+        "round_ref": projection.round_ref,
+        "facts": {
+            "execution": execution_fact,
+            "review_round": (
+                {
+                    "ref": round_fact.get("ref"),
+                    "role": round_fact.get("role"),
+                    **round_row,
+                    "root_run_id": round_fact.get("root_run_id"),
+                    "rounds_recorded": round_fact.get("rounds_recorded"),
+                    "requests": round_fact.get("requests"),
+                }
+                if round_fact
+                else None
+            ),
+            "candidate": candidate_fact,
+            "verification": verification_fact,
+            "acceptance": acceptance,
+        },
+        "next_actions": delivery_next_actions(
+            _feedback_requests_of(run), round_row or None, budget_block, acceptance=acceptance
+        ),
+        "budget_blocked_review": budget_block,
+        "linkage": (
+            "five separate facts, linked by identity: the candidate names the round "
+            "that supersedes it, the verification names the candidate it tested, the "
+            "acceptance names the human who decided, the execution names the run that "
+            "currently executes — a superseded delivery's green evidence is history, "
+            "and green CI is never acceptance"
+        ),
+    }
+    return redact(document)
+
+
+def status_comment_identity(
+    *,
+    run_id: str = "",
+    state: str = "",
+    round_ref: str = "",
+    candidate_sha: str = "",
+    verification_binding_word: str = "",
+    acceptance_state: str = "",
+    extra: Mapping[str, Any] | None = None,
+) -> str:
+    """The STABLE identity of one status comment (R40-13).
+
+    A short digest over the FACTS the comment states — not over its
+    bytes: two renders of the same world produce the SAME identity
+    (replayed comment delivery collapses to ONE current status), and a
+    moved world produces a DIFFERENT one (an old comment is identifiable
+    as superseded by comparing its identity against the current rows).
+    """
+    payload = {
+        "schema": STATUS_COMMENT_SCHEMA,
+        "run_id": str(run_id or ""),
+        "state": str(state or ""),
+        "round_ref": str(round_ref or ""),
+        "candidate": str(candidate_sha or ""),
+        "verification": str(verification_binding_word or ""),
+        "acceptance": str(acceptance_state or ""),
+        "extra": dict(extra or {}),
+    }
+    return _digest_json(payload)[:20]
+
+
+def render_status_comment(source_rows: Mapping[str, Any]) -> str:
+    """The compact MR/issue status representation (R40-13): one block a
+    native comment carries — the five facts in five short lines, links
+    to the immutable evidence as digests, and the machine-readable
+    identity marker that makes replayed delivery collapse to ONE
+    current status. Pure: reads the rows, writes nothing."""
+    view = delivery_view(source_rows)
+    facts = view["facts"]
+    execution = facts["execution"]
+    round_fact = facts["review_round"]
+    candidate = facts["candidate"]
+    verification = facts["verification"]
+    acceptance = facts["acceptance"]
+    lines = [f"**Forge delivery — run `{view['run_id'][:8]}`**"]
+    if round_fact is not None:
+        lines.append(
+            f"- **Round:** {round_fact.get('ref')} — `{round_fact.get('status')}`"
+            + (f" ({round_fact.get('status_reason')})" if round_fact.get("status_reason") else "")
+        )
+    else:
+        lines.append("- **Round:** delivery 1 (no follow-up round recorded)")
+    if execution["flow_status"]:
+        lines.append(
+            f"- **Execution:** `{execution['flow_status']}` on `{execution['run_id'][:8]}`"
+        )
+    else:
+        # the current execution is the round's CHILD — its status lives on
+        # its own run, never guessed onto this render
+        lines.append(
+            f"- **Execution:** the round's child `{execution['run_id'][:8]}` "
+            "(its own run carries its status)"
+        )
+    candidate_word = "none recorded" if not candidate["sha"] else str(candidate["sha"])[:12]
+    lines.append(
+        f"- **Candidate:** `{candidate_word}` ({candidate['role']}"
+        + (f" — superseded by {candidate['superseded_by']}" if candidate["superseded_by"] else "")
+        + ")"
+    )
+    if verification["binding"] == "historical":
+        if verification["verdict"] == "pass":
+            lines.append(
+                f"- **Verification:** pass on `{str(verification['candidate_sha'])[:12]}` — "
+                "HISTORICAL (the delivery it verified was superseded; it does not "
+                "verify the lineage's current candidate)"
+            )
+        else:
+            lines.append("- **Verification:** none bound to the lineage's current candidate")
+    elif verification["binding"] == "none":
+        lines.append("- **Verification:** none bound to the current candidate")
+    else:
+        lines.append(
+            f"- **Verification:** pass on `{str(verification['candidate_sha'])[:12]}` "
+            "(current — bound to the current candidate)"
+        )
+    decided = acceptance.get("decided_by")
+    lines.append(
+        f"- **Acceptance:** {acceptance['state']}"
+        + (" — decided by a HUMAN merge decision" if decided else "")
+    )
+    links: list[str] = []
+    if candidate.get("evidence"):
+        links.append(f"candidate@{str(candidate['evidence'].get('ref', ''))[:12]}")
+    if verification.get("evidence"):
+        links.append(
+            f"verification:{verification['evidence'].get('id')}@{str(verification['evidence'].get('ref', ''))[:12]}"
+        )
+    if round_fact is not None and round_fact.get("evidence"):
+        links.append(
+            f"round:{round_fact.get('decision_id')}@{str(round_fact['evidence'].get('ref', ''))[:12]}"
+        )
+    if links:
+        lines.append(f"- **Evidence (immutable, digests):** {' · '.join(links)}")
+    for action in view["next_actions"]:
+        lines.append(f"- **Next:** {action['code']} — {action['description']}")
+    identity = status_comment_identity(
+        run_id=view["run_id"],
+        state=str(facts["execution"].get("operator_state") or ""),
+        round_ref=str(view.get("round_ref") or ""),
+        candidate_sha=str(candidate["sha"] or ""),
+        verification_binding_word=str(verification["binding"] or ""),
+        acceptance_state=str(acceptance["state"] or ""),
+    )
+    lines.append(
+        f"<!-- {STATUS_COMMENT_MARKER}:1 run={view['run_id']} identity={identity} "
+        f"round={view.get('round_ref') or 'delivery:1'} -->"
+    )
+    return "\n".join(lines)
+
+
+def with_status_comment_identity(body: str, snapshot: Mapping[str, Any]) -> str:
+    """Append the stable status identity marker to an already-rendered
+    ``/status`` body (the ONE call-site wiring the runs service makes).
+
+    *snapshot* is the ``collect_status_snapshot`` document the body was
+    rendered from — the identity digests the FACTS that body states
+    (run, status, reason, cycle, candidates, verification, publication
+    intents), so a replayed delivery of the same world carries the SAME
+    identity and a changed world a different one: no contradictory
+    ready/pending comment identities, ever.
+    """
+    facts = {
+        "run_id": str(snapshot.get("run_id") or ""),
+        "status": str(snapshot.get("status") or ""),
+        "status_reason": str(snapshot.get("status_reason") or ""),
+        "commit_cycle": snapshot.get("commit_cycle"),
+        "candidate_shas": [str(sha) for sha in snapshot.get("candidate_shas") or []],
+        "verification": dict(snapshot.get("verification") or {}),
+        "intents": [str(intent.get("status") or "") for intent in snapshot.get("intents") or []],
+        "updated_at": str(snapshot.get("updated_at") or ""),
+    }
+    identity = _digest_json({"schema": STATUS_COMMENT_SCHEMA, "facts": facts})[:20]
+    marker = (
+        f"<!-- {STATUS_COMMENT_MARKER}:1 run={facts['run_id']} identity={identity} "
+        f"state={facts['status']} -->"
+    )
+    text = str(body or "").rstrip()
+    return f"{text}\n\n{marker}" if text else marker

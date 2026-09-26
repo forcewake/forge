@@ -35,19 +35,34 @@ front door, and every rule here is pinned by
   the attribution segment is derived from (route, route version,
   rate-card id) — a route/version or card change creates a NEW segment;
   existing rows are immutable, history is never rewritten.
-- **Spend caps consult the ingested totals, three quantities SEPARATED**
-  (Q39-06/#325) — :func:`spend_cap_check` is the check the existing
-  budget/caps gate consults BEFORE the next chargeable action
+- **Spend caps consult the ingested totals; FINALITY, not value
+  presence, settles** (Q39-06/#325, corrected by R40-03/#339) —
+  :func:`spend_cap_check` is the check the existing budget/caps gate
+  consults BEFORE the next chargeable action
   (:meth:`forge.adaptive.research_cohort_live.SpendLedger.allows_call` is
   the projection seam; ``budget_block_reason`` the dispatch gate). The
-  result keeps ``known_spend`` (every known cost), the unknown intervals'
-  ``unknown_lower_bound``, and their ``reserved_liability`` (the
-  worst-case retained envelope) SEPARATE, and the HARD CAP consults
-  ``known + reserved_liability + projection`` — never a lower bound. An
-  unknown interval with no finite upper bound (neither its own
-  ``cost_upper_bound_usd`` nor the explicit bounded policy ceiling)
-  sets ``requires_bounded_policy`` and BLOCKS the next chargeable
-  action: a lower bound cannot bound spend from above (the P03 probe).
+  exposure fold (:func:`exposure_fold`, :class:`SpendExposure`) keeps the
+  quantities SEPARATE: ``settled_usd`` (FINAL rows' costs — settlement
+  is decided by the ``final`` marker, never by the presence of a cost),
+  ``accrued_unsettled_usd`` (nonfinal rows' observed subtotals —
+  accrued, NOT settled), ``unknown_lower_bound`` (the unresolved
+  intervals' floors) and ``retained_liability_usd`` (the unresolved
+  intervals' worst-case retained envelope). Each unresolved interval —
+  a nonfinal row, or a final row that never reported a cost — retains
+  ``max(its finite upper envelope, its accrued cost, its lower bound)``
+  WITHOUT double-counting the accrued cost: the HARD CAP consults
+  ``settled + retained_liability + projection``, never a lower bound. A
+  partial's subtotal never releases its envelope (the P01 probe: cap 10,
+  settled 8, a partial at 0.5 inside an envelope of 3 "allowed" 9.5
+  while the bounded exposure is 8 + 3 + 1 = 12); an unresolved interval
+  with no finite upper bound (neither its own ``cost_upper_bound_usd``
+  nor the explicit bounded policy ceiling) — including a nonfinal row
+  that already carries a cost — is a typed ``unbounded-exposure`` finding
+  that sets ``requires_bounded_policy`` and BLOCKS the next chargeable
+  action; an upper bound BELOW an interval's observed accrued cost is a
+  typed ``incoherent-bound`` inconsistency (never free headroom); NaN/
+  infinite/negative costs, bounds and projections surface as typed
+  findings, never silent defaults.
 - **Duplicate call identities never false-join** — the same model-call id
   under two attempts is ingested under BOTH natural keys but the ledger
   join (:func:`forge.adaptive.delivery_measurement.
@@ -90,12 +105,20 @@ from forge.adaptive.delivery_measurement import ProviderRoute
 
 __all__ = [
     "ATTRIBUTION_REFUSED",
+    "BLOCKING_FINDINGS",
     "COST_BASIS_BILLING",
     "COST_BASIS_ESTIMATED",
     "COST_BASIS_PROVIDER_REPORTED",
     "COST_BASES",
     "IDENTITY_REJECTED",
     "INGESTION_SCHEMA",
+    "INCOHERENT_BOUND",
+    "INVALID_BOUND",
+    "INVALID_CAP",
+    "INVALID_COST",
+    "INVALID_LOWER_BOUND",
+    "INVALID_POLICY_CEILING",
+    "INVALID_PROJECTION",
     "IngestedUsageRow",
     "IngestionConflict",
     "IngestionRefusal",
@@ -105,8 +128,11 @@ __all__ = [
     "SOURCE_LANE_ARTIFACT",
     "SOURCE_PLANNER_LEDGER",
     "SOURCE_SDK_RECEIPT",
+    "SpendExposure",
+    "UNBOUNDED_EXPOSURE",
     "UsageIngestStore",
     "attribution_segment",
+    "exposure_fold",
     "ingest_usage_artifact",
     "normalize_counters",
     "persist_ingested_rows",
@@ -148,6 +174,49 @@ ATTRIBUTION_REFUSED = "attribution-refused"
 #: (a work id longer than the run id column — no run row could ever own
 #: it) — the row is rejected outright, never silently truncated.
 IDENTITY_REJECTED = "identity-rejected"
+
+# ----------------------------------------------------------------------
+# The typed spend-cap findings (R40-03/#339) — surfaced, never defaulted
+# ----------------------------------------------------------------------
+
+#: An unresolved interval with NO finite upper envelope — a nonfinal row
+#: (with or without an accrued cost) or a final row that never reported
+#: one — cannot be bounded from above: the next chargeable action is
+#: REFUSED until an explicit bounded-policy ceiling is supplied or the
+#: interval settles (:func:`spend_cap_check`'s ``requires_bounded_policy``).
+UNBOUNDED_EXPOSURE = "unbounded-exposure"
+#: An interval's declared upper bound sits BELOW its observed accrued cost
+#: (or a settlement landed above its own declared envelope) — a visible
+#: INCONSISTENCY: the interval retains at least its accrued cost, never
+#: free headroom.
+INCOHERENT_BOUND = "incoherent-bound"
+#: ``cap_usd`` is not a nonnegative number (NaN/negative/−inf/not a
+#: number) — the decision refuses rather than clamping. ``+inf`` is the
+#: deliberate un-bounded fold arm (the closing report folds against an
+#: infinite cap when none is configured) and is NOT a finding.
+INVALID_CAP = "invalid-cap"
+#: ``projection_usd`` is not a finite nonnegative number.
+INVALID_PROJECTION = "invalid-projection"
+#: ``unknown_interval_ceiling_usd`` is not a finite nonnegative number —
+#: the bounded-policy field is corrupt: treated as NOT supplied (never
+#: silently coerced), so every interval relying on it is unbounded.
+INVALID_POLICY_CEILING = "invalid-policy-ceiling"
+#: A row's ``cost_usd`` is not a finite nonnegative number — the figure
+#: is untrustworthy: the interval stays unresolved (never settled at a
+#: garbage value).
+INVALID_COST = "invalid-cost"
+#: A row's ``cost_upper_bound_usd`` is not a finite nonnegative number —
+#: treated as absent, never clamped.
+INVALID_BOUND = "invalid-bound"
+#: A row's ``cost_lower_bound_usd`` is not a finite nonnegative number —
+#: reported at 0.0 for the (non-gating) lower-bound sum, with the
+#: corruption visible.
+INVALID_LOWER_BOUND = "invalid-lower-bound"
+
+#: The finding types that REFUSE the next chargeable action outright.
+BLOCKING_FINDINGS = frozenset(
+    {UNBOUNDED_EXPOSURE, INVALID_CAP, INVALID_PROJECTION, INVALID_POLICY_CEILING}
+)
 
 
 # ----------------------------------------------------------------------
@@ -731,11 +800,11 @@ def _artifact_rows(
         return [], refusals
 
     rows: list[IngestedUsageRow] = []
-    refusals: list[IngestionRefusal] = []
+    attempt_refusals: list[IngestionRefusal] = []
     for payload, index in entries:
         claimed_attempt = _text(payload.get("attempt_id"))
         if trusted_attempt_id and claimed_attempt and claimed_attempt != trusted_attempt_id:
-            refusals.append(
+            attempt_refusals.append(
                 IngestionRefusal(
                     kind=ATTRIBUTION_REFUSED,
                     trusted_work_id=trusted_work_id,
@@ -764,7 +833,7 @@ def _artifact_rows(
                 row_source=source or _text(payload.get("source")),
             )
         )
-    return rows, refusals
+    return rows, attempt_refusals
 
 
 def ingest_usage_artifact(
@@ -890,8 +959,261 @@ def reconcile_after_death(
 
 
 # ----------------------------------------------------------------------
-# The spend-cap check — three separated quantities, an UPPER envelope
+# The exposure fold — finality settles; the spend-cap check over it
 # ----------------------------------------------------------------------
+
+
+def _finite_nonneg(value: Any) -> bool:
+    """Whether *value* is a finite nonnegative number (bools excluded)."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
+
+
+@dataclass(frozen=True)
+class SpendExposure:
+    """The run's exposure folded by FINALITY (R40-03/#339).
+
+    Settlement is decided by the row's ``final`` marker, NEVER by the
+    presence of a cost — a partial that already carries a subtotal is
+    ACCRUED, not settled, and keeps its whole retained envelope. The
+    separated quantities:
+
+    - ``settled_usd`` — final rows' costs. A settlement releases its
+      interval's envelope exactly once (the natural-key contract makes a
+      replayed identical final a no-op); ``settlement_release_usd`` is
+      the net envelope headroom the settlements returned (the envelope
+      each settled row would still retain as nonfinal, minus its
+      settled cost).
+    - ``accrued_unsettled_usd`` — nonfinal rows' observed subtotals:
+      the streaming provider's intermediate figures. Reported, never
+      treated as settled.
+    - ``unknown_lower_bound`` — the unresolved intervals' floors (a
+      partial's own subtotal is its floor); a lower bound can never
+      bound spend from ABOVE.
+    - ``retained_liability_usd`` — the worst-case retained envelope over
+      the unresolved intervals: each contributes ``max(finite upper
+      envelope, accrued cost, lower bound)`` — the accrued cost rides
+      INSIDE the envelope, never double-counted, and an envelope below
+      the accrued cost is an ``incoherent-bound`` inconsistency, never
+      free headroom.
+
+    Unresolved intervals are nonfinal rows AND final rows that never
+    reported a cost. An unresolved interval with no finite envelope
+    (neither its own ``cost_upper_bound_usd`` nor the bounded-policy
+    ceiling) is a typed ``unbounded-exposure`` finding.
+    """
+
+    settled_usd: float
+    accrued_unsettled_usd: float
+    unknown_lower_bound: float
+    retained_liability_usd: float
+    settlement_release_usd: float
+    unresolved_intervals: int
+    unbounded_intervals: int
+    incoherent_bounds: int
+    requires_bounded_policy: bool
+    findings: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def reserved_usd(self) -> float:
+        """The hard cap's reservation: settled + retained liability."""
+        return self.settled_usd + self.retained_liability_usd
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "settled_usd": round(self.settled_usd, 6),
+            "accrued_unsettled_usd": round(self.accrued_unsettled_usd, 6),
+            "unknown_lower_bound": round(self.unknown_lower_bound, 6),
+            "retained_liability_usd": round(self.retained_liability_usd, 6),
+            "settlement_release_usd": round(self.settlement_release_usd, 6),
+            "unresolved_intervals": self.unresolved_intervals,
+            "unbounded_intervals": self.unbounded_intervals,
+            "incoherent_bounds": self.incoherent_bounds,
+            "requires_bounded_policy": self.requires_bounded_policy,
+            "findings": [dict(finding) for finding in self.findings],
+        }
+
+
+def exposure_fold(
+    rows: Sequence[IngestedUsageRow],
+    *,
+    unknown_interval_ceiling_usd: float | None = None,
+) -> SpendExposure:
+    """Fold ingested rows into the run's exposure, classified by FINALITY.
+
+    Every quantity is cap-independent; malformed numbers surface as
+    typed findings and are treated conservatively (an invalid cost never
+    settles an interval, an invalid bound is no bound, an invalid policy
+    ceiling is treated as not supplied) — never silently coerced.
+    """
+    findings: list[dict[str, Any]] = []
+    ceiling: float | None = None
+    if unknown_interval_ceiling_usd is not None:
+        if _finite_nonneg(unknown_interval_ceiling_usd):
+            ceiling = float(unknown_interval_ceiling_usd)
+        else:
+            findings.append(
+                {
+                    "type": INVALID_POLICY_CEILING,
+                    "value": repr(unknown_interval_ceiling_usd),
+                    "note": (
+                        "the bounded-policy ceiling is not a finite nonnegative"
+                        " number — treated as NOT supplied (never silently"
+                        " coerced); every interval relying on it is unbounded"
+                    ),
+                }
+            )
+
+    settled: list[float] = []
+    accrued: list[float] = []
+    lowers: list[float] = []
+    retained: list[float] = []
+    releases: list[float] = []
+    unresolved = unbounded = incoherent = 0
+
+    for row in rows:
+        cost = row.cost_usd
+        cost_ok = cost is not None and _finite_nonneg(cost)
+        if cost is not None and not cost_ok:
+            findings.append(
+                {
+                    "type": INVALID_COST,
+                    "receipt_id": row.receipt_id,
+                    "work_id": row.work_id,
+                    "value": repr(cost),
+                    "note": (
+                        "the row's cost is not a finite nonnegative number —"
+                        " the figure is untrustworthy: the interval stays"
+                        " unresolved (never settled at a garbage value)"
+                    ),
+                }
+            )
+        observed = float(cost) if cost is not None and _finite_nonneg(cost) else None
+        upper = row.cost_upper_bound_usd
+        if upper is not None and not _finite_nonneg(upper):
+            findings.append(
+                {
+                    "type": INVALID_BOUND,
+                    "receipt_id": row.receipt_id,
+                    "work_id": row.work_id,
+                    "value": repr(upper),
+                    "note": (
+                        "the row's upper bound is not a finite nonnegative"
+                        " number — treated as absent, never clamped"
+                    ),
+                }
+            )
+            upper = None
+        lower = row.cost_lower_bound_usd
+        if not _finite_nonneg(lower):
+            findings.append(
+                {
+                    "type": INVALID_LOWER_BOUND,
+                    "receipt_id": row.receipt_id,
+                    "work_id": row.work_id,
+                    "value": repr(lower),
+                    "note": (
+                        "the row's lower bound is not a finite nonnegative"
+                        " number — reported at 0 for the (non-gating)"
+                        " lower-bound sum, corruption visible here"
+                    ),
+                }
+            )
+            lower = 0.0
+        else:
+            lower = float(lower)
+
+        if row.final and observed is not None:
+            # SETTLED — finality settles, exactly once: the envelope this
+            # interval would still retain as nonfinal is released, and
+            # the settled cost is all that remains of it.
+            settled.append(observed)
+            twin = upper if upper is not None else ceiling
+            envelope = max(observed, lower) if twin is None else max(twin, observed, lower)
+            if upper is not None and upper < observed:
+                incoherent += 1
+                findings.append(
+                    {
+                        "type": INCOHERENT_BOUND,
+                        "receipt_id": row.receipt_id,
+                        "work_id": row.work_id,
+                        "settled_usd": observed,
+                        "upper_bound_usd": upper,
+                        "note": (
+                            "the settlement landed ABOVE the interval's own"
+                            " declared envelope — a visible inconsistency;"
+                            " the settled figure stands"
+                        ),
+                    }
+                )
+            releases.append(max(envelope - observed, 0.0))
+            continue
+
+        # UNRESOLVED interval — a nonfinal row (a partial, whatever cost
+        # it already carries) or a final row that never reported a cost.
+        unresolved += 1
+        floor = max(lower, observed) if observed is not None else lower
+        lowers.append(floor)
+        if observed is not None:
+            accrued.append(observed)
+        bound = upper if upper is not None else ceiling
+        if bound is None:
+            unbounded += 1
+            findings.append(
+                {
+                    "type": UNBOUNDED_EXPOSURE,
+                    "receipt_id": row.receipt_id,
+                    "work_id": row.work_id,
+                    "final": row.final,
+                    "accrued_cost_usd": observed,
+                    "note": (
+                        "an unresolved interval with no finite upper envelope"
+                        " (a partial that already carries a cost included) —"
+                        " the next chargeable action is refused until an"
+                        " explicit bounded-policy ceiling is supplied or the"
+                        " interval settles"
+                    ),
+                }
+            )
+            continue
+        if observed is not None and bound < observed:
+            incoherent += 1
+            findings.append(
+                {
+                    "type": INCOHERENT_BOUND,
+                    "receipt_id": row.receipt_id,
+                    "work_id": row.work_id,
+                    "accrued_cost_usd": observed,
+                    "upper_bound_usd": bound,
+                    "note": (
+                        "the interval's upper bound is BELOW its observed"
+                        " accrued cost — a visible inconsistency; the interval"
+                        " retains at least its accrued cost, never free"
+                        " headroom"
+                    ),
+                }
+            )
+        # The retained liability, WITHOUT double-counting the accrued
+        # cost: max(envelope, accrued, lower) — the envelope covers the
+        # subtotal, the subtotal never releases it (R40-03/P01).
+        retained.append(max(bound, floor))
+
+    return SpendExposure(
+        settled_usd=math.fsum(settled),
+        accrued_unsettled_usd=math.fsum(accrued),
+        unknown_lower_bound=math.fsum(lowers),
+        retained_liability_usd=math.fsum(retained),
+        settlement_release_usd=math.fsum(releases),
+        unresolved_intervals=unresolved,
+        unbounded_intervals=unbounded,
+        incoherent_bounds=incoherent,
+        requires_bounded_policy=unbounded > 0,
+        findings=tuple(findings),
+    )
 
 
 def spend_cap_check(
@@ -905,82 +1227,130 @@ def spend_cap_check(
 
     The check the existing budget/caps gate consults before the next
     chargeable action (the dispatch gate / the SpendLedger projection
-    seam). Q39-06 (#325) keeps THREE quantities separated in the result:
+    seam). The quantities stay separated (:class:`SpendExposure`):
+    settled spend (FINAL rows — finality, never value presence,
+    settles), the nonfinal rows' accrued-unsettled subtotals, the
+    unresolved intervals' lower bound, and their retained liability (the
+    worst-case envelope; each interval contributes ``max(envelope,
+    accrued, lower)`` so a partial's subtotal rides INSIDE the envelope
+    and never releases it). The HARD CAP consults ``settled +
+    retained_liability + projection`` — never a lower bound.
 
-    - ``known_spend`` — every known billed/estimated cost;
-    - ``unknown_lower_bound`` — the known lower bounds of the
-      unknown-cost intervals (never zero when something is known, but a
-      lower bound can never bound spend from ABOVE);
-    - ``reserved_liability`` — the worst-case retained ENVELOPE actually
-      reserved for those intervals: each unknown interval's own finite
-      ``cost_upper_bound_usd`` when it carries one, else the explicit
-      bounded-policy ceiling (``unknown_interval_ceiling_usd``).
-
-    The HARD CAP consults ``known_spend + reserved_liability +
-    projection_usd``. An unknown interval with NO finite upper bound
-    (neither source) cannot be bounded from above, so the check sets
-    ``requires_bounded_policy`` and refuses the next chargeable action —
-    the operator must supply an explicit bounded policy ceiling or
-    reconcile the interval to a final cost (the P03 counterexample: cap
-    10, known 8, lower bound 0.5, projection 1 — reserving at the lower
-    bound "allowed" 9.5 while the interval could settle at 3 for an
-    actual 12). Reconciliation releases an interval's envelope ONCE: a
-    reconciled final cost moves the interval out of the unknown set and
-    into ``known_spend`` (a replayed identical final is a store no-op —
-    the release is exactly-once by the natural-key contract).
+    A partial that already carries a cost cannot spend the headroom its
+    envelope still fences (the P01 counterexample: cap 10, settled 8, a
+    partial at 0.5 inside an envelope of 3, projection 1 — the old
+    value-presence math "allowed" 9.5 while the bounded exposure is
+    8 + 3 + 1 = 12). An unresolved interval with NO finite upper bound —
+    a nonfinal row with a cost included (typed ``unbounded-exposure``)
+    — sets ``requires_bounded_policy`` and refuses the next chargeable
+    action until an explicit bounded policy ceiling is supplied or the
+    interval settles. A settlement releases the envelope exactly once
+    (``settlement_release_usd``; a replayed identical final is a store
+    no-op by the natural-key contract). Malformed numbers (NaN,
+    infinity, negative) surface as typed findings and refuse — never
+    silent defaults.
     """
-    known = [row.cost_usd for row in rows if row.cost_usd is not None]
-    unknown_rows = [row for row in rows if row.cost_usd is None]
-    unknown_lower_bound = math.fsum(row.cost_lower_bound_usd for row in unknown_rows)
+    findings: list[dict[str, Any]] = []
+    cap: float | None = None
+    if isinstance(cap_usd, bool) or not isinstance(cap_usd, (int, float)):
+        findings.append(
+            {
+                "type": INVALID_CAP,
+                "value": repr(cap_usd),
+                "note": "the cap is not a number — the check refuses, never clamps",
+            }
+        )
+    else:
+        candidate = float(cap_usd)
+        if math.isnan(candidate) or candidate < 0:
+            findings.append(
+                {
+                    "type": INVALID_CAP,
+                    "value": repr(cap_usd),
+                    "note": (
+                        "the cap is negative or not-a-number — the check"
+                        " refuses, never clamps (+inf is the deliberate"
+                        " un-bounded fold arm and is not a finding)"
+                    ),
+                }
+            )
+        else:
+            cap = candidate
+    projection = 0.0
+    if _finite_nonneg(projection_usd):
+        projection = float(projection_usd)
+    else:
+        findings.append(
+            {
+                "type": INVALID_PROJECTION,
+                "value": repr(projection_usd),
+                "note": (
+                    "the projection is not a finite nonnegative number — the"
+                    " check refuses, never silently zeroed"
+                ),
+            }
+        )
 
-    envelopes: list[float] = []
-    unbounded = 0
-    for row in unknown_rows:
-        bound = row.cost_upper_bound_usd
-        if bound is None:
-            bound = unknown_interval_ceiling_usd
-        if bound is None:
-            unbounded += 1
-            continue
-        envelopes.append(max(bound, row.cost_lower_bound_usd))
-    reserved_liability = math.fsum(envelopes)
-    known_spend = math.fsum(known)
-    requires_bounded_policy = unbounded > 0
-    reserved = known_spend + reserved_liability
-    allowed = (not requires_bounded_policy) and reserved + projection_usd <= cap_usd
+    exposure = exposure_fold(rows, unknown_interval_ceiling_usd=unknown_interval_ceiling_usd)
+    findings.extend(dict(finding) for finding in exposure.findings)
+    blocked = any(finding["type"] in BLOCKING_FINDINGS for finding in findings)
+    reserved = exposure.reserved_usd
+    allowed = (not blocked) and cap is not None and reserved + projection <= cap
 
     notes = [
-        "hard cap consults known_spend + reserved_liability + projection"
-        " (a lower bound can never bound spend from above — Q39-06/P03)"
+        "hard cap consults settled + retained_liability + projection"
+        " (finality, not value presence, settles — Q39-06/P03, R40-03/P01)"
     ]
-    if unknown_rows:
+    if exposure.accrued_unsettled_usd > 0:
         notes.append(
-            f"{len(unknown_rows)} unknown-cost interval(s): lower bound"
-            f" {round(unknown_lower_bound, 6)} usd, retained envelope"
-            f" {round(reserved_liability, 6)} usd — never reserved as zero"
+            f"{round(exposure.accrued_unsettled_usd, 6)} usd accrued-unsettled"
+            " rides inside the retained envelope — a partial's subtotal"
+            " never settles liability"
         )
-    if requires_bounded_policy:
+    if exposure.unresolved_intervals:
         notes.append(
-            f"{unbounded} unknown-cost interval(s) have NO finite upper bound —"
-            " the next chargeable action is blocked until an explicit bounded"
-            " policy ceiling is supplied or the interval reconciles"
+            f"{exposure.unresolved_intervals} unresolved interval(s): lower"
+            f" bound {round(exposure.unknown_lower_bound, 6)} usd, retained"
+            f" envelope {round(exposure.retained_liability_usd, 6)} usd —"
+            " never reserved as zero"
+        )
+    if exposure.requires_bounded_policy:
+        notes.append(
+            f"{exposure.unbounded_intervals} unresolved interval(s) have NO"
+            " finite upper bound — the next chargeable action is blocked"
+            " until an explicit bounded policy ceiling is supplied or the"
+            " interval reconciles"
+        )
+    if exposure.settlement_release_usd > 0:
+        notes.append(
+            f"settlement released {round(exposure.settlement_release_usd, 6)}"
+            " usd of retained envelope — exactly once per settled interval"
         )
     return {
         "schema": INGESTION_SCHEMA,
         "allowed": allowed,
         "cap_usd": cap_usd,
         "projection_usd": projection_usd,
-        # the three separated quantities (Q39-06 scope item 1)
-        "known_spend": known_spend,
-        "unknown_lower_bound": unknown_lower_bound,
-        "reserved_liability": reserved_liability,
-        # the report's fifth field: how many intervals are unknown
-        "unknown_intervals": len(unknown_rows),
-        "unbounded_intervals": unbounded,
-        "requires_bounded_policy": requires_bounded_policy,
+        # the finality-separated quantities (R40-03/#339)
+        "settled_usd": exposure.settled_usd,
+        "accrued_unsettled_usd": exposure.accrued_unsettled_usd,
+        "unknown_lower_bound": exposure.unknown_lower_bound,
+        "retained_liability_usd": exposure.retained_liability_usd,
+        "settlement_release_usd": exposure.settlement_release_usd,
+        "unresolved_intervals": exposure.unresolved_intervals,
+        "unbounded_intervals": exposure.unbounded_intervals,
+        "incoherent_bounds": exposure.incoherent_bounds,
+        "requires_bounded_policy": exposure.requires_bounded_policy,
+        # legacy aliases (the seam the live gate/report reads): the known
+        # spend is the SETTLED figure — accrued subtotals live inside the
+        # retained liability, never added on top.
+        "known_spend": exposure.settled_usd,
+        "known_cost_usd": exposure.settled_usd,
+        "reserved_liability": exposure.retained_liability_usd,
+        "unknown_intervals": exposure.unresolved_intervals,
         "reserved_usd": reserved,
-        "known_cost_usd": known_spend,
-        "headroom_usd": cap_usd - reserved,
+        "headroom_usd": (cap - reserved) if cap is not None else None,
+        "findings": findings,
         "notes": notes,
     }
 

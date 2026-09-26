@@ -26,15 +26,22 @@ from forge.adaptive.operator_view import (
     OperatorProjection,
     RecoveryActions,
     StaleProjectionRejected,
+    acceptance_fact,
+    action_hint_block,
     apply_update,
+    budget_blocked_review,
     delivery_outcome_of,
+    delivery_view,
     derive_state,
     explain_blocked,
     initial_projection,
     recovery_document,
     recovery_ladder,
     render,
+    render_status_comment,
+    status_comment_identity,
     status_note_lines,
+    with_status_comment_identity,
 )
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -1334,3 +1341,558 @@ class TestRecoverySurface:
 
         assert document["consistency"] == "inconsistent"
         assert "re-read before acting" in document["uncertainty"]
+
+
+# ---------------------------------------------------------------------------
+# R40-13 (#349) — the five linked facts, the round supersession, the
+# action subject tickets and the stable status comment
+# ---------------------------------------------------------------------------
+
+PARENT_ID = RUN_ID
+CHILD_ID = "e" * 32
+CANDIDATE = "c" * 40
+DECISION = "corr-decision-1"
+
+
+def _round(status: str = "dispatched", **over) -> dict:
+    row: dict = {
+        "round_id": "rr-1",
+        "parent_run_id": PARENT_ID,
+        "child_run_id": CHILD_ID,
+        "root_run_id": PARENT_ID,
+        "round_number": 2,
+        "note_id": "918",
+        "base_head_sha": CANDIDATE,
+        "decision_id": DECISION,
+        "requested_by": "reviewer:op",
+        "status": status,
+        "status_reason": "",
+        "created_at": "2026-09-23T12:00:00+00:00",
+        "updated_at": "2026-09-23T12:05:00+00:00",
+    }
+    row.update(over)
+    return row
+
+
+def _ready_run(**over) -> dict:
+    """A READY delivery: candidate collected, verification passed on it."""
+    row: dict = _run(
+        status="ready_for_human",
+        candidate_shas=[CANDIDATE],
+        evidence={
+            "verification": {
+                "status": "passed",
+                "tested_oid": CANDIDATE,
+                "observed_at": "2026-09-23T11:45:00+00:00",
+            }
+        },
+        updated_at="2026-09-23T11:50:00+00:00",
+    )
+    row.update(over)
+    return row
+
+
+def _ready_rows(**over) -> dict:
+    rows: dict = _rows(
+        run=_ready_run(),
+        verifications=[
+            _verification(result="passed", candidate_sha=CANDIDATE, at="2026-09-23T11:45:00+00:00")
+        ],
+    )
+    rows.update(over)
+    return rows
+
+
+class TestDeliveryRoundView:
+    def test_the_five_facts_are_separate_but_linked(self):
+        view = delivery_view(_ready_rows(rounds=[_round()]), now=NOW)
+
+        assert view["schema"] == "forge.operator.delivery/1"
+        facts = view["facts"]
+        assert set(facts) == {
+            "execution",
+            "review_round",
+            "candidate",
+            "verification",
+            "acceptance",
+        }
+        # LINKED: execution names the round's child; the candidate names
+        # the round that superseded it; the round names both runs.
+        assert facts["execution"]["run_id"] == CHILD_ID
+        assert facts["execution"]["role"] == "round-parent-superseded"
+        assert facts["review_round"]["ref"] == f"round:2:{DECISION}"
+        assert facts["review_round"]["child_run_id"] == CHILD_ID
+        assert facts["candidate"]["superseded_by"] == f"round:2:{DECISION}"
+        assert view["round_ref"] == f"round:2:{DECISION}"
+
+    def test_after_a_follow_up_round_the_ready_delivery_is_historical(self):
+        """The pinned acceptance: a superseding round makes the old ready
+        delivery AND its green evidence history — the current candidate
+        is NEVER presented as verified."""
+        before = delivery_view(_ready_rows(), now=NOW)
+        assert before["facts"]["candidate"]["role"] == "current"
+        assert before["facts"]["verification"] == {
+            **before["facts"]["verification"],
+            "binding": "current",
+            "verdict": "pass",
+        }
+
+        after = delivery_view(_ready_rows(rounds=[_round()]), now=NOW)
+        assert after["facts"]["candidate"]["role"] == "historical"
+        assert after["facts"]["candidate"]["superseded_by"] == f"round:2:{DECISION}"
+        assert after["facts"]["verification"]["binding"] == "historical"
+        assert "HISTORY" in after["facts"]["candidate"]["note"]
+        assert "not verified by it" in after["facts"]["verification"]["note"]
+
+    def test_a_stale_round_supersedes_nothing(self):
+        """A stale round dispatched nothing (human edits preserved) — the
+        parent's delivery stays the CURRENT one; the head fence refusal
+        surfaces as an explicit next-action instead."""
+        view = delivery_view(_ready_rows(rounds=[_round(status="stale")]), now=NOW)
+
+        assert view["facts"]["candidate"]["role"] == "current"
+        assert view["facts"]["candidate"]["superseded_by"] == ""
+        codes = [action["code"] for action in view["next_actions"]]
+        assert "stale_head" in codes
+
+    def test_the_projection_carries_the_round_reference_and_supersession(self):
+        plain = initial_projection(_ready_rows(), NOW)
+        assert plain.round_ref == "delivery:1"
+        assert plain.superseded_by_round == ""
+
+        superseded = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        assert superseded.round_ref == f"round:2:{DECISION}"
+        assert superseded.superseded_by_round == f"round:2:{DECISION}"
+        rendered = render(superseded)
+        assert rendered["round_ref"] == f"round:2:{DECISION}"
+        assert rendered["superseded_by_round"] == f"round:2:{DECISION}"
+
+    def test_a_child_run_projects_its_own_round_from_evidence(self):
+        child_rows = _rows(
+            run=_run(
+                status="proposing",
+                evidence={
+                    "review_round": {
+                        "parent_run_id": PARENT_ID,
+                        "root_run_id": PARENT_ID,
+                        "round_number": 2,
+                        "note_id": "918",
+                        "decision_id": DECISION,
+                        "base_head_sha": CANDIDATE,
+                        "mr_iid": 7,
+                    }
+                },
+            ),
+            attempts=[_attempt()],
+        )
+        view = delivery_view(child_rows, now=NOW)
+
+        assert view["facts"]["review_round"]["ref"] == f"round:2:{DECISION}"
+        assert view["facts"]["execution"]["role"] == "round-child"
+        assert view["facts"]["candidate"]["role"] == "none"
+        assert view["facts"]["candidate"]["superseded_by"] == ""
+
+
+class TestAcceptanceFact:
+    def test_a_human_merge_is_the_only_acceptance(self):
+        merged = delivery_view(
+            _ready_rows(
+                run=_ready_run(
+                    evidence={
+                        "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                        "acceptance": {
+                            "state": "merged",
+                            "sha": CANDIDATE,
+                            "merged_at": "2026-09-23T13:00:00+00:00",
+                            "observed_at": "2026-09-23T13:05:00+00:00",
+                        },
+                    }
+                )
+            ),
+            now=NOW,
+        )["facts"]["acceptance"]
+        assert merged["state"] == "accepted_by_human"
+        assert merged["decided_by"] == "human"
+        assert "never merges" in merged["basis"]
+        assert merged["at"] == "2026-09-23T13:00:00+00:00"
+
+    def test_a_human_close_is_an_honest_rejection(self):
+        closed = acceptance_fact(
+            {"evidence": {"acceptance": {"state": "closed"}}},
+            verified_current=True,
+            candidate_sha=CANDIDATE,
+        )
+        assert closed["state"] == "rejected_by_human"
+        assert closed["decided_by"] == "human"
+
+    def test_green_ci_alone_is_never_acceptance(self):
+        verified = acceptance_fact({}, verified_current=True, candidate_sha=CANDIDATE)
+        assert verified["state"] == "pending_human_decision"
+        assert verified["decided_by"] is None
+        assert "NOT acceptance" in verified["basis"]
+
+        unverified = acceptance_fact({}, verified_current=False, candidate_sha=CANDIDATE)
+        assert unverified["state"] == "none"
+        assert "never to green CI" in unverified["basis"]
+
+
+class TestBudgetBlockedReview:
+    def _blocked_rows(self, block: dict) -> dict:
+        return _ready_rows(
+            run=_ready_run(
+                evidence={
+                    "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                    "review_budget_block": block,
+                }
+            )
+        )
+
+    def test_a_refused_amendment_names_the_limiting_axis(self):
+        block = budget_blocked_review(
+            self._blocked_rows(
+                {
+                    "budget_decision": "budget_exhausted",
+                    "released": False,
+                    "short_reason": "an explicit, auditable amendment on the limiting axis is required",
+                    "budget": {"closing_review_fits": True},
+                    "amendments": [
+                        {
+                            "command_id": "run:continue_review:42:9101",
+                            "axis": "calls",
+                            "status": "refused",
+                            "refusal_reason": "calls: the run budget is exhausted and refuses a raise",
+                        },
+                    ],
+                }
+            )
+        )
+
+        assert block is not None and block["blocked"] is True
+        assert block["limiting_axis"] == "calls"
+        assert "amend the LIMITING axis" in block["limiting_axis_basis"]
+        route = block["amendment_route"]
+        assert route["via"] == "runs-service:continue_review_only"
+        assert route["shape"]["fields"].startswith("axis=")
+        assert "ONE axis per amendment" in route["shape"]["rule"]
+
+    def test_a_short_reserve_names_the_usd_axis(self):
+        block = budget_blocked_review(
+            self._blocked_rows(
+                {
+                    "budget_decision": "budget_exhausted",
+                    "released": False,
+                    "budget": {"closing_review_fits": False, "closing_reserve_usd": 1.0},
+                }
+            )
+        )
+
+        assert block["limiting_axis"] == "usd"
+        assert "closing gate" in block["limiting_axis_basis"]
+
+    def test_an_unnamed_axis_is_honest_not_guessed(self):
+        block = budget_blocked_review(
+            self._blocked_rows(
+                {
+                    "budget_decision": "budget_exhausted",
+                    "released": False,
+                    "budget": {"closing_review_fits": True},
+                    "amendments": [],
+                }
+            )
+        )
+
+        assert block["limiting_axis"] is None
+        assert "no single limiting axis" in block["limiting_axis_basis"]
+
+    def test_no_recorded_block_is_none(self):
+        assert budget_blocked_review(_ready_rows()) is None
+
+    def test_the_budget_block_surfaces_as_an_explicit_next_action(self):
+        rows = self._blocked_rows(
+            {
+                "budget_decision": "budget_exhausted",
+                "released": False,
+                "budget": {"closing_review_fits": False},
+                "amendments": [],
+            }
+        )
+        actions = delivery_view(rows, now=NOW)["next_actions"]
+
+        budget = next(action for action in actions if action["code"] == "budget_blocked_review")
+        assert budget["available"] is True
+        assert budget["amendment_route"]["shape"]["identity"].startswith("run:continue_review:")
+
+
+class TestRoundNextActions:
+    def _requests_rows(self, status: str) -> dict:
+        return _ready_rows(
+            run=_ready_run(
+                evidence={
+                    "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                    "review_feedback_requests": {
+                        "918": {
+                            "note_id": "918",
+                            "status": status,
+                            "classification": "in-scope_correction",
+                        }
+                    },
+                }
+            )
+        )
+
+    def test_the_head_fence_refusals_render_explicitly(self):
+        for status, code in (
+            ("stale_head", "stale_head"),
+            ("round_limit", "round_limit"),
+            ("mr_closed", "mr_closed"),
+            ("conflicting_correction", "conflicting_correction"),
+        ):
+            actions = delivery_view(self._requests_rows(status), now=NOW)["next_actions"]
+            entry = next((a for a in actions if a["code"] == code), None)
+            assert entry is not None, status
+            assert entry["available"] is False
+            assert entry["description"]
+            assert entry["evidence"]["id"] == "918"
+
+    def test_a_verified_unaccepted_candidate_names_the_pending_human_decision(self):
+        actions = delivery_view(_ready_rows(), now=NOW)["next_actions"]
+
+        pending = next(a for a in actions if a["code"] == "pending_human_merge_decision")
+        assert pending["via"] == "human:merge-decision"
+
+
+class TestActionSubjectTickets:
+    def _projection(self, rows: dict) -> OperatorProjection:
+        return initial_projection(rows, NOW)
+
+    def test_plan_names_the_expected_candidate_and_round(self):
+        projection = self._projection(_ready_rows())
+        (probe,) = RecoveryActions.plan(projection, "op@corp", "observer", at=NOW)
+
+        assert probe.expected_candidate == CANDIDATE
+        assert probe.expected_round == "delivery:1"
+        fact = probe.audit_fact()
+        assert fact["expected_candidate"] == CANDIDATE
+        assert fact["expected_round"] == "delivery:1"
+
+    def test_every_action_carries_a_one_line_safe_description(self):
+        from forge.adaptive.operator_view import ACTIONS, SAFE_ACTION_DESCRIPTIONS
+
+        assert set(SAFE_ACTION_DESCRIPTIONS) >= set(ACTIONS)
+        for action in ACTIONS:
+            description = SAFE_ACTION_DESCRIPTIONS[action]
+            assert description, action
+        # the four recovery verbs are DIFFERENT actions and say so
+        assert "zero coder dispatches" in SAFE_ACTION_DESCRIPTIONS["continue_review_only"]
+        assert "linked round" in SAFE_ACTION_DESCRIPTIONS["follow_up_correction"]
+        assert "IMPLEMENTATION RESTART" in SAFE_ACTION_DESCRIPTIONS["retry"]
+        assert "WIP DISCARD" in SAFE_ACTION_DESCRIPTIONS["cancel"]
+
+    def test_decide_refuses_a_moved_candidate_with_the_stale_action_code(self):
+        from forge.adaptive.operator_view import STALE_ACTION_REFUSAL
+
+        v1 = self._projection(_ready_rows())
+        (probe,) = RecoveryActions.plan(v1, "op@corp", "observer", at=NOW)
+
+        # the world moves: round 2 supersedes the delivery AND a NEW
+        # candidate exists — same projection version, different subject
+        moved = self._projection(
+            _ready_rows(
+                run=_ready_run(candidate_shas=[CANDIDATE, "d" * 40]),
+                rounds=[_round()],
+            )
+        )
+        moved = OperatorProjection(
+            **{
+                **moved.__dict__,
+                "projection_version": v1.projection_version,
+            }
+        )
+
+        decision = RecoveryActions.decide(probe, moved)
+
+        assert decision.allowed is False
+        assert decision.reason.startswith(STALE_ACTION_REFUSAL)
+        assert decision.current_state == moved.state
+        assert decision.safe_next_action == "probe"
+
+    def test_decide_refuses_a_moved_round_with_the_stale_action_code(self):
+        from forge.adaptive.operator_view import STALE_ACTION_REFUSAL
+
+        planned_against = self._projection(_ready_rows(rounds=[_round(round_number=2)]))
+        (probe,) = RecoveryActions.plan(planned_against, "op@corp", "observer", at=NOW)
+        assert probe.expected_round == f"round:2:{DECISION}"
+
+        # the lineage moves to round 3 — the action named round 2
+        moved = self._projection(
+            _ready_rows(
+                rounds=[
+                    _round(round_number=2),
+                    _round(round_number=3, decision_id="corr-decision-2", round_id="rr-2"),
+                ]
+            )
+        )
+
+        decision = RecoveryActions.decide(probe, moved)
+
+        assert decision.allowed is False
+        assert decision.reason.startswith(STALE_ACTION_REFUSAL)
+        assert "round:3" in decision.reason
+
+    def test_a_matching_subject_ticket_is_allowed(self):
+        projection = self._projection(_ready_rows())
+        (probe,) = RecoveryActions.plan(projection, "op@corp", "observer", at=NOW)
+
+        decision = RecoveryActions.decide(probe, projection)
+
+        assert decision.allowed is True
+
+    def test_the_hint_block_carries_the_subject_ticket_and_safe_action(self):
+        projection = self._projection(_ready_rows())
+        hints = action_hint_block(projection)
+
+        assert hints["actions"]
+        for entry in hints["actions"]:
+            assert entry["expected_candidate"] == CANDIDATE
+            assert entry["expected_round"] == "delivery:1"
+            assert entry["safe_action"]
+
+
+class TestStatusComment:
+    def _rows(self, **over) -> dict:
+        rows = _ready_rows(rounds=[_round()])
+        rows.update(over)
+        return rows
+
+    def test_the_comment_renders_the_five_facts_and_evidence_links(self):
+        comment = render_status_comment(self._rows())
+
+        assert "Forge delivery" in comment
+        assert f"round:2:{DECISION}" in comment
+        assert "historical" in comment
+        assert "HISTORICAL" in comment  # the green evidence is labelled
+        assert "Evidence (immutable, digests)" in comment
+        assert "sha256:" in comment
+
+    def test_the_identity_is_stable_under_replay_and_moves_with_the_world(self):
+        def _identity_of(comment: str) -> str:
+            marker = next(
+                line for line in comment.splitlines() if line.startswith("<!-- forge-status")
+            )
+            return marker.split("identity=", 1)[1].split()[0]
+
+        first = render_status_comment(self._rows())
+        replay = render_status_comment(self._rows())
+        assert first == replay  # same world → byte-identical comment, ONE identity
+        identity_first = _identity_of(first)
+
+        moved = render_status_comment(
+            self._rows(
+                run=_ready_run(
+                    candidate_shas=[CANDIDATE, "d" * 40],  # a NEW current candidate
+                    evidence={
+                        "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                    },
+                )
+            )
+        )
+        identity_moved = _identity_of(moved)
+
+        assert identity_moved != identity_first  # a moved world gets a NEW identity
+
+    def test_the_identity_digest_is_deterministic_over_the_named_facts(self):
+        common = {
+            "run_id": PARENT_ID,
+            "state": "verified_ready",
+            "round_ref": f"round:2:{DECISION}",
+            "candidate_sha": CANDIDATE,
+            "verification_binding_word": "historical",
+            "acceptance_state": "none",
+        }
+        assert status_comment_identity(**common) == status_comment_identity(**common)
+        assert status_comment_identity(**common) != status_comment_identity(
+            **{**common, "round_ref": "round:3:other"}
+        )
+        assert status_comment_identity(**common) != status_comment_identity(
+            **{**common, "acceptance_state": "accepted_by_human"}
+        )
+
+    def test_with_status_comment_identity_is_replay_stable(self):
+        snapshot = {
+            "run_id": PARENT_ID,
+            "status": "ready_for_human",
+            "status_reason": "",
+            "commit_cycle": 1,
+            "candidate_shas": [CANDIDATE],
+            "verification": {"status": "passed", "tested_oid": CANDIDATE},
+            "intents": [{"id": "op-1", "status": "committed"}],
+            "updated_at": "2026-09-23T11:50:00+00:00",
+        }
+        first = with_status_comment_identity("## body", snapshot)
+        replay = with_status_comment_identity("## body", snapshot)
+
+        assert first == replay
+        assert first.startswith("## body")
+        assert "<!-- forge-status:1 run=" in first
+        # a moved world (a new candidate) changes the identity
+        moved = with_status_comment_identity("## body", {**snapshot, "candidate_shas": ["d" * 40]})
+        identity_first = first.rsplit("identity=", 1)[1].split()[0]
+        identity_moved = moved.rsplit("identity=", 1)[1].split()[0]
+        assert identity_moved != identity_first
+
+
+class TestRoundSurfaceValueFreedom:
+    def test_the_round_surfaces_never_carry_request_text_or_secret_values(self):
+        sentinel = "glpat-supersecret-value-123"
+        rows = _ready_rows(
+            run=_ready_run(
+                evidence={
+                    "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                    "review_feedback_requests": {
+                        "918": {
+                            "note_id": "918",
+                            "status": "round_admitted",
+                            "classification": "in-scope_correction",
+                            "text": f"/fix use the token {sentinel} in `src/app.py`",
+                            "head_sha": CANDIDATE,
+                        }
+                    },
+                }
+            ),
+            rounds=[_round()],  # the round fact exists — its requests render
+        )
+
+        view = delivery_view(rows, now=NOW)
+        comment = render_status_comment(rows)
+        rendered = json.dumps(view)
+
+        assert sentinel not in rendered
+        assert sentinel not in comment
+        # the reviewer's TEXT never renders on the operator surface
+        assert "use the token" not in rendered
+        assert all(
+            set(request)
+            <= {"note_id", "status", "classification", "decision_id", "head_sha", "created_at"}
+            for request in view["facts"]["review_round"]["requests"]
+        )
+
+    def test_requests_surface_even_without_the_rounds_table_section(self):
+        """A snapshot whose rounds section was NOT selected (coverage
+        unknown) still renders the request refusals from the run's own
+        evidence — an unavailable prerequisite is never silent."""
+        rows = _ready_rows(
+            run=_ready_run(
+                evidence={
+                    "verification": {"status": "passed", "tested_oid": CANDIDATE},
+                    "review_feedback_requests": {
+                        "918": {"note_id": "918", "status": "round_limit"}
+                    },
+                }
+            )
+        )
+
+        view = delivery_view(rows, now=NOW)
+
+        assert view["facts"]["review_round"] is None  # no round identity observed
+        codes = [action["code"] for action in view["next_actions"]]
+        assert "round_limit" in codes

@@ -34,7 +34,12 @@ Profiles (the required selection lives HERE, as data):
   skip); the files' sqlite unit arms run beside them on the same
   selection, so the executed-ID manifest covers the critical ids.
 
-Skip accounting is honest, not blanket: a skip whose reason mentions
+Skip accounting is honest, not blanket: a skip on a REQUIRED trace whose
+reason mentions ``FORGE_PG_TEST_URL`` is a ``prerequisite_missing`` skip —
+the DISTINCT, named outcome (R40-08 / #344) recording that a required
+profile's fixture environment is absent: the profile is reported
+UNQUALIFIED and the gate refuses with the prerequisite exit (2), never an
+invisible skip-green. Any other skip whose reason mentions
 ``FORGE_PG_TEST_URL`` is a REQUIRED skip (the qualification prerequisite
 failed — refuse), a skip in the podman-bound retry-authority lab (its
 disposable database is created via the local ``forge-postgres`` container,
@@ -53,7 +58,8 @@ the negative-arm mode for AT-09's "wrong schema revision / dropped table"
 drills. Mind that the production-entry profile resets that database's
 public schema; point it at a disposable database only.
 
-Exit codes: 0 green · 2 prerequisite · 3 schema · 4 manifest ·
+Exit codes: 0 green · 2 prerequisite (including a required profile's
+``prerequisite_missing`` skip — R40-08) · 3 schema · 4 manifest ·
 5 required skip · 6 test failures.
 """
 
@@ -61,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -169,6 +176,16 @@ PROFILES: tuple[GateProfile, ...] = (
     ),
 )
 
+#: R40-08 (#344): where the production-entry traces write their
+#: machine-readable execution records during the gate run (source sha +
+#: evidence class per trace; embedded into the report artifact below).
+#: Unset outside the gate — the traces stay fully hermetic then.
+TRACE_RECORD_DIR_ENV = "FORGE_TRACE_RECORD_DIR"
+#: R40-08 (#344): the release-artifact digest when the gate runs against
+#: a BUILT artifact (the canary's spelling) — the report distinguishes
+#: the source tree it executed on from the artifact it installed.
+RELEASE_ARTIFACT_SHA_ENV = "FORGE_RELEASE_ARTIFACT_SHA256"
+
 
 @dataclass(frozen=True)
 class RequiredTrace:
@@ -230,6 +247,49 @@ REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
         ),
         profile="accounting-races",
     ),
+    # R40-08 (#344): the REQUIRED composed-trace set — one entry per
+    # high-risk invariant, each WITH its mutation arm (a removed arm is
+    # the same marker-removal mutation the manifest check detects).
+    RequiredTrace(
+        label="R40-01 (#337) FI-1 the wired /fix ingress trace (ASGI→inbox→worker→reconciler)",
+        pattern=re.compile(
+            r"tests/production_entry/test_feedback_ingress\.py"
+            r"::TestFI1TheWiredIngressTrace::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R40-01 (#337) FI-5 the registration-revert mutation arms",
+        pattern=re.compile(
+            r"tests/production_entry/test_feedback_ingress\.py"
+            r"::TestFI5TheRegistrationMutations::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R40-03 (#339) MG-1 partial-liability admission + the value-presence mutant",
+        pattern=re.compile(
+            r"tests/production_entry/test_mutation_gates\.py"
+            r"::TestMG1PartialLiabilityAdmission::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R40-04 (#340) MG-2 guarded review amendment + the evidence-only mutant",
+        pattern=re.compile(
+            r"tests/production_entry/test_mutation_gates\.py"
+            r"::TestMG2GuardedReviewAmendment::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R40-05 (#341) MG-3 grant persistence under concurrent evidence + the mutant",
+        pattern=re.compile(
+            r"tests/production_entry/test_mutation_gates\.py"
+            r"::TestMG3GrantPersistenceUnderConcurrentEvidence::"
+        ),
+        profile="production-entry",
+    ),
 )
 
 #: Lab-environment-bound traces: executed wherever the local lab exists
@@ -273,25 +333,36 @@ def check_selection_on_disk() -> None:
 
 
 def classify_skip(test_id: str, reason: str) -> str:
-    """Classify one skipped test: ``required`` (refuse) or ``environment``.
+    """Classify one skipped test: ``prerequisite_missing`` (a required
+    profile's fixture env is absent — the DISTINCT, named R40-08 outcome),
+    ``required`` (refuse) or ``environment``.
 
     - the lab-environment traces classify FIRST: their combined-reason
       skips name FORGE_PG_TEST_URL alongside the live-GitLab prerequisite
       and are environment-bound by design (the PG half IS provided; the
       live-lab half is the recorded lab evidence);
+    - a skip on a REQUIRED trace whose reason names ``FORGE_PG_TEST_URL``
+      is ``prerequisite_missing``: the gate exported the URL, so that
+      skipif firing means the required profile's fixture environment
+      broke — the profile is reported UNQUALIFIED under its own name,
+      never an invisible skip (R40-08 / #344 acceptance 6);
     - any other skip whose reason names ``FORGE_PG_TEST_URL`` refuses: the
       gate exported the URL, so that skipif firing means the prerequisite
       broke (AT-09's "remove the URL" arm);
-    - the lab-environment-bound traces (podman retry lab; the R37-14
-      native matrix needing the live GitLab credentials) skip as
-      ``environment`` only when the skip is exactly about that lab;
     - anything else refuses too: a required gate must not skip silently.
     """
     if ENVIRONMENT_SCOPED_TESTS.search(test_id) and _LAB_SKIP.search(reason):
         return "environment"
+    if _PG_URL_SKIP.search(reason) and _is_required_trace(test_id):
+        return "prerequisite_missing"
     if _PG_URL_SKIP.search(reason):
         return "required"
     return "required"
+
+
+def _is_required_trace(test_id: str) -> bool:
+    """Whether *test_id* belongs to the required (critical) manifest."""
+    return any(trace.pattern.search(test_id) for trace in REQUIRED_TRACES)
 
 
 # ---------------------------------------------------------------------------
@@ -583,11 +654,20 @@ def _run_pytest(arguments: list[str], env: dict[str, str]) -> subprocess.Complet
 
 
 def run_profile(
-    profile: GateProfile, gate_url: str, junit_path: Path, base_env: dict[str, str]
+    profile: GateProfile,
+    gate_url: str,
+    junit_path: Path,
+    base_env: dict[str, str],
+    trace_record_dir: Path | None = None,
 ) -> ProfileRun:
     run = ProfileRun(profile=profile, database_url=mask_url(gate_url))
     profile_traces = traces_for_profile(profile)
     env = {**base_env, "FORGE_PG_TEST_URL": gate_url}
+    if trace_record_dir is not None:
+        # R40-08 (#344): the mutation-gate traces write their execution
+        # records (source sha + evidence class) here during the run; the
+        # report embeds them — see :func:`trace_records`.
+        env[TRACE_RECORD_DIR_ENV] = str(trace_record_dir)
 
     started = time.monotonic()
     collected = _run_pytest(["--collect-only", "-q", *profile.selection], env)
@@ -606,7 +686,22 @@ def run_profile(
         )
     run.required_matches = required_test_ids(run.manifest, profile_traces)
 
-    executed = _run_pytest(["-q", "-rs", f"--junitxml={junit_path}", *profile.selection], env)
+    # R40-08 (#344): an unhandled database-thread exception FAILS the
+    # test that leaked it — the gate promotes
+    # PytestUnhandledThreadExceptionWarning to an error for its own runs,
+    # so "zero unhandled thread errors" is enforced mechanically, never
+    # asserted by absence.
+    executed = _run_pytest(
+        [
+            "-q",
+            "-rs",
+            "-W",
+            "error::pytest.PytestUnhandledThreadExceptionWarning",
+            f"--junitxml={junit_path}",
+            *profile.selection,
+        ],
+        env,
+    )
     run.duration_seconds = round(time.monotonic() - started, 3)
     run.pytest_returncode = executed.returncode
     run.records = parse_junit(junit_path.read_text(encoding="utf-8"), run.manifest)
@@ -636,6 +731,21 @@ def run_profile(
 def evaluate_profile(run: ProfileRun) -> None:
     """Skip accounting + required outcomes — refuse, never skip green."""
     required = {node for nodes in run.required_matches.values() for node in nodes}
+    prerequisite_missing = [
+        skip for skip in run.skips if skip["classification"] == "prerequisite_missing"
+    ]
+    if prerequisite_missing:
+        # R40-08 (#344): a required profile whose fixture environment is
+        # missing is UNQUALIFIED under its own named outcome — never an
+        # invisible skip, and never folded into a generic test failure.
+        details = "; ".join(
+            f"{skip['test_id']} ({skip['reason']})" for skip in prerequisite_missing[:5]
+        )
+        raise PrerequisiteError(
+            f"profile {run.profile.name!r} is UNQUALIFIED — required traces skipped "
+            f"on a missing prerequisite ({details}); the gate never counts a "
+            "skip as passed coverage"
+        )
     required_skips = [skip for skip in run.skips if skip["test_id"] in required] + [
         skip for skip in run.skips if skip["classification"] == "required"
     ]
@@ -660,7 +770,16 @@ def evaluate_profile(run: ProfileRun) -> None:
 # ---------------------------------------------------------------------------
 
 
-def source_identity() -> dict[str, Any]:
+def source_identity(environ: dict[str, str] | None = None) -> dict[str, Any]:
+    """WHAT the gate executed on: the source tree, or a release artifact.
+
+    R40-08 (#344) report hygiene: the two identities are kept DISTINCT —
+    ``basis: source-main`` names the checked-out tree (commit + dirty
+    flag), ``basis: release-artifact`` names the built artifact the run
+    installed (``FORGE_RELEASE_ARTIFACT_SHA256``, the canary's spelling).
+    A report can never present an artifact run as source-main evidence or
+    the reverse.
+    """
     commit, dirty = None, False
     try:
         commit = (
@@ -675,7 +794,53 @@ def source_identity() -> dict[str, Any]:
         dirty = bool(status.strip())
     except OSError:
         pass
-    return {"git_commit": commit, "tree_dirty": dirty}
+    artifact = (environ or os.environ).get(RELEASE_ARTIFACT_SHA_ENV, "").strip()
+    return {
+        "basis": "release-artifact" if artifact else "source-main",
+        "git_commit": commit,
+        "tree_dirty": dirty,
+        "artifact_sha256": artifact or None,
+    }
+
+
+def critical_test_sources(manifest: list[str]) -> dict[str, dict[str, str]]:
+    """Every executed critical test id → its EXACT source SHA (R40-08).
+
+    The sha256 of the test's own source FILE at run time: an executed
+    record from a different source (a renamed file, a moved class) can
+    never masquerade as the critical id — the manifest pattern matches,
+    the source digest pins the bytes.
+    """
+    sources: dict[str, dict[str, str]] = {}
+    for node in manifest:
+        if not any(trace.pattern.search(node) for trace in REQUIRED_TRACES):
+            continue
+        rel_path = node.split("::", 1)[0]
+        path = REPO_ROOT / rel_path
+        entry: dict[str, str] = {"file": rel_path}
+        if path.is_file():
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:  # pragma: no cover — collection produced it; refuse-shaped
+            entry["sha256"] = "MISSING"
+        sources[node] = entry
+    return sources
+
+
+def trace_records(environ: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """The #344 mutation-gate traces' own execution records (if the gate
+    exported FORGE_TRACE_RECORD_DIR, the traces wrote one JSON record per
+    executed baseline/mutation arm — label, outcome, source identity).
+    Embedded into the report so the artifact is self-contained."""
+    directory = (environ or os.environ).get(TRACE_RECORD_DIR_ENV, "").strip()
+    if not directory:
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(Path(directory).glob("*.json")):
+        try:
+            records.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):  # pragma: no cover — a torn record
+            records.append({"schema": "unreadable", "path": str(path)})
+    return records
 
 
 def build_report(
@@ -687,7 +852,11 @@ def build_report(
     total_duration: float,
     refusal: PgGateError | None,
     databases: dict[str, Any],
+    environ: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """The qualification evidence artifact. *environ* names the run's
+    environment (the main() plumbing passes the gate's own); it decides
+    the source-vs-artifact identity and where the trace records live."""
     required_ids = sorted(
         {
             node
@@ -707,17 +876,26 @@ def build_report(
     ]
     durations = {record.test_id: record.duration for run in runs for record in run.records}
     skipped_count = sum(1 for run in runs for record in run.records if record.outcome == "skipped")
+    prerequisite_skips = [
+        skip
+        for run in runs
+        for skip in run.skips
+        if skip["classification"] == "prerequisite_missing"
+    ]
+    critical_sources: dict[str, dict[str, str]] = {}
+    for run in runs:
+        critical_sources.update(critical_test_sources(run.manifest))
     return {
         "gate": {
             "script": "scripts/pg_gate.py",
-            "issue": "#267 (R36-08 / AT-09)",
+            "issue": "#267 (R36-08 / AT-09), extended by #344 (R40-08)",
             "mode": mode,
             "started_utc": started_iso,
             "duration_seconds": round(total_duration, 3),
             "admin_url": admin_url_masked,
             "alembic_head": head,
             "databases": databases,
-            "source_identity": source_identity(),
+            "source_identity": source_identity(environ),
         },
         "profiles": [
             {
@@ -758,16 +936,49 @@ def build_report(
             ],
             "required_test_ids": required_ids,
             "executed_test_ids": executed_ids,
+            # R40-08 (#344): the executed CRITICAL test ids with their
+            # EXACT source sha — an executed record is bound to the bytes
+            # that ran, never to a pattern alone.
+            "critical_test_sources": critical_sources,
             "durations_seconds": durations,
             "required_skips": required_skips,  # MUST stay [] for green
             "environment_skips": environment_skips,
+            # R40-08 (#344): the named, distinct outcome for a required
+            # profile whose fixture environment is missing — the profile is
+            # UNQUALIFIED, never invisibly skipped (must stay [] for green).
+            "prerequisite_missing_skips": prerequisite_skips,
             "skip_accounting": {
                 "collected": sum(len(run.manifest) for run in runs),
                 "executed": len(executed_ids),
                 "skipped": skipped_count,
                 "required": len(required_skips),
                 "environment": len(environment_skips),
+                "prerequisite_missing": len(prerequisite_skips),
             },
+            # The issue's observability vocabulary, verbatim keys.
+            "tests.critical_trace_executed": len(
+                [node for node in executed_ids if node in critical_sources]
+            ),
+            "tests.prerequisite_missing": len(prerequisite_skips),
+            # A mutation arm "killed" = its record executed green (the arm
+            # proves the baseline detects the seeded defect; a failing arm
+            # means the detector itself broke).
+            "tests.mutation_killed": len(
+                [
+                    record
+                    for record in trace_records(environ)
+                    if record.get("mutation") and record.get("outcome") == "passed"
+                ]
+            ),
+            # Structurally zero on green: the gate's pytest promotes the
+            # unhandled-thread-exception warning to an error (run_profile),
+            # so a green report CANNOT carry one.
+            "tests.unhandled_thread_errors": 0 if not refusal else None,
+            "tests.duration_by_layer": {run.profile.name: run.duration_seconds for run in runs},
+            # The #344 mutation-gate traces' own records (label + mutation
+            # + outcome + source identity per trace/arm), when the gate
+            # exported FORGE_TRACE_RECORD_DIR.
+            "mutation_gate_trace_records": trace_records(environ),
             "flake_attempts": 1,  # never retried until green
         },
         "ci": {
@@ -825,6 +1036,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     created: dict[str, str] = {}  # database name → admin url (for cleanup)
     databases_dropped = False
     head = ""
+    trace_dir: Path | None = None
     try:
         if not admin_url:
             raise PrerequisiteError(
@@ -854,6 +1066,10 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
             profile_urls = {profile.name: admin_url for profile in PROFILES}
 
         junit_dir = Path(tempfile.mkdtemp(prefix="pg-gate-"))
+        # The traces' records outlive the junit dir: the report embeds them
+        # (trace_records()) BEFORE this second tempdir is removed below.
+        trace_dir = Path(tempfile.mkdtemp(prefix="pg-gate-traces-"))
+        environ[TRACE_RECORD_DIR_ENV] = str(trace_dir)  # the report reads it back
         try:
             for profile in PROFILES:
                 run = run_profile(
@@ -861,6 +1077,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
                     profile_urls[profile.name],
                     junit_dir / f"{profile.name}.xml",
                     environ,
+                    trace_record_dir=trace_dir,
                 )
                 runs.append(run)
                 evaluate_profile(run)
@@ -887,8 +1104,18 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         else "pre-existing (verified at head, not re-provisioned)",
     }
     report = build_report(
-        args.mode, mask_url(admin_url), head, runs, started_iso, total, refusal, databases
+        args.mode,
+        mask_url(admin_url),
+        head,
+        runs,
+        started_iso,
+        total,
+        refusal,
+        databases,
+        environ=environ,
     )
+    if trace_dir is not None:
+        shutil.rmtree(trace_dir, ignore_errors=True)  # embedded above
     if args.report is not None:
         args.report.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"

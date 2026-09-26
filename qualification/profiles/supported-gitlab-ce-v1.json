@@ -6,9 +6,9 @@
   "control_plane": {
     "divergence": "the promoted v0.39.0 release is built from this exact tree and its lane wheel is byte-identical to the qualification wheel (78711c28…) — the moving-tree gap is closed at this promotion; the executed-lab image digest and the promoted GHCR digest still differ BY CONSTRUCTION (the podman working-tree build that RAN the trace vs the CI build of the same source) — both are bound, neither is silently substituted, and the next lab re-alignment onto the promoted digest is recorded as the open follow-up",
     "executed_lab": {
-      "deployed_schema_head": "028",
-      "image_digest": "sha256:33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
-      "image_id": "587e339268ad20f127f6b2fbb1a06fb3863fb26386a8ec721bcf9f4d592f8fbd",
+      "deployed_schema_head": "031",
+      "image_digest": "sha256:ddcb9137b09c41acbbc7a1cdffbcf60c79beffbe2bfd5708034f29edf58ba1a7",
+      "image_id": "80a1c1822c03d4dd03dba35b2f85b5f56bcb813b48649989a2be2adbb1f4007b",
       "image_name": "localhost/forge:dev",
       "qualification_composition": {
         "note": "the executed-lab section IS the qualification composition: the alignment image is the WORKING-TREE build and the wheel beside it is the uv build of the SAME tree — a cold install from this manifest installs THESE bytes, never a released artifact that predates them",
@@ -22,11 +22,11 @@
         }
       },
       "receipts": [
-        "docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
-        "qualification/inventory-2026-09-25-v2.json"
+        "docs/evaluation/2026-09-26-redemption-qualification/alignment-receipts.json",
+        "qualification/inventory-2026-09-26-redemption.json"
       ],
-      "reported_version": "0.38.0",
-      "rollback_tag": "pre-r3708-20260925T092917Z"
+      "reported_version": "0.39.0",
+      "rollback_tag": "pre-r3708-20260926T132558Z"
     },
     "latest_promotion": {
       "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
@@ -48,8 +48,8 @@
       "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.39.0/forge-0.39.0-py3-none-any.whl"
     },
     "schema_revision": {
-      "head": "028",
-      "predecessor": "027",
+      "head": "031",
+      "predecessor": "030",
       "receipt": "alembic/versions + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
       "upgrade_claim_basis": "the alignment migrate ran head->head (same-head preservation); the N-1->head transition is proven separately by cold_install_check --mode upgrade and must be reported as its ACTUAL edge"
     }
@@ -102,7 +102,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-26T07:24:19+00:00",
+  "frozen_at": "2026-09-26T14:19:11+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.39.0.json",
@@ -145,7 +145,7 @@
       "version": "0.39.0"
     }
   },
-  "manifest_digest": "099431ca9fb119b2a2be46f4abe06f28039bb5b3afc3e2b587ba1b2a9d0928a3",
+  "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",

@@ -42,13 +42,22 @@ new framework, no extraction wave:
   GitLab dispatch resolves ApprovedInput at every dispatch entry (a
   direct ``spec.plan_summary`` brief is the pre-#321 shape); the
   native locator allocation goes through the registry (a direct
-  legacy-carrier derivation bypasses the collision check).
+  legacy-carrier derivation bypasses the collision check);
+- **fixture isolation** (R40-17/#353): the synthetic reference
+  executors and the qualification fixtures are never imported by
+  default production startup — the AST rule bars any src/forge module
+  from importing the fixture set outright, the reference axis above
+  bars the executors from every runtime entry point, and a runtime
+  probe imports the production startup surface in a clean interpreter
+  to prove neither loads.
 """
 
 from __future__ import annotations
 
 import ast
 import functools
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -138,6 +147,16 @@ REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
 #: the wiring, ``main`` and the lane entry (it composes runtime
 #: contracts only; ADR-0031 §2).
 REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(REFERENCE_ENTRY_POINTS)
+
+#: R40-17 (#353): the SYNTHETIC/QUALIFICATION FIXTURE modules — code that
+#: exists for tests and the versioned compat documents, never for the
+#: production composition. NO module under src/forge may import one
+#: (module-level or lazy): a fixture entering the production import
+#: graph is a scenario's assumptions becoming a deployed guarantee by
+#: import. The synthetic reference EXECUTORS are the reference axis
+#: above (barred from every runtime entry point); this set names the
+#: fixture modules that carry no registered home at all.
+FIXTURE_MODULES: tuple[str, ...] = ("forge.adaptive.compat_fixtures",)
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +911,90 @@ def _check_reference_purity(modules: dict[str, _ModuleIndex]) -> list[str]:
     return violations
 
 
+def _check_fixture_isolation(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """`architecture.shadow_authority_count` (the fixture axis, R40-17 /
+    #353): the synthetic reference executors and qualification fixtures
+    are test/compat material — NO production module imports one, so the
+    default production startup can never load fixture code as a
+    runtime authority."""
+    violations: list[str] = []
+    for index in modules.values():
+        hits = index.imported_modules() & set(FIXTURE_MODULES)
+        if hits:
+            violations.append(
+                f"{index.module} imports {sorted(hits)} — the fixture modules "
+                "are test/compat material, never production composition; "
+                "compose the document contract the fixture versions instead, "
+                "or register a reviewed compat home beside the rule"
+            )
+    return violations
+
+
+def _check_budget_amendment_applicants(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R40-17 (#353, ADR-0034 §2): the amendment APPLICATION decision has
+    exactly the registered applicants — the owner (the stable seam) and
+    the two provider continuation routes. The services import the
+    durable PACKAGE facade, so this is a NAME-reference confinement over
+    ``apply_budget_amendment`` / ``BudgetAmendmentCommand`` construction,
+    not an import registration. The inverse guard keeps the seam honest:
+    the applicants that remain must still reach the seam (a drained
+    applicant is a stale registration)."""
+    allowed = set(boundary_registry.BUDGET_AMENDMENT_APPLICANTS)
+    seam_names = {"apply_budget_amendment", "BudgetAmendmentCommand"}
+    violations: list[str] = []
+    for index in modules.values():
+        if index.module in allowed:
+            continue
+        for call, callee in index.calls():
+            if callee.split(".")[-1] in seam_names:
+                violations.append(
+                    f"{index.module}:{call.lineno} applies a budget amendment "
+                    f"({callee}) outside the registered applicants — the ONE "
+                    "application decision is the owner seam consumed by the "
+                    "provider continuation routes; register a reviewed "
+                    "applicant in BUDGET_AMENDMENT_APPLICANTS or route the "
+                    "operator command through an existing continuation route"
+                )
+        for fn in _functions(index.tree):
+            names, _ = _names_and_attrs(fn)
+            if "BudgetAmendmentCommand" in names and fn.name != "":
+                violations.append(
+                    f"{index.module}:{fn.name} constructs a BudgetAmendmentCommand "
+                    "outside the registered applicants — an amendment's "
+                    "identity/axis validation IS the decision; only the owner "
+                    "and the continuation routes may build one"
+                )
+                break  # one finding per module is enough to fail loudly
+    # The inverse guard: the seam still exists and both provider
+    # applicants still reach it.
+    for applicant in ("forge.runs.service", "forge.runs.github_service"):
+        index = modules.get(applicant)
+        if index is None:  # pragma: no cover — the services are registry owners
+            violations.append(
+                f"{applicant} was not found under src/forge — the amendment "
+                "applicant registration is stale; update the rule"
+            )
+            continue
+        reached = False
+        for call, callee in index.calls():
+            if callee.split(".")[-1] in seam_names:
+                reached = True
+                break
+        if not reached:
+            for fn in _functions(index.tree):
+                names, _ = _names_and_attrs(fn)
+                if "BudgetAmendmentCommand" in names:
+                    reached = True
+                    break
+        if not reached:
+            violations.append(
+                f"{applicant} is registered as a budget-amendment applicant but "
+                "no longer constructs/applies one — a drained registration; "
+                "remove it from BUDGET_AMENDMENT_APPLICANTS"
+            )
+    return violations
+
+
 ALL_CHECKS = (
     ("legacy lookup confinement", _check_legacy_lookup_confinement),
     ("resolve_repository monopoly", _check_resolve_repository_monopoly),
@@ -901,6 +1004,8 @@ ALL_CHECKS = (
     ("boundary registration", _check_boundary_registration),
     ("reference separation", _check_reference_separation),
     ("reference purity", _check_reference_purity),
+    ("fixture isolation", _check_fixture_isolation),
+    ("budget amendment applicants", _check_budget_amendment_applicants),
     ("redemption grant authority", _check_redemption_grant_authority),
     ("approved-input brief", _check_approved_input_brief),
     ("native locator allocation", _check_native_locator_allocation),
@@ -930,6 +1035,10 @@ class TestAuthorityBoundaryRules:
             # R38-17 (#318, ADR-0032): the versioned execution/delivery
             # spec the lane templates consume as pins.
             "execution_delivery_spec",
+            # R40-17 (#353, ADR-0034 §1): the budget-amendment application
+            # decision and the feedback admission decision.
+            "budget_amendment_application",
+            "feedback_admission",
         ]
 
     def test_every_boundary_declares_owners_callers_and_negative_contract(self) -> None:
@@ -1146,6 +1255,54 @@ class TestIntentionalViolationTraps:
         )
         violations = _check_reference_purity(modules)
         assert any("composes runtime contracts only" in text for text in violations)
+
+    def test_a_production_module_importing_a_qualification_fixture_is_caught(self) -> None:
+        """R40-17 (#353): the fixture axis trap — a module-level OR lazy
+        import of a fixture module inside src/forge is the defect (the
+        fixture's assumptions entering the production import graph)."""
+        modules = _synthetic(
+            "forge.runs.fixture_reading_leg",
+            "def legacy_document():\n"
+            "    from forge.adaptive.compat_fixtures import compat_inventory\n"
+            "\n"
+            "    return compat_inventory()\n",
+        )
+        violations = _check_fixture_isolation(modules)
+        assert any(
+            "fixture modules" in text and "fixture_reading_leg" in text for text in violations
+        )
+
+    def test_a_third_module_applying_a_budget_amendment_is_caught(self) -> None:
+        """R40-17 (#353): the applicants trap — a THIRD module applying
+        the amendment seam (or constructing the command) is the
+        duplicated-decision defect the extraction removed."""
+        modules = _synthetic(
+            "forge.gateway.amending_leg",
+            "from forge.durable import BudgetAmendmentCommand, apply_budget_amendment\n"
+            "\n"
+            "\n"
+            "async def amend(session, run_id):\n"
+            "    return await apply_budget_amendment(\n"
+            '        session, BudgetAmendmentCommand(run_id=run_id, command_id="c")\n'
+            "    )\n",
+        )
+        violations = _check_budget_amendment_applicants(modules)
+        assert any("amending_leg" in text for text in violations)
+
+    def test_a_drained_amendment_applicant_registration_is_caught(self) -> None:
+        """The inverse guard: a registered applicant that no longer
+        reaches the seam is a stale registration."""
+        modules = {
+            "forge.runs.service": _ModuleIndex("forge.runs.service", ast.parse("X = 1\n")),
+            "forge.runs.github_service": _ModuleIndex(
+                "forge.runs.github_service",
+                ast.parse(
+                    "async def continue_review_only(self, run_id, *, operator):\n    return {}\n"
+                ),
+            ),
+        }
+        violations = _check_budget_amendment_applicants(modules)
+        assert any("drained registration" in text for text in violations)
 
     # ------------------------------------------------------------------
     # Q39-17 (#336, ADR-0033 §5) — the three consolidation traps
@@ -1411,6 +1568,41 @@ class TestProviderConformance:
                         )
         gap = boundary_registry.boundary_by_name("continuation_authorization").honest_gaps
         assert "Azure remains the honest gap" in gap
+
+
+class TestSyntheticFixtureIsolation:
+    """R40-17 (#353) acceptance: the synthetic reference executors and
+    qualification fixtures are never imported by DEFAULT PRODUCTION
+    STARTUP — verified at runtime, in a clean interpreter that imports
+    the production startup surface (``forge.main`` + the worker wiring)
+    exactly the way a deployed process does, not only by the AST scan
+    above."""
+
+    def _startup_probe(self) -> set[str]:
+        probe = (
+            "import sys\n"
+            "import forge.main\n"
+            "import forge.adaptive.wiring\n"
+            "import forge.worker.queue\n"
+            "banned = ('forge.adaptive.compat_fixtures', 'forge.adaptive.reference')\n"
+            "leaked = sorted(\n"
+            "    m for m in sys.modules if m.startswith(banned)\n"
+            ")\n"
+            "print('LEAKED=' + ','.join(leaked))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        leaked = result.stdout.strip().removeprefix("LEAKED=")
+        return set(filter(None, leaked.split(",")))
+
+    def test_default_production_startup_loads_no_fixture_or_reference_module(self) -> None:
+        leaked = self._startup_probe()
+        assert leaked == set(), (
+            f"importing the production startup surface loaded fixture/reference "
+            f"modules ({sorted(leaked)}) — a deployed process would carry "
+            "synthetic executor or qualification fixture code as runtime"
+        )
 
 
 class TestStaleEpochConformance:

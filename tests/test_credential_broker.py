@@ -39,11 +39,14 @@ from forge.adaptive.credential_broker import (
     DELIVERY_PLAN_SCHEMA,
     DELIVERY_ROUTE_ENV,
     DELIVERY_TEMPLATE_DIR_ENV,
+    OPERATION_GRANT_SCHEMA,
+    PERMITTED_OPERATION_REDEMPTION,
     VERSION_KIND_FIXTURE,
     VERSION_KIND_PRESENCE,
     BrokerCredentialRefusal,
     CredentialBroker,
     CredentialDeliveryPlan,
+    CredentialOperationGrant,
     EnvBroker,
     StagedBroker,
     credential_secret_name,
@@ -53,9 +56,11 @@ from forge.adaptive.credential_broker import (
     native_locator,
     stage_dispatch_credential,
     template_identity_digest,
+    validate_operation_grant_document,
 )
 from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.adaptive.project_credentials import (
+    BINDING_REVISION_UNKNOWN,
     CredentialRefusal,
     ProjectCredentialRegistry,
     resolve_dispatch_credential,
@@ -811,3 +816,167 @@ class TestReceiptCorrelationFields:
         assert staged.proof["credential_policy"] == CREDENTIAL_POLICY_COMPAT
         assert staged.proof["receipt"]["receipt_id"]
         assert CANARY_VALUE not in json.dumps(staged.proof)
+
+
+# ----------------------------------------------------------------------
+# R40-06 (#342) — the COMPLETE grant identity validation, the binding
+# revision carried (and compared) at every seam, and the EXPLICIT
+# pre-revision version adapter. Sameness of a binding is never inferred
+# from a locator string alone.
+# ----------------------------------------------------------------------
+
+
+def _grant_document(**overrides: object) -> dict:
+    """A well-formed persisted grant document for THIS subject/world."""
+    from datetime import datetime, timedelta, timezone
+
+    document: dict = {
+        "schema": OPERATION_GRANT_SCHEMA,
+        "grant_id": "g-r40-06",
+        "work_id": "run-r40-06",
+        "subject": SUBJECT.subject_id(),
+        "provider": "anthropic-gateway",
+        "credential_ref": ENV_REF,
+        "binding_revision": 1,
+        "attempt_generation": 2,
+        "delivery_mode": DELIVERY_MODE_RUNNER_REDEMPTION,
+        "operation": PERMITTED_OPERATION_REDEMPTION,
+        "redemption_deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    document.update(overrides)
+    return document
+
+
+class TestGrantIdentityValidation:
+    """The validation entrypoint the redemption seam calls on the ONE
+    authoritative copy — every wrong field is a typed refusal naming
+    the field, BEFORE any broker invocation."""
+
+    def test_a_well_formed_document_validates_and_loads(self):
+        document = _grant_document()
+        grant = validate_operation_grant_document(
+            document,
+            work_id="run-r40-06",
+            provider="anthropic-gateway",
+            credential_ref=ENV_REF,
+            attempt_generation=2,
+            subject_id=SUBJECT.subject_id(),
+        )
+        assert grant == CredentialOperationGrant.from_document(document)
+
+    def test_a_wrong_field_is_a_typed_refusal_naming_the_field(self):
+        """Schema tag, operation, delivery mode, work, canonical subject,
+        internal generation, route and ref — each refused on its own."""
+        cases = (
+            ("schema", {"schema": "forge.credential.operation-grant/2"}),
+            ("operation", {"operation": "credential-exfiltration"}),
+            ("delivery_mode", {"delivery_mode": DELIVERY_MODE_GITHUB_NATIVE}),
+            ("work_id", {"work_id": "run-other"}),
+            ("subject", {"subject": OTHER_SUBJECT.subject_id()}),
+            ("attempt_generation", {"attempt_generation": 7}),
+            ("provider", {"provider": "openai"}),
+            ("credential_ref", {"credential_ref": "vault:kv/other#1"}),
+        )
+        for field, mutation in cases:
+            with pytest.raises(CredentialRefusal, match="grant_invalid_field") as caught:
+                validate_operation_grant_document(
+                    _grant_document(**mutation),
+                    work_id="run-r40-06",
+                    provider="anthropic-gateway",
+                    credential_ref=ENV_REF,
+                    attempt_generation=2,
+                    subject_id=SUBJECT.subject_id(),
+                )
+            assert caught.value.detail["field"] == field
+            assert caught.value.detail["observability"] == "credential.grant_invalid_field"
+
+    def test_a_malformed_document_keeps_its_own_typed_refusal(self):
+        with pytest.raises(CredentialRefusal, match="operation_grant_invalid"):
+            validate_operation_grant_document(
+                _grant_document(redemption_deadline="not-a-time"),
+                work_id="run-r40-06",
+                provider="anthropic-gateway",
+            )
+
+
+class TestGrantRevisionVersionAdapter:
+    """The EXPLICIT adapter for pre-revision grant documents: an absent
+    revision is the named unknown marker — never an inferred pass, never
+    a coerced guess; a present-but-malformed revision stays typed."""
+
+    def test_an_absent_revision_loads_as_the_explicit_unknown_marker(self):
+        document = _grant_document()
+        del document["binding_revision"]
+        grant = CredentialOperationGrant.from_document(document)
+        assert grant.binding_revision == BINDING_REVISION_UNKNOWN == 0
+        # A real revision can never be 0 (the first bind is revision 1),
+        # so the marker cannot collide with a live generation.
+        assert _bound_registry().binding_for(SUBJECT, "anthropic-gateway").revision == 1
+
+    def test_a_present_but_malformed_revision_stays_a_typed_refusal(self):
+        with pytest.raises(CredentialRefusal, match="operation_grant_invalid") as caught:
+            CredentialOperationGrant.from_document(_grant_document(binding_revision="two"))
+        assert "non-integer binding_revision" in str(caught.value.detail["problem"])
+
+
+class TestBindingRevisionComparison:
+    """R40-06: the revision the authorization recorded vs the LIVE
+    binding — same-ref rebind is a NEW decision; the ref string alone
+    never carries an old authorization across it."""
+
+    @staticmethod
+    def _resolve(registry: ProjectCredentialRegistry, presented_revision: int | None):
+        return resolve_dispatch_credential(
+            registry,
+            subject=SUBJECT,
+            provider="anthropic-gateway",
+            presented_ref=ENV_REF,
+            presented_revision=presented_revision,
+        )
+
+    def test_the_same_revision_verifies_equal_and_passes(self):
+        proof = self._resolve(_bound_registry(), 1)
+        assert proof.binding_revision == 1
+
+    def test_a_same_ref_rebind_refuses_typed_with_the_event_named(self):
+        registry = _bound_registry()
+        # Revoke, then REGRANT at the SAME locator: the ref string is
+        # unchanged, the revision is 2 — a NEW binding decision.
+        registry.revoke(SUBJECT, "anthropic-gateway", revoked_by="ops@a")
+        registry.bind(SUBJECT, "anthropic-gateway", ENV_REF, bound_by="ops@a")
+        with pytest.raises(CredentialRefusal, match="binding_revision_mismatch") as caught:
+            self._resolve(registry, 1)
+        detail = caught.value.detail
+        assert detail["observability"] == "credential.binding_revision_mismatch"
+        assert detail["authorized_binding_revision"] == 1
+        assert detail["live_binding_revision"] == 2
+        assert detail["credential_ref"] == ENV_REF  # the ref MATCHED — the revision did not
+
+    def test_a_rebind_to_a_different_ref_keeps_the_rotation_reasons(self):
+        """The changed-ref case is SEPARATE: the presented ref no longer
+        matches, so the typed rotation reasons own the refusal."""
+        registry = _bound_registry()
+        registry.bind(SUBJECT, "anthropic-gateway", "vault:kv/eng#42", bound_by="ops@a")
+        with pytest.raises(CredentialRefusal, match="rotated"):
+            resolve_dispatch_credential(
+                registry,
+                subject=SUBJECT,
+                provider="anthropic-gateway",
+                presented_ref=ENV_REF,
+                presented_revision=1,
+            )
+
+    def test_the_explicit_unknown_revision_grandfathers_one_named_branch(self):
+        """The adapter's marker skips the comparison — the documented
+        pre-revision grandfather, never an inferred pass: the marker is
+        the ONLY value that does."""
+        registry = _bound_registry()
+        registry.revoke(SUBJECT, "anthropic-gateway", revoked_by="ops@a")
+        registry.bind(SUBJECT, "anthropic-gateway", ENV_REF, bound_by="ops@a")
+        assert self._resolve(registry, BINDING_REVISION_UNKNOWN).binding_revision == 2
+
+    def test_no_presented_revision_skips_the_axis(self):
+        """Callers that predate the axis (plain dispatch staging) verify
+        exactly as they always did."""
+        assert self._resolve(_bound_registry(), None).binding_revision == 1

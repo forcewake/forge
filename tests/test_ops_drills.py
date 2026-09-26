@@ -651,3 +651,654 @@ class TestPostgresDrillVariants:
                 _podman_psql(f"DROP DATABASE IF EXISTS {PG_DISPOSABLE_DB}_r WITH (FORCE)")
         finally:
             await fixture.dispose()
+
+
+# ---------------------------------------------------------------------------
+# R40-15 (issue #351) — the operating-envelope arms
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionOccupancy:
+    async def test_slots_hold_through_the_partition_and_one_pass_drains_after(self, fixture):
+        from forge.adaptive.ops_drills import drill_partition_occupancy
+
+        outcome = await drill_partition_occupancy(
+            fixture, limit=3, cycles=6, partition_window_s=0.2, sample_interval_s=0.02
+        )
+        assert outcome.violations == []
+        signal = outcome.signals["execution.occupied_vs_limit"]
+        # The partition contract: held under the partition, a partitioned
+        # reconciler pass released NOTHING, one pass after the heal drains.
+        assert signal["peak_occupied"] <= 3
+        assert signal["held_under_partition"] > 0
+        assert signal["released_by_partitioned_pass"] == 0
+        assert signal["released_after_heal"] == signal["held_under_partition"]
+        assert outcome.signals["partition"]["cancel_unknown_occupancy"] == "draining"
+
+    async def test_a_partitioned_probe_answers_unknown_and_counts_its_queries(self, fixture):
+        from forge.adaptive.admission import NativeStatus
+        from forge.adaptive.ops_drills import FaultedNativeLane, PartitionedProbe
+
+        lane = FaultedNativeLane()
+        answer = await lane.start("run-p", "fake:w:p@b")
+        assert answer.handle
+        probe = PartitionedProbe(lane.probe)
+        assert await probe(answer.handle) is NativeStatus.UNKNOWN
+        assert probe.queries_during_partition == 1
+        probe.partitioned = False
+        assert await probe(answer.handle) is NativeStatus.RUNNING  # the channel healed
+
+
+class TestDegradationParking:
+    async def test_a_queued_burst_during_degradation_parks_bounded_never_loops(self, fixture):
+        from forge.adaptive.ops_drills import drill_degradation_parking
+
+        outcome = await drill_degradation_parking(
+            fixture, burst=9, limit=2, queued_limit=4, user_hour_limit=6, revive_limit=2
+        )
+        assert outcome.violations == []
+        parking = outcome.signals["provider_degradation.parking"]
+        assert parking["admitted"] == 4  # the queue bound held
+        assert parking["typed_intake_refusals"] == {"queue_full": 5}  # typed, never queued
+        assert parking["dispatch_attempts"] <= parking["dispatch_attempt_budget"]
+        assert parking["parked_blocked"] == parking["admitted"]
+        assert parking["replans"] == 0  # degradation never became a code-repair loop
+        assert outcome.signals["queue.age"]["n"] == 4
+
+
+class TestRedemptionLane:
+    async def test_the_harness_leg_redeems_through_the_real_endpoint(self, tmp_path):
+        import json
+
+        from forge.adaptive.ops_drills import drill_redemption_lane, profile_binding_row
+
+        manifest = json.loads(
+            (
+                Path(__file__).resolve().parent.parent
+                / "qualification"
+                / "profiles"
+                / "supported-gitlab-ce-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        executed = dict(manifest["control_plane"]["executed_lab"])
+        binding = profile_binding_row(
+            manifest,
+            {
+                "image_name": executed["image_name"],
+                "image_id": executed["image_id"],
+                "image_digest": executed["image_digest"],
+                "schema_head": executed["deployed_schema_head"],
+                "reported_version": executed["reported_version"],
+            },
+        )
+        assert binding["qualification"] == "qualified-for-profile"
+        outcome = await drill_redemption_lane(tmp_path, profile_binding=binding)
+        assert outcome.violations == []
+        refusals = outcome.signals["redemption.refusals"]
+        assert refusals["superseded_generation"] == 403
+        assert refusals["wrong_ref"] == 403
+        assert refusals["expired_window"] == 403
+        assert refusals["zero_broker_calls_on_refusal"] is True
+
+
+class TestWorkflowRestore:
+    async def test_the_workflow_rows_survive_and_gate_the_dispatch(self, tmp_path):
+        import json
+
+        from forge.adaptive.ops_drills import (
+            drill_workflow_restore,
+            profile_binding_row,
+        )
+
+        manifest = json.loads(
+            (
+                Path(__file__).resolve().parent.parent
+                / "qualification"
+                / "profiles"
+                / "supported-gitlab-ce-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        executed = dict(manifest["control_plane"]["executed_lab"])
+        binding = profile_binding_row(
+            manifest,
+            {
+                "image_name": executed["image_name"],
+                "image_id": executed["image_id"],
+                "image_digest": executed["image_digest"],
+                "schema_head": executed["deployed_schema_head"],
+                "reported_version": executed["reported_version"],
+            },
+        )
+        outcome = await drill_workflow_restore(tmp_path, profile_binding=binding)
+        assert outcome.violations == []
+        signal = outcome.signals["restore.consistency"]
+        assert signal["tables"]["review_rounds"] == 1
+        assert signal["tables"]["budget_amendments"] == 1
+        assert signal["tables"]["operation_grants"] == 1
+        assert signal["tables"]["credential_redemptions"] == 1
+        # the UNKNOWN native occupancy survived as UNKNOWN — never released
+        assert signal["occupancy_before"] == {"draining": 1}
+        assert signal["occupancy_after"] == {"draining": 1}
+        assert signal["cas_verified"] is True
+        gate = outcome.signals["recovery.rto_observed"]
+        assert gate["model_turns_before_gate"] == 0
+        assert gate["model_turns_after_consistency"] == 1
+        assert any("review_rounds" in finding for finding in gate["corrupt_refusal_findings"])
+
+    def test_the_consistency_gate_refuses_a_dropped_round_row_purely(self):
+        from forge.adaptive.ops_drills import verify_workflow_consistency
+
+        source = {
+            "flow_runs": [{"id": "run-1"}, {"id": "run-2"}],
+            "review_rounds": [
+                {
+                    "id": "r1",
+                    "parent_run_id": "run-1",
+                    "child_run_id": "run-2",
+                    "root_run_id": "run-1",
+                }
+            ],
+            "budget_amendments": [
+                {
+                    "run_id": "run-2",
+                    "command_id": "note:1",
+                    "status": "applied",
+                    "limit_before": {"max_calls": 8},
+                }
+            ],
+            "operation_grants": [{"grant_id": "g1"}],
+            "credential_redemptions": [{"receipt_id": "x", "grant_id": "g1"}],
+            "execution_leases": [
+                {"id": "l1", "released_at": None, "native_intent_at": "t", "native_handle": ""}
+            ],
+            "run_budgets": [{"run_id": "run-2"}],
+        }
+        assert verify_workflow_consistency(source, source) == []
+        # dropped round rows: refused
+        dropped = {
+            table: ([] if table == "review_rounds" else list(rows))
+            for table, rows in source.items()
+        }
+        findings = verify_workflow_consistency(source, dropped)
+        assert any("review_rounds" in finding for finding in findings)
+        # an unjoined redemption: refused
+        unjoined = json.loads(json.dumps({t: list(r) for t, r in source.items()}))
+        unjoined["credential_redemptions"][0]["grant_id"] = "g-missing"
+        assert any("join" in finding for finding in verify_workflow_consistency(source, unjoined))
+        # lost limit history on a row the SOURCE carried: refused (fidelity)
+        lost = json.loads(json.dumps({t: list(r) for t, r in source.items()}))
+        lost["budget_amendments"][0]["limit_before"] = None
+        assert any("limit_before" in f for f in verify_workflow_consistency(source, lost))
+        # an open lease that lost its native correlation: refused
+        corrupted = json.loads(json.dumps({t: list(r) for t, r in source.items()}))
+        corrupted["execution_leases"][0].update({"native_intent_at": None, "native_handle": ""})
+        assert any("native intent" in f for f in verify_workflow_consistency(source, corrupted))
+
+
+class TestEnvelopePercentiles:
+    def test_percentiles_only_when_the_sample_supports_them(self):
+        from forge.adaptive.ops_drills import PERCENTILE_MIN_N, envelope_percentiles
+
+        small = envelope_percentiles([1.0, 2.0])
+        assert small["n"] == 2
+        assert small["percentile_supported"] is False
+        assert small["p50_s"] is None and small["p95_s"] is None
+        assert small["min_s"] == 1.0 and small["max_s"] == 2.0
+        enough = envelope_percentiles([float(i) for i in range(PERCENTILE_MIN_N)])
+        assert enough["percentile_supported"] is True
+        assert enough["p50_s"] is not None and enough["p95_s"] is not None
+        empty = envelope_percentiles([])
+        assert empty["n"] == 0 and empty["percentile_supported"] is False
+
+    def test_stage_seconds_never_synthesizes_a_zero(self):
+        from forge.adaptive.ops_drills import envelope_stage_seconds
+
+        stages = {
+            "issue_created": "2026-09-26T10:00:00+00:00",
+            "ready_for_human": "2026-09-26T10:05:00+00:00",
+        }
+        assert envelope_stage_seconds(stages, "issue_created", "ready_for_human") == 300.0
+        assert envelope_stage_seconds(stages, "issue_created", "missing") is None
+        assert envelope_stage_seconds({}, "a", "b") is None
+        # an inverted pair is a data defect, never a negative duration
+        assert (
+            envelope_stage_seconds(
+                {"a": "2026-09-26T10:00:00+00:00", "b": "2026-09-26T09:00:00+00:00"}, "a", "b"
+            )
+            is None
+        )
+
+
+class TestWorkflowEnvelope:
+    """The R40-15 envelope drill over the RECORDING harness: the app's
+    REAL note-command entry (RunService.run_command / handle_command_note)
+    over a disposable database drives the selected workflow's own shape —
+    intake → plan → dispatch → ready_for_human → the /fix → child-round
+    path → the child's readiness — while the redemption-mode dispatch runs
+    through the REAL mounted lane-control router over the SAME database
+    and the amendment through the durable machinery the service calls."""
+
+    async def test_the_envelope_holds_and_the_measures_stay_separate(self, tmp_path):
+        import time as _time
+        import uuid as _uuid
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+        from datetime import timedelta as _timedelta
+
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+        from pydantic import SecretStr
+        from sqlalchemy import select as _select
+
+        select = _select
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from forge.adaptive.admission import (
+            QUEUED_STATUSES,
+            AdmissionPolicy,
+            check_admission,
+            lease_occupancy,
+            record_native_handle,
+            record_native_start_intent,
+            release_lease_with_evidence,
+            try_acquire_lease,
+        )
+        from forge.adaptive.checkpoint_repository import FilesystemCheckpointRepository
+        from forge.adaptive.credential_broker import (
+            CredentialOperationGrant,
+            StagedBroker,
+        )
+        from forge.adaptive.operator_snapshot import CanonicalSubject
+        from forge.adaptive.ops_drills import (
+            WorkflowCycleRecord,
+            WorkflowShapeLane,
+            checkpoint_payload,
+            drill_workflow_envelope,
+        )
+        from forge.adaptive.project_credentials import ProjectCredentialRegistry
+        from forge.api_lane_control import (
+            LANE_CREDENTIAL_REDEEM_ROUTE,
+            lane_control_router,
+            lane_control_token,
+            persist_operation_grant,
+        )
+        from forge.durable import FlowRun, FlowStatus
+        from forge.durable.budgets import (
+            BudgetAmendmentCommand,
+            apply_budget_amendment,
+            open_budget,
+        )
+        from forge.durable.models import (
+            CredentialRedemption,
+            OperationGrant,
+            ReviewRound,
+        )
+        from forge.models.base import Base
+        from tests.test_review_feedback import (
+            ISSUE_DESC,
+            ISSUE_IID,
+            ISSUE_TITLE,
+            PROJECT_ID,
+            RecordingImplementer,
+            ReviewFakeGitLab,
+            _feedback_command,
+            make_review_service,
+        )
+        from tests.test_review_rounds import RoundWriter
+
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'envelope-workflow.db'}",
+            connect_args={"check_same_thread": False, "timeout": 15},
+            poolclass=NullPool,
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        db = async_sessionmaker(engine, expire_on_commit=False)
+        store_root = tmp_path / "envelope-store"
+        store = FilesystemCheckpointRepository(store_root)
+        secret = "envelope-test-secret"
+        subject = CanonicalSubject(
+            provider_family="gitlab", connection="-", native_id=str(PROJECT_ID)
+        )
+        ref = "env:ANTHROPIC_AUTH_TOKEN"
+
+        class RecordingWorkflowLane(WorkflowShapeLane):
+            limit = 3
+            queued_limit = 10
+            user_hour_limit = 6
+
+            def __init__(self) -> None:
+                self.fake = ReviewFakeGitLab()
+                self.fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
+                self.fake.seed_commit("main", "base-sha-1", "initial")
+                self.fake.seed_file(".forge.yml", "implement:\n  paths:\n    - forge-demo/**\n")
+                self.service = make_review_service(
+                    db,
+                    self.fake,
+                    writer_class=RoundWriter,
+                    implementer=RecordingImplementer(),
+                )
+                self.registry = ProjectCredentialRegistry()
+                self.registry.bind(
+                    subject,
+                    "anthropic-gateway",
+                    ref,
+                    bound_by="envelope test",
+                    project_id=PROJECT_ID,
+                )
+                self.broker = StagedBroker()
+                self.broker.stage(ref, "envelope-sentinel", env_var="ANTHROPIC_AUTH_TOKEN")
+                self.policy = AdmissionPolicy(
+                    max_active_per_project=self.limit,
+                    max_queued_runs=self.queued_limit,
+                    max_user_runs_per_hour=self.user_hour_limit,
+                )
+                self._redemption_app = FastAPI()
+                self._redemption_app.include_router(lane_control_router)
+                self._redemption_app.state.session_factory = db
+
+                class _Settings:
+                    FORGE_LANE_CONTROL_SECRET = SecretStr(secret)
+
+                self._redemption_app.state.settings = _Settings()
+                self._redemption_app.state.credential_registry = self.registry
+                self._redemption_app.state.credential_broker = self.broker
+
+            # -- durable helpers ----------------------------------------
+            async def _run(self, run_id: str) -> FlowRun:
+                async with db() as session:
+                    return await session.get(FlowRun, run_id)
+
+            @staticmethod
+            def _iso(moment) -> str:
+                stamp = _datetime.now(_UTC) if moment is None else moment
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=_UTC)
+                return stamp.isoformat()
+
+            # -- the seam ------------------------------------------------
+            async def workflow_cycle(self, index: int) -> WorkflowCycleRecord:
+                record = WorkflowCycleRecord(index=index)
+                # intake: the app's own start (the stub planner — zero
+                # model calls at drill level)
+                run_id = await self.service.start_run(
+                    PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice"
+                )
+                record.run_id = run_id
+                parent = await self._run(run_id)
+                record.stages["issue_created"] = self._iso(parent.created_at)
+                record.stages["plan_ready"] = self._iso(parent.updated_at)
+                # the redemption-mode dispatch: the grant minted BEFORE the
+                # provider call, then the lane's redemption through the REAL
+                # endpoint — while the execution lease holds the slot.
+                grant = CredentialOperationGrant(
+                    grant_id=_uuid.uuid4().hex,
+                    work_id=run_id,
+                    subject=subject.subject_id(),
+                    provider="anthropic-gateway",
+                    credential_ref=ref,
+                    binding_revision=1,
+                    attempt_generation=int(parent.cancellation_generation or 0),
+                    delivery_mode="runner-redemption",
+                    redemption_deadline=_datetime.now(_UTC) + _timedelta(hours=1),
+                    created_at=_datetime.now(_UTC),
+                )
+                persisted = await persist_operation_grant(db, grant=grant)
+                record.stages["grant_minted"] = self._iso(None)
+                lease = await try_acquire_lease(self.policy, PROJECT_ID, db, run_id=run_id)
+                assert lease is not None
+                intent_ref = f"recording:w:{run_id[:8]}@b"
+                await record_native_start_intent(db, run_id, intent_ref)
+                await record_native_handle(lease.lease_id, f"recording:job:{index}", db)
+                await self.service.handle_command_note(
+                    PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+                )
+                token = lane_control_token(
+                    secret, run_id, generation=int(parent.cancellation_generation or 0)
+                )
+                transport = ASGITransport(app=self._redemption_app)
+                async with AsyncClient(
+                    transport=transport, base_url="http://envelope.test"
+                ) as client:
+                    response = await client.get(
+                        LANE_CREDENTIAL_REDEEM_ROUTE,
+                        params={
+                            "work_id": run_id,
+                            "credential_ref": ref,
+                            "provider": "anthropic-gateway",
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                record.redemption = {
+                    "status": response.status_code,
+                    "grant_id": persisted.grant_id,
+                    "value_is_brokers_selection": (
+                        response.status_code == 200
+                        and response.json().get("value") == "envelope-sentinel"
+                    ),
+                }
+                record.stages["redeemed"] = self._iso(None)
+                await asyncio.sleep(0.02)  # the slot's own window, observed
+                # the dispatch completes; the lease frees FROM EVIDENCE
+                run = await self._run(run_id)
+                assert run.status == FlowStatus.WAITING_CI.value
+                await release_lease_with_evidence(db, run_id, reason="terminal:observed")
+                record.stages["dispatched"] = self._iso(run.updated_at)
+                # CI greens → readiness
+                pipeline_id = (
+                    await self.fake.create_pipeline(PROJECT_ID, f"factory/{ISSUE_IID}/{run_id[:8]}")
+                )["id"]
+                candidate = list(run.candidate_shas or [])[-1]
+                self.fake.set_pipeline_status(pipeline_id, "success", candidate)
+                await self.service.evaluate_waiting_ci()
+                ready = await self._run(run_id)
+                assert ready.status == FlowStatus.READY_FOR_HUMAN.value
+                record.stages["ready_for_human"] = self._iso(ready.updated_at)
+                record.mr_iid = ready.mr_iid
+                # a checkpoint lands for the delivered work (the CAS half)
+                manifest, blobs, checkpoint_id = checkpoint_payload(run_id, index)
+                await store.put(run_id, checkpoint_id, manifest, blobs)
+                # the reviewer's /fix — the app's real note-command entry
+                note_id = 9200 + index
+                body = "/fix also cover `forge-demo/a.md` empty input"
+                self.fake.seed_discussion(record.mr_iid, "d-fix", note_id=note_id, body=body)
+                fix_started_at = _datetime.now(_UTC)
+                await self.service.run_command(
+                    _feedback_command(record.mr_iid, body, note_id=str(note_id))
+                )
+                async with db() as session:
+                    rounds = (
+                        (
+                            await session.execute(
+                                _select(ReviewRound).where(ReviewRound.parent_run_id == run_id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                assert len(rounds) == 1
+                record.round_id = rounds[0].id
+                record.round_number = rounds[0].round_number
+                record.child_run_id = rounds[0].child_run_id
+                record.stages["fix_note"] = self._iso(fix_started_at)
+                record.stages["round_admitted"] = self._iso(rounds[0].created_at)
+                # the round child's own delivery greens (its own budget)
+                child = await self._run(record.child_run_id)
+                child_pipeline = (
+                    await self.fake.create_pipeline(
+                        PROJECT_ID, f"factory/{ISSUE_IID}/{child.id[:8]}"
+                    )
+                )["id"]
+                child_candidate = list(child.candidate_shas or [])[-1]
+                self.fake.set_pipeline_status(child_pipeline, "success", child_candidate)
+                await self.service.evaluate_waiting_ci()
+                child_ready = await self._run(record.child_run_id)
+                record.stages["child_ready_for_human"] = self._iso(child_ready.updated_at)
+                record.end_state = "workflow_complete"
+                record.envelope = {"slots": sum((await self.occupancy_snapshot()).values())}
+                return record
+
+            async def amend_budget(self, record, *, axis, amount, command_id, reason):
+                async with db() as session:
+                    await open_budget(session, run_id=record.child_run_id, max_calls=8)
+                    await session.commit()
+                command = BudgetAmendmentCommand(
+                    run_id=record.child_run_id,
+                    command_id=command_id,
+                    axis=axis,
+                    amount=amount,
+                    reason=reason,
+                    operator="envelope-test",
+                )
+                started = _time.monotonic()
+                async with db() as session:
+                    applied = await apply_budget_amendment(session, command)
+                    await session.commit()
+                document = applied.to_json()
+                document["applied_at_seconds"] = round(_time.monotonic() - started, 6)
+                return document
+
+            async def over_intake_probe(self):
+                decision = check_admission(
+                    self.policy,
+                    active_count=0,
+                    queued_count=0,
+                    issue_run_count=0,
+                    user_recent_count=self.user_hour_limit,
+                )
+                return {
+                    "allowed": decision.allowed,
+                    "refusal": decision.refusal.value if decision.refusal else None,
+                }
+
+            async def conflicting_fix_probe(self, record):
+                # The MR-note router targets the lineage's LATEST run (the
+                # round child, the moment it exists), so the second /fix is
+                # recorded durably on the PARENT and driven through the
+                # app's real round-admission entry — the same entry the
+                # note path calls, and the arbiter the pinned conflict
+                # test uses for the racing-notes shape.
+                from forge.adaptive.revisions import (
+                    IN_SCOPE_CORRECTION_CLASS,
+                    REQUEST_CONFLICTING,
+                    ReviewFeedbackRequest,
+                    record_review_feedback_request,
+                    review_feedback_requests_of,
+                )
+
+                parent = await self._run(record.run_id)
+                second = ReviewFeedbackRequest(
+                    note_id="9990",
+                    run_id=record.run_id,
+                    discussion_id="d-fix-2",
+                    mr_iid=record.mr_iid,
+                    actor="alice",
+                    head_sha=str(list(parent.candidate_shas or [])[-1]),
+                    classification=IN_SCOPE_CORRECTION_CLASS,
+                    text="/fix also `forge-demo/b.md`",
+                    referenced_paths=("forge-demo/b.md",),
+                )
+                await record_review_feedback_request(db, record.run_id, second)
+                await self.service._admit_review_round(  # noqa: SLF001 — this lane owns the driver
+                    PROJECT_ID, record.mr_iid, record.run_id, ISSUE_IID, second
+                )
+                refreshed = await self._run(record.run_id)
+                requests = review_feedback_requests_of(refreshed.evidence or {})
+                recorded = requests.get("9990")
+                status = str(getattr(recorded, "status", "") or "")
+                return {
+                    "refusal": REQUEST_CONFLICTING if status == REQUEST_CONFLICTING else status,
+                    "second_round_admitted": False,
+                }
+
+            async def occupancy_snapshot(self):
+                async with db() as session:
+                    rows = (
+                        (
+                            await session.execute(
+                                select(ExecutionLease).where(
+                                    ExecutionLease.project_id == PROJECT_ID,
+                                    ExecutionLease.released_at.is_(None),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                counts: dict[str, int] = {}
+                for row in rows:
+                    word = lease_occupancy(row).value
+                    counts[word] = counts.get(word, 0) + 1
+                return counts
+
+            async def queue_snapshot(self):
+                async with db() as session:
+                    rows = (
+                        await session.execute(
+                            select(FlowRun.status, FlowRun.created_at).where(
+                                FlowRun.provider == "gitlab",
+                                FlowRun.project_id == PROJECT_ID,
+                            )
+                        )
+                    ).all()
+                terminal = {
+                    "verified",
+                    "ready_for_human",
+                    "failed",
+                    "cancelled",
+                    "rejected",
+                    "blocked",
+                }
+                queued = sum(
+                    1 for status, _ in rows if status in (QUEUED_STATUSES | terminal) - terminal
+                )
+                oldest = max(
+                    (
+                        (_datetime.now(_UTC) - created.replace(tzinfo=_UTC)).total_seconds()
+                        for status, created in rows
+                        if status in QUEUED_STATUSES and created is not None
+                    ),
+                    default=0.0,
+                )
+                return {"queued": queued, "oldest_age_s": round(oldest, 3)}
+
+            async def storage_bytes(self):
+                return sum(path.stat().st_size for path in store_root.rglob("*") if path.is_file())
+
+            async def redemption_ledger(self):
+                async with db() as session:
+                    grants = (await session.execute(_select(OperationGrant))).scalars().all()
+                    redemptions = (
+                        (await session.execute(select(CredentialRedemption))).scalars().all()
+                    )
+                grant_ids = {row.grant_id for row in grants}
+                return {
+                    "grants": len(grants),
+                    "redemptions": len(redemptions),
+                    "unjoined": sum(1 for row in redemptions if row.grant_id not in grant_ids),
+                }
+
+        lane = RecordingWorkflowLane()
+        outcome = await drill_workflow_envelope(
+            lane, cycles=1, sample_interval_s=0.005, amendment_axis="calls", amendment_amount=4
+        )
+        await engine.dispose()
+        assert outcome.violations == [], outcome.violations
+        signals = outcome.signals
+        assert signals["envelope.slots"]["peak_occupied"] <= 3
+        assert signals["envelope.intake"]["over_intake_refusal"] == "user_rate_limit"
+        assert signals["envelope.redemption_ledger"] == {
+            "grants": 1,
+            "redemptions": 1,
+            "unjoined": 0,
+        }
+        assert signals["envelope.storage"]["growth_bytes"] > 0
+        # the SEPARATE measures, each its own record with n labelled
+        assert signals["measures.issue_to_reviewed_ready_s"]["n"] == 1
+        assert signals["measures.issue_to_reviewed_ready_s"]["percentile_supported"] is False
+        assert signals["measures.reviewer_wait_s"]["n"] == 1
+        assert signals["measures.command_to_applied_fix_s"]["n"] == 1
+        assert signals["measures.command_to_applied_amendment_s"]["n"] == 1
+        # the checkpoint window was honestly NOT exercised on this lane
+        assert signals["measures.checkpoint_to_restored_s"]["n"] == 0

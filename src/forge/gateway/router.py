@@ -21,7 +21,12 @@ from forge.adaptive.command_router import (
     adaptive_command_set,
     route_adaptive_command_note,
 )
+from forge.adaptive.revisions import parse_review_feedback_note
 from forge.durable.models import FlowRun, StepRun
+from forge.gateway.feedback import (
+    REVIEW_FEEDBACK_NOTE_COMMANDS as _REVIEW_FEEDBACK_NOTE_COMMANDS,
+    review_feedback_command_set,
+)
 from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
@@ -49,6 +54,15 @@ _RUN_COMMANDS = frozenset(
     {"/implement", "/go", "/cancel", "/retry", "/security", "/status", "/why-blocked", "/reconcile"}
 )
 
+#: R40-01 (#337): the review-feedback verbs (``/fix``/``/ask``) join the
+#: parsed set ONLY while ``FORGE_REVIEW_FEEDBACK_ENABLED`` is on — with the
+#: default OFF the verbs are not recognized at all (zero routing). They are
+#: NOT classic run commands: an MR-discussion-bound surface served by the
+#: ``review_feedback`` service branch, never issue-bound. The module-level
+#: alias is the capability manifest's binding proof (the
+#: ``_ADAPTIVE_NOTE_COMMANDS`` pattern — a removed binding breaks the
+#: manifest's claim instead of silently passing).
+
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     """Detect note events that belong to the durable run loop (M1 + v0.7).
@@ -57,6 +71,11 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     - ``<mention> /go <run-id>`` on an issue → ``handle_command_note``.
     - ``<mention> /security`` on an issue **or MR** → ``security_triage``
       (the provider-neutral durable triage step, v0.7).
+    - ``/fix`` / ``/ask`` on an MR note → ``review_feedback`` (R40-01,
+      behind ``FORGE_REVIEW_FEEDBACK_ENABLED``): a reviewer's bounded
+      correction request or clarification, served by the same durable
+      dispatch. A malformed body is the typed ``review_feedback_refused``
+      ingress refusal, never a run command.
 
     Respects ``FORGE_MENTION_PATTERN``. Returns the run_command metadata dict,
     or None when the event should take its legacy path.
@@ -75,7 +94,9 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     # NXT-10: the adaptive control verbs (/pause /resume /steer /answer) join
     # the parsed set ONLY while FORGE_ADAPTIVE_COMMANDS_ENABLED is on — with
     # the default OFF the verbs are not recognized at all (zero routing).
-    commands = _RUN_COMMANDS | adaptive_command_set()
+    # R40-01: the review-feedback verbs (/fix /ask) follow the same pattern
+    # behind FORGE_REVIEW_FEEDBACK_ENABLED.
+    commands = _RUN_COMMANDS | adaptive_command_set() | review_feedback_command_set()
     mention = extract_mention(note_text, mention_pattern, extra_commands=commands)
 
     slash_command: str | None = None
@@ -92,9 +113,20 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         return None
 
     on_issue = event.issue is not None
-    if not on_issue and slash_command != "/security":
+    feedback_command = slash_command in _REVIEW_FEEDBACK_NOTE_COMMANDS
+    feedback_mr_iid: int | None = None
+    if feedback_command:
+        if on_issue or event.merge_request is None:
+            # R40-01: review feedback lives on MR discussions — the Draft MR
+            # the candidate opened. An issue-bound or commit/snippet-bound
+            # /fix//ask is not a run command at all (zero routing, the legacy
+            # path owns it).
+            return None
+        feedback_mr_iid = event.merge_request.iid
+    elif not on_issue and slash_command != "/security":
         # Gate notes are posted on issues; MR notes keep the legacy paths —
-        # except /security, which is MR/issue/PR-neutral by contract.
+        # except /security, which is MR/issue/PR-neutral by contract, and
+        # the review-feedback verbs (R40-01), which are MR-bound BY design.
         return None
 
     common = {
@@ -106,6 +138,33 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         # revival attempt's idempotency (a redelivered webhook is a no-op).
         "note_id": event.object_attributes.id,
     }
+    if feedback_command:
+        # R40-01 (#337): the reviewer's comment ON the Draft MR — the same
+        # durable run-command dispatch /security travels, carrying the note
+        # identity (project + note id — a GitLab note id is unique inside a
+        # project, the logical request identity), the MR and the discussion
+        # the request binds to. The head binding is read LIVE by the service
+        # (the branch head at request time), never trusted from the payload.
+        if parse_review_feedback_note(note_text) is None:
+            # A recognized verb with a malformed body (``/fix`` with no
+            # description): the typed INGRESS refusal. It answers 2xx with
+            # the reason — a 4xx spike would count toward GitLab's hook
+            # auto-disable (4 failures → 24h backoff project-wide) — and it
+            # never becomes a run command, so nothing can activate.
+            return {
+                **common,
+                "command": "review_feedback_refused",
+                "provider": "gitlab",
+                "refusal_reason": "malformed_feedback_command",
+            }
+        return {
+            **common,
+            "command": "review_feedback",
+            "provider": "gitlab",
+            "mr_iid": feedback_mr_iid,
+            "note_text": note_text,
+            "discussion_id": event.object_attributes.discussion_id or "",
+        }
     if slash_command in _ADAPTIVE_NOTE_COMMANDS:
         # NXT-10: the adaptive verbs normalize to ONE command and route to
         # the ControlCommandRouter (approver gate, work-scoped run
@@ -337,10 +396,24 @@ async def _ingest_run_command(
     )
 
     if queue is not None:
+        # R40-01 transport-layer dedup (feedback commands): the per-delivery
+        # UUID GitLab stamps (``X-Gitlab-Event-UUID``). A manual redelivery
+        # carries a NEW uuid, so this layer catches only exact network
+        # replays — the logical layer below (the inbox unique index over the
+        # note identity: command + project + note id) is the authority that
+        # collapses ANY redelivery onto ONE request.
+        delivery_uuid = str(run_command.get("delivery_uuid") or "")
+        is_feedback = run_command.get("command") == "review_feedback"
+        if delivery_uuid and await queue.is_duplicate(f"delivery:{delivery_uuid}"):
+            if is_feedback:
+                logger.info("feedback.duplicate_delivery layer=transport uuid=%s", delivery_uuid)
+            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
         # Content-stable identity: re-delivered note webhooks collapse. This
         # SET-NX check is the fast path only — a false negative still gets
         # caught by the inbox unique index below.
         if await queue.is_duplicate(f"run:{run_command['project_id']}:{note_id}"):
+            if is_feedback:
+                logger.info("feedback.duplicate_delivery layer=logical note=%s", note_id)
             return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
 
     if session_factory is not None:
@@ -647,6 +720,7 @@ async def webhook(
     background_tasks: BackgroundTasks,
     x_gitlab_token: str | None = Header(None),
     x_gitlab_event: str | None = Header(None),
+    x_gitlab_event_uuid: str | None = Header(None),
 ) -> dict[str, Any]:
     """Accept GitLab webhook events."""
     settings = request.app.state.settings
@@ -705,11 +779,42 @@ async def webhook(
     # orchestrator/flow dispatch entirely (they never need an LLM here).
     run_command = _match_run_command(event, settings)
     if run_command is not None:
+        if run_command.get("command") == "review_feedback_refused":
+            # R40-01: the typed ingress refusal for a malformed feedback
+            # verb — a 2xx WITH the reason (a 4xx spike counts toward
+            # GitLab's hook auto-disable: 4 failures → 24h backoff
+            # project-wide), and no run command (nothing can activate).
+            logger.info(
+                "feedback.refusal_reason=%s note=%s project=%s",
+                run_command["refusal_reason"],
+                run_command.get("note_id"),
+                run_command.get("project_id"),
+            )
+            return {
+                "status": "accepted",
+                "event": event.object_kind,
+                "feedback": "refused",
+                "refusal_reason": run_command["refusal_reason"],
+            }
         if run_command.get("command") == "adaptive_control":
             # NXT-10: adaptive control verbs take the mailbox leg, not the
             # durable run-command step path.
             return _ingest_adaptive_control(
                 request, background_tasks, run_command, event.object_kind
+            )
+        if run_command.get("command") == "review_feedback":
+            # R40-01: the transport identity rides the metadata (audit +
+            # transport-layer dedup); the LOGICAL identity stays the note
+            # id — the request, the reply journal and the revision decision
+            # all key on it, so an exact redelivery observes the original
+            # request and never a second paid correction run.
+            run_command = {**run_command, "delivery_uuid": x_gitlab_event_uuid or ""}
+            logger.info(
+                "feedback.ingress_received note=%s project=%s mr=%s delivery=%s",
+                run_command.get("note_id"),
+                run_command.get("project_id"),
+                run_command.get("mr_iid"),
+                x_gitlab_event_uuid or "-",
             )
         return await _ingest_run_command(request, background_tasks, event, run_command)
 

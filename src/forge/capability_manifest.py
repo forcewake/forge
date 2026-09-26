@@ -60,6 +60,7 @@ __all__ = [
     "CLASSIC_OPERATOR_COMMANDS",
     "EVIDENCE_CLASSES",
     "REQUIRED_EVIDENCE",
+    "REVIEW_FEEDBACK_OPERATOR_COMMANDS",
     "TIER_LADDER",
     "TIER_LEGEND",
     "Capability",
@@ -132,6 +133,18 @@ ADAPTIVE_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
     "/answer",
     "/resume",
     "/approve-revision",
+)
+
+#: The review-feedback verbs the GITLAB ingress routes onto the durable
+#: ``review_feedback`` run command (R40-01 / #337) — gated behind
+#: ``FORGE_REVIEW_FEEDBACK_ENABLED`` (default OFF; with the flag off the
+#: verbs are not parsed at all — zero routing). MR-discussion-bound by
+#: design; GitLab is the ONE qualified platform (the capability row's note
+#: carries the same bound). Verified against the gateway command sets by
+#: :func:`ingress_routed_commands`.
+REVIEW_FEEDBACK_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
+    "/fix",
+    "/ask",
 )
 
 
@@ -222,6 +235,40 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         "(adaptive/durable-mailbox owns the Postgres swap), the lane-side "
         "consumer runs only with FORGE_STEERING_ENABLED, and no real-provider "
         "operator→mailbox→lane cycle is recorded yet.",
+    ),
+    Capability(
+        name="operator-commands/review-feedback",
+        tier="production_wiring",
+        entry_point=(
+            "forge.gateway.router._match_run_command (review_feedback branch) "
+            "-> RunService.run_command + forge.runs.reconciler.run_reconciler "
+            "pass — behind FORGE_REVIEW_FEEDBACK_ENABLED (GitLab MR notes "
+            "only)"
+        ),
+        evidence=(
+            "tests/production_entry/test_feedback_ingress.py",
+            "tests/test_review_feedback.py",
+            "tests/test_review_rounds.py",
+        ),
+        commands=REVIEW_FEEDBACK_OPERATOR_COMMANDS,
+        note="R40-01 (#337): /fix and /ask on a GitLab Draft-MR note parse "
+        "into the durable review_feedback run command (the same ingress → "
+        "inbox+step → worker dispatch /security travels), the staged "
+        "correction re-drives through run_reconciler's registered "
+        "evaluate_review_corrections pass, and one logical note identity "
+        "(project + note id; two dedup layers — delivery uuid at ingress, "
+        "the inbox unique index) yields ONE request and at most ONE "
+        "authorized correction start. R40-02 (#338): the SAME verb on a "
+        "ready_for_human delivery admits a LINKED review round (its own "
+        "child work unit, budget and base head; the terminal record is "
+        "never reopened), driven and closed by the registered "
+        "evaluate_review_rounds pass and bounded by "
+        "FORGE_MAX_REVIEW_ROUNDS. Behind "
+        "FORGE_REVIEW_FEEDBACK_ENABLED, default OFF (with the flag off the "
+        "verbs are not parsed at all: zero routing). PLATFORM-SCOPED: "
+        "GitLab MR notes only — the GitHub and Azure ingresses do not parse "
+        "the verbs (parity deliberately unclaimed until one native path is "
+        "qualified).",
     ),
     # ---- batch CI harnesses (the four shipped one-shot drivers) ----
     Capability(
@@ -457,7 +504,11 @@ def ingress_routed_commands() -> frozenset[str]:
     integrity error (doctor fails), never a silent over-claim. The adaptive
     verbs count as routed when ANY gateway still binds them (the per-gateway
     ``_ADAPTIVE_NOTE_COMMANDS`` attributes — a missing binding reads as
-    empty, so unbinding the verb everywhere breaks the row's claim).
+    empty, so unbinding the verb everywhere breaks the row's claim); the
+    review-feedback verbs follow the same rule through
+    ``_REVIEW_FEEDBACK_NOTE_COMMANDS`` (GitLab-only by design — the flag
+    gate is disclosed in the owning row's note, like the adaptive rollout
+    flag).
     """
     from forge.gateway import azure_webhook, github_webhook
     from forge.gateway import router as gateway_router
@@ -472,7 +523,10 @@ def ingress_routed_commands() -> frozenset[str]:
         | getattr(github_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
         | getattr(azure_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
     )
-    return frozenset(classic) | frozenset(adaptive)
+    feedback: frozenset[str] = getattr(
+        gateway_router, "_REVIEW_FEEDBACK_NOTE_COMMANDS", frozenset()
+    )
+    return frozenset(classic) | frozenset(adaptive) | feedback
 
 
 def manifest_problems(

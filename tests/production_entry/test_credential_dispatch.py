@@ -246,10 +246,13 @@ async def persist_grant(
     ref: str,
     subject: CanonicalSubject | None = None,
     provider: str = "anthropic-gateway",
+    binding_revision: int = 1,
 ) -> str:
     """Persist the attempt's operation grant the way the DISPATCH seam
     does (Q39-01) — through the production :func:`persist_operation_grant`,
-    so the lab's evidence shape is the production one. Returns the id."""
+    so the lab's evidence shape is the production one. The binding
+    revision names the generation the dispatch's plan resolved (R40-06
+    mint rule: the grant carries the LIVE revision). Returns the id."""
     from datetime import datetime, timedelta, timezone
 
     from forge.adaptive.credential_broker import CredentialOperationGrant
@@ -262,7 +265,7 @@ async def persist_grant(
         subject=(subject or RUN_SUBJECT).subject_id(),
         provider=provider,
         credential_ref=ref,
-        binding_revision=1,
+        binding_revision=binding_revision,
         attempt_generation=generation,
         delivery_mode="runner-redemption",
         redemption_deadline=now + timedelta(hours=1),
@@ -778,7 +781,13 @@ class TestCD4Rotation:
                 await session.commit()
             # The re-dispatch of the new attempt persists ITS grant (the
             # dispatch seam's own step — Q39-01).
-            await persist_grant(control._session_factory, "run-redeem-1", generation=1, ref=REF_V2)
+            await persist_grant(
+                control._session_factory,
+                "run-redeem-1",
+                generation=1,
+                ref=REF_V2,
+                binding_revision=2,  # the rotated-in generation (R40-06 mint rule)
+            )
 
             # The OLD attempt's token is retired — zero retrievals.
             with pytest.raises(LaneCredentialRedemptionError, match="HTTP 403"):
@@ -1385,7 +1394,13 @@ class TestCD8RotationAtTheBoundary:
                 await session.commit()
             # The re-dispatch of the new attempt persists ITS grant (the
             # dispatch seam's own step — Q39-01).
-            await persist_grant(control._session_factory, LANE_WORK_ID, generation=1, ref=REF_V2)
+            await persist_grant(
+                control._session_factory,
+                LANE_WORK_ID,
+                generation=1,
+                ref=REF_V2,
+                binding_revision=2,  # the rotated-in generation (R40-06 mint rule)
+            )
             new = lane_control_token(PE_LANE_SECRET, LANE_WORK_ID, generation=1)
             renewed_env = TestCD2RunnerRedemption._lane_env(
                 control.base_url, new, ref=REF_V2, generation="1"
@@ -1480,6 +1495,10 @@ def _lying_document(**overrides: Any) -> dict[str, Any]:
         "resolved_version_kind": "fixture",
         "attempt_generation": 0,
         "credential_policy": "compat",
+        # R40-06 (#342): the operation identity + the grant deadline the
+        # typed verification now also checks.
+        "operation": "credential-redemption",
+        "redemption_deadline": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
     }
     document.update(overrides)
     return document
@@ -1574,3 +1593,149 @@ class TestCD9RunnerTypedVerification:
             assert model_endpoint.bearers() == []
         finally:
             lying.stop()
+
+
+# ----------------------------------------------------------------------
+# CD-10 (R40-06 / #342) — the binding-revision axis through the REAL
+# endpoint over real HTTP: a same-ref revoke/regrant (revision 1→2)
+# under a revision-1 grant retrieves NOTHING; the response carries the
+# dispatched operation identity + the grant's absolute deadline; and
+# the runner's typed verification rejects a wrong operation or a wrong
+# binding-revision ANSWER before any vendor client exists.
+# ----------------------------------------------------------------------
+
+
+class TestCD10BindingRevisionIdentity:
+    async def test_the_answer_carries_the_operation_identity_and_the_grant_deadline(
+        self, pe_db, monkeypatch
+    ):
+        """The happy path first: the redemption names the permitted
+        operation and the grant's ABSOLUTE deadline, and the presented
+        expiry is capped at it (the linearization contract's bound)."""
+        from datetime import datetime
+
+        from forge.api_lane_control import lane_control_token
+
+        control, _registry, _broker = await TestCD2RunnerRedemption._lab(pe_db, monkeypatch)
+        try:
+            env = TestCD2RunnerRedemption._lane_env(
+                control.base_url, lane_control_token(PE_LANE_SECRET, "run-redeem-1", generation=0)
+            )
+            record = redeem_lane_credential(env)
+            assert record["operation"] == "credential-redemption"
+            deadline = datetime.fromisoformat(record["redemption_deadline"])
+            assert datetime.fromisoformat(record["expires_at"]) <= deadline
+            assert SECRET_V1 not in json.dumps(record)  # still value-free
+        finally:
+            control.stop()
+
+    async def test_a_same_ref_revoke_regrant_retrieves_nothing(self, pe_db, monkeypatch):
+        """THE R40-06 shape: rebind the SAME ref (revoke → regrant, the
+        revision moves 1→2) while the attempt's grant still records
+        revision 1 — the old authorization does not silently apply to the
+        NEW binding decision. Zero successful retrievals."""
+        from forge.api_lane_control import lane_control_token
+
+        control, registry, _broker = await TestCD2RunnerRedemption._lab(pe_db, monkeypatch)
+        try:
+            registry.revoke(RUN_SUBJECT, "anthropic-gateway", revoked_by="ops@a")
+            regranted = registry.bind(RUN_SUBJECT, "anthropic-gateway", REF_V1, bound_by="ops@a")
+            assert regranted.revision == 2  # a NEW decision at the same locator
+
+            token = lane_control_token(PE_LANE_SECRET, "run-redeem-1", generation=0)
+            env = TestCD2RunnerRedemption._lane_env(control.base_url, token)
+            with pytest.raises(LaneCredentialRedemptionError) as caught:
+                redeem_lane_credential(env)
+            # The lane sees the status class only — never the body.
+            assert "HTTP 403" in str(caught.value)
+            assert await _lane_audit_rows_of(control, "run-redeem-1") == []
+        finally:
+            control.stop()
+
+    async def test_a_regrant_new_attempt_redeems_under_its_own_grant(self, pe_db, monkeypatch):
+        """The recovery half: the operator's new decision is honored the
+        documented way — a NEW attempt whose dispatch mints ITS grant
+        against the live revision redeems; the old attempt's grant never
+        does."""
+        from forge.api_lane_control import lane_control_token
+
+        control, registry, _broker = await TestCD2RunnerRedemption._lab(pe_db, monkeypatch)
+        try:
+            registry.revoke(RUN_SUBJECT, "anthropic-gateway", revoked_by="ops@a")
+            registry.bind(RUN_SUBJECT, "anthropic-gateway", REF_V1, bound_by="ops@a")
+            async with control._session_factory() as session:
+                run = await session.get(FlowRun, "run-redeem-1")
+                run.cancellation_generation = 1
+                await session.commit()
+            await persist_grant(
+                control._session_factory,
+                "run-redeem-1",
+                generation=1,
+                ref=REF_V1,
+                binding_revision=2,  # the mint rule: the LIVE revision
+            )
+            new = lane_control_token(PE_LANE_SECRET, "run-redeem-1", generation=1)
+            env = TestCD2RunnerRedemption._lane_env(control.base_url, new, generation="1")
+            record = redeem_lane_credential(env)
+            assert record["binding_revision"] == 2
+            assert env["ANTHROPIC_AUTH_TOKEN"] == SECRET_V1
+        finally:
+            control.stop()
+
+
+async def _lane_audit_rows_of(control, work_id: str) -> list[dict[str, Any]]:
+    async with control._session_factory() as session:
+        run = await session.get(FlowRun, work_id)
+    return list((run.evidence or {}).get("credential_redemptions") or [])
+
+
+class TestCD10RunnerTypedVerification:
+    """AC-06 extensions: the runner rejects a wrong-operation or
+    wrong-binding-revision ANSWER (HTTP 200!) before any vendor client
+    is constructed — the fake model endpoint asserts ZERO calls."""
+
+    @staticmethod
+    def _lying_lane(model_endpoint, tmp_path, *, document) -> subprocess.CompletedProcess[str]:
+        lying = CannedRedemptionEndpoint(document)
+        sdk_dir = tmp_path / "sdk"
+        sdk_dir.mkdir(exist_ok=True)
+        (sdk_dir / "claude_agent_sdk.py").write_text(_FAKE_SDK_STUB)
+        env = _lane_job_env(
+            lying.base_url, "any-token-works-here", endpoint_url=model_endpoint.url, sdk_dir=sdk_dir
+        )
+        # The envelope names the dispatched revision — the verification
+        # then demands the answer EQUAL it (R40-06).
+        env["FORGE_CREDENTIAL_BINDING_REVISION"] = "1"
+        return _run_lane_job(tmp_path / "lane-job", env)
+
+    async def test_a_wrong_operation_answer_never_constructs_the_vendor_client(
+        self, model_endpoint, tmp_path
+    ):
+        result = self._lying_lane(
+            model_endpoint,
+            tmp_path,
+            document=_lying_document(operation="credential-exfiltration"),
+        )
+        assert result.returncode == 1
+        meta = json.loads(((tmp_path / "lane-job") / ".forge" / "candidate.meta.json").read_text())
+        assert meta["terminal_reason"] == "credential_redemption_failed"
+        assert "operation" in meta["error"]
+        assert model_endpoint.bearers() == []
+        assert AMBIENT_VALUE not in result.stdout + result.stderr
+
+    async def test_a_wrong_binding_revision_answer_never_constructs_the_vendor_client(
+        self, model_endpoint, tmp_path
+    ):
+        """The envelope names revision 1; the answer claims revision 2 —
+        a response minted for a DIFFERENT binding generation is not this
+        lane's credential."""
+        result = self._lying_lane(
+            model_endpoint,
+            tmp_path,
+            document=_lying_document(binding_revision=2),
+        )
+        assert result.returncode == 1
+        meta = json.loads(((tmp_path / "lane-job") / ".forge" / "candidate.meta.json").read_text())
+        assert meta["terminal_reason"] == "credential_redemption_failed"
+        assert "binding_revision" in meta["error"]
+        assert model_endpoint.bearers() == []

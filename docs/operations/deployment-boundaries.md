@@ -309,3 +309,48 @@ cancelled) and the run sits `blocked` with the honest classification.
 | Restore time | **measured, not extrapolated** — remeasure as the store grows |
 | Scaling beyond one CAS volume | **not supported** — outside the demonstrated topology (§1) |
 | Measurements on a deployment differing from the frozen profile | **not evidence** — `unqualified-for-profile` (§0) |
+
+## 11. The operating envelope and its alerts (R40-15 / #351)
+
+The selected workflow's own shape — a delivery that includes a review
+round (#338), a guarded budget amendment (#340) and a redemption-mode
+dispatch (#343, the lane mode this profile pins) — has its own
+envelope, measured on the actual lab (the
+`workflow_envelope`/`partition`/`degradation_parking`/`redemption_lane`/
+`workflow_restore` sections of `run_deployment_ops.py`; the 2026-09-26
+record is `qualification/deployment-ops-2026-09-26.json`). The full
+table lives in the [support agreement](support-agreement.md); the
+ALERTS and their recovery steps live here.
+
+### The envelope, one paragraph
+
+Active execution is bounded by the durable lease CAS (3 per project —
+accepted backlog is a DIFFERENT counter: 10 queued, 6 runs/user/hour,
+5/issue); a review round holds the lineage's ONE outstanding-round slot
+(a second /fix refuses typed) and its child holds an execution slot only
+while IT executes; slots stay occupied while native work runs OR its
+start/cancel outcome is unknown — under a simulated partition the
+reconciler's pass released NOTHING (3 held) and ONE pass after the heal
+drained all 3; a queued burst during sustained provider 429 parks
+bounded (9-request burst → 4 admitted + 5 typed `queue_full` refusals,
+12 dispatch attempts = exactly the 4×(1+2) budget, ZERO re-plans); the
+redemption leg mints the grant before the provider call and the lane
+redeems through the real endpoint (ledger joined, refusals typed with
+zero broker calls); a data-bearing restore recovers runs, checkpoints,
+`review_rounds`, `budget_amendments`, grants+redemptions and native
+intent, gating the resume dispatch behind consistency verification.
+
+### The alerts (each: observable → threshold basis → recovery step)
+
+| Alert | Observable | Threshold basis | Recovery step |
+| --- | --- | --- | --- |
+| **Oldest unresolved effect** | `operator.unresolved_effect_age` (per publication-intent row still unresolved) and `native_start.unknown_age` in the operator occupancy view | the partition drill's held-unknown window resolves by OBSERVATION in one reconciler pass after heal — an unresolved effect or unknown occupancy whose age exceeds the reconciler's normal pass interval ×10 with the provider reachable is STUCK, not slow | run the reconciler's probe once (it is bounded); if the provider is provably terminal and the probe cannot observe, use the AUDITED override (§9 step 3) — never a bare release |
+| **Sustained queue age** | `queue.age` — oldest admitted-not-executing run (`accepted/preflight/planning/waiting_approval/waiting_harness/waiting_ci`) | the degradation-parking drill: sustained 429 parks every admitted run blocked within its bounded revival budget (≤ 2 revives); a queued run whose age exceeds the revival ladder's ceiling (900 s backoff cap) + one lane run's measured wall clock means the queue is NOT draining | check the provider route (LiteLLM → vendor) first — the same 429 never re-plans (0 replans in the drill), so a stuck queue is infrastructure, not code: resolve the vendor window, then `/retry` the parked runs |
+| **Storage pressure** | `storage.unreferenced_bytes` / the CAS volume's bytes vs the per-work quota (`StoragePolicy`) and the host volume's free space | the volume-fill drill: writes refuse TYPED at the configured safety threshold and PINNED WIP survives — growth stops predictably; alert when the volume passes 70 % of the threshold that produced the first typed refusal in the last run | raise the quota or clean SUPERSEDED checkpoints via the retention pass (`apply_retention`) — never delete PINNED WIP; the sweep converges once the volume lock frees (`GCLockTimeout` is bounded, retry-later is recovery) |
+| **Credential expiry** | the operation grant's `redemption_deadline` vs now, and the registry binding's revision history (`data/credential-bindings.json`) | the redemption drill: an expired window refuses typed `grant_expired` (absolute deadline, never re-anchored) and a rotation between mint and redemption refuses `binding_revision_mismatch` with the lane FAILING CLOSED (zero model calls) | re-dispatch the attempt (`/retry`) so a FRESH grant mints under the live binding — the registry is re-read on every dispatch and every redemption; never widen a stale grant's deadline |
+| **Database unavailability** | `/health` `database` axis; `LaneAuthorityUnavailable` (503) on the lane-control surface | the restart drill: engine disposed and recreated — occupancy identities SURVIVE and the reconciler resolves by durable `native_intent_ref` through the fresh engine; the DB being down is a hard stop for NEW dispatches, never a data-loss event | restore connectivity (the lab owner's domain for forge-postgres); the reconciler picks up from the durable rows — no manual lease surgery. If the volume itself is lost: the restore runbook (§3) + the workflow-restore consistency gate — the resume dispatch stays closed until rounds/amendments/grants/native intent verify |
+
+Every threshold above names its drill basis — none is a fleet SLA. The
+measured numbers behind them are in the report's
+`measured_limits.operating_envelope` block and the support agreement's
+envelope table; re-measure on every profile re-freeze.

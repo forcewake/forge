@@ -1,0 +1,729 @@
+{
+  "drills": [
+    {
+      "drill": "deployment_remote_occupancy",
+      "objectives_achieved": 9,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "drained_after_s": 20.5,
+        "execution.occupied_vs_limit": {
+          "cycles": 4,
+          "dispatched": 3,
+          "limit": 3,
+          "parked": [
+            "parked_execution_capacity"
+          ],
+          "peak_occupied": 3
+        },
+        "queue_wait_s": {
+          "max": 3.218
+        }
+      },
+      "tested_limits": {
+        "cycles": 4,
+        "native_jobs": "REAL on the lab runner, cancelled job-level immediately after observation",
+        "observed_limit": 3,
+        "reconcile_timeout_s": 300.0,
+        "sample_interval_s": 3.0
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_lost_response_at_cap",
+      "objectives_achieved": 8,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "drained_after_s": 10.3,
+        "execution.occupied_vs_limit": {
+          "limit": 3,
+          "occupancy_mix_at_cap": {
+            "native_running": 3
+          },
+          "occupancy_words_seen": [
+            "dispatched_unknown",
+            "native_running"
+          ],
+          "occupied_at_cap": 3,
+          "peak_occupied": 3
+        },
+        "queue_wait_s": {
+          "measured_from": "the durable lease row (the dispatch response was dropped)"
+        }
+      },
+      "tested_limits": {
+        "cycles_at_cap": 3,
+        "dropped_response_cycle": 1,
+        "native_jobs": "REAL on the deployment's runner, cancelled job-level immediately after observation",
+        "observed_limit": 3,
+        "over_cap_cycle": "pre-planned (its model call completes BEFORE the cap fills)",
+        "over_cap_cycles": 1,
+        "phasing": "every cycle planned BEFORE any dispatch (a plan holds no lease); the /go probe window contains no model call",
+        "reconcile_timeout_s": 300.0,
+        "sample_interval_s": 1.0
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_backup_restore",
+      "objectives_achieved": 5,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "backup_seconds": 0.262,
+        "checkpoint.reachability": {
+          "checkpoints": 14,
+          "mismatch_detected": true,
+          "mismatch_refused": true,
+          "pins": 8,
+          "pins_resolved": 8,
+          "works": 13,
+          "works_resolved": 13
+        },
+        "restore_seconds": 0.355
+      },
+      "tested_limits": {
+        "mismatch_shape": "metadata naming a checkpoint the blob half lacks",
+        "source": "the deployment's real CAS volume (read-only backup_store snapshot)",
+        "target": "a disposable restore root (plus a disposable database when supplied)"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_mismatched_restore_preflight",
+      "objectives_achieved": 6,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "preflight.restore_gate": {
+          "expected_schema_head": "031",
+          "model_turns_after_consistent_restore": 1,
+          "model_turns_before_refusals": 0,
+          "nothing_written": true,
+          "refusals": {
+            "backup-halves": true,
+            "schema-head": true
+          },
+          "restored_checkpoints": 4,
+          "restored_verified": true
+        }
+      },
+      "tested_limits": {
+        "expected_schema_head": "031",
+        "gate": "preflight \u2192 restore \u2192 resume dispatch (the first model turn)",
+        "installations": "DISPOSABLE target roots (never the deployment's store)",
+        "mismatched_schema_head": "026",
+        "snapshot_shape": "metadata naming checkpoints the blob half lacks (t2 metadata + t1 blobs)"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_credential_isolation",
+      "objectives_achieved": 5,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "attempt_generation": 0,
+        "credential_shaped_beyond_lane_token": [],
+        "token_dispatched": true
+      },
+      "tested_limits": {
+        "control_plane_env": "container env NAMES only (podman inspect, read-only)",
+        "envelope_source": "the recorded dispatch envelope of the live run (#288 journal)"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_degraded_modes",
+      "objectives_achieved": 8,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "provider_throttling": {
+          "backoff_ladder_s": [
+            60,
+            120,
+            240,
+            480
+          ],
+          "classification": "transient",
+          "exhausted_budget": "blocked, no further revival",
+          "first_death": "blocked + scheduled bounded revival",
+          "revive_limit": 2
+        },
+        "storage.quota_refusal": {
+          "store_intact": true,
+          "typed_refusal": true
+        }
+      },
+      "tested_limits": {
+        "control_objective_s": 60.0,
+        "fences": "publication/cancellation fences NEVER disabled",
+        "provider_throttling": "a fake 429 lane through the app's own revival budget",
+        "storage_pressure": "a quota'd DISPOSABLE store (typed refusal, store intact)"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_volume_fill_during_pause",
+      "objectives_achieved": 5,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "storage.volume_fill": {
+          "admission_stop": "typed refusal at the store boundary \u2014 every further write refused at the same predictable boundary (quota-tmp-dir shape, never a real disk)",
+          "landed_during_fill": 1,
+          "pinned_read_s": 0.0001,
+          "pinned_wip_survives": true,
+          "safety_threshold_bytes": 4096,
+          "silent_writes": 0,
+          "store_bytes_at_refusal": 3241,
+          "typed_refusals": 5
+        }
+      },
+      "tested_limits": {
+        "further_write_attempts": 4,
+        "paused_work": "a checkpoint PINNED by the pause fence (the persisted continuation decision)",
+        "pinned_read_objective_s": 5.0,
+        "safety_threshold_bytes": 4096,
+        "volume_shape": "a quota'd DISPOSABLE tmp-dir store (a real disk is NEVER filled)"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_pause_cancel_percentiles",
+      "objectives_achieved": 4,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "control.pause_cancel_percentiles_s": {
+          "cancel_under_slow_provider": {
+            "max_s": 0.0521,
+            "min_s": 0.0511,
+            "n": 12,
+            "objective_s": 60.0,
+            "p50_s": 0.0521,
+            "p95_s": 0.0521
+          },
+          "control": {
+            "max_s": 0.0302,
+            "min_s": 0.017,
+            "n": 12,
+            "objective_s": 60.0,
+            "p50_s": 0.0225,
+            "p95_s": 0.0302
+          },
+          "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
+        }
+      },
+      "tested_limits": {
+        "control_objective_s": 60.0,
+        "cycles": 12,
+        "fixture": "disposable (a real SQLite database + the real mounted lane-control router)",
+        "kinds": "pause/resume control commands through the REAL lane-control endpoints",
+        "provider_latency_s": 0.05,
+        "puts_per_worker": 8,
+        "upload_workers": 3
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_token_rotation",
+      "objectives_achieved": 4,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "credential.rotation_generation": {
+          "current_generation": 1,
+          "new_secret_token_status": 200,
+          "old_secret_token_status": 403,
+          "refusal_status": 403,
+          "refused_generation": 0
+        }
+      },
+      "tested_limits": {
+        "configuration": "DISPOSABLE (a throwaway database + the real lane-control router)",
+        "deployment_env_touched": false,
+        "mechanism": "api_lane_control's generation-scoped auth ladder"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_partition_occupancy",
+      "objectives_achieved": 7,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "execution.occupied_vs_limit": {
+          "held_under_partition": 3,
+          "limit": 3,
+          "peak_occupied": 3,
+          "released_after_heal": 3,
+          "released_by_partitioned_pass": 0
+        },
+        "native_start.unknown_age": {
+          "max_observed_seconds": 2
+        },
+        "partition": {
+          "cancel_unknown_occupancy": "draining",
+          "probe_queries_during_partition": 3,
+          "window_s": 1.2
+        }
+      },
+      "tested_limits": {
+        "ambiguous_statuses": [
+          429,
+          503
+        ],
+        "cancel_unknown": "provider cancel issued, no answer (cancel_mode=fail)",
+        "cycles": 6,
+        "database": "sqlite+aiosqlite",
+        "observed_limit": 3,
+        "partition_shape": "the probe answers UNKNOWN for every key (the channel is down)",
+        "partition_window_s": 1.2,
+        "sample_interval_s": 0.05
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_degradation_parking",
+      "objectives_achieved": 7,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "execution.occupied_vs_limit": {
+          "limit": 2,
+          "peak_occupied": 2
+        },
+        "provider_degradation.parking": {
+          "admitted": 4,
+          "burst": 9,
+          "dispatch_attempt_budget": 12,
+          "dispatch_attempts": 12,
+          "parked_blocked": 4,
+          "replans": 0,
+          "revive_limit": 2,
+          "typed_intake_refusals": {
+            "queue_full": 5
+          }
+        },
+        "queue.age": {
+          "n": 4,
+          "oldest_waiting_seconds": 0.219
+        }
+      },
+      "tested_limits": {
+        "burst": 9,
+        "degradation_window": "sustained (every provider start answers the degrade status)",
+        "degrade_status": 429,
+        "observed_limit": 2,
+        "queued_limit": 4,
+        "revive_limit": 2,
+        "user_hour_limit": 6
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_redemption_lane",
+      "objectives_achieved": 8,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "redemption.grant_mint_seconds": 0.0058,
+        "redemption.redeem_seconds": {
+          "first_s": 0.0198,
+          "n": 2,
+          "percentile_supported": false,
+          "replay_s": 0.01
+        },
+        "redemption.refusals": {
+          "expired_window": 403,
+          "superseded_generation": 403,
+          "wrong_ref": 403,
+          "zero_broker_calls_on_refusal": true
+        }
+      },
+      "tested_limits": {
+        "endpoint": "/lane/credentials/redeem",
+        "fixture": "disposable (a real SQLite database + the real mounted lane-control router)",
+        "grant_mint": "persist_operation_grant \u2014 the dispatch seam's own path, before the provider call",
+        "lane_mode": "runner-redemption",
+        "refusal_arms": [
+          "superseded generation",
+          "wrong ref (zero broker calls)",
+          "expired window"
+        ]
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_workflow_restore",
+      "objectives_achieved": 7,
+      "outcome": "pass",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "recovery.rto_observed": {
+          "model_turns_after_consistency": 1,
+          "model_turns_before_gate": 0
+        },
+        "restore.consistency": {
+          "amendment_row_limit_history": {
+            "row_limit_after": {
+              "max_calls": 12
+            },
+            "row_limit_before": {
+              "max_calls": 8
+            }
+          },
+          "cas_checkpoints": 1,
+          "cas_pins": 1,
+          "cas_verified": true,
+          "occupancy_after": {
+            "draining": 1
+          },
+          "occupancy_before": {
+            "draining": 1
+          },
+          "tables": {
+            "budget_amendments": 1,
+            "credential_redemptions": 1,
+            "execution_leases": 1,
+            "flow_runs": 2,
+            "operation_grants": 1,
+            "review_rounds": 1,
+            "run_budgets": 1
+          }
+        }
+      },
+      "tested_limits": {
+        "expected_schema_head": "031",
+        "gate": "verify work/checkpoint/native-intent consistency BEFORE the resume dispatch",
+        "halves": "the CAS volume (backup_store) + the workflow's durable rows (the dump)",
+        "seeded_shape": "ready parent + review_rounds row + child run + applied budget amendment + operation grant + joined redemption + open draining lease + pinned checkpoints"
+      },
+      "violations": 0
+    },
+    {
+      "drill": "deployment_workflow_envelope",
+      "objectives_achieved": 8,
+      "outcome": "fail",
+      "profile": {
+        "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+        "qualification": "qualified-for-profile"
+      },
+      "signals": {
+        "envelope.amendment": {
+          "applied": 0,
+          "replays_confirmed": 0
+        },
+        "envelope.intake": {
+          "over_intake_refusal": "user_rate_limit",
+          "user_hour_limit": 6
+        },
+        "envelope.queued": {
+          "limit": 10,
+          "peak_queued": 1
+        },
+        "envelope.redemption_ledger": {
+          "grants": 1,
+          "redemptions": 1,
+          "unjoined": 0
+        },
+        "envelope.slots": {
+          "limit": 3,
+          "peak_occupied": 1
+        },
+        "envelope.storage": {
+          "bytes_after": 1337717,
+          "bytes_before": 1337717,
+          "growth_bytes": 0
+        },
+        "measures.checkpoint_to_restored_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.command_to_applied_amendment_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.command_to_applied_fix_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.issue_to_reviewed_ready_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.reviewer_wait_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "note_extra": "the DRILL acted as the reviewer \u2014 this is the mechanism's wait window, not a human reaction-time measurement",
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        }
+      },
+      "tested_limits": {
+        "amendment": "axis calls, amount 4, command-identity idempotent",
+        "cycles": 1,
+        "lane_mode": "the deployment's CURRENT credential delivery mode (asserted by the seam)",
+        "observed_limit": 3,
+        "queued_limit": 10,
+        "sample_interval_s": 5.0,
+        "user_hour_limit": 6,
+        "workflow_shape": "intake \u2192 /implement plan \u2192 redemption-mode /go dispatch \u2192 ready_for_human \u2192 /fix review round admitted + child dispatched \u2192 child ready"
+      },
+      "violations": 1
+    }
+  ],
+  "generated_at": "2026-09-26T16:40:40+00:00",
+  "issue": "R38-18 (#319) \u2014 operating limits and recovery measured on the actual supported deployment, BOUND to the frozen profile (previous: R37-20 #301)",
+  "measured_limits": {
+    "command_latency_under_contention": {
+      "control.received_to_applied_s": 9.111,
+      "scope": "the slow-control-ACK window measured through the app's real lane-control endpoints during the occupancy load; the machinery percentiles are in pause_cancel_responsiveness"
+    },
+    "concurrency": {
+      "limit": 3,
+      "occupancy_mix_at_cap": {
+        "native_running": 3
+      },
+      "occupied_at_cap": 3,
+      "over_cap_verdict": "parked_execution_capacity",
+      "peak_occupied": 3,
+      "scope": "one dropped native dispatch response + the cap reached immediately; running/unknown/draining observed under the controlled failure (per-drill tested_limits carry the exact N and waits)"
+    },
+    "operating_envelope": {
+      "degradation_parking_arm": {
+        "admitted": 4,
+        "burst": 9,
+        "dispatch_attempt_budget": 12,
+        "dispatch_attempts": 12,
+        "parked_blocked": 4,
+        "replans": 0,
+        "revive_limit": 2,
+        "typed_intake_refusals": {
+          "queue_full": 5
+        }
+      },
+      "partition_arm": {
+        "held_under_partition": 3,
+        "limit": 3,
+        "peak_occupied": 3,
+        "released_after_heal": 3,
+        "released_by_partitioned_pass": 0
+      },
+      "per_user_intake": {
+        "basis": "the fair-use gate's typed refusal on the deliberate over-intake probe",
+        "over_intake_refusal": "user_rate_limit",
+        "user_hour_limit": 6
+      },
+      "queued_bound": {
+        "basis": "admitted-not-executing runs \u2014 a separate population from slots",
+        "limit": 10,
+        "peak_queued": 1
+      },
+      "redemption_harness_leg": {
+        "redemption.grant_mint_seconds": 0.0058,
+        "redemption.redeem_seconds": {
+          "first_s": 0.0198,
+          "n": 2,
+          "percentile_supported": false,
+          "replay_s": 0.01
+        },
+        "redemption.refusals": {
+          "expired_window": 403,
+          "superseded_generation": 403,
+          "wrong_ref": 403,
+          "zero_broker_calls_on_refusal": true
+        }
+      },
+      "redemption_ledger": {
+        "grants": 1,
+        "redemptions": 1,
+        "unjoined": 0
+      },
+      "scope": "the selected workflow's own shape (a review round, a guarded amendment, a redemption-mode dispatch) measured on the actual lab deployment \u2014 n=1 live cycle per run plus the drill-level arms; every measure carries its own n and percentiles are claimed only where the sample supports them",
+      "separate_measures": {
+        "measures.checkpoint_to_restored_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.command_to_applied_amendment_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.command_to_applied_fix_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.issue_to_reviewed_ready_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        },
+        "measures.reviewer_wait_s": {
+          "max_s": null,
+          "min_s": null,
+          "n": 0,
+          "note_extra": "the DRILL acted as the reviewer \u2014 this is the mechanism's wait window, not a human reaction-time measurement",
+          "p50_s": null,
+          "p95_s": null,
+          "percentile_supported": false
+        }
+      },
+      "storage_growth": {
+        "basis": "the checkpoint CAS volume's byte size across the cycles",
+        "bytes_after": 1337717,
+        "bytes_before": 1337717,
+        "growth_bytes": 0
+      },
+      "workflow_restore_gate": {
+        "corrupt_refusal_findings": [
+          "review_rounds: 1 source row(s) restored as 0"
+        ],
+        "model_turns_after_consistency": 1,
+        "model_turns_before_gate": 0,
+        "restore_shape": "seeded disposable installation (the exact seeded_limits carry the size)"
+      },
+      "workflow_shape": {
+        "basis": "open execution leases (running + unknown + draining) sampled through the cycles",
+        "limit": 3,
+        "peak_occupied": 1
+      }
+    },
+    "pause_cancel_responsiveness": {
+      "cancel_under_slow_provider_percentiles_s": {
+        "max_s": 0.0521,
+        "min_s": 0.0511,
+        "n": 12,
+        "objective_s": 60.0,
+        "p50_s": 0.0521,
+        "p95_s": 0.0521
+      },
+      "control_percentiles_s": {
+        "max_s": 0.0302,
+        "min_s": 0.017,
+        "n": 12,
+        "objective_s": 60.0,
+        "p50_s": 0.0225,
+        "p95_s": 0.0302
+      },
+      "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
+    },
+    "profile": {
+      "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+      "qualification": "qualified-for-profile"
+    },
+    "restore_time_s": {
+      "measured": 0.355,
+      "scope": "the deployment's CURRENT store size \u2014 remeasure as it grows; the number does not extrapolate"
+    }
+  },
+  "private_diagnostics": {
+    "location_class": "outside the repository, access-controlled (never a public artifact)",
+    "retained": true,
+    "schema": "forge.deployment.ops/1"
+  },
+  "profile": {
+    "bind": "matched",
+    "differences": [],
+    "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+    "profile": "supported-gitlab-ce-v1",
+    "qualification": "qualified-for-profile"
+  },
+  "read_only": true,
+  "refusals": [],
+  "reviewer_wip": {
+    "admission_bound": 3,
+    "coherent": true,
+    "policy": "admission never queues more work than the stated human review capacity can safely review (R38-18: human review capacity measured separately from model throughput)",
+    "reviewer_wip_bound": 5,
+    "statement": "the deployment's admission bound (3 active runs per project) stays within the stated reviewer-WIP bound (5) \u2014 the operator does not admit work beyond the reviewable volume",
+    "throughput_claim": null,
+    "unit": "concurrent reviewable WIP (a STATED POLICY FIELD, not a measured value)"
+  },
+  "runbook": "docs/operations/deployment-boundaries.md",
+  "schema": "forge.deployment.ops.sanitized/1",
+  "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+  "summary": {
+    "drills_run": 14,
+    "failed": 1,
+    "passed": 13,
+    "policy_findings": 0,
+    "profile_qualification": "qualified-for-profile",
+    "refused_sections": 0
+  }
+}

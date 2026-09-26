@@ -104,16 +104,24 @@ from forge.adaptive.ops_drills import (  # noqa: E402
     PROFILE_QUALIFIED,
     CapBoundaryLane,
     RemoteCycleRecord,
+    WorkflowCycleRecord,
+    WorkflowShapeLane,
+    build_fixture,
     build_topology_document,
     drill_credential_isolation,
     drill_degraded_modes,
+    drill_degradation_parking,
     drill_lost_response_at_cap,
     drill_mismatched_restore_preflight,
     drill_pause_cancel_percentiles,
+    drill_partition_occupancy,
+    drill_redemption_lane,
     drill_remote_occupancy,
     drill_restore_deployment,
     drill_token_rotation,
     drill_volume_fill_during_pause,
+    drill_workflow_envelope,
+    drill_workflow_restore,
     profile_binding_row,
     reviewer_wip_bound_row,
     summarize_for_publication,
@@ -1012,11 +1020,45 @@ class LabRemoteDispatchLane(CapBoundaryLane):
         return (not rows), time.monotonic() - started
 
 
-def setup_disposable_project(settings: Settings, name: str) -> int:
+def _workflow_lane_ref(settings: Settings) -> str:
+    """The workflow section's lane package: the LAB project's own
+    ``FORGE_LANE_REF`` when it is at least the promoted release the
+    redemption route was validated on, else the promoted tag itself.
+
+    LIVE-FINDING (2026-09-26, the first workflow attempt): the lab's
+    pinned ref (``2fbc321``, 2026-09-21) PREDATES the working-tree
+    template's collector flags (``--collect-candidate`` /
+    ``--expected-checkpoint-id``) — the lane job died
+    ``collector_exit=2`` with the driver completed. The promoted v0.39.0
+    package (``b521e1a``, the #343-validated redemption pairing with this
+    exact template, sha256 ``3d74be37…``) carries both the collector
+    flags and the redemption consumer, so the workflow section pins it
+    when the lab's own ref is older, and NAMES the substitution."""
+
+    response = gitlab_get(settings, f"/projects/{LAB_PROJECT_ID}/variables/FORGE_LANE_REF")
+    pinned = ""
+    if response.status_code == 200:
+        pinned = str(response.json().get("value") or "").strip()
+    if pinned == WORKFLOW_PROMOTED_LANE_REF or pinned == WORKFLOW_PROMOTED_LANE_SHA:
+        return pinned
+    log(
+        f"workflow lane ref: the lab pins {pinned or 'nothing'} — substituting the promoted "
+        f"{WORKFLOW_PROMOTED_LANE_REF} ({WORKFLOW_PROMOTED_LANE_SHA[:12]}…): the pinned ref "
+        "predates this template's collector flags (live-found, recorded)"
+    )
+    return WORKFLOW_PROMOTED_LANE_REF
+
+
+def setup_disposable_project(settings: Settings, name: str, *, workflow_shape: bool = False) -> int:
     """Create + seed the DISPOSABLE GitLab project (the R37-08 shape):
     pinned lane template, copied lane credentials, the forge webhook, the
     bot member, and a tiny smoke job whose completion feeds the
-    failed-cancel leg."""
+    failed-cancel leg. ``workflow_shape=True`` (the R40-15 envelope
+    section) additionally seeds the project's ``.forge.yml`` work scope
+    (so a reviewer's ``/fix`` can PROVE its claimed path inside the
+    frozen spec's ``allowed_paths``) and copies the LAB project's own
+    ``FORGE_LANE_REF`` verbatim — the lane package the lab owner
+    validated the redemption route with, never a script-local guess."""
 
     who = gitlab_get(settings, "/user")
     who.raise_for_status()
@@ -1063,16 +1105,58 @@ def setup_disposable_project(settings: Settings, name: str) -> int:
         f"  script:\n"
         f"    - python -c \"print('smoke ok')\"\n"
     )
+    actions: list[dict[str, str]] = [
+        {"action": "create", "file_path": "README.md", "content": f"# {name}\n"},
+        {"action": "create", "file_path": ".gitlab-ci.yml", "content": ci_yaml},
+    ]
+    if workflow_shape:
+        # The SHIPPED lane template VERBATIM as the project's CI (the
+        # #343-validated shape: its bootstrap carries the runner-redemption
+        # consumer — the v0.36.0+patch template the other sections seed has
+        # no redemption leg, and the R40-15 harness legs must match the
+        # CURRENT lane mode). The seed receipt records the template's
+        # sha256, byte-identical to the frozen profile's template.
+        import hashlib as _hashlib
+
+        template = (REPO_ROOT / "ci" / "templates" / "claude-sdk-lane.gitlab-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow_ci_yaml = (
+            template + "\n# A deliberately tiny always-green job: regular pipelines get a\n"
+            "# fast success (the lane template's rules skip it for $FORGE_RUN_ID).\n"
+            "smoke:\n"
+            "  stage: test\n"
+            "  image: python:3.13-slim\n"
+            "  rules:\n"
+            "    - if: '$FORGE_RUN_ID'\n"
+            "      when: never\n"
+            "    - when: on_success\n"
+            "  script:\n"
+            "    - python -c \"print('smoke ok')\"\n"
+        )
+        actions = [
+            {"action": "create", "file_path": "README.md", "content": f"# {name}\n"},
+            {"action": "create", "file_path": ".gitlab-ci.yml", "content": workflow_ci_yaml},
+            {
+                "action": "create",
+                "file_path": ".forge.yml",
+                # the approved work scope the /fix classification proves
+                # its claimed path against (fnmatch globs — `**` spans `/`)
+                "content": 'implement:\n  paths:\n    - "**"\n',
+            },
+        ]
+        log(
+            "workflow seed: the SHIPPED claude-sdk-lane template VERBATIM "
+            f"(sha256 {_hashlib.sha256(template.encode()).hexdigest()[:16]}…) "
+            "+ the smoke job + the broad .forge.yml work scope"
+        )
     commit = gitlab_post(
         settings,
         f"/projects/{project_id}/repository/commits",
         json={
             "branch": "main",
             "commit_message": "seed: deployment-ops disposable project (R37-20)",
-            "actions": [
-                {"action": "create", "file_path": "README.md", "content": f"# {name}\n"},
-                {"action": "create", "file_path": ".gitlab-ci.yml", "content": ci_yaml},
-            ],
+            "actions": actions,
         },
     )
     if commit.status_code not in (200, 201):
@@ -1093,7 +1177,7 @@ def setup_disposable_project(settings: Settings, name: str) -> int:
             raise Refused(f"variable {key} copy failed: {response.text[:200]}")
         copied.append(key)
     for key, value in (
-        ("FORGE_LANE_REF", LANE_REF_SHA),
+        ("FORGE_LANE_REF", _workflow_lane_ref(settings) if workflow_shape else LANE_REF_SHA),
         ("FORGE_STEERING_ENABLED", "1"),
     ):
         response = gitlab_post(
@@ -1778,6 +1862,520 @@ async def section_rotation(settings: Settings, work_dir: Path) -> dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Section 7 (R40-15 / #351) — the operating envelope from the SELECTED
+# workflow's own shape: a LIVE cycle with a review round on a disposable
+# project, plus the drill-level arms (partition, degradation parking,
+# redemption harness leg, workflow restore)
+# ---------------------------------------------------------------------------
+
+
+#: The deployment's persisted credential-binding registry (bind-mounted
+#: at ``/app/data``; the app re-reads it on EVERY dispatch command and
+#: redemption — the #343 rotation arm proved the live semantics).
+CREDENTIAL_BINDINGS_PATH = REPO_ROOT / "data" / "credential-bindings.json"
+
+#: The promoted lane package the redemption route was validated on
+#: (#343): the workflow section pins it whenever the lab's own
+#: ``FORGE_LANE_REF`` is older (the live-found collector-flag skew).
+WORKFLOW_PROMOTED_LANE_REF = "v0.39.0"
+WORKFLOW_PROMOTED_LANE_SHA = "b521e1a"
+
+
+def _subject_of(project_id: int) -> str:
+    return f"gitlab/-/{project_id}"
+
+
+def bind_disposable_subject(project_id: int, *, bound_by: str) -> dict[str, Any]:
+    """The OPERATOR action that binds the disposable project's canonical
+    subject to the broker-held model credential (refs only, never a
+    value) — the same registry decision the #343 qualification made for
+    its own disposable subject. The file is rewritten atomically; the
+    app re-reads it per dispatch/redemption."""
+
+    document = json.loads(CREDENTIAL_BINDINGS_PATH.read_text(encoding="utf-8"))
+    subject = _subject_of(project_id)
+    bindings = [entry for entry in document.get("bindings", []) if entry.get("subject") != subject]
+    binding = {
+        "schema": "forge.project.credential-binding/2",
+        "subject": subject,
+        "provider": "anthropic-gateway",
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "env_var": "ANTHROPIC_AUTH_TOKEN",
+        "project_id": project_id,
+        "revision": 1,
+        "bound_at": _now_iso(),
+        "bound_by": bound_by,
+        "revoked_at": None,
+    }
+    bindings.append(binding)
+    document["bindings"] = bindings
+    temporary = CREDENTIAL_BINDINGS_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(CREDENTIAL_BINDINGS_PATH)
+    return {"subject": subject, "credential_ref": binding["credential_ref"], "revision": 1}
+
+
+def unbind_disposable_subject(project_id: int) -> None:
+    """The teardown half of the operator action: the disposable subject's
+    binding leaves the registry (the history block is untouched — every
+    past decision stays visible)."""
+
+    document = json.loads(CREDENTIAL_BINDINGS_PATH.read_text(encoding="utf-8"))
+    subject = _subject_of(project_id)
+    document["bindings"] = [
+        entry for entry in document.get("bindings", []) if entry.get("subject") != subject
+    ]
+    temporary = CREDENTIAL_BINDINGS_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(CREDENTIAL_BINDINGS_PATH)
+
+
+class LabWorkflowEnvelopeLane(WorkflowShapeLane):
+    """The REAL deployment's selected workflow, driven natively for the
+    R40-15 envelope: issue → ``@forge /implement`` (the app plans — one
+    cheap planner call) → ``@forge /go`` (the app reserves the execution
+    lease, MINTS the operation grant and dispatches a REAL pipeline on
+    runner 4; the lane bootstrap REDEEMS through the lane-control
+    endpoint — the current ``runner-redemption`` lane mode) → the lane
+    completes the trivial task → ``ready_for_human`` with its Draft MR →
+    the reviewer's ``/fix`` note → the linked review ROUND admitted and
+    its child dispatched (redemption-mode again) → the child's own
+    readiness. Every stage moment is a DURABLE timestamp re-read from
+    the control plane's rows, never a client clock."""
+
+    def __init__(self, settings: Settings, project_id: int) -> None:
+        self.settings = settings
+        self.project_id = project_id
+        app_env = inspect_container("forge-app")["env"]
+        raw_limit = app_env.get("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "").strip()
+        raw_queued = app_env.get("FORGE_ADMISSION_MAX_QUEUED_RUNS", "").strip()
+        raw_user = app_env.get("FORGE_ADMISSION_USER_RUNS_PER_HOUR", "").strip()
+        self.limit = int(raw_limit) if raw_limit else 3
+        self.queued_limit = int(raw_queued) if raw_queued else 10
+        self.user_hour_limit = int(raw_user) if raw_user else 6
+        self.notes: list[str] = []
+        self.stopped_early = ""
+
+    # -- durable reads through the read-only psql seam -------------------
+
+    def _run_row(self, run_id: str) -> dict[str, str] | None:
+        return (
+            psql_select(
+                "SELECT status, mr_iid, created_at, updated_at FROM flow_runs "
+                f"WHERE id = '{run_id}' LIMIT 1"
+            )
+            or [None]
+        )[0]
+
+    async def _await_row(self, sql: str, *, timeout_s: float, interval_s: float = 5.0):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            rows = psql_select(sql)
+            if rows:
+                return rows[0]
+            await asyncio.sleep(interval_s)
+        rows = psql_select(sql)
+        return rows[0] if rows else None
+
+    async def _await_status(self, run_id: str, statuses: list[str], *, timeout_s: float):
+        deadline = time.monotonic() + timeout_s
+        row: dict[str, str] | None = None
+        while time.monotonic() < deadline:
+            row = self._run_row(run_id)
+            if row and row["col0"] in statuses:
+                return row
+            await asyncio.sleep(10.0)
+        return row
+
+    async def _await_plan_note(self, issue_iid: int) -> str:
+        plan_run_id = ""
+        deadline = time.monotonic() + 420.0
+        while time.monotonic() < deadline:
+            response = gitlab_get(
+                self.settings, f"/projects/{self.project_id}/issues/{issue_iid}/notes"
+            )
+            response.raise_for_status()
+            for note in reversed(response.json()):
+                body = str(note.get("body", ""))
+                if note.get("author", {}).get("username") == "forge" and "/go " in body:
+                    match = RUN_ID_RE.search(body)
+                    if match is not None:
+                        plan_run_id = match.group(1)
+                        break
+            if plan_run_id:
+                break
+            await asyncio.sleep(10.0)
+        return plan_run_id
+
+    def _issue_note(self, issue_iid: int, body: str) -> None:
+        response = gitlab_post(
+            self.settings,
+            f"/projects/{self.project_id}/issues/{issue_iid}/notes",
+            json={"body": body},
+        )
+        if response.status_code not in (200, 201):
+            raise Refused(f"issue note failed: {response.text[:200]}")
+
+    def _mr_note(self, mr_iid: int, body: str) -> dict[str, Any]:
+        response = gitlab_post(
+            self.settings,
+            f"/projects/{self.project_id}/merge_requests/{mr_iid}/notes",
+            json={"body": body},
+        )
+        if response.status_code not in (200, 201):
+            raise Refused(f"MR note failed: {response.text[:200]}")
+        return response.json()
+
+    def _forge_mr_reply(self, mr_iid: int, *, since_minutes: float = 30.0) -> list[str]:
+        response = gitlab_get(
+            self.settings, f"/projects/{self.project_id}/merge_requests/{mr_iid}/notes"
+        )
+        response.raise_for_status()
+        return [
+            str(note.get("body", ""))
+            for note in response.json()
+            if note.get("author", {}).get("username") == "forge"
+        ]
+
+    # -- the WorkflowShapeLane seam ---------------------------------------
+
+    async def workflow_cycle(self, index: int) -> WorkflowCycleRecord:
+        record = WorkflowCycleRecord(index=index)
+        # 1. the intake: the issue (the drill IS the requester)
+        created = gitlab_post(
+            self.settings,
+            f"/projects/{self.project_id}/issues",
+            json={
+                "title": f"envelope workflow {index + 1}: append one line, then a review round",
+                "description": TASK_BODY,
+            },
+        )
+        if created.status_code not in (200, 201):
+            raise Refused(f"issue creation failed: {created.text[:200]}")
+        issue = created.json()
+        record.issue_iid = int(issue["iid"])
+        record.stages["issue_created"] = str(issue.get("created_at") or "")
+        # 2. /implement → the app plans (one cheap planner call)
+        self._issue_note(record.issue_iid, "@forge /implement")
+        run_id = await self._await_plan_note(record.issue_iid)
+        if not run_id:
+            record.end_state = "no_plan"
+            record.detail = "the plan note never arrived within the bounded wait"
+            self.stopped_early = record.end_state
+            return record
+        record.run_id = run_id
+        plan_row = self._run_row(run_id)
+        record.stages["plan_ready"] = str(plan_row["col3"]) if plan_row else ""
+        # 3. /go — the redemption-mode dispatch: lease + grant minted
+        # BEFORE the provider call + the lane's redemption
+        go_at = _now_iso()
+        self._issue_note(record.issue_iid, f"@forge /go {run_id}")
+        grant_row = await self._await_row(
+            "SELECT grant_id, created_at FROM operation_grants "
+            f"WHERE work_id = '{run_id}' ORDER BY created_at DESC LIMIT 1",
+            timeout_s=300.0,
+        )
+        record.stages["go_note"] = go_at
+        if grant_row is not None:
+            record.stages["grant_minted"] = grant_row["col1"]
+        redemption_row = await self._await_row(
+            "SELECT receipt_id, created_at FROM credential_redemptions "
+            f"WHERE work_id = '{run_id}' ORDER BY created_at DESC LIMIT 1",
+            timeout_s=600.0,
+        )
+        if redemption_row is not None:
+            record.stages["redeemed"] = redemption_row["col1"]
+        record.redemption = {
+            "grant_minted": grant_row is not None,
+            "redeemed": redemption_row is not None,
+        }
+        # 4. the lane completes the trivial task → ready_for_human
+        ready_row = await self._await_status(
+            run_id, ["ready_for_human", "failed", "blocked", "cancelled"], timeout_s=1500.0
+        )
+        if ready_row is None or ready_row["col0"] != "ready_for_human":
+            record.end_state = f"lane_outcome_{(ready_row or {}).get('col0', 'unknown')}"
+            record.detail = f"the parent run ended {(ready_row or {}).get('col0')}"
+            self.stopped_early = record.end_state
+            return record
+        record.stages["ready_for_human"] = ready_row["col3"]
+        record.mr_iid = int(ready_row["col1"]) if ready_row["col1"] else None
+        if record.mr_iid is None:
+            record.end_state = "no_mr"
+            self.stopped_early = record.end_state
+            return record
+        # 5. the reviewer's /fix — the app's real MR-note ingress
+        record.stages["fix_note"] = _now_iso()
+        self._mr_note(record.mr_iid, "/fix also append the marker word `NOTES.md`")
+        round_row = await self._await_row(
+            "SELECT id, child_run_id, round_number, created_at FROM review_rounds "
+            f"WHERE parent_run_id = '{run_id}' ORDER BY created_at DESC LIMIT 1",
+            timeout_s=300.0,
+        )
+        if round_row is None:
+            replies = self._forge_mr_reply(record.mr_iid)
+            record.end_state = "no_round"
+            record.detail = f"no review_rounds row; the forge replies said: {replies[-1][:160] if replies else 'nothing'}"
+            self.stopped_early = record.end_state
+            return record
+        record.round_id = round_row["col0"]
+        record.child_run_id = round_row["col1"]
+        record.round_number = int(round_row["col2"] or 0)
+        record.stages["round_admitted"] = round_row["col3"]
+        # 6. the round child's own delivery (redemption-mode again)
+        child_row = await self._await_status(
+            record.child_run_id,
+            ["ready_for_human", "failed", "blocked", "cancelled"],
+            timeout_s=1500.0,
+        )
+        record.stages["child_ready_for_human"] = (
+            child_row["col3"]
+            if child_row is not None and child_row["col0"] == "ready_for_human"
+            else ""
+        )
+        record.end_state = (
+            "workflow_complete"
+            if record.stages["child_ready_for_human"]
+            else (f"child_outcome_{(child_row or {}).get('col0', 'unknown')}")
+        )
+        if record.end_state != "workflow_complete":
+            self.stopped_early = record.end_state
+        record.envelope = {"slots": sum((await self.occupancy_snapshot()).values())}
+        self.notes.append(
+            f"cycle {index}: run {run_id[:8]}… round {record.round_number} "
+            f"(child {str(record.child_run_id)[:8]}…) — {record.end_state}"
+        )
+        return record
+
+    async def amend_budget(
+        self, record: WorkflowCycleRecord, *, axis: str, amount: float, command_id: str, reason: str
+    ) -> dict[str, Any]:
+        # The LIVE amendment rides the review-only continuation, which by
+        # contract requires a run parked in reviewing with a REAL
+        # exhausted review budget — manufacturing that state on the lab
+        # would be exactly the silent re-plan the #340 guard refuses. The
+        # applied+replay proof stands in the drill-level tests and the
+        # workflow-restore drill; the live leg says so honestly.
+        return {
+            "exercised": False,
+            "reason": (
+                "the live amendment path (continue_review_only) requires a naturally "
+                "exhausted review budget; the durable applied+replay proof is "
+                "drill-level (deployment_workflow_restore + tests)"
+            ),
+        }
+
+    async def over_intake_probe(self) -> dict[str, Any]:
+        from forge.adaptive.admission import AdmissionPolicy, check_admission
+
+        rows = psql_select(
+            "SELECT count(*) FROM flow_runs WHERE provider = 'gitlab' "
+            f"AND project_id = {self.project_id} "
+            "AND (evidence->>'requested_by') IS NOT NULL "
+            "AND created_at >= now() - interval '1 hour'"
+        )
+        observed = int(rows[0]["col0"]) if rows else 0
+        # The deployment's own gate on the deployment's own counts, at the
+        # limit-1 request shape: what the NEXT request would face once the
+        # hourly per-user bound is reached.
+        decision = check_admission(
+            AdmissionPolicy(
+                max_active_per_project=self.limit,
+                max_queued_runs=self.queued_limit,
+                max_user_runs_per_hour=self.user_hour_limit,
+            ),
+            active_count=0,
+            queued_count=0,
+            issue_run_count=0,
+            user_recent_count=self.user_hour_limit,
+        )
+        return {
+            "observed_user_runs_last_hour": observed,
+            "user_hour_limit": self.user_hour_limit,
+            "allowed": decision.allowed,
+            "refusal": decision.refusal.value if decision.refusal else None,
+            "basis": (
+                "the app's own check_admission gate over the deployment's own hourly "
+                "count at the limit shape (zero model spend on the probe)"
+            ),
+        }
+
+    async def conflicting_fix_probe(self, record: WorkflowCycleRecord) -> dict[str, Any]:
+        if record.mr_iid is None:
+            return {"refusal": "not_exercised_no_mr", "second_round_admitted": False}
+        self._mr_note(record.mr_iid, "/fix and also touch `README.md` again")
+        deadline = time.monotonic() + 120.0
+        refusal = ""
+        while time.monotonic() < deadline:
+            replies = self._forge_mr_reply(record.mr_iid)
+            for body in reversed(replies):
+                lowered = body.lower()
+                if "conflicting" in lowered or "one outstanding" in lowered:
+                    refusal = "conflicting_correction"
+                    break
+                if "window" in lowered and "closed" in lowered:
+                    refusal = "correction_window_closed"
+                    break
+            if refusal:
+                break
+            await asyncio.sleep(5.0)
+        rows = psql_select(
+            "SELECT count(*) FROM review_rounds rr WHERE rr.root_run_id = "
+            f"(SELECT root_run_id FROM review_rounds WHERE id = '{record.round_id}')"
+        )
+        total_rounds = int(rows[0]["col0"]) if rows else 0
+        return {
+            "refusal": refusal or "no_typed_reply_observed",
+            "second_round_admitted": total_rounds > 1,
+            "rounds_in_lineage": total_rounds,
+        }
+
+    async def occupancy_snapshot(self) -> dict[str, int]:
+        rows = psql_select(
+            "SELECT native_intent_at, native_handle, draining_at FROM execution_leases "
+            f"WHERE project_id = {self.project_id} AND released_at IS NULL"
+        )
+        counts: dict[str, int] = {}
+        for row in rows:
+            if row["col2"]:
+                word = "draining"
+            elif not row["col0"]:
+                word = "never_dispatched"
+            elif row["col1"]:
+                word = "native_running"
+            else:
+                word = "dispatched_unknown"
+            counts[word] = counts.get(word, 0) + 1
+        return counts
+
+    async def queue_snapshot(self) -> dict[str, int]:
+        rows = psql_select(
+            "SELECT status, created_at FROM flow_runs WHERE provider = 'gitlab' "
+            f"AND project_id = {self.project_id} AND status IN "
+            "('accepted', 'preflight', 'planning', 'waiting_approval', 'proposing', "
+            "'waiting_harness', 'waiting_ci')"
+        )
+        oldest = 0.0
+        now = datetime.now(UTC)
+        for row in rows:
+            created = datetime.fromisoformat(row["col1"].replace(" ", "T")) if row["col1"] else None
+            if created is not None:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                oldest = max(oldest, (now - created).total_seconds())
+        return {"queued": len(rows), "oldest_age_s": round(oldest, 1)}
+
+    async def storage_bytes(self) -> int:
+        if not STORE_ROOT.is_dir():
+            return 0
+        return sum(path.stat().st_size for path in STORE_ROOT.rglob("*") if path.is_file())
+
+    async def redemption_ledger(self) -> dict[str, Any]:
+        grants = psql_select(
+            "SELECT count(*) FROM operation_grants og JOIN flow_runs fr ON fr.id = og.work_id "
+            f"WHERE fr.project_id = {self.project_id}"
+        )
+        redemptions = psql_select(
+            "SELECT count(*) FROM credential_redemptions cr JOIN flow_runs fr "
+            f"ON fr.id = cr.work_id WHERE fr.project_id = {self.project_id}"
+        )
+        unjoined = psql_select(
+            "SELECT count(*) FROM credential_redemptions cr JOIN flow_runs fr "
+            f"ON fr.id = cr.work_id WHERE fr.project_id = {self.project_id} "
+            "AND NOT EXISTS (SELECT 1 FROM operation_grants og WHERE og.grant_id = cr.grant_id)"
+        )
+        return {
+            "grants": int(grants[0]["col0"]) if grants else 0,
+            "redemptions": int(redemptions[0]["col0"]) if redemptions else 0,
+            "unjoined": int(unjoined[0]["col0"]) if unjoined else 0,
+        }
+
+
+async def section_workflow_envelope(
+    settings: Settings, *, profile_binding: dict[str, Any]
+) -> tuple[dict[str, Any], int]:
+    """The R40-15 operating envelope from the SELECTED workflow's own
+    shape, LIVE on the lab: one full cycle (issue → plan → redemption-mode
+    dispatch → ready_for_human → /fix review round → the round child's
+    readiness) on a DISPOSABLE project whose canonical subject the
+    section binds to the broker-held credential for exactly its lifetime
+    (the same operator action the #343 qualification took). The lane
+    package is the LAB project's own current ``FORGE_LANE_REF``."""
+
+    name = f"forge-ops-351-envelope-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+    project_id = setup_disposable_project(settings, name, workflow_shape=True)
+    binding: dict[str, Any] = {}
+    try:
+        binding = bind_disposable_subject(
+            project_id, bound_by="R40-15 #351 workflow envelope section (operator action)"
+        )
+        log(
+            f"workflow_envelope: disposable project {project_id} bound "
+            f"({binding['subject']} → {binding['credential_ref']} rev {binding['revision']})"
+        )
+        lane = LabWorkflowEnvelopeLane(settings, project_id)
+        outcome = await drill_workflow_envelope(lane, cycles=1, sample_interval_s=5.0)
+        document = outcome.as_document()
+        document["scope"] = DEPLOYMENT_DRILL_SCOPE
+        document["lane_notes"] = lane.notes
+        document["credential_binding"] = {
+            **binding,
+            "note": (
+                "bound for the section's lifetime only; the teardown removes the binding "
+                "(the registry history block is untouched)"
+            ),
+        }
+        return document, project_id
+    finally:
+        try:
+            unbind_disposable_subject(project_id)
+        except (OSError, ValueError):
+            log("workflow_envelope: binding teardown failed — the subject stays bound (named)")
+
+
+async def section_drill_level(
+    kind: str,
+    work_dir: Path,
+    *,
+    profile_binding: dict[str, Any],
+    expected_schema_head: str,
+    mismatched_schema_head: str,
+) -> dict[str, Any]:
+    """The R40-15 drill-level arms on DISPOSABLE fixtures (zero lab
+    writes, zero spend): the partition arm, the degradation-parking arm,
+    the redemption harness leg and the workflow restore drill."""
+
+    if kind == "partition":
+        fixture = await build_fixture(work_dir / "partition")
+        try:
+            outcome = await drill_partition_occupancy(
+                fixture, limit=3, cycles=6, partition_window_s=1.2, sample_interval_s=0.05
+            )
+        finally:
+            await fixture.dispose()
+    elif kind == "degradation_parking":
+        fixture = await build_fixture(work_dir / "parking")
+        try:
+            outcome = await drill_degradation_parking(fixture)
+        finally:
+            await fixture.dispose()
+    elif kind == "redemption_lane":
+        outcome = await drill_redemption_lane(work_dir, profile_binding=profile_binding)
+    elif kind == "workflow_restore":
+        outcome = await drill_workflow_restore(
+            work_dir,
+            profile_binding=profile_binding,
+            expected_schema_head=expected_schema_head,
+            mismatched_schema_head=mismatched_schema_head,
+        )
+    else:  # pragma: no cover — the caller names one of the four
+        raise Refused(f"unknown drill-level section kind {kind!r}")
+    document = outcome.as_document()
+    document["scope"] = DEPLOYMENT_DRILL_SCOPE
+    return document
+
+
+# ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
 
@@ -1792,6 +2390,11 @@ SECTIONS = (
     "volume_fill",
     "percentiles",
     "rotation",
+    "partition",
+    "degradation_parking",
+    "redemption_lane",
+    "workflow_restore",
+    "workflow_envelope",
 )
 
 
@@ -2019,6 +2622,39 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
                 record_refusal("rotation", exc)
 
+        # -- the R40-15 (#351) operating-envelope arms --------------------
+        envelope_document: dict[str, Any] | None = None
+        for kind in ("partition", "degradation_parking", "redemption_lane", "workflow_restore"):
+            if kind not in selected:
+                continue
+            log(f"== section: {kind} (disposable fixture, profile-bound)")
+            try:
+                record_drill(
+                    await section_drill_level(
+                        kind,
+                        work_dir,
+                        profile_binding=profile_binding,
+                        expected_schema_head=expected_schema_head,
+                        mismatched_schema_head="030",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal(kind, exc)
+
+        if "workflow_envelope" in selected:
+            log(
+                "== section: workflow_envelope (LIVE: the selected workflow with a review "
+                "round, in the current lane mode)"
+            )
+            try:
+                envelope_document, envelope_project_id = await section_workflow_envelope(
+                    settings, profile_binding=profile_binding
+                )
+                disposable_projects.append(envelope_project_id)
+                record_drill(envelope_document)
+            except Exception as exc:  # noqa: BLE001 — a section failure is recorded, never fatal to the report
+                record_refusal("workflow_envelope", exc)
+
         # -- the human-capacity discipline (a STATED POLICY FIELD) -------
         admission_limit = 3
         for document in report["drills"]:
@@ -2146,6 +2782,58 @@ async def _run(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                 "measured": restore_seconds,
                 "scope": "the deployment's CURRENT store size — remeasure as it grows; the number does not extrapolate",
             },
+        }
+
+        # -- the R40-15 operating envelope (the selected workflow's own
+        # shape — the support agreement's §envelope numbers) ----------
+        envelope_signals = (envelope_document or {}).get("signals") or {}
+        partition_signal = {}
+        parking_signal = {}
+        redemption_lane_signal = {}
+        restore_gate_signal = {}
+        for document in report["drills"]:
+            drill_name = document.get("drill")
+            if drill_name == "deployment_partition_occupancy":
+                partition_signal = (document.get("signals") or {}).get(
+                    "execution.occupied_vs_limit"
+                ) or {}
+            if drill_name == "deployment_degradation_parking":
+                parking_signal = (document.get("signals") or {}).get(
+                    "provider_degradation.parking"
+                ) or {}
+            if drill_name == "deployment_redemption_lane":
+                redemption_lane_signal = dict(document.get("signals") or {})
+            if drill_name == "deployment_workflow_restore":
+                restore_gate_signal = (document.get("signals") or {}).get(
+                    "recovery.rto_observed"
+                ) or {}
+        report["measured_limits"]["operating_envelope"] = {
+            "workflow_shape": envelope_signals.get("envelope.slots"),
+            "queued_bound": envelope_signals.get("envelope.queued"),
+            "per_user_intake": envelope_signals.get("envelope.intake"),
+            "storage_growth": envelope_signals.get("envelope.storage"),
+            "redemption_ledger": envelope_signals.get("envelope.redemption_ledger"),
+            "separate_measures": {
+                name: envelope_signals.get(name)
+                for name in (
+                    "measures.issue_to_reviewed_ready_s",
+                    "measures.reviewer_wait_s",
+                    "measures.command_to_applied_fix_s",
+                    "measures.command_to_applied_amendment_s",
+                    "measures.checkpoint_to_restored_s",
+                )
+                if envelope_signals.get(name) is not None
+            },
+            "partition_arm": partition_signal,
+            "degradation_parking_arm": parking_signal,
+            "redemption_harness_leg": redemption_lane_signal,
+            "workflow_restore_gate": restore_gate_signal,
+            "scope": (
+                "the selected workflow's own shape (a review round, a guarded amendment, "
+                "a redemption-mode dispatch) measured on the actual lab deployment — "
+                "n=1 live cycle per run plus the drill-level arms; every measure carries "
+                "its own n and percentiles are claimed only where the sample supports them"
+            ),
         }
         report["summary"] = {
             "drills_run": len(report["drills"]),
