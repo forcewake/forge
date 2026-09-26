@@ -47,3 +47,7 @@ demo/production/
 
 # forge control directory (lane-local state, never tracked)
 .forge/
+
+# dotnet evaluation-world build outputs (obj/bin are drill byproducts)
+evaluation/tested_world/**/obj/
+evaluation/tested_world/**/bin/
