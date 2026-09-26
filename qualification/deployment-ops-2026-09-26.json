@@ -5,11 +5,11 @@
       "objectives_achieved": 9,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "drained_after_s": 20.4,
+        "drained_after_s": 10.2,
         "execution.occupied_vs_limit": {
           "cycles": 4,
           "dispatched": 3,
@@ -20,7 +20,7 @@
           "peak_occupied": 3
         },
         "queue_wait_s": {
-          "max": 3.154
+          "max": 3.267
         }
       },
       "tested_limits": {
@@ -37,11 +37,11 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "drained_after_s": 10.6,
+        "drained_after_s": 10.2,
         "execution.occupied_vs_limit": {
           "limit": 3,
           "occupancy_mix_at_cap": {
@@ -76,11 +76,11 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "backup_seconds": 0.632,
+        "backup_seconds": 0.301,
         "checkpoint.reachability": {
           "checkpoints": 14,
           "mismatch_detected": true,
@@ -90,7 +90,7 @@
           "works": 13,
           "works_resolved": 13
         },
-        "restore_seconds": 0.526
+        "restore_seconds": 0.185
       },
       "tested_limits": {
         "mismatch_shape": "metadata naming a checkpoint the blob half lacks",
@@ -104,7 +104,7 @@
       "objectives_achieved": 6,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -135,7 +135,7 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -154,7 +154,7 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -188,14 +188,14 @@
       "objectives_achieved": 5,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
         "storage.volume_fill": {
           "admission_stop": "typed refusal at the store boundary \u2014 every further write refused at the same predictable boundary (quota-tmp-dir shape, never a real disk)",
           "landed_during_fill": 1,
-          "pinned_read_s": 0.0006,
+          "pinned_read_s": 0.0002,
           "pinned_wip_survives": true,
           "safety_threshold_bytes": 4096,
           "silent_writes": 0,
@@ -217,26 +217,26 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
         "control.pause_cancel_percentiles_s": {
           "cancel_under_slow_provider": {
-            "max_s": 0.0513,
-            "min_s": 0.0504,
+            "max_s": 0.0511,
+            "min_s": 0.0505,
             "n": 12,
             "objective_s": 60.0,
             "p50_s": 0.0511,
-            "p95_s": 0.0513
+            "p95_s": 0.0511
           },
           "control": {
-            "max_s": 0.1078,
-            "min_s": 0.0304,
+            "max_s": 0.0312,
+            "min_s": 0.0191,
             "n": 12,
             "objective_s": 60.0,
-            "p50_s": 0.0576,
-            "p95_s": 0.1078
+            "p50_s": 0.0207,
+            "p95_s": 0.0312
           },
           "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
         }
@@ -257,7 +257,7 @@
       "objectives_achieved": 4,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -281,7 +281,7 @@
       "objectives_achieved": 7,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -321,7 +321,7 @@
       "objectives_achieved": 7,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -343,7 +343,7 @@
         },
         "queue.age": {
           "n": 4,
-          "oldest_waiting_seconds": 0.256
+          "oldest_waiting_seconds": 0.228
         }
       },
       "tested_limits": {
@@ -362,16 +362,16 @@
       "objectives_achieved": 8,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
-        "redemption.grant_mint_seconds": 0.0079,
+        "redemption.grant_mint_seconds": 0.0071,
         "redemption.redeem_seconds": {
-          "first_s": 0.0171,
+          "first_s": 0.0167,
           "n": 2,
           "percentile_supported": false,
-          "replay_s": 0.0127
+          "replay_s": 0.0116
         },
         "redemption.refusals": {
           "expired_window": 403,
@@ -398,7 +398,7 @@
       "objectives_achieved": 7,
       "outcome": "pass",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -448,7 +448,7 @@
       "objectives_achieved": 8,
       "outcome": "fail",
       "profile": {
-        "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+        "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
         "qualification": "qualified-for-profile"
       },
       "signals": {
@@ -536,11 +536,11 @@
       "violations": 1
     }
   ],
-  "generated_at": "2026-09-26T17:17:04+00:00",
+  "generated_at": "2026-09-26T18:16:13+00:00",
   "issue": "R38-18 (#319) \u2014 operating limits and recovery measured on the actual supported deployment, BOUND to the frozen profile (previous: R37-20 #301)",
   "measured_limits": {
     "command_latency_under_contention": {
-      "control.received_to_applied_s": 9.442,
+      "control.received_to_applied_s": 8.659,
       "scope": "the slow-control-ACK window measured through the app's real lane-control endpoints during the occupancy load; the machinery percentiles are in pause_cancel_responsiveness"
     },
     "concurrency": {
@@ -584,12 +584,12 @@
         "peak_queued": 1
       },
       "redemption_harness_leg": {
-        "redemption.grant_mint_seconds": 0.0079,
+        "redemption.grant_mint_seconds": 0.0071,
         "redemption.redeem_seconds": {
-          "first_s": 0.0171,
+          "first_s": 0.0167,
           "n": 2,
           "percentile_supported": false,
-          "replay_s": 0.0127
+          "replay_s": 0.0116
         },
         "redemption.refusals": {
           "expired_window": 403,
@@ -669,29 +669,29 @@
     },
     "pause_cancel_responsiveness": {
       "cancel_under_slow_provider_percentiles_s": {
-        "max_s": 0.0513,
-        "min_s": 0.0504,
+        "max_s": 0.0511,
+        "min_s": 0.0505,
         "n": 12,
         "objective_s": 60.0,
         "p50_s": 0.0511,
-        "p95_s": 0.0513
+        "p95_s": 0.0511
       },
       "control_percentiles_s": {
-        "max_s": 0.1078,
-        "min_s": 0.0304,
+        "max_s": 0.0312,
+        "min_s": 0.0191,
         "n": 12,
         "objective_s": 60.0,
-        "p50_s": 0.0576,
-        "p95_s": 0.1078
+        "p50_s": 0.0207,
+        "p95_s": 0.0312
       },
       "scope": "n=12 pause/resume command cycles through the REAL lane-control endpoints over a disposable database, contended by 3x8 checkpoint uploads and 0.05s provider start latency; the objective is 60.0s \u2014 a stated percentile table for THIS shape, never a best-case single latency and not a fleet claim"
     },
     "profile": {
-      "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+      "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
       "qualification": "qualified-for-profile"
     },
     "restore_time_s": {
-      "measured": 0.526,
+      "measured": 0.185,
       "scope": "the deployment's CURRENT store size \u2014 remeasure as it grows; the number does not extrapolate"
     }
   },
@@ -703,7 +703,7 @@
   "profile": {
     "bind": "matched",
     "differences": [],
-    "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+    "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
     "profile": "supported-gitlab-ce-v1",
     "qualification": "qualified-for-profile"
   },

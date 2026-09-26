@@ -4,7 +4,7 @@
     "issue": "forge#326 (external review 6df4020 §Q39-07)"
   },
   "control_plane": {
-    "divergence": "the promoted v0.39.0 release is built from this exact tree and its lane wheel is byte-identical to the qualification wheel (78711c28…) — the moving-tree gap is closed at this promotion; the executed-lab image digest and the promoted GHCR digest still differ BY CONSTRUCTION (the podman working-tree build that RAN the trace vs the CI build of the same source) — both are bound, neither is silently substituted, and the next lab re-alignment onto the promoted digest is recorded as the open follow-up",
+    "divergence": "the promoted v0.40.0 release is built from this exact tree and its lane wheel is byte-identical to the qualification wheel (150bf797…) — the moving-tree gap stays closed; the executed-lab image digest and the promoted GHCR digest still differ BY CONSTRUCTION (the podman working-tree build that RAN the trace vs the CI build of the same source) — both are bound, neither is silently substituted, and the next lab re-alignment onto the promoted digest is recorded as the open follow-up",
     "executed_lab": {
       "deployed_schema_head": "031",
       "image_digest": "sha256:ddcb9137b09c41acbbc7a1cdffbcf60c79beffbe2bfd5708034f29edf58ba1a7",
@@ -29,23 +29,23 @@
       "rollback_tag": "pre-r3708-20260926T132558Z"
     },
     "latest_promotion": {
-      "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
-      "receipt": "docs/releases/evidence/v0.39.0/promotion.json",
-      "release_version": "0.39.0",
-      "source_sha": "4bbfc3e7fadc9ed514572853c2f8ae169f25dd32",
-      "status": "promoted FROM the qualified composition — v0.39.0 is built from the exact tree the trace executed and the promoted lane wheel is byte-identical to the qualification wheel (78711c28…); the pending-promotion note the v0.38.0 era carried is retired",
-      "wheel_sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
-      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.39.0/forge-0.39.0-py3-none-any.whl"
+      "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
+      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
+      "release_version": "0.40.0",
+      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
+      "status": "promoted FROM the qualified composition — v0.40.0 is built from the exact tree the traces executed and the promoted lane wheel is byte-identical to the qualification wheel (150bf797…); the byte-identity held at v0.39.0 and holds again here",
+      "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl"
     },
     "promoted": {
-      "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
+      "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
       "image_ref": "ghcr.io/forcewake/forge",
-      "receipt": "docs/releases/evidence/v0.39.0/promotion.json",
-      "release_version": "0.39.0",
-      "sdist_sha256": "085f052d6edde8824f81e51adb693434f910b528f3c3575eba8a824072dacec0",
-      "source_sha": "4bbfc3e7fadc9ed514572853c2f8ae169f25dd32",
-      "wheel_sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
-      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.39.0/forge-0.39.0-py3-none-any.whl"
+      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
+      "release_version": "0.40.0",
+      "sdist_sha256": "a61a23fecb7b279acafee2ebd7bba7fca8d5113d3de18a7c09e99cec3648f891",
+      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
+      "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl"
     },
     "schema_revision": {
       "head": "031",
@@ -73,12 +73,12 @@
       "status": "green live — outcome reviewed-ready: the useful-WIP checkpoint (all three file shapes, verified digests) restored exactly on a second runner whose resumed dispatch carried the APPROVED revision-2 text (no rescue steer), the final candidate verified by the precommitted oracle on the exact sha, AND the closing review completed within the #325 closing reserve (reserve 0.5 usd visible) — the run ended ready_for_human; Draft MR left for human review; spend 0.4032 usd of the 2.0 usd lane cap"
     },
     "release_canary": {
-      "receipt": "docs/releases/evidence/v0.39.0/promotion.json#canary",
-      "status": "pass (v0.39.0) — fresh-install canary + seeded previous-head upgrade 027->028 WITH data preservation (five seeded tables fingerprint-identical through the real migration); the data-bearing N-1->head edge is now proven by the promotion canary itself, cross-checked by cold_install_check --mode upgrade"
+      "receipt": "docs/releases/evidence/v0.40.0/promotion.json#canary",
+      "status": "pass (v0.40.0) — fresh-install canary + seeded previous-head upgrade 029->031 WITH data preservation (migrations 030 budget_amendments + 031 review_rounds chained through the real canary); the data-bearing N-1->head edge is proven by the promotion canary itself, cross-checked by cold_install_check --mode upgrade"
     },
     "source_review": {
-      "receipt": "docs/releases/evidence/v0.39.0/promotion.json#decision.checks + #required_checks",
-      "source_sha": "4bbfc3e7fadc9ed514572853c2f8ae169f25dd32",
+      "receipt": "docs/releases/evidence/v0.40.0/promotion.json#decision.checks + #required_checks",
+      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
       "status": "conditional — lint/typecheck passed; test(3.13)/test(3.14)/integration passed on retry after a cancelled run; every earlier failed/cancelled attempt stays on record, never silently green"
     }
   },
@@ -102,10 +102,10 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-26T17:16:58+00:00",
+  "frozen_at": "2026-09-26T18:16:01+00:00",
   "harness": {
     "binary": "claude-code",
-    "receipt": "qualification/records/gitlab-ce-v1@0.39.0.json",
+    "receipt": "qualification/records/gitlab-ce-v1@0.40.0.json",
     "version": "2.1.273"
   },
   "lane": {
@@ -129,11 +129,11 @@
     },
     "install_route": "working-tree-wheel",
     "promoted_wheel": {
-      "receipt": "docs/releases/evidence/v0.39.0/promotion.json",
-      "sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
-      "status": "the promoted v0.39.0 wheel — BYTE-IDENTICAL to the qualification wheel (78711c28…): for the first time the released install pin and the qualified composition are the same bytes",
-      "url": "https://github.com/forcewake/forge/releases/download/v0.39.0/forge-0.39.0-py3-none-any.whl",
-      "version": "0.39.0"
+      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
+      "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "status": "the promoted v0.40.0 wheel — BYTE-IDENTICAL to the qualification wheel (150bf797…): the released install pin and the qualified composition are the same bytes",
+      "url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl",
+      "version": "0.40.0"
     },
     "wheel": {
       "name": "forge-0.40.0-py3-none-any.whl",
@@ -145,7 +145,7 @@
       "version": "0.40.0"
     }
   },
-  "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
+  "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",
@@ -153,7 +153,7 @@
     "receipts": [
       "litellm-config.yaml",
       "qualification/profiles/receipts/litellm-config-lab-v1.yaml",
-      "qualification/records/gitlab-ce-v1@0.39.0.json"
+      "qualification/records/gitlab-ce-v1@0.40.0.json"
     ],
     "upstream": "openai/glm-5.3-flash"
   },
@@ -204,7 +204,7 @@
     "oracle_tampering": [],
     "receipts": [
       "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json",
-      "qualification/records/gitlab-ce-v1@0.39.0.json",
+      "qualification/records/gitlab-ce-v1@0.40.0.json",
       "qualification/profiles/gitlab-ce-v1.md"
     ],
     "required_jobs": [

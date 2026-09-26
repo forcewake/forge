@@ -11,26 +11,26 @@
     {
       "capability": "release-artifact-canary",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: the v0.39.0 canary stands (fresh + seed-real-data + migrate 028->029); the v0.40.0 canary runs in release.yml against this tag and the follow-up re-binds",
-      "executed_at": "2026-09-26T07:13:44Z",
+      "covers": "fresh stage: migrate (029->031 on the promoted image), boot gate, /health, /mcp 401, doctor (promotion.json canary rows)",
+      "executed_at": "2026-09-26T18:07:51Z",
       "outcome": "pass"
     },
     {
       "capability": "release-canary/previous-release-upgrade",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: v0.39.0's seeded 027->028 upgrade stands; the v0.40.0 canary is expected to exercise 029->029+head (the promoted v0.39.0 image carries head 029, v0.40.0 carries 031) — matching cold_install_check's chained transitions",
-      "executed_at": "2026-09-26T07:13:44Z",
+      "covers": "seed-real-data + migrate stages: seeded at previous head 029; upgrade 029->031 preserved counts + digests — migrations 030 (budget_amendments) + 031 (review_rounds) chained with data preservation",
+      "executed_at": "2026-09-26T18:07:51Z",
       "outcome": "pass"
     }
   ],
   "evidence_refs": [
-    "docs/releases/evidence/v0.39.0/promotion.json"
+    "docs/releases/evidence/v0.40.0/promotion.json"
   ],
   "harness_binary": "ghcr.io/forcewake/forge",
-  "harness_version": "0.39.0",
-  "image_digest": "sha256:72438649b2091a46adf5742868e3324d848da4b166ca31454621a719a280a91f",
+  "harness_version": "0.40.0",
+  "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
   "legacy": false,
-  "note": "Pre-release window record for the v0.40.0 tag: canary capabilities cite the promoted v0.39.0 evidence until release.yml records the v0.40.0 stages; the follow-up re-binds every field. Upgrade expectation: the real 029->031 chain (migrations 030 budget_amendments + 031 review_rounds) with seeded-data preservation. Fields follow the strict schema (ISO executed_at; the digest identity lives in image_digest/wheel_sha256).",
+  "note": "BOUND to the promoted v0.40.0 artifacts (verdict promote, all five required checks green at 68f22b8): the canary exercised the real 029->031 chain with seeded-data preservation.",
   "profile": "release-artifact-canary",
   "provider": "*",
   "provider_behavior_fingerprint": "",
@@ -42,7 +42,7 @@
   "stamp": "forge.profile.qualification/1",
   "template_defaults_digest": "",
   "upgrade": {
-    "evidence_ref": "docs/releases/evidence/v0.39.0/promotion.json",
+    "evidence_ref": "docs/releases/evidence/v0.40.0/promotion.json",
     "preservation_checks": [
       "per-table row counts identical after upgrade",
       "sha256 fingerprints over ordered row identity identical after upgrade"
@@ -58,5 +58,5 @@
     "target_schema": "031"
   },
   "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
-  "wheel_sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de"
+  "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff"
 }

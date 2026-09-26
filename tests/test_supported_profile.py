@@ -136,7 +136,7 @@ class TestFreezeFieldSourcing:
     def test_committed_manifest_matches_every_cited_receipt(self) -> None:
         """Every frozen value IS the receipt's value — read both, compare."""
         document = load_manifest(MANIFEST)
-        promotion = _load(ROOT / "docs/releases/evidence/v0.39.0/promotion.json")
+        promotion = _load(ROOT / "docs/releases/evidence/v0.40.0/promotion.json")
         trace = _load(
             ROOT / "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
         )
@@ -154,7 +154,7 @@ class TestFreezeFieldSourcing:
         )
         assert closure_path is not None, "no closure receipt (dist build or committed copy)"
         closure = _load(closure_path)
-        record = _load(ROOT / "qualification/records/gitlab-ce-v1@0.39.0.json")
+        record = _load(ROOT / "qualification/records/gitlab-ce-v1@0.40.0.json")
 
         promoted = document["control_plane"]["promoted"]
         assert promoted["wheel_sha256"] == promotion["wheel_sha256"]

@@ -94,7 +94,7 @@ ARCHIVED_MANIFEST_PATH = (
 )
 
 #: Every receipt the freeze binds, by role (repo-relative).
-PROMOTION_RECEIPT = "docs/releases/evidence/v0.39.0/promotion.json"
+PROMOTION_RECEIPT = "docs/releases/evidence/v0.40.0/promotion.json"
 #: The v2 receipts (Q39-07/#326 — the executed-lab trace on the NEW
 #: composition): the alignment + live bundle + record live in the v2
 #: evaluation directory; the inventory is the post-alignment v2 snapshot.
@@ -107,7 +107,7 @@ INVENTORY_RECEIPT = "qualification/inventory-2026-09-25-v2.json"
 #: exact composition the trace executed (the promoted lane wheel is
 #: byte-identical to the qualification wheel — 78711c28…) — the
 #: moving-tree gap the v0.38.0 record named is CLOSED by this promotion.
-LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.39.0/promotion.json"
+LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.40.0/promotion.json"
 #: The uv build of the working tree — the QUALIFICATION composition's
 #: wheel (the fresh cold-install target). Built by ``uv build`` from the
 #: exact tree the alignment image carried; the freeze binds its sha256
@@ -134,7 +134,7 @@ CLOSURE_RECEIPT_CANDIDATES = (
     "dist/lane-closure/closure-manifest.json",
     "qualification/profiles/receipts/lane-closure-v0.37.0.json",
 )
-PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.39.0.json"
+PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.40.0.json"
 PROFILE_DOC_RECEIPT = "qualification/profiles/gitlab-ce-v1.md"
 #: The lab gateway's model-route receipt (env-referenced keys only — no
 #: secrets; the working-tree file is gitignored, so the COMMITTED copy is
@@ -722,11 +722,11 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 ),
                 "wheel_url": str(inputs.latest_promotion.get("wheel_url", "")),
                 "status": (
-                    "promoted FROM the qualified composition — v0.39.0 is built "
-                    "from the exact tree the trace executed and the promoted lane "
+                    "promoted FROM the qualified composition — v0.40.0 is built "
+                    "from the exact tree the traces executed and the promoted lane "
                     "wheel is byte-identical to the qualification wheel "
-                    "(78711c28…); the pending-promotion note the v0.38.0 era "
-                    "carried is retired"
+                    "(150bf797…); the byte-identity held at v0.39.0 and holds "
+                    "again here"
                 ),
                 "receipt": LATEST_PROMOTION_RECEIPT,
             },
@@ -763,9 +763,9 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "receipt": "alembic/versions + " + ALIGNMENT_RECEIPT,
             },
             "divergence": (
-                "the promoted v0.39.0 release is built from this exact tree and "
+                "the promoted v0.40.0 release is built from this exact tree and "
                 "its lane wheel is byte-identical to the qualification wheel "
-                "(78711c28…) — the moving-tree gap is closed at this promotion; "
+                "(150bf797…) — the moving-tree gap stays closed; "
                 "the executed-lab image digest and the promoted GHCR digest still "
                 "differ BY CONSTRUCTION (the podman working-tree build that RAN "
                 "the trace vs the CI build of the same source) — both are bound, "
@@ -795,10 +795,9 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "sha256": wheel_sha,
                 "version": release_version,
                 "status": (
-                    "the promoted v0.39.0 wheel — BYTE-IDENTICAL to the "
-                    "qualification wheel (78711c28…): for the first time the "
-                    "released install pin and the qualified composition are the "
-                    "same bytes"
+                    "the promoted v0.40.0 wheel — BYTE-IDENTICAL to the "
+                    "qualification wheel (150bf797…): the released install pin "
+                    "and the qualified composition are the same bytes"
                 ),
                 "receipt": PROMOTION_RECEIPT,
             },
@@ -904,12 +903,12 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             },
             "release_canary": {
                 "status": (
-                    "pass (v0.39.0) — fresh-install canary + seeded previous-head "
-                    "upgrade 027->028 WITH data preservation (five seeded tables "
-                    "fingerprint-identical through the real migration); the "
-                    "data-bearing N-1->head edge is now proven by the promotion "
-                    "canary itself, cross-checked by cold_install_check --mode "
-                    "upgrade"
+                    "pass (v0.40.0) — fresh-install canary + seeded previous-head "
+                    "upgrade 029->031 WITH data preservation (migrations 030 "
+                    "budget_amendments + 031 review_rounds chained through the "
+                    "real canary); the data-bearing N-1->head edge is proven by "
+                    "the promotion canary itself, cross-checked by "
+                    "cold_install_check --mode upgrade"
                 ),
                 "receipt": f"{LATEST_PROMOTION_RECEIPT}#canary",
             },
