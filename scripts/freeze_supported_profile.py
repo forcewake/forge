@@ -499,6 +499,10 @@ def _working_tree_wheel(root: Path) -> dict[str, Any]:
             "sha256": _sha256_bytes(local.read_bytes()),
             "source": "local-uv-build",
             "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
+            # same shape as the committed receipt below: the capture must
+            # reproduce byte-identically with OR without a local dist/ (CI
+            # has none) — a shape difference is a reproducibility defect.
+            "built_for": "the v2 qualification composition (forge#326)",
         }
     receipt = root / WHEEL_RECEIPT_PATH
     if receipt.is_file():

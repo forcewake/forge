@@ -13,6 +13,7 @@
       "qualification_composition": {
         "note": "the executed-lab section IS the qualification composition: the alignment image is the WORKING-TREE build and the wheel beside it is the uv build of the SAME tree — a cold install from this manifest installs THESE bytes, never a released artifact that predates them",
         "wheel": {
+          "built_for": "the v2 qualification composition (forge#326)",
           "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
           "name": "forge-0.39.0-py3-none-any.whl",
           "path": "dist/forge-0.39.0-py3-none-any.whl",
@@ -101,7 +102,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-25T13:47:07+00:00",
+  "frozen_at": "2026-09-25T14:25:27+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.37.0.json",
@@ -144,7 +145,7 @@
       "version": "0.39.0"
     }
   },
-  "manifest_digest": "e0177d5c903c0c65563facc4b31a8915ff4b0cbd3e0a1741c6232055c1ce7f8e",
+  "manifest_digest": "13d0fcecb12674177d84cbefb577344f6a14e4095c91c938f20f58a74fa27885",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",
