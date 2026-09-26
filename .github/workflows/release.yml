@@ -260,7 +260,7 @@ jobs:
       # wheel_url + wheel_sha256 from the archived record and refuses any
       # bytes that do not reproduce the hash.
       - name: Fetch the lane wheel set
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: lane-dist-v${{ github.ref_name }}
           path: dist
