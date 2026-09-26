@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-09-26
+
+### Added — the b521e1a review: 12/18 items implemented (#337-#354)
+
+The closed-human-loop cycle: review is no longer a dead end after
+readiness, budget decisions are executable, and credential authority is
+serialized. Suite 8593 → 8846 (+253). The 6 remaining items closed at
+their honest human/external boundaries (#345 partner task, #346 blind
+review, #347 customer discovery, #350 .NET customer profile, #352
+two-writer, #354 the 1.0 declaration) — packages, kits and contracts
+ready, nothing weakened to force a close.
+
+**The two P1:**
+- **#337 R40-01**: the /fix//ask production path — flag-gated ingress
+  (FORGE_REVIEW_FEEDBACK_ENABLED, default OFF = zero routing), two-layer
+  dedup (delivery-UUID SET-NX at ingress + the logical
+  connection/project/MR/note identity), the installed reconciler's
+  correction pass (worker-restart semantics proven), typed 2xx refusals
+  (the GitLab 4-failure hook auto-disable protection), and
+  registration-revert mutation arms.
+- **#339 R40-03**: finality-based exposure — settled / accrued-unsettled /
+  retained-liability separated; the P01 counterexample (a partial with a
+  cost no longer releases its envelope) dead; typed unbounded-exposure,
+  incoherent-bound and invalid-number findings; monotonicity, order and
+  replay invariance property-tested; SQL-reload parity.
+
+**The loop (the review's named main product result):**
+- **#338 R40-02**: bounded review rounds after ready_for_human — linked
+  child work units (migration 031, partial-unique race arbiter: two
+  racing authorized /fix notes collapse onto one round), the classic-run
+  adapter deriving the active plan from the frozen spec, the head-fence
+  eligibility ladder (human commits preserved), one outstanding round
+  per MR, the original delivery immutable with old evidence historical.
+
+**Executable budgets:**
+- **#340 R40-04**: typed budget amendments keyed by the ORIGINATING
+  NATIVE COMMAND identity (migration 030; two identical commands are two
+  decisions, a redelivery applies once), atomic application to the
+  enforcing RunBudget (count axes raise limits and re-open limit-reached
+  exhaustion; usd raises the closing gate's effective cap), the
+  closing-partition/1 reserve frozen BEFORE coding (the implementer sees
+  limit − share, the reviewer the full limits), and AT-04 with the REAL
+  LLMClient + BudgetGuard — an evidence-only amendment cannot buy a
+  reviewer call.
+
+**Serialized authority:**
+- **#341 R40-05**: the operation_grants keyed table (migration 029) —
+  the unique index is the creation lock (concurrent creators converge on
+  one grant_id and one absolute deadline); the evidence projection is a
+  targeted CAS merge re-reading the authority each round; concurrent
+  checkpoint/native-handle fields survive (mutation-proven).
+- **#342 R40-06**: complete grant identity validation pre-broker
+  (schema/operation/delivery-mode/work/subject/generation), the
+  binding-revision comparison with the explicit grandfather adapter, the
+  issuance/cancellation linearization contract, post-await fence
+  re-reads, and runner verification of the operation word + revision +
+  deadline.
+
+**Qualification and gates:**
+- **#343 R40-07**: operation-grant redemption LIVE-qualified — the
+  native dispatch minted the grant (never seeded), the real lane
+  bootstrap redeemed, the sentinel proof (the broker-selected key
+  presented, the ambient never), generation retirement, cold restart
+  preserving the deadline, seven typed negative classes with zero
+  successful retrievals. <$0.01 spend.
+- **#344 R40-08**: the required composed-trace mutation gates (every
+  seeded defect proven to fail its trace), prerequisite-missing honesty
+  in the PG gate (a required profile without its fixture reports
+  UNQUALIFIED, exit 2 — never an invisible skip), and the aiosqlite
+  teardown fixed at the allocation origin.
+- **#351 R40-15**: the measured operating envelope under the real
+  workflow shape (partition occupancy, degradation parking, the
+  workflow-rows restore drill covering rounds+amendments+grants, five
+  alerts with threshold bases); the honestly-blocked live leg (the lab's
+  expired broker credential) recorded as the failing drill row.
+- **#348 R40-12 (machine part)**: the cold-install kit — the runbook
+  whose machine steps execute verbatim with verified observables, four
+  human steps counted honestly, the four negative arms firing typed
+  refusals before any unsafe or paid action.
+- **#349 R40-13**: the five-fact operator projection (execution / review
+  round / candidate / verification / acceptance as separate but linked
+  facts), action versioning with typed stale refusals, one-snapshot
+  consistency across API/comment/native lines.
+- **#353 R40-17**: ADR-0034 (the ownership map with verified production
+  callers), the BudgetAmendment unification (GitHub off the legacy
+  evidence ledger onto the one table, guarded by an architecture
+  allow-set), fixture isolation pinned.
+- **#354 R40-18 (the contract drafted)**:
+  docs/product/supported-contract.md — the 1.0 candidate centered on
+  reviewed delivery + bounded follow-up, with the six-point declaration
+  gate (four machine-proven and linked, two honestly human).
+
 ## [0.39.0] - 2026-09-25
 
 ### Added — the 6df4020 review: 12/17 items implemented (#320-#336)

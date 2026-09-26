@@ -1,0 +1,131 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem' — observed 2026-09-26)",
+  "capabilities": [
+    "real-provider-e2e",
+    "useful-wip-cross-runner-resume",
+    "approved-revision-rebind",
+    "closing-review-within-reserve",
+    "operation-grant-redemption"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer",
+    "approve-revision",
+    "review-rounds"
+  ],
+  "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential delivered by RUNNER REDEMPTION on the qualifying trace (the operation-grant route, live-qualified 2026-09-26) with the native/protected-variable route also qualified on the v0.39.0 record",
+  "evidence": [
+    {
+      "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+      "capability": "real-provider-e2e",
+      "class": "live-provider",
+      "covers": "the v2 trace (2026-09-25, run f0d559fd): issue → plan → /go → adaptive ladder → useful checkpoint (three file shapes) → material revision approved natively → the resumed candidate carrying revision-2 text (zero rescue steers) → Draft MR + green oracle → closing review within reserve → terminal ready_for_human. $0.4032 lane spend. Full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "6b665cf4000000000000000000000000000000000000000000000000000000dd",
+      "capability": "operation-grant-redemption",
+      "class": "live-provider",
+      "covers": "the redemption trace (2026-09-26, run 3360ff64): the native dispatch minted the grant (zero rows before /go, asserted); the REAL lane bootstrap redeemed through the endpoint; the sentinel proof — the recorder captured exactly one model call whose Authorization digest matches the BROKER-SELECTED sentinel, the AMBIENT sentinel never presented; generation retirement live (gen-1 token superseded); cold restart preserved the absolute deadline; 7 typed negative classes with zero successful retrievals. <$0.01 spend. Full record: qualification/records/redemption-2026-09-26.json",
+      "executed_at": "2026-09-26T13:25:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "capability": "real-provider-e2e",
+      "class": "offline-operational",
+      "covers": "the composition + operations qualification (2026-09-26): the profile frozen onto the redemption alignment (image sha256:ddcb9137, schema 031); the deployment-ops drills 13/14 qualified-for-profile (the 1 fail is the honestly-recorded blocked live leg — the lab's expired broker credential, operator action; the lane failed CLOSED with zero model spend); the measured operating envelope with the workflow-rows restore drill; the mutation-gated composed traces (tests.mutation_killed: 3)",
+      "executed_at": "2026-09-26T16:46:00+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+      "capability": "useful-wip-cross-runner-resume",
+      "class": "live-provider",
+      "covers": "the useful-WIP checkpoint (files=2, ALL THREE shapes with verified digests) restored EXACTLY on a second runner (required-resume envelope 11a7f7fda283, workspace generation .forge-workspace-gen-f70244cc49d2); rung-1 sampled the empty mode (files=0) and re-entered through the native /retry — the ladder measured both live. Full record: qualification/records/supported-composition-v2-2026-09-25.json (carried by the v0.39.0 release record; the live facts stand)",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+      "capability": "approved-revision-rebind",
+      "class": "live-provider",
+      "covers": "the MATERIAL revision staged through stage_pending_revision INSIDE forge-app, approved NATIVELY (/approve-revision, decision dec-wipv2-f0d559fdb7f1; the activation CAS switched the durable plan digest to revision 2); the resumed dispatch carried the revision-2 TEXT (approved_input source=revision, executor_input_digest f34f5d62b8b0 persisted beside the intent) and the final candidate itself carries the marker — the executor obeyed the NEW brief with ZERO rescue steers. Full record: qualification/records/supported-composition-v2-2026-09-25.json (carried by the v0.39.0 release record; the live facts stand)",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+      "capability": "closing-review-within-reserve",
+      "class": "live-provider",
+      "covers": "the closing review completed on the run's own budget under the configured closing reserve (FORGE_CLOSING_RESERVE_USD=0.50, FORGE_SPEND_CAP_USD=2.50 on BOTH consumers): verdict ok bound to the exact candidate sha — run terminal ready_for_human ('checks passed; merge is a human decision'); no review_budget_block was ever written. Full record: qualification/records/supported-composition-v2-2026-09-25.json (carried by the v0.39.0 release record; the live facts stand)",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "qualification/records/supported-composition-v2-2026-09-25.json",
+    "qualification/records/redemption-2026-09-26.json",
+    "qualification/deployment-ops-2026-09-26.json",
+    "qualification/profiles/supported-gitlab-ce-v1.json",
+    "docs/evaluation/2026-09-26-redemption-qualification/README.md"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:ddcb9137b09c41acbbc7a1cdffbcf60c79beffbe2bfd5708034f29edf58ba1a7",
+  "legacy": false,
+  "note": "R40 cycle release record. The five claimed capabilities are proven LIVE on the exact compositions: the v2 trace (the working-tree build promoted AS v0.39.0 — byte-identical wheel) and the redemption trace (the current tree's alignment ddcb9137). v0.40.0 promotes the tree that adds the review-round loop (#338), executable budgets (#340), serialized grant authority (#341/#342), the wired feedback ingress (#337), the mutation gates (#344) and the operator projection (#349). Honest posture: (1) the human approval on the promotion decision stays PENDING (qualification/profile-approvals.json). (2) The broker credential on the lab is EXPIRED (verified 401) — the live /fix→round leg of the envelope drill is blocked on operator action and recorded as the failing drill row; the round path stands proven at drill level through the app's real note-command entry. (3) The lab's FORGE_LANE_REF pin predates the working-tree template — the drills substitute the promoted v0.39.0 pairing and name it. (4) This pre-release record binds the EXECUTED lab digest; the follow-up re-binds image_digest to the promoted GHCR digest. Spend this cycle: <$0.02 total live (the redemption trace <$0.01 + the envelope drill legs ≈$0.10 inside the run budgets).",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-26",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-26",
+  "record_id": "gitlab-ce-v1@0.40.0",
+  "refusal_resolution": [
+    {
+      "action": "rotate the lab's expired broker credential (env:ANTHROPIC_AUTH_TOKEN on forge-app — verified 401), then re-run the workflow-envelope drill's live round leg",
+      "owner": "maintainer (Pavel) — lab credentials",
+      "refusal": "the envelope drill's /fix→review-round live leg failed: the broker-bound credential is expired; the lane failed CLOSED with zero model spend (exactly as designed)",
+      "status": "open"
+    },
+    {
+      "action": "re-pin the lab's FORGE_LANE_REF to the promoted release lane ref (the current pin predates the working-tree template's collector flags)",
+      "owner": "maintainer (Pavel) — lab configuration",
+      "refusal": "the lab's pinned FORGE_LANE_REF (2fbc321, 2026-09-21) predates the working-tree template; the drills substitute the promoted v0.39.0 pairing and name it",
+      "status": "open"
+    },
+    {
+      "action": "run one real-model redemption pass (the sentinel proof used a recording endpoint by design; a real-model pass establishes vendor compatibility)",
+      "owner": "next live drill (needs spend authorization)",
+      "refusal": "the redemption identity proof is complete without model spend; a real-model pass is the remaining vendor-compatibility arm",
+      "status": "open"
+    },
+    {
+      "action": "record the human approval decision in qualification/profile-approvals.json",
+      "owner": "maintainer (Pavel)",
+      "refusal": "profile approval is a separate human artifact this record deliberately does not claim",
+      "status": "open"
+    }
+  ],
+  "release_version": "0.40.0",
+  "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@b521e1a7bd3568dd48bb235b6b7d743a21caca99 (the promoted v0.39.0 sha — the #343-validated pairing; claude-code CLI 2.1.273; uv python 3.13); control plane = the current tree's alignment build (ddcb9137, schema 031)",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "upgrade": {
+    "claim": "schema-transition",
+    "evidence_ref": "cold_install_check --mode upgrade (2026-09-26): the real 030->031 transition with seeded tables preserved; the 027->028 and 029 steps proven by the same chain and the release canaries",
+    "preservation_checks": [
+      "per-table row counts",
+      "per-table sha256 fingerprints over ordered identity strings"
+    ],
+    "seeded_records": [
+      "the seeded tables at 030 preserved through the 031 upgrade"
+    ],
+    "source_schema": "030",
+    "target_schema": "031"
+  },
+  "verification_contract": "one required job named smoke asserting six exact slugify cases on the CURRENT candidate sha (committed before any run); the v2 revision marker proving the resumed executor consumed the approved revision-2 brief; the redemption trace's grant-joined consumption receipt",
+  "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff"
+}

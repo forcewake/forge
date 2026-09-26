@@ -1363,11 +1363,16 @@ def test_the_committed_store_manifest_is_honest() -> None:
     # the per-release record claims every capability the qualifying trace
     # proved live (four since v0.39.0); with no committed live TraceRecord
     # the derived tier stays 'none' for each — the join stays owed.
+    # the per-release record claims every capability the qualifying traces
+    # proved live (five since v0.40.0 — operation-grant-redemption joined);
+    # with no committed live TraceRecord the derived tier stays 'none' per
+    # capability — the trace join stays owed.
     assert {tier.capability: tier.tier for tier in gitlab.tiers} == {
         "real-provider-e2e": "none",
         "useful-wip-cross-runner-resume": "none",
         "approved-revision-rebind": "none",
         "closing-review-within-reserve": "none",
+        "operation-grant-redemption": "none",
     }
 
 

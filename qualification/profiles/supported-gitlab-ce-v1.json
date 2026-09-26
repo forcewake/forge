@@ -15,9 +15,9 @@
         "wheel": {
           "built_for": "the v2 qualification composition (forge#326)",
           "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
-          "name": "forge-0.39.0-py3-none-any.whl",
-          "path": "dist/forge-0.39.0-py3-none-any.whl",
-          "sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
+          "name": "forge-0.40.0-py3-none-any.whl",
+          "path": "dist/forge-0.40.0-py3-none-any.whl",
+          "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
           "source": "local-uv-build"
         }
       },
@@ -102,7 +102,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-26T14:19:11+00:00",
+  "frozen_at": "2026-09-26T17:16:58+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.39.0.json",
@@ -136,16 +136,16 @@
       "version": "0.39.0"
     },
     "wheel": {
-      "name": "forge-0.39.0-py3-none-any.whl",
-      "path": "dist/forge-0.39.0-py3-none-any.whl",
+      "name": "forge-0.40.0-py3-none-any.whl",
+      "path": "dist/forge-0.40.0-py3-none-any.whl",
       "promotion_pending": "the fresh cold install installs THIS working-tree build by sha256 (the qualification composition); the promoted-wheel section names what is released and stays behind it",
       "receipt": "uv build of the working tree + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
-      "sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
+      "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
       "source": "local-uv-build",
-      "version": "0.39.0"
+      "version": "0.40.0"
     }
   },
-  "manifest_digest": "f3c0416396eeb150b523b7d34b4fefc11ba2ebe8da3ab5f01603daa84799f300",
+  "manifest_digest": "bb8f2858fb980b91cffbc0fd412deca103ef37db6a9bf6e32be422b40d24e66e",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",

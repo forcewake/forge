@@ -51,7 +51,12 @@ from forge.adaptive.ops_drills import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FROZEN_PROFILE = REPO_ROOT / "qualification" / "profiles" / "supported-gitlab-ce-v1.json"
-EXECUTED_REPORT = REPO_ROOT / "qualification" / "deployment-ops-2026-09-25.json"
+#: The LATEST dated executed report (a literal broke when the R40-15 cycle
+#: moved to deployment-ops-2026-09-26.json without overwriting history).
+EXECUTED_REPORT = sorted(
+    (REPO_ROOT / "qualification").glob("deployment-ops-*.json"),
+    key=lambda path: path.name,
+)[-1]
 
 #: The frozen profile's manifest digest (#307) — the executed-lab bind.
 #: The frozen digest DERIVES from the committed manifest (a literal broke
