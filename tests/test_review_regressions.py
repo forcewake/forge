@@ -278,7 +278,11 @@ async def composed_a05_leased_batch_expiry_two_workers(monkeypatch: pytest.Monke
                     .all()
                 )
             assert len(claimed_ids) == 5
-            past = datetime.now(timezone.utc) - timedelta(seconds=1)
+            # Firmly past the reaper's grace window — these unstarted claims
+            # belong to a worker that will never renew them (A05's shape).
+            past = datetime.now(timezone.utc) - timedelta(
+                seconds=step_runtime.STEP_REAP_GRACE_SECONDS + 5
+            )
             async with db() as session:
                 async with session.begin():
                     await session.execute(

@@ -40,17 +40,19 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -155,7 +157,9 @@ from forge.durable import (
     complete_intent,
     consume_approval,
     due_intents,
+    InvalidIntentTransition,
     is_valid,
+    mark_dispatched,
     OPEN_STATES,
     ProbeObservation,
     ProbeVerdict,
@@ -193,7 +197,7 @@ from forge.durable.budgets import (
     resolve_budget_limits,
     usd_amendment_total,
 )
-from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
+from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition, StaleClaimError
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
@@ -604,6 +608,34 @@ class _ResolvedGo:
     """The identifier narrowed to exactly one run of this project+issue."""
 
     run: FlowRun
+
+
+@dataclass(frozen=True)
+class _MRCreateClaim:
+    """The durable create-once claim behind ``_create_draft_mr`` (R11).
+
+    ``owner`` — this call MINTED the create intent and owns the native
+    create; ``observed_iid`` — an already-created (or concurrently
+    completed) MR to ADOPT instead of creating; ``redrive`` — an OPEN
+    intent whose creator died mid-create (the bounded I/O window elapsed
+    with no outcome) that this call re-drives on the SAME identity.
+    """
+
+    intent_id: str
+    owner: bool = False
+    observed_iid: int | None = None
+    redrive: bool = False
+
+
+#: The Draft-MR create intent's idempotency scope — ONE logical MR per
+#: run+branch (B03), the same identity the ``mr_reservations`` row keys.
+_DRAFT_MR_INTENT_SCOPE = "draft-mr"
+
+#: CAS rounds for the shared evidence fold (#341's lost-write class,
+#: closed at the fold itself): a concurrent evidence writer between the
+#: fold's read and its commit makes the compare fail and the fold re-reads
+#: and retries — nobody's evidence is lost to a racing merge.
+_EVIDENCE_FOLD_CAS_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -2540,6 +2572,8 @@ class RunService:
 
         now = datetime.now(timezone.utc)
         for intent in intents:
+            if intent.operation != "commit":
+                continue  # the Draft-MR create intent resolves in its own leg
             if intent.status not in OPEN_STATES:
                 continue  # terminal intents are immutable — reported, never re-driven
             try:
@@ -5303,7 +5337,24 @@ class RunService:
                 return
 
         if entry_status != FlowStatus.ENSURING_DRAFT_MR.value:
-            await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
+            try:
+                await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
+            except (InvalidTransition, StaleClaimError):
+                # A concurrent recovery may already have walked the run
+                # past this stage (its own MR ensured) — the reads below
+                # see the row as it is and adopt instead of fighting.
+                async with self._session_factory() as probe:
+                    current = await self._get_run(probe, run_id)
+                if current is None or current.status not in (
+                    FlowStatus.ENSURING_DRAFT_MR.value,
+                    FlowStatus.WAITING_CI.value,
+                ):
+                    raise
+                logger.info(
+                    "Run %s already past ensuring_draft_mr (now %s) — continuing the leg",
+                    run_id[:8],
+                    current.status,
+                )
 
         # ensuring_draft_mr: Draft MR before CI (ADR-0007). On a repair the MR
         # already exists — update it instead of creating a second one.
@@ -5341,9 +5392,27 @@ class RunService:
 
         async with self._session_factory() as session:
             controller = Controller(session)
-            await controller.transition(
-                run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {commit_sha[:8]}"
-            )
+            try:
+                await controller.transition(
+                    run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {commit_sha[:8]}"
+                )
+            except (InvalidTransition, StaleClaimError):
+                # A concurrent recovery (the publication-intent scanner
+                # finishing an adopted commit's walk) already landed the
+                # run in waiting_ci with its MR — this leg's remaining
+                # writes are all recorded on the row; stand down instead
+                # of fighting a walk that already finished.
+                run = await self._get_run(session, run_id)
+                if run is None or run.status != FlowStatus.WAITING_CI.value:
+                    raise
+                logger.info(
+                    "Run %s already walked to waiting_ci by a concurrent recovery — "
+                    "standing down (mr=%s)",
+                    run_id[:8],
+                    run.mr_iid,
+                )
+                await session.rollback()
+                return
             run = await self._get_run(session, run_id)
             run.mr_iid = mr_iid
             run.candidate_shas = list(run.candidate_shas or []) + [commit_sha]
@@ -6160,6 +6229,180 @@ class RunService:
             )
             await session.commit()
 
+    async def _claim_draft_mr_create(
+        self, project_id: int, run_id: str, branch: str
+    ) -> _MRCreateClaim:
+        """Find-or-mint the durable create intent for the run's Draft MR (R11).
+
+        The reservation row alone cannot close the concurrent-creator
+        window: ``FOR UPDATE`` serializes only on PostgreSQL, and even
+        there the loser's JOURNAL/PROVIDER reads can precede the winner's
+        commit — two creators then POST two identical MRs (LIVE-found
+        2026-09-20: "two create_merge_request calls for one intent"; the
+        R41-07 matrix arm hit the same shape on a slow runner). The R11
+        answer for every other native effect applies here too: a
+        :class:`~forge.durable.models.PublicationIntent` with a STABLE
+        operation key, committed BEFORE any provider I/O — concurrent
+        creators collapse on the row (the unique index decides at the DB),
+        the minter creates, everyone else adopts.
+
+        The loser does not guess: a live creator resolves within one
+        bounded I/O window (its create is bounded by the same timeout),
+        and only an intent that sat open PAST that window is re-driven on
+        the SAME identity (a creator that died mid-create — recovery, not
+        duplication; the in-transaction provider-list adoption still
+        catches an effect that landed without a journal).
+        """
+        repo_identity = str(project_id)
+        base_key = f"mr:{run_id}:{branch}"
+        claim: _MRCreateClaim | None = None
+        for _ in range(4):  # bounded mint retry: a conflict collapses on re-read
+            async with self._session_factory() as session:
+                rows = (
+                    (
+                        await session.execute(
+                            select(PublicationIntent)
+                            .where(
+                                PublicationIntent.run_id == run_id,
+                                PublicationIntent.provider == "gitlab",
+                                PublicationIntent.repo == repo_identity,
+                                PublicationIntent.target_ref == branch,
+                                PublicationIntent.operation == "create_merge_request",
+                            )
+                            .order_by(
+                                PublicationIntent.created_at.desc(), PublicationIntent.id.desc()
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                newest = rows[0] if rows else None
+                if newest is not None and newest.status in OPEN_STATES:
+                    claim = _MRCreateClaim(intent_id=newest.id)
+                    break  # foreign/open — resolved below, outside the txn
+                operation_key = base_key
+                if newest is not None:
+                    # A terminal intent means the effect was recorded; the
+                    # recorded MR still existing makes this a pure adoption.
+                    # One that is GONE (closed/merged — the reservation
+                    # reopened) legitimately starts a NEW create: a fresh
+                    # intent on a suffixed key, same identity discipline.
+                    recorded = str(newest.provider_object_id or "").strip()
+                    if recorded.isdigit():
+                        try:
+                            await self._gitlab.get_merge_request(project_id, int(recorded))
+                        except GitLabAPIError:
+                            recorded = ""
+                        if recorded:
+                            claim = _MRCreateClaim(intent_id=newest.id, observed_iid=int(recorded))
+                            break
+                    operation_key = f"{base_key}#{len(rows)}"
+                intent_id = uuid4().hex
+                dialect_insert = (
+                    postgresql.insert
+                    if session.bind.dialect.name == "postgresql"
+                    else sqlite_dialect_insert
+                )
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        dialect_insert(PublicationIntent)
+                        .values(
+                            id=intent_id,
+                            run_id=run_id,
+                            provider="gitlab",
+                            repo=repo_identity,
+                            operation="create_merge_request",
+                            target_ref=branch,
+                            idempotency_scope=_DRAFT_MR_INTENT_SCOPE,
+                            operation_key=operation_key,
+                            status="requested",
+                        )
+                        .on_conflict_do_nothing()
+                    ),
+                )
+                if (result.rowcount or 0) == 1:
+                    await mark_dispatched(session, intent_id)
+                    await session.commit()
+                    return _MRCreateClaim(intent_id=intent_id, owner=True)
+                await session.rollback()  # someone else minted — re-read collapses
+        if claim is None:
+            # Four mint conflicts without a readable row is not a state this
+            # leg can act on — the honest answer is the typed failure, not a
+            # second effect on an identity we cannot see.
+            raise RuntimeError(
+                f"draft-MR create intent for run {run_id[:8]} on {branch!r} could not "
+                "be claimed after repeated conflicts"
+            )
+        if claim.observed_iid is not None:
+            return claim
+        observed = await self._await_foreign_draft_mr(claim.intent_id, project_id)
+        if observed is not None:
+            return replace(claim, observed_iid=observed)
+        return replace(claim, redrive=True)
+
+    async def _await_foreign_draft_mr(self, intent_id: str, project_id: int) -> int | None:
+        """Bounded wait for a concurrent creator's Draft-MR outcome (A12 shape).
+
+        The winner's create is bounded by the same I/O timeout this wait
+        allows, so a LIVE creator always resolves first — its completed
+        intent carries the MR iid to adopt. Still open at the bound, the
+        creator is dead (crashed mid-create) and the caller re-drives the
+        SAME intent; the provider list inside the create transaction
+        remains the arbiter for an effect that landed unjournaled.
+        """
+        deadline = time.monotonic() + self._mr_io_timeout_s() + 5.0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+            async with self._session_factory() as session:
+                row = await session.get(PublicationIntent, intent_id)
+            if row is None or row.status in OPEN_STATES:
+                continue
+            recorded = str(row.provider_object_id or "").strip()
+            if not recorded.isdigit():
+                return None  # failed/unknown without an object — the caller decides
+            try:
+                await self._gitlab.get_merge_request(project_id, int(recorded))
+            except GitLabAPIError:
+                return None  # recorded but gone — the caller's normal path decides
+            return int(recorded)
+        return None
+
+    async def _adopt_draft_mr(self, run_id: str, branch: str, mr_iid: int) -> int:
+        """Adopt an already-created Draft MR: journal the observation, confirm.
+
+        The 3b shape (provider adoption) for a creator that observed the
+        effect through the INTENT instead of the provider list — its own
+        observation row in the immutable journal, the reservation confirmed
+        exactly once.
+        """
+        async with self._session_factory() as session:
+            reservation = (
+                (
+                    await session.execute(
+                        select(MRReservation).where(
+                            MRReservation.flow_run_id == run_id,
+                            MRReservation.branch == branch,
+                        )
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            if not (reservation.status == "confirmed" and reservation.mr_iid == mr_iid):
+                controller = Controller(session)
+                action_id = await controller.record_action(
+                    run_id, "create_merge_request", correlation_id=branch
+                )
+                await controller.complete_action(
+                    action_id, "succeeded", {"mr_iid": mr_iid, "adopted": True}
+                )
+                reservation.status = "confirmed"
+                reservation.mr_iid = mr_iid
+                await session.commit()
+        return mr_iid
+
     async def _draft_target_branch(self, run_id: str) -> str:
         """The MR target from the FROZEN spec (C05) — never live settings.
 
@@ -6176,6 +6419,38 @@ class RunService:
             return self._target_branch()
         return spec.target_branch or self._target_branch()
 
+    async def _complete_mr_intent_quietly(
+        self,
+        session: AsyncSession,
+        intent_id: str,
+        status: str,
+        *,
+        provider_object_id: str | None = None,
+        remote_result: dict | None = None,
+    ) -> None:
+        """Complete the create intent, tolerating a creator that finished first.
+
+        Two creators can hold the same OPEN intent legitimately (the
+        bounded wait expires, the re-drive proceeds) — whoever completes
+        first owns the outcome row (terminal is immutable); the other's
+        journal and reservation writes are still correct, so the
+        completion conflict is logged, never raised.
+        """
+        try:
+            await complete_intent(
+                session,
+                intent_id,
+                status,
+                provider_object_id=provider_object_id,
+                remote_result=remote_result,
+            )
+        except InvalidIntentTransition:
+            logger.warning(
+                "Draft-MR create intent %s already terminal — %s completion skipped",
+                intent_id[:8],
+                status,
+            )
+
     async def _create_draft_mr(
         self,
         project_id: int,
@@ -6191,6 +6466,15 @@ class RunService:
         1. **Reserve** (own committed transaction, before any I/O): the
            ``mr_reservations`` row is the durable one-MR intent — visible
            to every other connection immediately.
+        1b. **Claim the create** (R11): the create's PublicationIntent —
+           stable operation key, committed BEFORE any provider I/O — is
+           what actually collapses CONCURRENT creators (the reservation's
+           ``FOR UPDATE`` cannot: SQLite ignores it, and a queued creator's
+           journal/provider checks go stale behind the winner's open
+           transaction). The minter creates; a concurrent creator waits
+           one bounded I/O window and adopts; only an intent left open
+           past that window (a creator that died mid-create) is re-driven
+           on the SAME identity.
         2. **Serialize** under the reservation row lock (``FOR UPDATE``):
            a concurrent leg or the recovery scanner blocks behind the
            winner, then sees ``confirmed``.
@@ -6207,6 +6491,20 @@ class RunService:
         # spec read opens its own session; under the row lock it would
         # interleave with this transaction's uncommitted state).
         target_branch = await self._draft_target_branch(run_id)
+        claim = await self._claim_draft_mr_create(project_id, run_id, branch)
+        if claim.observed_iid is not None:
+            return await self._adopt_draft_mr(run_id, branch, claim.observed_iid)
+        if claim.redrive:
+            # A creator that died mid-create left the intent open — re-drive
+            # it on the same identity. The dispatch bump is bookkeeping: a
+            # creator completing in this exact window wins the race and the
+            # create below adopts its effect anyway.
+            async with self._session_factory() as session:
+                try:
+                    await mark_dispatched(session, claim.intent_id)
+                    await session.commit()
+                except InvalidIntentTransition:
+                    await session.rollback()
         async with self._session_factory() as session:
             reservation = (
                 (
@@ -6225,18 +6523,34 @@ class RunService:
             if reservation.status == "confirmed" and reservation.mr_iid is not None:
                 try:
                     await self._gitlab.get_merge_request(project_id, int(reservation.mr_iid))
-                    return int(reservation.mr_iid)
                 except GitLabAPIError:
                     # the confirmed MR is gone (closed/merged) — reopen the
                     # reservation and create a fresh Draft MR.
                     reservation.status = "open"
                     reservation.mr_iid = None
+                else:
+                    await self._complete_mr_intent_quietly(
+                        session,
+                        claim.intent_id,
+                        "adopted",
+                        provider_object_id=str(reservation.mr_iid),
+                        remote_result={"mr_iid": int(reservation.mr_iid), "adopted": True},
+                    )
+                    await session.commit()
+                    return int(reservation.mr_iid)
 
             controller = Controller(session)
 
             # 3a. adopt the journal first — a previous attempt succeeded.
             journal_iid = await self._journaled_draft_mr(run_id, project_id, branch)
             if journal_iid is not None:
+                await self._complete_mr_intent_quietly(
+                    session,
+                    claim.intent_id,
+                    "adopted",
+                    provider_object_id=str(journal_iid),
+                    remote_result={"mr_iid": journal_iid, "adopted": True},
+                )
                 reservation.status = "confirmed"
                 reservation.mr_iid = journal_iid
                 await session.commit()
@@ -6270,12 +6584,19 @@ class RunService:
                         "succeeded",
                         {"mr_iid": int(existing_mr.iid), "adopted": True},
                     )
+                    await self._complete_mr_intent_quietly(
+                        session,
+                        claim.intent_id,
+                        "adopted",
+                        provider_object_id=str(int(existing_mr.iid)),
+                        remote_result={"mr_iid": int(existing_mr.iid), "adopted": True},
+                    )
                     reservation.status = "confirmed"
                     reservation.mr_iid = int(existing_mr.iid)
                     await session.commit()
                     return int(existing_mr.iid)
 
-            # 5. verified miss on both surfaces — create, under the same
+            # 5. verified miss on all surfaces — create, under the same
             # locked transaction (the reservation is the serializer).
             action_id = await controller.record_action(
                 run_id, "create_merge_request", correlation_id=branch
@@ -6299,16 +6620,29 @@ class RunService:
             except (httpx.HTTPError, TimeoutError):
                 # a timeout after possibly executing = unknown outcome
                 await controller.complete_action(action_id, "unknown_outcome")
+                await self._complete_mr_intent_quietly(
+                    session, claim.intent_id, "unknown", remote_result={"outcome": "lost"}
+                )
                 await session.commit()
                 raise
             except GitLabAPIError as exc:
                 await controller.complete_action(action_id, "failed", {"error": str(exc)})
+                await self._complete_mr_intent_quietly(
+                    session, claim.intent_id, "failed", remote_result={"error": str(exc)}
+                )
                 await session.commit()
                 raise
             await controller.complete_action(
                 action_id,
                 "succeeded",
                 {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
+            )
+            await self._complete_mr_intent_quietly(
+                session,
+                claim.intent_id,
+                "committed",
+                provider_object_id=str(mr.get("iid") or ""),
+                remote_result={"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
             )
             reservation.status = "confirmed"
             reservation.mr_iid = int(mr["iid"])
@@ -8151,6 +8485,11 @@ class RunService:
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
             intents = await due_intents(session, provider="gitlab", now=now)
+        # R11 (the Draft-MR create intent): the commit probe's marker+parent
+        # logic has nothing to say about an MR create — the MR intent's
+        # creator/adopter discipline lives in ``_create_draft_mr`` (bounded
+        # concurrent-creator wait, same-identity re-drive), never here.
+        intents = [intent for intent in intents if intent.operation == "commit"]
         for intent in intents:
             try:
                 await self._resolve_one_publication_intent(intent, now=now)
@@ -8865,9 +9204,24 @@ class RunService:
 
         async with self._session_factory() as session:
             controller = Controller(session)
-            await controller.transition(
-                run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {sha[:8]}"
-            )
+            try:
+                await controller.transition(
+                    run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {sha[:8]}"
+                )
+            except (InvalidTransition, StaleClaimError):
+                # The builtin leg's comment applies verbatim: a concurrent
+                # recovery may have finished this walk already.
+                run = await self._get_run(session, run_id)
+                if run is None or run.status != FlowStatus.WAITING_CI.value:
+                    raise
+                logger.info(
+                    "Run %s already walked to waiting_ci by a concurrent recovery — "
+                    "standing down (mr=%s)",
+                    run_id[:8],
+                    run.mr_iid,
+                )
+                await session.rollback()
+                return
             run = await self._get_run(session, run_id)
             run.mr_iid = mr_iid
             run.candidate_shas = list(run.candidate_shas or []) + [sha]
@@ -9529,11 +9883,64 @@ class RunService:
             return self._plan_evidence(run)
 
     async def _merge_run_evidence(self, run_id: str, patch: dict) -> None:
-        """Incrementally fold *patch* into flow_runs.evidence (ADR-0008)."""
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            run.evidence = _merge_evidence(run.evidence, patch)
-            await session.commit()
+        """Incrementally fold *patch* into flow_runs.evidence (ADR-0008).
+
+        CAS-guarded (#341's lost-write class, closed at the shared fold):
+        the write lands only when the stored evidence TEXT still equals
+        the text this writer read — a concurrent evidence writer
+        (checkpoint, native handle, the grant projection) makes the
+        compare fail and the fold re-reads and retries, so nobody's
+        evidence is ever lost to a racing merge. The guard shape is the
+        one ``_project_operation_grant`` already uses (raw-text compare,
+        JSON round-trip on every backend).
+        """
+        from sqlalchemy import String, bindparam
+        from sqlalchemy import cast as sql_cast
+        from sqlalchemy import select as sql_select
+        from sqlalchemy import update as sql_update
+
+        for _ in range(_EVIDENCE_FOLD_CAS_ATTEMPTS):
+            async with self._session_factory() as session:
+                row = (
+                    await session.execute(
+                        sql_select(
+                            FlowRun.id, sql_cast(FlowRun.evidence, String).label("raw")
+                        ).where(FlowRun.id == run_id)
+                    )
+                ).first()
+                if row is None:
+                    return  # the run vanished — nothing to fold onto
+                old_raw: str | None = row.raw
+                current: dict = json.loads(old_raw) if isinstance(old_raw, str) and old_raw else {}
+                if not isinstance(current, dict):  # pragma: no cover — corrupt document
+                    current = {}
+                guard = (
+                    sql_cast(FlowRun.evidence, String) == bindparam("raw_text", old_raw)
+                    if old_raw is not None
+                    else FlowRun.evidence.is_(None)
+                )
+                won = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        sql_update(FlowRun)
+                        .where(FlowRun.id == run_id, guard)
+                        .values(evidence=_merge_evidence(current, patch))
+                        .execution_options(synchronize_session=False)
+                    ),
+                )
+                if (won.rowcount or 0) == 1:
+                    await session.commit()
+                    return
+                await session.rollback()
+                logger.warning(
+                    "Run %s evidence fold lost a CAS round to a concurrent writer — retrying",
+                    run_id[:8],
+                )
+        raise RuntimeError(
+            f"the evidence fold for run {run_id[:8]} could not win its CAS within "
+            f"{_EVIDENCE_FOLD_CAS_ATTEMPTS} rounds — a concurrent writer kept the "
+            "document busy"
+        )
 
     async def _read_review_evidence(self, run_id: str) -> dict | None:
         async with self._session_factory() as session:

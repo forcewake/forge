@@ -75,6 +75,21 @@ STEP_DEAD = "dead"
 #: Lease granted per claim, renewed by the per-task heartbeat.
 STEP_LEASE_SECONDS = 120
 STEP_LEASE_RENEW_INTERVAL = 30
+#: The FIRST renewal fires after this probe delay, not a full interval: a
+#: claim that sat queued (batched claims, a slow handler dispatch) is at
+#: its weakest the moment its handler finally starts, and the renewal is
+#: the only thing standing between a slow-but-progressing step and the
+#: reaper (A05).
+STEP_FIRST_RENEW_DELAY = 1.0
+#: Reaper grace (A05): a lease must be expired BY THIS MUCH before the
+#: reaper reschedules. A renewal delayed by database contention does not
+#: check expiry — it lands late and REVIVES the lease — so the reaper
+#: firing at the exact expiry tick would race every delayed renewal of a
+#: worker that is alive and heartbeating. One renewal interval of grace
+#: (bounded) lets a live worker's late renewal win; a truly dead worker's
+#: step still reschedules, grace-seconds later — recovery is delayed,
+#: never lost.
+STEP_REAP_GRACE_SECONDS = 5.0
 
 #: Poison-pill ceiling (ADR-0017 §4): attempt >= max_attempts parks the step.
 STEP_MAX_ATTEMPTS = 3
@@ -437,6 +452,8 @@ async def fail_step(
 
 async def reschedule_expired_leases(
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    grace_seconds: float = STEP_REAP_GRACE_SECONDS,
 ) -> int:
     """Reaper: steps whose lease expired mid-flight go back to ``scheduled``.
 
@@ -449,8 +466,17 @@ async def reschedule_expired_leases(
     would loop claim → crash → reap forever and never reach ``fail_step``'s
     dead parking. The last error (if a worker recorded one) is preserved in
     ``output``; otherwise the reap reason is written there.
+
+    A05: a lease expired *grace-seconds ago or less* is NOT reaped — a
+    renewal delayed by write contention does not check expiry and revives
+    the lease on arrival, so the reaper must not race every delayed
+    heartbeat of a worker that is alive and progressing. Only a lease that
+    sat expired past the grace window belongs to a worker that is truly
+    gone (or truly stopped renewing) — that one is rescheduled exactly as
+    before.
     """
     now = _utcnow()
+    cutoff = now - timedelta(seconds=grace_seconds)
     reap_error = {"error": "lease_expired: attempts exhausted by the reaper"}
     async with session_factory() as session:
         async with session.begin():
@@ -460,7 +486,7 @@ async def reschedule_expired_leases(
                     update(StepRun)
                     .where(
                         StepRun.status == STEP_RUNNING,
-                        StepRun.lease_expires_at < now,
+                        StepRun.lease_expires_at < cutoff,
                         StepRun.attempt + 1 >= StepRun.max_attempts,
                     )
                     .values(
@@ -483,7 +509,7 @@ async def reschedule_expired_leases(
                 CursorResult[Any],
                 await session.execute(
                     update(StepRun)
-                    .where(StepRun.status == STEP_RUNNING, StepRun.lease_expires_at < now)
+                    .where(StepRun.status == STEP_RUNNING, StepRun.lease_expires_at < cutoff)
                     .values(
                         status=STEP_SCHEDULED,
                         due_at=now,
@@ -788,8 +814,14 @@ async def execute_claimed_step(
     lease_lost: list[str] = []
 
     async def _heartbeat() -> None:
+        # The FIRST renewal comes after a short probe delay, not a full
+        # interval (A05): the claim is at its weakest right after a queued
+        # start, and one early renewal arms the full interval cadence
+        # before any slow external call can outrun the lease.
+        delay = min(heartbeat_interval, STEP_FIRST_RENEW_DELAY)
         while True:
-            await asyncio.sleep(heartbeat_interval)
+            await asyncio.sleep(delay)
+            delay = heartbeat_interval
             alive: bool
             failure: str | None
             try:

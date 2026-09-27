@@ -25,6 +25,7 @@ from forge.main import create_app
 from forge.models.base import Base
 from forge.runs import RunService
 from forge.worker.steps import (
+    STEP_REAP_GRACE_SECONDS,
     ClaimedStep,
     LeaseLostError,
     claim_command_step,
@@ -392,7 +393,10 @@ class TestFencing:
                 await session.execute(
                     update(StepRun)
                     .where(StepRun.id == step_id)
-                    .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                    .values(
+                        lease_expires_at=datetime.now(timezone.utc)
+                        - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                    )
                 )
 
         assert await reschedule_expired_leases(db) == 1
@@ -410,6 +414,89 @@ class TestFencing:
         # And the step is claimable again by any worker.
         reclaimed = await claim_due_steps(db, "worker-b")
         assert [s.id for s in reclaimed] == [step_id]
+
+    async def test_slow_handler_outliving_the_lease_is_never_reaped(self, db, monkeypatch):
+        """A05/R41-07: the per-task heartbeat renews the lease THROUGH long
+        awaits — a handler slower than the lease (the slow CI runner's
+        publication, a slow native call) is never reaped and rescheduled
+        while it is alive and progressing, so its step runs EXACTLY ONCE
+        (the reaper pass between renewals finds a live lease)."""
+        step_id = await self._scheduled_step(db)
+        # A lease far shorter than the handler, renewed on a fraction of it.
+        claimed = (await claim_due_steps(db, "worker-a", lease_seconds=1))[0]
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def slow_handler(settings, forge_config, session_factory, metadata):
+            started.set()
+            await asyncio.sleep(3.0)  # 3x the lease — slow but progressing
+            finished.set()
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", slow_handler)
+        task = asyncio.create_task(
+            execute_claimed_step(db, object(), object(), claimed, heartbeat_interval=0.2)
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.sleep(1.2)  # the lease (1s) has expired at least once
+
+        # The reaper pass finds a RENEWED lease — nothing to reschedule, no
+        # second claim, the in-flight execution keeps its row.
+        assert await reschedule_expired_leases(db, grace_seconds=0.05) == 0
+        assert await claim_due_steps(db, "worker-b") == []
+
+        await asyncio.wait_for(task, timeout=10)
+        assert finished.is_set()
+        async with db() as session:
+            step = await session.get(StepRun, step_id)
+        assert step.status == "succeeded"
+        assert step.attempt == 0, "the step ran exactly once — no reap, no retry"
+
+    async def test_reaper_grace_lets_a_delayed_renewal_revive_the_lease(self, db):
+        """A05: a lease expired only RECENTLY is not reaped — a renewal
+        delayed by write contention does not check expiry and revives the
+        lease on arrival, so the reaper firing at the exact expiry tick
+        must not race it. Past the grace window the reap happens exactly
+        as before (the recovery property)."""
+        step_id = await self._scheduled_step(db)
+        await self._claim(db, step_id)
+
+        # Expired a moment ago — inside the grace window: NOT reaped.
+        async with db() as session:
+            async with session.begin():
+                await session.execute(
+                    update(StepRun)
+                    .where(StepRun.id == step_id)
+                    .values(
+                        lease_expires_at=datetime.now(timezone.utc)
+                        - timedelta(seconds=STEP_REAP_GRACE_SECONDS / 2)
+                    )
+                )
+        assert await reschedule_expired_leases(db) == 0
+
+        # The delayed renewal lands (it does not check expiry) — the lease
+        # is alive again and the step is not claimable by anyone else.
+        async with db() as session:
+            step = await session.get(StepRun, step_id)
+        assert step is not None and step.status == "running"
+        assert await claim_due_steps(db, "worker-b") == []
+
+        # Firmly past the window — the dead worker's step IS rescheduled
+        # (the recovery the kill-matrix arms rely on, unchanged).
+        async with db() as session:
+            async with session.begin():
+                await session.execute(
+                    update(StepRun)
+                    .where(StepRun.id == step_id)
+                    .values(
+                        lease_expires_at=datetime.now(timezone.utc)
+                        - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                    )
+                )
+        assert await reschedule_expired_leases(db) == 1
+        async with db() as session:
+            step = await session.get(StepRun, step_id)
+        assert step is not None and step.status == "scheduled"
+        assert await claim_due_steps(db, "worker-b") != []
 
     async def test_attempts_exhaustion_parks_step_as_dead(self, db, monkeypatch):
         """(g) max_attempts reached → dead, with the last error kept."""
@@ -559,8 +646,10 @@ class TestHeartbeatSupervision:
         )
         await asyncio.wait_for(started.wait(), timeout=5)
 
-        # The lease dies and the reaper reclaims the row for nobody.
-        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        # The lease dies and the reaper reclaims the row for nobody — past
+        # the reaper's grace window (a lease expired only recently may still
+        # be revived by a delayed renewal; this one is firmly dead).
+        past = datetime.now(timezone.utc) - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
         async with db() as session:
             async with session.begin():
                 await session.execute(

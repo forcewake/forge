@@ -874,14 +874,20 @@ async def _merge_concurrent_evidence(pe_db, run_id: str) -> None:
 async def _write_concurrent_evidence_once_the_authority_lands(pe_db, run_id: str, done) -> None:
     """Watch for the keyed authority row (committed BEFORE the evidence
     projection runs), then land the concurrent evidence write — hitting
-    whatever side of the projection's read/write window is live."""
+    whatever side of the projection's read/write window is live.
+
+    The probe runs BEFORE the done-check on every pass: a drive that ends
+    between polls must not strand an authority row the watcher never
+    reacted to (the merge is the arm's entire stimulus — skipping it made
+    the baseline flap on ``checkpoint_probe is None`` and could
+    false-acquit the whole-document mutant)."""
     from sqlalchemy import select
 
     from forge.durable.models import OperationGrant
 
     factory = pe_db.worker_factory()
     deadline = time.monotonic() + 30.0
-    while not done.is_set() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         async with factory() as session:
             row = (
                 await session.execute(
@@ -891,6 +897,8 @@ async def _write_concurrent_evidence_once_the_authority_lands(pe_db, run_id: str
         if row is not None:
             await _merge_concurrent_evidence(pe_db, run_id)
             return
+        if done.is_set():
+            return  # the drive ended without the authority landing — no window to hit
         await asyncio.sleep(0.005)
 
 

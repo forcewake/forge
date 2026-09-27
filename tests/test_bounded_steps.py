@@ -483,15 +483,19 @@ class TestProposeAndPublishCheckpoints:
         assert run.candidate_shas == [sha]
         # The replay handed off to the R11 intent — it never minted a rival.
         async with db() as session:
-            intents = (
-                (
-                    await session.execute(
-                        select(PublicationIntent).where(PublicationIntent.run_id == run_id)
+            intents = [
+                intent
+                for intent in (
+                    (
+                        await session.execute(
+                            select(PublicationIntent).where(PublicationIntent.run_id == run_id)
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
+                if intent.operation == "commit"
+            ]
         assert len(intents) == 1
 
     async def test_partial_publication_is_reconciled_through_the_open_intent(self, db, fake_gitlab):
@@ -529,7 +533,10 @@ class TestProposeAndPublishCheckpoints:
             intent = (
                 (
                     await session.execute(
-                        select(PublicationIntent).where(PublicationIntent.run_id == run_id)
+                        select(PublicationIntent).where(
+                            PublicationIntent.run_id == run_id,
+                            PublicationIntent.operation == "commit",
+                        )
                     )
                 )
                 .scalars()
@@ -553,7 +560,10 @@ class TestProposeAndPublishCheckpoints:
             intent = (
                 (
                     await session.execute(
-                        select(PublicationIntent).where(PublicationIntent.run_id == run_id)
+                        select(PublicationIntent).where(
+                            PublicationIntent.run_id == run_id,
+                            PublicationIntent.operation == "commit",
+                        )
                     )
                 )
                 .scalars()

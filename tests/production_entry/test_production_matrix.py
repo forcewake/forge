@@ -507,21 +507,22 @@ def _dispatch_refs(gitlab_native) -> list[str]:
 
 
 async def _expire_dead_claims(pe_db) -> int:
-    """Advance the clock past the lease of every RUNNING step — the honest
-    spelling of "the lease window elapsed" for a worker SIGKILLed mid-step
-    (the lease is 120s; the trace waits it out in one tick). The REAL
-    reaper inside the recovery worker then reschedules the step — nothing
-    here touches step state beyond the clock."""
+    """Advance the clock past the lease (and the reaper's grace window) of
+    every RUNNING step — the honest spelling of "the lease window elapsed"
+    for a worker SIGKILLed mid-step (the lease is 120s; the trace waits it
+    out in one tick). The REAL reaper inside the recovery worker then
+    reschedules the step — nothing here touches step state beyond the
+    clock."""
     from datetime import timedelta
 
-    from forge.worker.steps import _utcnow
+    from forge.worker.steps import STEP_REAP_GRACE_SECONDS, _utcnow
 
     factory = pe_db.worker_factory()
     async with factory() as session:
         result = await session.execute(
             update(StepRun)
             .where(StepRun.status == "running")
-            .values(lease_expires_at=_utcnow() - timedelta(seconds=1))
+            .values(lease_expires_at=_utcnow() - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5))
         )
         await session.commit()
         return int(result.rowcount or 0)

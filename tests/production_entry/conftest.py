@@ -552,6 +552,20 @@ class FakeGitLabNative:
         """The runner-loss primitive: the CI job is cancelled natively."""
         self._ctl("cancel_job", job_id=job_id)
 
+    def set_latency(self, rules: list[dict]) -> None:
+        """Inject provider latency (the deterministic slow-native surface).
+
+        Each rule shapes like ``{"method": "POST", "tail": ["merge_requests"],
+        "phase": "request"|"response", "ms": 4000, "nth": 2}`` — ``tail``
+        matches the exact project-tail path (``["repository", "commits"]``,
+        ``["merge_requests"]``, …) and ``segment`` matches one segment
+        anywhere in it. ``phase="response"`` registers the effect and delays
+        only the reply (the slow/lost-response window); the default
+        ``phase="request"`` delays before the effect lands. A rule fires
+        once — on the first match, or the ``nth`` one — then disarms.
+        """
+        self._ctl("set_latency", rules=rules)
+
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:

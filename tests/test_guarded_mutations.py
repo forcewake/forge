@@ -47,6 +47,7 @@ from forge.runs.revival import (
     claim_attempt_dispatch,
 )
 from forge.worker.steps import (
+    STEP_REAP_GRACE_SECONDS,
     claim_due_steps,
     execution_claim,
     reschedule_expired_leases,
@@ -531,7 +532,10 @@ class TestClaimFreshAtHandlerEntry:
             await session.execute(
                 update(StepRun)
                 .where(StepRun.id == step_id)
-                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                .values(
+                    lease_expires_at=datetime.now(timezone.utc)
+                    - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                )
             )
 
         attempted: list[str] = []
@@ -569,7 +573,10 @@ class TestClaimFreshAtHandlerEntry:
             await session.execute(
                 update(StepRun)
                 .where(StepRun.id == step_id)
-                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                .values(
+                    lease_expires_at=datetime.now(timezone.utc)
+                    - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                )
             )
         assert await reschedule_expired_leases(db) == 1
         fresh = (await claim_due_steps(db, "worker-b"))[0]

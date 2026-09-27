@@ -57,6 +57,7 @@ from forge.runs import RunService
 from forge.runs.reconciler import run_reconciler
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
 from forge.worker import steps as step_runtime
+from forge.worker.steps import STEP_REAP_GRACE_SECONDS
 from tests.fi_hooks import CrashAfterPropose, CrashInjector
 from tests.fixtures.fake_gitlab import FakeGitLab, FakeGitLabClientFactory
 
@@ -514,7 +515,10 @@ async def expire_running_leases(control) -> None:
             await session.execute(
                 update(StepRun)
                 .where(StepRun.status == step_runtime.STEP_RUNNING)
-                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                .values(
+                    lease_expires_at=datetime.now(timezone.utc)
+                    - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                )
             )
 
 

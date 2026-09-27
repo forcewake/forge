@@ -31,6 +31,7 @@ from forge.models.base import Base
 from forge.worker import steps as step_runtime
 from forge.worker.steps import (
     STEP_CLAIM_BATCH,
+    STEP_REAP_GRACE_SECONDS,
     claim_due_steps,
     execute_claimed_step,
     reschedule_expired_leases,
@@ -72,8 +73,10 @@ async def step_rows(db) -> dict[int, StepRun]:
 
 
 async def expire_leases(db, step_ids: list[int]) -> None:
-    """Simulate a lease that died while its claim sat queued."""
-    past = datetime.now(timezone.utc) - timedelta(seconds=1)
+    """Simulate a lease that died while its claim sat queued — planted
+    firmly past the reaper's grace window (a lease expired only recently
+    may still be revived by a delayed renewal; these are dead)."""
+    past = datetime.now(timezone.utc) - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
     async with db() as session:
         async with session.begin():
             await session.execute(

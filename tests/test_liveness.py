@@ -26,6 +26,7 @@ from forge.models.base import Base
 from forge.runs.github_service import GitHubRunService
 from forge.runs.stubs import StubImplementer, StubPlanner
 from forge.worker.steps import (
+    STEP_REAP_GRACE_SECONDS,
     claim_due_steps,
     reap_deadline_exceeded,
     reschedule_expired_leases,
@@ -409,7 +410,10 @@ async def _expire_lease(db, step_id: int) -> None:
             await session.execute(
                 update(StepRun)
                 .where(StepRun.id == step_id)
-                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                .values(
+                    lease_expires_at=datetime.now(timezone.utc)
+                    - timedelta(seconds=STEP_REAP_GRACE_SECONDS + 5)
+                )
             )
 
 

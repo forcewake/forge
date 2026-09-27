@@ -93,6 +93,7 @@ import hashlib
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -481,11 +482,70 @@ class GitLabState:
         self.job_cancels: list[dict] = []
         self.unknown_paths: list[str] = []
         self.files: dict[str, str] = {}  # path -> text (ref-independent snapshot)
+        #: Injectable provider latency (``__ctl/set_latency``) — the
+        #: deterministic slow-native surface the exactly-once traces need:
+        #: ``{"method": "POST", "tail": ["merge_requests"], "phase":
+        #: "request", "ms": 4000}`` delays the request BEFORE the effect is
+        #: registered (a slow provider processing an accepted request);
+        #: ``phase: "response"`` registers the effect and delays the REPLY
+        #: (the lost/slow-response window — other readers already see the
+        #: effect while the caller still waits). POST-only for the response
+        #: phase; sleeps never hold ``state.lock`` (a delayed creator must
+        #: not serialize the readers that race it).
+        self.latency_rules: list[dict] = []
+        #: every project-scope request with a monotonic timestamp — the
+        #: interleaving evidence the exactly-once traces print.
+        self.request_log: list[dict] = []
         self._next_id = 1000
 
     def _id(self) -> int:
         self._next_id += 1
         return self._next_id
+
+    def note_request(self, method: str, tail: list[str]) -> None:
+        """Record one project-scope request (the interleaving evidence)."""
+        with self.lock:
+            self.request_log.append(
+                {"t": round(time.monotonic(), 3), "method": method, "path": "/".join(tail)}
+            )
+
+    def latency_ms(self, method: str, tail: list[str], phase: str) -> float:
+        """The injected delay for one request, in milliseconds (0 = none).
+
+        A rule fires at most once: on the FIRST matching request, or on the
+        ``"nth"`` matching one when given (``nth: 2`` slows the second
+        reader of a surface while the first reads fast), then disarms
+        itself — the deterministic way to slow one particular caller
+        without slowing the one that races it.
+        """
+        total = 0.0
+        with self.lock:
+            remaining: list[dict] = []
+            for rule in self.latency_rules:
+                if str(rule.get("method") or method) != method:
+                    remaining.append(rule)
+                    continue
+                if str(rule.get("phase") or "request") != phase:
+                    remaining.append(rule)
+                    continue
+                exact = rule.get("tail")
+                if isinstance(exact, list):
+                    if list(tail) != [str(part) for part in exact]:
+                        remaining.append(rule)
+                        continue
+                segment = rule.get("segment")
+                if segment is not None and str(segment) not in tail:
+                    remaining.append(rule)
+                    continue
+                seen = int(rule.get("_seen") or 0) + 1
+                nth = int(rule.get("nth") or 1)
+                if seen < nth:
+                    rule["_seen"] = seen
+                    remaining.append(rule)
+                    continue
+                total += float(rule.get("ms") or 0)  # fired — not kept
+            self.latency_rules = remaining
+        return total
 
     # -- native mutations (called under the handler) -----------------------
 
@@ -561,6 +621,8 @@ class GitLabState:
                 "issues": {str(iid): dict(issue) for iid, issue in self.issues.items()},
                 "files": dict(self.files),
                 "unknown_paths": list(self.unknown_paths),
+                "latency_rules": [dict(rule) for rule in self.latency_rules],
+                "request_log": [dict(entry) for entry in self.request_log],
             }
 
 
@@ -655,6 +717,10 @@ def make_gitlab_handler(state: GitLabState) -> type[BaseHTTPRequestHandler]:
             if tail is None:
                 self._unknown()
                 return
+            state.note_request("GET", tail)
+            pre = state.latency_ms("GET", tail, "request")
+            if pre > 0:
+                time.sleep(pre / 1000.0)
             with state.lock:
                 if tail[:1] == ["repository"]:
                     repo = tail[1:]
@@ -853,121 +919,139 @@ def make_gitlab_handler(state: GitLabState) -> type[BaseHTTPRequestHandler]:
                     state.set_job_status(job_id, "canceled", pipeline_status="canceled")
                 self._send_json(200, {"job_id": job_id})
                 return
+            if segments[:2] == ["__ctl", "set_latency"]:
+                rules = body.get("rules")
+                state.latency_rules = (
+                    [dict(rule) for rule in rules] if isinstance(rules, list) else []
+                )
+                self._send_json(200, {"rules": len(state.latency_rules)})
+                return
             tail = self._project_tail(segments)
             if tail is None:
                 self._unknown()
                 return
+            state.note_request("POST", tail)
+            pre = state.latency_ms("POST", tail, "request")
+            if pre > 0:
+                time.sleep(pre / 1000.0)
             with state.lock:
-                if tail == ["pipeline"]:
-                    pipeline = state.create_pipeline(
-                        str(body.get("ref") or ""), list(body.get("variables") or [])
-                    )
-                    self._send_json(201, pipeline)
-                    return
-                if tail[:1] == ["jobs"] and len(tail) == 3 and tail[2] == "cancel":
-                    job_id = int(tail[1])
-                    state.job_cancels.append({"job_id": job_id})
-                    state.set_job_status(job_id, "canceled", pipeline_status="canceled")
-                    job = next(
+                handled = self._project_post(tail, body)
+            if handled is None:
+                self._unknown()
+                return
+            status, document = handled
+            # The response phase registers the effect FIRST (inside the
+            # lock, above) and delays only the reply — other readers see
+            # the effect while this caller still waits (the slow/lost
+            # response window the intent machinery exists for).
+            post = state.latency_ms("POST", tail, "response")
+            if post > 0:
+                time.sleep(post / 1000.0)
+            self._send_json(status, document)
+
+        def _project_post(self, tail: list[str], body: dict) -> tuple[int, object] | None:
+            """One project-scope POST, computed under the state lock.
+
+            Returns ``(status, document)`` — the caller sends it AFTER any
+            injected response latency — or ``None`` for an unknown path.
+            """
+            if tail == ["pipeline"]:
+                pipeline = state.create_pipeline(
+                    str(body.get("ref") or ""), list(body.get("variables") or [])
+                )
+                return 201, pipeline
+            if tail[:1] == ["jobs"] and len(tail) == 3 and tail[2] == "cancel":
+                job_id = int(tail[1])
+                state.job_cancels.append({"job_id": job_id})
+                state.set_job_status(job_id, "canceled", pipeline_status="canceled")
+                job = next(
+                    (
+                        dict(j)
+                        for jobs in state.pipeline_jobs.values()
+                        for j in jobs
+                        if j["id"] == job_id
+                    ),
+                    None,
+                )
+                if job is None:
+                    return 404, {"message": "404 Job Not Found"}
+                return 200, job
+            if tail[:2] == ["repository", "branches"]:
+                branch = str(body.get("branch") or "")
+                ref = str(body.get("ref") or "main")
+                if branch in state.branches:
+                    return 400, {"message": "Branch already exists"}
+                # real GitLab resolves *ref*: a branch name → that
+                # branch's head; a SHA → the commit with that id.
+                commits = state.branches.get(ref)
+                if commits is None:
+                    commits = next(
                         (
-                            dict(j)
-                            for jobs in state.pipeline_jobs.values()
-                            for j in jobs
-                            if j["id"] == job_id
+                            found
+                            for found in state.branches.values()
+                            if found and found[0]["id"] == ref
                         ),
                         None,
                     )
-                    if job is None:
-                        self._send_json(404, {"message": "404 Job Not Found"})
-                        return
-                    self._send_json(200, job)
-                    return
-                if tail[:2] == ["repository", "branches"]:
-                    branch = str(body.get("branch") or "")
-                    ref = str(body.get("ref") or "main")
-                    if branch in state.branches:
-                        self._send_json(400, {"message": "Branch already exists"})
-                        return
-                    # real GitLab resolves *ref*: a branch name → that
-                    # branch's head; a SHA → the commit with that id.
-                    commits = state.branches.get(ref)
-                    if commits is None:
-                        commits = next(
-                            (
-                                found
-                                for found in state.branches.values()
-                                if found and found[0]["id"] == ref
-                            ),
-                            None,
-                        )
-                    state.branches[branch] = [dict(commits[0])] if commits else []
-                    self._send_json(
-                        201, {"name": branch, "commit": dict(commits[0]) if commits else None}
-                    )
-                    return
-                if tail[:2] == ["repository", "commits"] and len(tail) == 2:
-                    branch = str(body.get("branch") or "")
-                    actions = list(body.get("actions") or [])
-                    message = str(body.get("commit_message") or "")
-                    parent = state.branch_head(branch)
-                    sha = f"gl-sha-{state._id():08d}"
-                    record = _gitlab_commit_doc(sha, message, [parent] if parent else [])
-                    state.branches.setdefault(branch, []).insert(0, record)
-                    # materialize file actions into the snapshot (the
-                    # publisher's authoritative base reads follow the head)
-                    for action in actions:
-                        path = str(action.get("file_path") or "")
-                        if not path:
-                            continue
-                        if str(action.get("action") or "create") == "delete":
-                            state.files.pop(path, None)
-                        else:
-                            state.files[path] = str(action.get("content") or "")
-                    self._send_json(201, {"id": sha, "short_id": sha[:8], "message": message})
-                    return
-                if tail[:1] == ["issues"] and len(tail) == 3 and tail[2] == "notes":
-                    iid = int(tail[1])
-                    note = {
-                        "id": state._id(),
-                        "body": str(body.get("body") or ""),
-                        "system": False,
-                    }
-                    state.notes.append({"id": note["id"], "issue_iid": iid, "body": note["body"]})
-                    self._send_json(201, note)
-                    return
-                if tail[:1] == ["merge_requests"] and len(tail) == 1:
-                    iid = state._id()
-                    mr = {
-                        "id": iid,
-                        "iid": iid,
-                        "title": str(body.get("title") or ""),
-                        "description": str(body.get("description") or ""),
-                        "state": "opened",
-                        "source_branch": str(body.get("source_branch") or ""),
-                        "target_branch": str(body.get("target_branch") or "main"),
-                        "web_url": (
-                            f"https://gitlab.test/project-{state.project_id}/-/merge_requests/{iid}"
-                        ),
-                        "draft": str(body.get("title") or "").startswith("Draft:"),
-                        "sha": state.branch_head(str(body.get("source_branch") or "")),
-                    }
-                    state.merge_requests[iid] = mr
-                    self._send_json(201, mr)
-                    return
-                if (
-                    tail[:1] == ["merge_requests"]
-                    and len(tail) == 3
-                    and tail[2] == "notes"
-                    and tail[1].isdigit()
-                ):
-                    mr_iid = int(tail[1])
-                    note = {"id": state._id(), "body": str(body.get("body") or "")}
-                    state.mr_notes.append(
-                        {"id": note["id"], "mr_iid": mr_iid, "body": note["body"]}
-                    )
-                    self._send_json(201, note)
-                    return
-            self._unknown()
+                state.branches[branch] = [dict(commits[0])] if commits else []
+                return 201, {"name": branch, "commit": dict(commits[0]) if commits else None}
+            if tail[:2] == ["repository", "commits"] and len(tail) == 2:
+                branch = str(body.get("branch") or "")
+                actions = list(body.get("actions") or [])
+                message = str(body.get("commit_message") or "")
+                parent = state.branch_head(branch)
+                sha = f"gl-sha-{state._id():08d}"
+                record = _gitlab_commit_doc(sha, message, [parent] if parent else [])
+                state.branches.setdefault(branch, []).insert(0, record)
+                # materialize file actions into the snapshot (the
+                # publisher's authoritative base reads follow the head)
+                for action in actions:
+                    path = str(action.get("file_path") or "")
+                    if not path:
+                        continue
+                    if str(action.get("action") or "create") == "delete":
+                        state.files.pop(path, None)
+                    else:
+                        state.files[path] = str(action.get("content") or "")
+                return 201, {"id": sha, "short_id": sha[:8], "message": message}
+            if tail[:1] == ["issues"] and len(tail) == 3 and tail[2] == "notes":
+                iid = int(tail[1])
+                note = {
+                    "id": state._id(),
+                    "body": str(body.get("body") or ""),
+                    "system": False,
+                }
+                state.notes.append({"id": note["id"], "issue_iid": iid, "body": note["body"]})
+                return 201, note
+            if tail[:1] == ["merge_requests"] and len(tail) == 1:
+                iid = state._id()
+                mr = {
+                    "id": iid,
+                    "iid": iid,
+                    "title": str(body.get("title") or ""),
+                    "description": str(body.get("description") or ""),
+                    "state": "opened",
+                    "source_branch": str(body.get("source_branch") or ""),
+                    "target_branch": str(body.get("target_branch") or "main"),
+                    "web_url": (
+                        f"https://gitlab.test/project-{state.project_id}/-/merge_requests/{iid}"
+                    ),
+                    "draft": str(body.get("title") or "").startswith("Draft:"),
+                    "sha": state.branch_head(str(body.get("source_branch") or "")),
+                }
+                state.merge_requests[iid] = mr
+                return 201, mr
+            if (
+                tail[:1] == ["merge_requests"]
+                and len(tail) == 3
+                and tail[2] == "notes"
+                and tail[1].isdigit()
+            ):
+                mr_iid = int(tail[1])
+                note = {"id": state._id(), "body": str(body.get("body") or "")}
+                state.mr_notes.append({"id": note["id"], "mr_iid": mr_iid, "body": note["body"]})
+                return 201, note
+            return None
 
         def do_PUT(self) -> None:  # noqa: N802 — http.server spelling
             segments = self._segments()
@@ -976,6 +1060,10 @@ def make_gitlab_handler(state: GitLabState) -> type[BaseHTTPRequestHandler]:
             if tail is None:
                 self._unknown()
                 return
+            state.note_request("PUT", tail)
+            pre = state.latency_ms("PUT", tail, "request")
+            if pre > 0:
+                time.sleep(pre / 1000.0)
             with state.lock:
                 if tail[:1] == ["merge_requests"] and len(tail) == 2 and tail[1].isdigit():
                     mr = state.merge_requests.get(int(tail[1]))
