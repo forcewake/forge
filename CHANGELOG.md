@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-27
+
+### Added — the 68f22b8 review: 13/18 items implemented (#356-#373)
+
+The correctness cycle: the review rounds became atomic, durable and
+recoverable; every acknowledged command is now durably accepted; the
+complete correction loop is live-proven on the current composition.
+Suite 8846 → 9084 (+238). The 5 remaining items closed at their honest
+external/human boundaries (#366 discovery boundary, #369 design partner,
+#370 .NET customer, #371 two-writer, #373 the 1.0 declaration — the
+contract's wording corrected to the honest arrows map, the headline
+arrows filled by the live loop).
+
+**The three P1 (each mutation-killed in CI):**
+- **#356 R41-01**: child-before-budget in ONE admission transaction —
+  any finite spec previously broke on RunNotFound before the child
+  existed; the finite matrix (calls/tokens/wallclock/single-axis) and
+  the restored old ordering failing all four profiles prove it.
+- **#357 R41-02 + parity**: commit-then-2xx on ALL THREE gateways — the
+  Redis marker no longer decides correctness, adaptive commands go
+  through the durable inbox (BackgroundTasks are after-response,
+  in-process), SQL failures answer retryable 503; kill matrices on a
+  real uvicorn subprocess.
+- **#358 R41-03**: a round's own published commit is adopted, not
+  mistaken for a human conflict — PublicationIntent identities classify
+  own/foreign/unknown before the head fence; kill-after-own-commit
+  recovers with exactly one provider commit; stranded children settled.
+
+**The M1 spine:** #359 collaboration targets (migration 032; 10
+factory_branch sites removed); #360 occupancy correlated with the
+current execution; #361 the closing reviewer sees the correction (the
+capture proved round children reviewed an empty plan); #362 the
+composed production matrix in REQUIRED_TRACES.
+
+**Qualification:** #363 one coherent profile with honest evidence
+kinds; #364 the COMPLETE correction loop LIVE (delivery → human edit →
+/fix → finite-budget round → oracle → READY; replay zero-effect;
+kill-recovery; $0.85); #365 the current grant pairing with the
+locator↔slot preflight; #367 the lineage view with acknowledgement-
+aware command states; #368 lineage economics (ledger v2, $1.256 exact);
+#372 authority consolidation (service.py −224 lines, six decisions to
+single owners).
+
 ## [0.40.0] - 2026-09-26
 
 ### Added — the b521e1a review: 12/18 items implemented (#337-#354)
