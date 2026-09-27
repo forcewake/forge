@@ -256,7 +256,12 @@ def _install_no_nudge() -> None:
     import forge.worker.steps as steps_module
 
     async def _ingress_only(
-        session_factory, settings, forge_config, source_event_id, *, owner  # noqa: ANN001
+        session_factory,
+        settings,
+        forge_config,
+        source_event_id,
+        *,
+        owner,  # noqa: ANN001
     ):
         return None
 
