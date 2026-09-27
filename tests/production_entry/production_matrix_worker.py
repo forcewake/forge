@@ -51,11 +51,15 @@ launching environment.
 The child writes ``{"pid": ...}`` to the ready file once the loops started,
 exits 0 when the step queue is quiet (no scheduled/running steps for
 ``--quiet-polls`` consecutive checks — the reconciler's in-flight pass
-always completes before the loops drain), and honors ``--max-seconds`` as
-a hard deadline. ``--mode reconciler --ticks N`` runs only the reconciler
-for N full pass cycles (the recovery driver). The step reaper
-(``run_step_reaper``, also part of the installed composition) reschedules
-the steps a killed worker left leased, once their leases expire.
+always completes before the loops drain). ``--max-seconds`` is a runaway
+ceiling that may end the child only while the queue is EMPTY — it never
+cancels a step mid-flight (a cancelled publication re-executes after the
+lease expires and duplicates the native effect); the launching test's
+subprocess timeout is the loud outer backstop. ``--mode reconciler
+--ticks N`` runs only the reconciler for N full pass cycles (the recovery
+driver). The step reaper (``run_step_reaper``, also part of the installed
+composition) reschedules the steps a killed worker left leased, once
+their leases expire.
 """
 
 from __future__ import annotations
@@ -138,15 +142,29 @@ def _install_budget_seam(action: str) -> None:
     async def _committed_anywhere(db_url: str, run_id: str) -> bool:
         """A SEPARATE connection cannot see the caller's open transaction —
         this is the honest read of 'does this run exist yet' from outside
-        the admission."""
+        the admission.
+
+        The probe is RETRIED under a small deadline before falling back:
+        a single transient read failure (first-connection latency, a
+        lock wait, a loaded runner's scheduling hiccup) must not suppress
+        the kill boundary — the answer "committed" is reserved for a
+        probe that genuinely, repeatedly fails (the honest fallback: a
+        probe failure must not fake the boundary)."""
         factory = _factory(db_url)
-        try:
-            async with factory() as session:
-                return (
-                    await session.execute(select(FlowRun.id).where(FlowRun.id == run_id))
-                ).first() is not None
-        except Exception:  # noqa: BLE001 — a probe failure must not fake the boundary
-            return True
+        deadline = time.monotonic() + 10.0
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                async with factory() as session:
+                    return (
+                        await session.execute(select(FlowRun.id).where(FlowRun.id == run_id))
+                    ).first() is not None
+            except Exception as exc:  # noqa: BLE001 — a transient read retries
+                last_error = exc
+                await asyncio.sleep(0.1)
+        if last_error is not None:  # pragma: no cover — the genuinely failing probe
+            print(f"mx-worker: budget probe failed: {last_error!r}", file=sys.stderr)
+        return True
 
     async def instrumented(session, **kwargs):  # noqa: ANN001
         run_id = str(kwargs.get("run_id") or "")
@@ -246,14 +264,24 @@ def _install_mutation(name: str) -> None:
 
 
 async def _quiet_supervisor(session_factory, shutdown: asyncio.Event, args) -> None:  # noqa: ANN001
-    """Set *shutdown* once the step queue is quiet and the reconciler ran."""
+    """Set *shutdown* once the step queue is quiet and the reconciler ran.
+
+    Termination is keyed on the OBSERVABLE (no ``scheduled``/``running``
+    step for ``--quiet-polls`` consecutive reads), never on wall-clock:
+    ``--max-seconds`` is a runaway ceiling that may end the child only
+    while the queue is EMPTY — it must NEVER cut a step mid-flight. A
+    publication cancelled between its native commit/MR and the journaled
+    completion is re-executed once the lease expires and duplicates the
+    NATIVE effect (the duplicate-MR flake a starved runner produced when
+    it outran the old deadline). With work in flight the child keeps
+    going; the launching test's subprocess timeout is the loud backstop."""
     from sqlalchemy import select
 
     from forge.durable.models import StepRun
 
     quiet = 0
-    deadline = time.monotonic() + args.max_seconds
-    while time.monotonic() < deadline and not shutdown.is_set():
+    runaway = time.monotonic() + args.max_seconds
+    while not shutdown.is_set():
         await asyncio.sleep(0.15)
         try:
             async with session_factory() as session:
@@ -264,8 +292,15 @@ async def _quiet_supervisor(session_factory, shutdown: asyncio.Event, args) -> N
                 ).first()
         except Exception:  # noqa: BLE001 — a transient read retries
             continue
-        quiet = quiet + 1 if pending is None else 0
+        if pending is not None:
+            quiet = 0  # work in flight — the ceiling never cuts here
+            continue
+        quiet += 1
         if quiet >= args.quiet_polls:
+            shutdown.set()
+            return
+        if time.monotonic() > runaway:
+            print("mx-worker: runaway ceiling reached on a quiet queue", file=sys.stderr)
             shutdown.set()
             return
 
@@ -335,11 +370,17 @@ async def _run(args, settings, ready_file: Path) -> None:  # noqa: ANN001
         tasks.append(asyncio.create_task(_tick_supervisor(service, shutdown, args.ticks)))
     ready_file.write_text(json.dumps({"pid": os.getpid()}))
     try:
-        done, pending = await asyncio.wait(
-            tasks, timeout=max(1.0, args.max_seconds), return_when=asyncio.FIRST_COMPLETED
-        )
+        # No timeout here: the supervisors own termination and only ever
+        # complete with NOTHING in flight (see _quiet_supervisor) — an
+        # outer wall-clock timeout is exactly the mid-flight cancellation
+        # that duplicated native effects on a starved runner. The
+        # launching test's subprocess timeout is the loud backstop.
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         shutdown.set()
-        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=15)
+        # By now every loop is idle (the supervisor fired on an empty
+        # queue); 30s is a CI-tolerant grace for a pass to land its
+        # terminal write under load.
+        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=30)
         for task in done:
             task.result()  # a crashed loop fails the child loudly
     finally:
@@ -354,7 +395,14 @@ def main() -> int:
     parser.add_argument("--db-url", required=True, help="the shared durable database URL")
     parser.add_argument("--mode", choices=("full", "reconciler"), default="full")
     parser.add_argument("--ticks", type=int, default=2, help="reconciler cycles (reconciler mode)")
-    parser.add_argument("--max-seconds", type=float, default=90.0)
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=90.0,
+        help="runaway ceiling, enforced only while the step queue is empty "
+        "(never cuts a step mid-flight; the launcher's subprocess timeout "
+        "is the loud outer backstop)",
+    )
     parser.add_argument("--quiet-polls", type=int, default=3)
     parser.add_argument(
         "--kill",

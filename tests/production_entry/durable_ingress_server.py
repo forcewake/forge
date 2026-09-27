@@ -29,7 +29,24 @@ child applies its OWN instrumentation at startup, before serving:
   deterministic stubs: the gateway's no-Redis execution nudge runs run
   commands INSIDE this process, and the matrix's Redis-absent arms drive
   full lifecycle legs (plan/publish/review) through it — the sanctioned
-  model double, never a policy replacement.
+  model double, never a policy replacement;
+- ``--no-nudge`` — pin the gateway to INGRESS-ONLY: the after-response
+  in-process execution nudge (``run_pending_command_step``) becomes a
+  no-op, so the durable step behind the ``202`` stays ``scheduled`` until
+  a WORKER claims it. Why this must be pinnable: whether the shipped
+  gateway takes the Redis queue path (no in-process execution) or the
+  no-Redis BackgroundTask nudge depends on an AMBIENT redis — importing
+  the app's router chain (``forge.llm.provider`` → ``agno.models.litellm``)
+  injects ``REDIS_URL=redis://localhost:6379/0`` when the variable is
+  absent, so a machine with a listening redis silently takes the queue
+  path while the CI runner (nothing on 6379) takes the in-process nudge.
+  The nudge racing the trace's designated worker (a kill-instrumented
+  worker child, or the fresh recovering worker) is exactly the CI-only
+  desynchronization this flag removes — on every machine the step is left
+  for the worker. The durable-acceptance contract is untouched: the 202
+  still follows the inbox+step commit, and the nudge is an accelerator,
+  never the durability mechanism. Incompatible with ``--kill
+  after-response`` (that boundary IS the nudge — the killer patch wins).
 
 The child serves on an ephemeral port and writes ``{"port": ...}`` to the
 ready file once listening (the fake-native server's convention).
@@ -225,6 +242,27 @@ def _install_pre_commit_cache_mutation() -> None:
     gateway._ingest_run_command = _old_ingest_run_command
 
 
+def _install_no_nudge() -> None:
+    """The gateway never executes commands in-process (see the docstring).
+
+    Patches the SAME module seam the ``after-response`` kill point uses:
+    ``forge.gateway.router._ingest_run_command`` imports
+    ``run_pending_command_step`` function-locally at call time, so replacing
+    the module attribute is effective for every later request. The no-queue
+    ingress still commits the inbox row and the scheduled step before its
+    202 — only the after-response execution nudge is neutralized, leaving
+    the step ``scheduled`` for the trace's designated worker.
+    """
+    import forge.worker.steps as steps_module
+
+    async def _ingress_only(
+        session_factory, settings, forge_config, source_event_id, *, owner  # noqa: ANN001
+    ):
+        return None
+
+    steps_module.run_pending_command_step = _ingress_only
+
+
 def _install_stub_model() -> None:
     """R41-07 (#362): the deterministic agents behind the REAL seams.
 
@@ -302,10 +340,24 @@ def main() -> None:
         help="patch the default agent builder to the deterministic stubs "
         "(R41-07: the no-Redis nudge executes lifecycle legs in-process)",
     )
+    parser.add_argument(
+        "--no-nudge",
+        action="store_true",
+        help="ingress-only gateway: the after-response in-process execution "
+        "nudge is a no-op, so the durable step stays scheduled for the "
+        "trace's worker (removes the ambient-redis-dependent race where the "
+        "gateway itself executes the command on machines without a "
+        "localhost redis)",
+    )
     args = parser.parse_args()
 
     if args.stub_model:
         _install_stub_model()
+    if args.no_nudge and args.kill != "after-response":
+        # The after-response kill point patches the same symbol and IS the
+        # nudge boundary — the killer wins there; everywhere else the nudge
+        # is pinned off so the designated worker owns the execution.
+        _install_no_nudge()
     if args.kill:
         _install_kill_point(args.kill)
     if args.db_failures:

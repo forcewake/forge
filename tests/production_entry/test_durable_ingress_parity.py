@@ -199,9 +199,24 @@ def start_parity_gateway(
     db_failures: int = 0,
     redis_url: str | None = None,
     name: str = "gw",
+    no_nudge: bool | None = None,
 ) -> Gateway:
     """Launch the shared harness subprocess serving the REAL app, with the
-    named gateway's ingress enabled (the env the child's Settings read)."""
+    named gateway's ingress enabled (the env the child's Settings read).
+
+    ``no_nudge`` (default: every mode except ``kill="after-response"``)
+    pins the gateway to ingress-only — the after-response in-process
+    execution nudge is disabled so the step behind the 202 stays
+    ``scheduled`` for this module's recovering fresh worker. Without the
+    pin, a machine with no ambient localhost redis (the CI runner) has the
+    gateway execute the adaptive step itself: the routing lands on the
+    gateway's IN-MEMORY control mailbox (no durable ``ControlCommandRow``,
+    no mailbox-shaped observable) or dies mid-nudge under ``stop()`` with
+    the lease stranded — the "outcome drifted" CI failure. The
+    ``after-response`` kill boundary IS the nudge; there the real symbol
+    stays."""
+    if no_nudge is None:
+        no_nudge = kill != "after-response"
     ready = tmp_path / f"{name}-ready.json"
     env = dict(os.environ)
     env.update(
@@ -249,6 +264,8 @@ def start_parity_gateway(
         command += ["--kill", kill]
     if db_failures:
         command += ["--db-failures", str(db_failures)]
+    if no_nudge:
+        command += ["--no-nudge"]
     process = subprocess.Popen(
         command,
         cwd=tmp_path,  # no repo .env: the parity env above is the whole config

@@ -259,7 +259,17 @@ def start_mx_gateway(
     name: str = "mx-gw",
 ) -> Gateway:
     """The REAL ASGI gateway subprocess (the shared #357 harness) with the
-    matrix's frozen configuration and the sanctioned model stub."""
+    matrix's frozen configuration and the sanctioned model stub.
+
+    The gateway is ALWAYS pinned to ingress-only (``--no-nudge``): the
+    matrix's designated executor is the REAL worker child
+    (``production_matrix_worker.py`` — the docstring's "never a cancelled
+    in-process task"), and the shipped no-Redis gateway would otherwise
+    race it through the after-response in-process nudge on any machine
+    without an ambient localhost redis (the CI runner — the exact
+    "worker child exited 0 (expected -9)" desynchronization). The 202
+    still follows the durable inbox+step commit; only the in-process
+    execution accelerator is off."""
     ready = tmp_path / f"{name}-ready.json"
     env = _mx_env(
         db_url=db_url, gitlab_url=gitlab_url, budget=budget, backend=backend, redis_url=redis_url
@@ -272,6 +282,7 @@ def start_mx_gateway(
         "--db-url",
         db_url,
         "--stub-model",
+        "--no-nudge",
     ]
     if kill:
         command += ["--kill", kill]

@@ -119,9 +119,24 @@ class Gateway:
         self._process.wait(timeout=10)  # a killed child is joined, not zombied
 
 
-def _wait_for_ready(process: subprocess.Popen, ready: Path, timeout: float = 30.0) -> int:
+def _wait_for_ready(process: subprocess.Popen, ready: Path, timeout: float = 60.0) -> int:
+    """Wait for the child's ready file CONTENT, not its existence.
+
+    R41-10 (the fake-native ready file taught this): ``write_text`` exposes
+    an empty file before the payload lands, and under a loaded runner the
+    existence check races an empty read into ``json.loads('')``. Poll until
+    the file holds parseable content; a torn/partial read retries within
+    the same deadline (60s — the CI runner spawns these children ~2-3×
+    slower than a dev box).
+    """
     deadline = time.monotonic() + timeout
-    while not ready.is_file():
+    while True:
+        if ready.is_file():
+            try:
+                return int(json.loads(ready.read_text())["port"])
+            except (ValueError, KeyError, json.JSONDecodeError):
+                # created but not yet written (or torn) — keep polling
+                pass
         if process.poll() is not None:
             process.wait(timeout=10)
             raise AssertionError("the gateway child died at startup")
@@ -130,7 +145,6 @@ def _wait_for_ready(process: subprocess.Popen, ready: Path, timeout: float = 30.
             process.wait(timeout=10)
             raise AssertionError("the gateway child never became ready")
         time.sleep(0.02)
-    return int(json.loads(ready.read_text())["port"])
 
 
 def start_gateway(
@@ -143,8 +157,23 @@ def start_gateway(
     mutation: str | None = None,
     redis_url: str | None = None,
     name: str = "gw",
+    no_nudge: bool | None = None,
 ) -> Gateway:
-    """Launch the harness subprocess: the REAL app, instrumented for kills."""
+    """Launch the harness subprocess: the REAL app, instrumented for kills.
+
+    ``no_nudge`` (default: every mode except ``kill="after-response"``)
+    pins the gateway to ingress-only — the after-response in-process
+    execution nudge is disabled, so the step behind the 202 stays
+    ``scheduled`` for THIS module's recovering fresh worker instead of
+    racing it inside the gateway process (the CI-only desynchronization:
+    with no ambient localhost redis the shipped gateway falls back to
+    executing the command itself, and either completes it under the fresh
+    worker's feet or dies mid-nudge under ``stop()`` leaving the lease
+    stranded). The ``after-response`` kill boundary IS the nudge — there
+    the real symbol must stay.
+    """
+    if no_nudge is None:
+        no_nudge = kill != "after-response"
     ready = tmp_path / f"{name}-ready.json"
     env = dict(os.environ)
     env.update(
@@ -176,6 +205,8 @@ def start_gateway(
         command += ["--db-failures", str(db_failures)]
     if mutation:
         command += ["--mutation", mutation]
+    if no_nudge:
+        command += ["--no-nudge"]
     process = subprocess.Popen(
         command,
         cwd=Path(__file__).resolve().parents[2],
@@ -319,11 +350,13 @@ def _worker_settings(gitlab_url: str) -> Settings:
     )
 
 
-async def _resume_worker(pe_db, settings, until, *, timeout: float = 30.0, expect: bool = True):
+async def _resume_worker(pe_db, settings, until, *, timeout: float = 60.0, expect: bool = True):
     """The INSTALLED step-runtime loop over a FRESH engine — the restarted
     worker (``run_step_worker`` is the exact loop ``worker/app.main``
     gathers; the claim → lease → fence protocol executes the persisted
-    step through the REAL dispatch)."""
+    step through the REAL dispatch). The 60s deadline is a CI-tolerant
+    bound on POLLING (claim + route + the native reply), never a
+    behavioral assertion — the predicate still has to become true."""
     shutdown = asyncio.Event()
     loop = asyncio.create_task(
         run_step_worker(
