@@ -96,6 +96,7 @@ __all__ = [
     "REUSE_DECISION_SCHEMA",
     "REVIEW_FEEDBACK_KEY",
     "REVIEW_FEEDBACK_SCHEMA",
+    "REVIEW_OBLIGATION_SCHEMA",
     "ReviewFeedbackRefused",
     "ReviewFeedbackRequest",
     "REVISION_ACTIVATIONS_KEY",
@@ -106,6 +107,7 @@ __all__ = [
     "REQUEST_MR_CLOSED",
     "REQUEST_ROUND_ADMITTED",
     "REQUEST_ROUND_LIMIT",
+    "REQUEST_TARGET_REFUSED",
     "RevisionDecision",
     "RevisionRebindRefused",
     "TacticalPolicy",
@@ -145,6 +147,7 @@ __all__ = [
     "review_correction_revision",
     "review_feedback_requests_of",
     "review_feedback_summary_section",
+    "review_obligation_digest",
     "resolve_approved_input",
     "route_question",
     "stage_pending_revision",
@@ -2709,6 +2712,11 @@ REQUEST_MR_CLOSED = "mr_closed"
 #: R40-02 (#338): the bounded round count is exhausted — the operator
 #: policy (FORGE_MAX_REVIEW_ROUNDS) refuses further rounds on the lineage.
 REQUEST_ROUND_LIMIT = "round_limit"
+#: R41-04 (#359): the lineage's collaboration target could not be
+#: resolved — an unresolved legacy topology, or recorded handles that
+#: disagree (run MR vs round MR vs provider MR vs the target row).
+#: The round is refused with ZERO writes; no branch is ever inferred.
+REQUEST_TARGET_REFUSED = "collaboration_target_unresolved"
 
 
 class ReviewFeedbackRefused(ValueError):
@@ -3245,6 +3253,56 @@ async def stage_review_correction(
         ),
     )
     return decision_id
+
+
+#: The closing review's obligation-identity schema (R41-06): the document
+#: whose sha256 rides the persisted review record beside its candidate sha.
+REVIEW_OBLIGATION_SCHEMA = "forge.review.obligation/1"
+
+
+def review_obligation_digest(
+    *,
+    plan_text: str,
+    candidate_sha: str,
+    requests: Iterable[ReviewFeedbackRequest] = (),
+) -> str:
+    """sha256 over the closing review's FULL obligation identity (R41-06).
+
+    A persisted review's applicability is NOT the candidate sha alone: the
+    sha says which tree was reviewed, never WHAT the reviewer was obliged
+    to check. The digest joins the three sides that change it — the
+    reviewer brief's plan TEXT (the #321 approved input the executor
+    consumed: a materially different correction folds a different
+    revision summary, so the text digests differently), the candidate the
+    verdict binds to, and the code-requesting correction obligations
+    governing that candidate (each request's text + bound head + policy
+    classification + decision identity). A materially changed correction
+    on the SAME source sha therefore digests differently, and an earlier
+    review can never be reused merely because the sha matches.
+
+    Pure function of durable material only — no clock, no counter — so
+    two processes resolving the same rows derive the identical digest and
+    the replay decision is deterministic.
+    """
+    obligations = [
+        {
+            "note_id": request.note_id,
+            "text": request.text,
+            "head_sha": request.head_sha,
+            "classification": request.classification,
+            "decision_id": request.decision_id,
+        }
+        for request in sorted(requests, key=lambda request: request.note_id)
+    ]
+    document = {
+        "schema": REVIEW_OBLIGATION_SCHEMA,
+        "plan_text_digest": _bytes_digest(str(plan_text or "")),
+        "candidate_sha": str(candidate_sha or ""),
+        "obligations": obligations,
+    }
+    return sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def review_feedback_summary_section(

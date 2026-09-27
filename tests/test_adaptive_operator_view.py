@@ -22,6 +22,7 @@ from forge.adaptive.operator_view import (
     NON_RETRYABLE_CODES,
     OPERATOR_STATES,
     RECOVERY_MILESTONES,
+    STALE_ACTION_REFUSAL,
     OperatorAction,
     OperatorProjection,
     RecoveryActions,
@@ -1896,3 +1897,92 @@ class TestRoundSurfaceValueFreedom:
         assert view["facts"]["review_round"] is None  # no round identity observed
         codes = [action["code"] for action in view["next_actions"]]
         assert "round_limit" in codes
+
+
+# ---------------------------------------------------------------------------
+# R41-12 (#367) — the action's FULL subject and the round-STATUS fence of
+# the stale_action_refusal
+# ---------------------------------------------------------------------------
+
+
+class TestActionSubjectAndRoundStatusFence:
+    """The #349 action CAS widened: every offered action names the FULL
+    subject (the complete run id + the round reference — #359 kept short
+    prefixes display-only because historical rounds shared them), and the
+    round's STATUS is part of the ticket: a round that settles without a
+    successor keeps its reference but changes its status, and an action
+    planned while it was open is refused once it settled."""
+
+    def test_planned_actions_carry_the_full_subject_and_round_status(self):
+        projection = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        assert projection.round_status == "dispatched"
+        for action in RecoveryActions.plan(projection, "op@example", "approver", at=NOW):
+            assert action.subject == f"{RUN_ID}@round:2:{DECISION}"
+            assert action.expected_round_status == "dispatched"
+
+    def test_the_projection_records_the_current_round_status(self):
+        plain = initial_projection(_ready_rows(), NOW)
+        assert plain.round_status == ""
+        dispatched = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        assert dispatched.round_status == "dispatched"
+        settled = initial_projection(_ready_rows(rounds=[_round(status="stale")]), NOW)
+        assert settled.round_status == "stale"
+
+    def test_decide_refuses_when_the_round_status_moved_under_the_reference(self):
+        """Same version, same candidate, same round REFERENCE — the round
+        settled. The refusal names both statuses and the safe next
+        action, with the #349 typed code."""
+        open_projection = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        planned = next(
+            action
+            for action in RecoveryActions.plan(open_projection, "op@example", "approver", at=NOW)
+            if action.action == "probe"
+        )
+        settled_projection = initial_projection(_ready_rows(rounds=[_round(status="stale")]), NOW)
+        decision = RecoveryActions.decide(planned, settled_projection)
+        assert decision.allowed is False
+        assert STALE_ACTION_REFUSAL in decision.reason
+        assert "'dispatched'" in decision.reason
+        assert "'stale'" in decision.reason
+        assert decision.current_state == settled_projection.state
+        assert decision.safe_next_action
+
+    def test_decide_still_accepts_the_fresh_action_on_the_same_world(self):
+        projection = initial_projection(_ready_rows(rounds=[_round(status="stale")]), NOW)
+        planned = next(
+            action
+            for action in RecoveryActions.plan(projection, "op@example", "approver", at=NOW)
+            if action.action == "probe"
+        )
+        assert RecoveryActions.decide(planned, projection).allowed is True
+
+    def test_the_audit_fact_carries_the_subject_ticket(self):
+        projection = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        planned = next(
+            action
+            for action in RecoveryActions.plan(projection, "op@example", "approver", at=NOW)
+            if action.action == "probe"
+        )
+        fact = planned.audit_fact()
+        assert fact["subject"] == f"{RUN_ID}@round:2:{DECISION}"
+        assert fact["expected_round"] == f"round:2:{DECISION}"
+        assert fact["expected_round_status"] == "dispatched"
+
+    def test_a_statusless_action_decides_exactly_as_before(self):
+        """Backwards compatibility: a hand-built #349 action without the
+        status ticket is never refused BY the status fence."""
+        projection = initial_projection(_ready_rows(rounds=[_round()]), NOW)
+        legacy = OperatorAction(
+            action="probe",
+            state=projection.state,
+            actor_role="observer",
+            actor="op@example",
+            digest=projection.action_digest,
+            at="2026-09-23T12:00:00+00:00",
+            linkage=f"run:{RUN_ID}",
+            expected_version=projection.projection_version,
+            via="read-only:/status",
+            expected_candidate=str(projection.identity.get("active_candidate") or ""),
+            expected_round=projection.round_ref,
+        )
+        assert RecoveryActions.decide(legacy, projection).allowed is True

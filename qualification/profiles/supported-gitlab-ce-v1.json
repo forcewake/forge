@@ -6,27 +6,27 @@
   "control_plane": {
     "divergence": "the promoted v0.40.0 release is built from this exact tree and its lane wheel is byte-identical to the qualification wheel (150bf797…) — the moving-tree gap stays closed; the executed-lab image digest and the promoted GHCR digest still differ BY CONSTRUCTION (the podman working-tree build that RAN the trace vs the CI build of the same source) — both are bound, neither is silently substituted, and the next lab re-alignment onto the promoted digest is recorded as the open follow-up",
     "executed_lab": {
-      "deployed_schema_head": "031",
-      "image_digest": "sha256:ddcb9137b09c41acbbc7a1cdffbcf60c79beffbe2bfd5708034f29edf58ba1a7",
-      "image_id": "80a1c1822c03d4dd03dba35b2f85b5f56bcb813b48649989a2be2adbb1f4007b",
+      "deployed_schema_head": "032",
+      "image_digest": "sha256:f6ff63089bb82af5c7bbf195a2aa56ee2d722c0e0fe19bad4e15b2e8bcf9b114",
+      "image_id": "4b4a39926a231446b839cfc11c9b1a5d94c7bf8c9c8357b4185168410fba947e",
       "image_name": "localhost/forge:dev",
       "qualification_composition": {
         "note": "the executed-lab section IS the qualification composition: the alignment image is the WORKING-TREE build and the wheel beside it is the uv build of the SAME tree — a cold install from this manifest installs THESE bytes, never a released artifact that predates them",
         "wheel": {
           "built_for": "the v2 qualification composition (forge#326)",
           "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
-          "name": "forge-0.40.0-py3-none-any.whl",
-          "path": "dist/forge-0.40.0-py3-none-any.whl",
-          "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+          "name": "forge-0.41.0-py3-none-any.whl",
+          "path": "dist/forge-0.41.0-py3-none-any.whl",
+          "sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
           "source": "local-uv-build"
         }
       },
       "receipts": [
-        "docs/evaluation/2026-09-26-redemption-qualification/alignment-receipts.json",
-        "qualification/inventory-2026-09-26-redemption.json"
+        "docs/evaluation/2026-09-27-review-loop/alignment-receipts.json",
+        "qualification/inventory-2026-09-27-review-loop.json"
       ],
-      "reported_version": "0.39.0",
-      "rollback_tag": "pre-r3708-20260926T132558Z"
+      "reported_version": "0.41.0",
+      "rollback_tag": "pre-r4109-20260927T063317Z"
     },
     "latest_promotion": {
       "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
@@ -48,8 +48,8 @@
       "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl"
     },
     "schema_revision": {
-      "head": "031",
-      "predecessor": "030",
+      "head": "032",
+      "predecessor": "031",
       "receipt": "alembic/versions + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
       "upgrade_claim_basis": "the alignment migrate ran head->head (same-head preservation); the N-1->head transition is proven separately by cold_install_check --mode upgrade and must be reported as its ACTUAL edge"
     }
@@ -102,7 +102,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-26T18:16:01+00:00",
+  "frozen_at": "2026-09-27T07:05:37+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.40.0.json",
@@ -136,16 +136,16 @@
       "version": "0.40.0"
     },
     "wheel": {
-      "name": "forge-0.40.0-py3-none-any.whl",
-      "path": "dist/forge-0.40.0-py3-none-any.whl",
+      "name": "forge-0.41.0-py3-none-any.whl",
+      "path": "dist/forge-0.41.0-py3-none-any.whl",
       "promotion_pending": "the fresh cold install installs THIS working-tree build by sha256 (the qualification composition); the promoted-wheel section names what is released and stays behind it",
       "receipt": "uv build of the working tree + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
-      "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
       "source": "local-uv-build",
-      "version": "0.40.0"
+      "version": "0.41.0"
     }
   },
-  "manifest_digest": "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
+  "manifest_digest": "3fcab8bc8699d0dc15e07b7e0ae8437f575afe312c33ed98950640ba209049b9",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",

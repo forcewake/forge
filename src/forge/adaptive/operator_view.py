@@ -125,6 +125,12 @@ __all__ = [
     "DIAGNOSTICS_SCHEMA",
     "DeliveryOutcome",
     "FEEDBACK_REFUSAL_NEXT_ACTIONS",
+    "LINEAGE_PREREQUISITE_CODES",
+    "LINEAGE_REFERENCE_DELIVERY",
+    "LINEAGE_SUPPORT_FIELDS",
+    "LINEAGE_SUPPORT_MAX_ENTRIES",
+    "LINEAGE_SUPPORT_SCHEMA",
+    "LINEAGE_VIEW_SCHEMA",
     "NON_RETRYABLE_CODES",
     "OperatorAction",
     "OperatorProjection",
@@ -147,17 +153,26 @@ __all__ = [
     "action_hint_block",
     "apply_update",
     "budget_blocked_review",
+    "command_state_rows",
+    "command_state_of_rung",
+    "COMMAND_STATES",
+    "COMMAND_STATE_PROOF",
     "current_candidate",
     "delivery_outcome_of",
     "delivery_view",
     "derive_state",
     "export_diagnostics",
+    "export_lineage_support",
     "explain_blocked",
     "initial_projection",
+    "lineage_prerequisites",
+    "lineage_reference",
+    "lineage_view",
     "recovery_document",
     "recovery_hint",
     "recovery_ladder",
     "render",
+    "render_lineage_comment",
     "render_status_comment",
     "review_round_fact",
     "source_digest",
@@ -701,6 +716,15 @@ class OperatorProjection:
     #: render labels the run's ready delivery and its green evidence
     #: HISTORICAL through this field — never as current readiness.
     superseded_by_round: str = ""
+    #: R41-12 (#367): the CURRENT round's lifecycle status as this
+    #: projection observed it (``""`` when the rows name no round). The
+    #: round-STATUS fence of the action CAS: an action planned while the
+    #: round was ``dispatched`` is refused once the round settled
+    #: ``stale``/``completed`` — the round reference alone cannot move
+    #: when the settle closes the lineage's outstanding slot without a
+    #: successor, so the status is the second subject an offered action
+    #: names.
+    round_status: str = ""
 
     @property
     def action_digest(self) -> str:
@@ -852,6 +876,9 @@ def _assemble(
         verification_history=tuple(redact(entry) for entry in historical_passes),
         round_ref=round_view["ref"] if round_view else "delivery:1",
         superseded_by_round=str(round_view.get("supersedes", "") or "") if round_view else "",
+        round_status=str((round_view or {}).get("round", {}).get("status") or "")
+        if round_view
+        else "",
     )
 
 
@@ -2018,6 +2045,15 @@ class OperatorAction:
     for the parent's superseded delivery never applies to the round's
     new candidate. ``safe_action`` carries the one-line will/will-not
     description from :data:`SAFE_ACTION_DESCRIPTIONS`.
+
+    R41-12 (#367) completes the subject naming: ``subject`` is the FULL,
+    unambiguous run id + round reference the guarded route resolves
+    (never an 8-char prefix — #359 kept short ids display-only because
+    historical rounds shared prefixes, so the printed command and the
+    CAS ticket both name the complete identity), and
+    ``expected_round_status`` is the round-STATUS fence — an action
+    planned while its round was open is refused once the round settled,
+    whatever the projection version says.
     """
 
     action: str
@@ -2031,6 +2067,8 @@ class OperatorAction:
     via: str
     expected_candidate: str = ""
     expected_round: str = "delivery:1"
+    subject: str = ""
+    expected_round_status: str = ""
 
     @property
     def safe_action(self) -> str:
@@ -2048,9 +2086,11 @@ class OperatorAction:
             "linkage": self.linkage,
             "action": self.action,
             "state": self.state,
+            "subject": self.subject,
             "expected_version": self.expected_version,
             "expected_candidate": self.expected_candidate,
             "expected_round": self.expected_round,
+            "expected_round_status": self.expected_round_status,
         }
 
 
@@ -2119,6 +2159,12 @@ class RecoveryActions:
                 via=ACTION_VIA[action],
                 expected_candidate=str(projection.identity.get("active_candidate") or ""),
                 expected_round=projection.round_ref,
+                # R41-12 (#367): the FULL subject — run id + round
+                # reference, never an 8-char prefix (#359 kept short ids
+                # display-only; the guarded route resolves the complete
+                # identity) — and the round-STATUS rung of the CAS ticket.
+                subject=f"{projection.run_id}@{projection.round_ref}",
+                expected_round_status=projection.round_status,
             )
             for action in RecoveryActions.valid_for(projection.state, actor_role)
         )
@@ -2142,6 +2188,16 @@ class RecoveryActions:
         with :data:`STALE_ACTION_REFUSAL` — the parent's superseded
         delivery and its actions never apply to the round's new world,
         whatever the projection version says.
+
+        R41-12 (#367) adds the round-STATUS rung to the same refusal: a
+        round that settles (``stale`` / ``completed`` / ``ended``)
+        without a successor keeps its round REFERENCE but changes its
+        status — an action planned while the round was open is refused
+        once it settled, and the refusal names the CURRENT status and
+        the safe next action. A pause is not "successful" because a
+        comment was accepted, and a recovery is not "valid" because its
+        round reference still parses: the world each ticket names must
+        still be the world that exists.
         """
         actions_now = RecoveryActions.valid_for(current.state, action.actor_role)
         safe_next = actions_now[0] if actions_now else ""
@@ -2182,6 +2238,22 @@ class RecoveryActions:
                     f"{action.expected_candidate[:12] or '(none)'} on {action.expected_round} "
                     f"but the current subject is candidate {current_candidate[:12] or '(none)'} "
                     f"on {current.round_ref} — the delivery or round moved; re-decide "
+                    "against the current world"
+                ),
+                current_state=current.state,
+                safe_next_action=safe_next or "probe",
+                action=action,
+            )
+        # the round-STATUS fence (R41-12): the reference still parses but
+        # the round's lifecycle moved — the settle that closes the
+        # lineage's outstanding slot without a successor.
+        if action.expected_round_status and action.expected_round_status != current.round_status:
+            return ActionDecision(
+                allowed=False,
+                reason=(
+                    f"{STALE_ACTION_REFUSAL}: the action was planned while "
+                    f"{action.expected_round} was {action.expected_round_status!r} but the "
+                    f"round is now {current.round_status!r} — the round settled; re-decide "
                     "against the current world"
                 ),
                 current_state=current.state,
@@ -3249,3 +3321,1095 @@ def with_status_comment_identity(body: str, snapshot: Mapping[str, Any]) -> str:
     )
     text = str(body or "").rstrip()
     return f"{text}\n\n{marker}" if text else marker
+
+
+# ---------------------------------------------------------------------------
+# R41-12 (#367) — ONE lineage view: the whole delivery lineage as ONE
+# snapshot, the command-state ladder over the durable-acceptance rows, the
+# explicit operator prerequisites, the concise MR comment and the
+# credential-free lineage support export
+# ---------------------------------------------------------------------------
+
+#: The lineage view's schema discriminator (versioned like the view's).
+LINEAGE_VIEW_SCHEMA: Final = "forge.operator.lineage/1"
+
+#: The lineage support export's schema discriminator.
+LINEAGE_SUPPORT_SCHEMA: Final = "forge.operator.lineage-support/1"
+
+#: The root delivery's human reference spelling — round 1 IS the root
+#: delivery (the #338 convention: no round row exists for it), so its
+#: lineage reference says ``delivery 1``; rounds 2..N say ``round N``.
+LINEAGE_REFERENCE_DELIVERY: Final = "delivery 1"
+
+
+def lineage_reference(round_number: Any, root_run_id: str) -> str:
+    """``round <n> of <root-8>`` — the #359 human round reference.
+
+    The concise, unambiguous name of ONE delivery inside a lineage: the
+    pair (lineage root, round number) names exactly one delivery, and the
+    root is spelled with its 8-char DISPLAY prefix exactly as
+    :func:`forge.durable.collaboration.round_reference` spells it (a test
+    pins the parity). DISPLAY AND READ RESOLUTION ONLY — never an
+    authorization token and never a publication input: the destructive
+    commands require the FULL run id, and this reference is what an
+    operator reads to know which full id to name.
+    """
+    root = str(root_run_id or "")
+    try:
+        numbered = int(round_number)
+    except (TypeError, ValueError):
+        numbered = 0
+    if numbered <= 1:
+        return f"{LINEAGE_REFERENCE_DELIVERY} of {root[:8]}"
+    return f"round {numbered} of {root[:8]}"
+
+
+#: The closed COMMAND-STATE vocabulary (R41-12, the review's core ask).
+#: Each state names WHERE the command stands on the
+#: received → durably-accepted → dispatched → applied → checkpointed
+#: ladder — five DIFFERENT durable rows distinguish them (the #357
+#: durable-acceptance work), and a pause is NOT "successful" because a
+#: comment was accepted: only ``checkpointed`` (a committed checkpoint)
+#: closes a pause's loop. ``refused`` is the spent-negative arm
+#: (rejected/expired); ``unknown`` is the honest unobserved authority,
+#: never a guess.
+COMMAND_STATES: Final[tuple[str, ...]] = (
+    "received",
+    "durably_accepted",
+    "dispatched",
+    "applied",
+    "checkpointed",
+    "refused",
+    "unknown",
+)
+
+#: WHICH durable row distinguishes each command state — the document the
+#: render states and the tests pin. This is the #357 ladder made visible:
+#: the inbox row proves the delivery landed; the CONTROL COMMAND row
+#: (with its scheduled step) proves the 202 contract — a worker WILL
+#: attempt it; the dispatch rung (or the lease's persisted
+#: ``native_intent_at``) proves the dispatch is in flight; ``applied_at``
+#: is the lane's application ack (the effect journal); the ``checkpointed``
+#: rung PLUS the committed checkpoint row closes a pause's loop.
+COMMAND_STATE_PROOF: Final[Mapping[str, str]] = {
+    "received": "the event-inbox row — the provider delivery landed in SQL, nothing more",
+    "durably_accepted": (
+        "the control-command row (the 202 contract: inbox + scheduled step COMMITTED — "
+        "a worker WILL attempt it)"
+    ),
+    "dispatched": (
+        "the command rung dispatching/vendor_accepted/outcome_unknown, or the execution "
+        "lease's persisted native_intent_at — the dispatch is in flight, the vendor may "
+        "have taken it"
+    ),
+    "applied": ("the command's applied_at — the lane acked APPLYING it (the effect journal's ack)"),
+    "checkpointed": (
+        "the command rung checkpointed PLUS the committed checkpoint row — the pause's "
+        "fence closed the loop"
+    ),
+    "refused": "the command rung rejected/expired — the command spent without applying",
+    "unknown": "the command authority was not observed — never guessed",
+}
+
+#: The mailbox ladder rung → command state (the router's own vocabulary
+#: mapped onto the #367 operator vocabulary; every CHECK-constrained rung
+#: of ``control_commands.status`` is covered).
+_COMMAND_STATE_OF_RUNG: Final[Mapping[str, str]] = {
+    "received": "durably_accepted",
+    "authorized": "durably_accepted",
+    "pending": "durably_accepted",
+    "dispatching": "dispatched",
+    "vendor_accepted": "dispatched",
+    "outcome_unknown": "dispatched",
+    "applied": "applied",
+    "checkpointed": "checkpointed",
+    "rejected": "refused",
+    "expired": "refused",
+}
+
+
+def command_state_of_rung(rung: str) -> str:
+    """The command state of one mailbox ladder *rung* (``unknown`` for a
+    rung outside the closed vocabulary — never guessed)."""
+    return _COMMAND_STATE_OF_RUNG.get(str(rung or "").strip(), "unknown")
+
+
+def command_state_rows(
+    source_rows: Mapping[str, Any],
+    *,
+    coverage: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Every command of one snapshot mapped onto the command-state ladder.
+
+    Two sources compose (both value-free):
+
+    - the ``commands`` section (the durable control-command rows) — each
+      row's rung maps through :data:`COMMAND_STATE_PROOF`'s ladder, with
+      the HONEST NOTE a pause carries until its checkpoint is committed
+      (``a pause is not successful because a comment was accepted``: the
+      ``vendor_accepted`` rung is a comment ACK, not a safe state);
+    - the ``inbox`` section (the durable webhook-inbox rows that name no
+      command yet) — state ``received``: the delivery landed in SQL and
+      NOTHING has durably accepted it. An inbox row whose
+      ``command_ref`` names a command row is its ``received`` receipt,
+      not a separate entry.
+
+    An unobserved commands authority renders ONE honest ``unknown``
+    entry, never an empty success.
+    """
+    commands = source_rows.get("commands")
+    if commands is None and (
+        coverage is None or str(coverage.get("commands", "") or "") == "unknown"
+    ):
+        return (
+            {
+                "command_id": "",
+                "kind": "",
+                "rung": "",
+                "command_state": "unknown",
+                "at": "",
+                "proven_by": None,
+                "honest_note": COMMAND_STATE_PROOF["unknown"],
+            },
+        )
+    command_refs: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for raw in commands or []:
+        row = _norm(raw)
+        if not row:
+            continue
+        rung = str(_first(row, "status") or "")
+        state = command_state_of_rung(rung)
+        command_id = str(_first(row, "command_id", "id") or "")
+        if command_id:
+            command_refs.add(command_id)
+        note = COMMAND_STATE_PROOF.get(state, "")
+        kind = str(row.get("kind") or "")
+        if kind == "pause" and state in ("durably_accepted", "dispatched", "applied"):
+            note = (
+                note + " — the pause is NOT successful yet: only a committed checkpoint "
+                "(the checkpointed rung) closes a pause's loop"
+            )
+        entries.append(
+            {
+                "command_id": command_id,
+                "kind": kind,
+                "rung": rung,
+                "command_state": state,
+                "at": _iso(_first(row, "created_at", "applied_at")),
+                "proven_by": {"of": "control command", "id": command_id, "ref": _row_digest(row)},
+                "honest_note": note,
+            }
+        )
+    for raw in source_rows.get("inbox") or []:
+        row = _norm(raw)
+        if not row:
+            continue
+        referenced = str(row.get("command_ref") or "")
+        if referenced and referenced in command_refs:
+            continue  # the referenced command's own entry carries its ladder
+        entries.append(
+            {
+                "command_id": str(row.get("source_event_id") or ""),
+                "kind": str(row.get("command") or ""),
+                "rung": "inbox",
+                "command_state": "received",
+                "at": _iso(_first(row, "received_at", "created_at")),
+                "proven_by": {
+                    "of": "event inbox",
+                    "id": str(row.get("source_event_id") or ""),
+                    "ref": _row_digest(row),
+                },
+                "honest_note": COMMAND_STATE_PROOF["received"],
+            }
+        )
+    return tuple(entries)
+
+
+#: The closed operator-prerequisite vocabulary (R41-12): the ambiguous
+#: evidence and the unavailable prerequisites a recovery stands on,
+#: rendered as NAMED rows — never silence the operator must debug. The
+#: three the #364 live loop surfaced: a round blocked on a moved head
+#: (its human commit preserved), a checkpoint the authority no longer
+#: holds, and an expired credential.
+LINEAGE_PREREQUISITE_CODES: Final[tuple[str, ...]] = (
+    "stale_head",
+    "missing_checkpoint",
+    "expired_credential",
+)
+
+#: The run-row blocked-reason wordings that prove the MR head moved off
+#: the approved base (the #364 round-4 shape: the writer's typed
+#: ``branch_drift`` refusal and the R41-03 settle's
+#: ``review_round_foreign_head`` — human commits preserved, never reset).
+_MOVED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"branch[_-]?drift|foreign[_-]?head|moved off the approved base", re.IGNORECASE
+)
+
+#: The expired-credential wordings beside the R37-16 revoked-authority
+#: regex — the #364 live finding was the broker token answering
+#: ``401 token-expired``.
+_EXPIRED_CREDENTIAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"token[_-]?expired|credential[_-]?expired|expired[_-]?(?:token|credential|key)", re.IGNORECASE
+)
+
+
+def lineage_prerequisites(
+    source_rows: Mapping[str, Any],
+    *,
+    coverage: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """The EXPLICIT prerequisites and ambiguities of one lineage's current
+    state — each a named row with its one-line remediation, the guarded
+    route or runbook that executes it, and whether it is available NOW.
+
+    Pure over the rows: a stale round or a moved-head blocked reason names
+    the re-raise route; a paused lineage whose checkpoint authority reads
+    ``missing``/``unknown`` names the restore-or-retire runbook BEFORE a
+    resume is offered; a revoked/expired credential names the rotation
+    runbook and never a retry. Absent rows render nothing — an honest
+    empty list, never a guessed prerequisite."""
+    run = _require_run(source_rows)
+    run_id = str(_first(run, "id", "run_id") or "")
+    run_link = {"of": "run", "id": run_id, "ref": _row_digest(run)}
+    blocked = str(run.get("blocked_reason") or "")
+    rounds = [_norm(row) for row in source_rows.get("rounds") or [] if _norm(row)]
+    newest = rounds[-1] if rounds else None
+    for row in rounds:  # the newest by round_number, never by arrival order
+        try:
+            if int(row.get("round_number") or 0) > int((newest or {}).get("round_number") or 0):
+                newest = row
+        except (TypeError, ValueError):
+            continue
+    prerequisites: list[dict[str, Any]] = []
+    moved_head = bool(newest is not None and str(newest.get("status") or "") == "stale") or (
+        bool(blocked) and bool(_MOVED_HEAD_RE.search(blocked))
+    )
+    if moved_head:
+        head_word = str((newest or {}).get("base_head_sha") or run.get("base_sha") or "")
+        prerequisites.append(
+            {
+                "code": "stale_head",
+                "description": (
+                    "the MR head moved off the approved base"
+                    + (f" {head_word[:12]}" if head_word else "")
+                    + " — human commits are preserved, never reset; re-raise the "
+                    "correction against the CURRENT head"
+                ),
+                "available": True,
+                "via": ACTION_VIA["follow_up_correction"],
+                "evidence": (
+                    {
+                        "of": "review round",
+                        "id": str(newest.get("decision_id") or ""),
+                        "ref": _row_digest(newest),
+                    }
+                    if newest
+                    else run_link
+                ),
+            }
+        )
+    checkpoints = [_norm(row) for row in source_rows.get("checkpoints") or [] if _norm(row)]
+    fence_held = any(str(row.get("fence") or "") == "held" for row in checkpoints)
+    checkpoint_word = (
+        str((coverage or {}).get("checkpoints", "") or "") if coverage is not None else ""
+    )
+    if coverage is not None and checkpoint_word in ("missing", "unknown") and fence_held:
+        prerequisites.append(
+            {
+                "code": "missing_checkpoint",
+                "description": (
+                    f"the lineage stands paused on a checkpoint the authority reads "
+                    f"{checkpoint_word!r} — a resume has no bytes to restore; restore "
+                    "from the backup receipt or retire the work"
+                ),
+                "available": False,
+                "via": _SUGGESTED_VIA["restore_checkpoint_or_retire"],
+                "evidence": run_link,
+            }
+        )
+    if blocked and (
+        _REVOKED_AUTHORITY_RE.search(blocked) or _EXPIRED_CREDENTIAL_RE.search(blocked)
+    ):
+        prerequisites.append(
+            {
+                "code": "expired_credential",
+                "description": (
+                    f"the lineage's credential or authority is revoked/expired "
+                    f"({blocked}) — rotate or rebind it per the token-rotation runbook; "
+                    "a retry cannot restore withdrawn authority"
+                ),
+                "available": False,
+                "via": _SUGGESTED_VIA["rotate_or_rebind_credential"],
+                "evidence": run_link,
+            }
+        )
+    return prerequisites
+
+
+def _lineage_deliveries(
+    run: Mapping[str, Any], rounds: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """The delivery history: delivery 1 (the root) + one entry per round
+    row, ordered by ROUND NUMBER — the append order the rounds table
+    owns, never the arrival order of the rows in one snapshot (a delayed
+    parent event with a newer ``updated_at`` cannot reorder history)."""
+
+    def number(row: Mapping[str, Any]) -> int:
+        try:
+            return int(row.get("round_number") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    run_id = str(_first(run, "id", "run_id") or "")
+    root = str((rounds[0] or {}).get("root_run_id") or "") if rounds else run_id
+    if not root:
+        root = run_id
+    deliveries: list[dict[str, Any]] = [
+        {
+            "reference": lineage_reference(1, root),
+            "round_number": 1,
+            "run_id": root,
+            "status": str(run.get("status") or "") if root == run_id else "",
+            "status_reason": "",
+            "decision_id": "",
+            "at": _iso(_first(run, "created_at")),
+            "evidence": {"of": "run", "id": root, "ref": _row_digest(run)},
+        }
+    ]
+    for row in sorted(rounds, key=number):
+        numbered = number(row)
+        deliveries.append(
+            {
+                "reference": lineage_reference(numbered, str(row.get("root_run_id") or root)),
+                "round_number": numbered,
+                "run_id": str(row.get("child_run_id") or ""),
+                "status": str(row.get("status") or ""),
+                "status_reason": str(row.get("status_reason") or ""),
+                "decision_id": str(row.get("decision_id") or ""),
+                "base_head_sha": str(row.get("base_head_sha") or ""),
+                "at": _iso(row.get("created_at")),
+                "evidence": {
+                    "of": "review round",
+                    "id": str(row.get("decision_id") or ""),
+                    "ref": _row_digest(row),
+                },
+            }
+        )
+    return deliveries
+
+
+#: The lease occupancy words whose native occupancy is NOT proven (#360's
+#: decision table): uncertain occupancy holds the slot and renders
+#: ``unknown`` — NEVER a convenient terminal row from a previous round.
+_OCCUPANCY_UNPROVEN: Final[frozenset[str]] = frozenset(
+    {"never_dispatched", "dispatched_unknown", "draining"}
+)
+
+
+def _native_occupancy_of(occupancy: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
+    """The lineage's native occupancy word — ``running`` / ``terminal`` /
+    ``unknown`` (#360): the CURRENT execution decides, never a historical
+    pipeline. ``terminal`` requires an OBSERVED terminal (a released
+    lease); unproven occupancy and an unobserved authority stay
+    ``unknown`` — never rendered as stopped."""
+    if occupancy is None:
+        return {
+            "native": "unknown",
+            "basis": "the occupancy authority was not queried — unknown, never stopped",
+            "leases": [],
+        }
+    leases: list[dict[str, Any]] = []
+    words: list[str] = []
+    for row in occupancy:
+        word = str(row.get("occupancy") or "")
+        words.append(word)
+        native = (
+            "terminal"
+            if word == "observed_terminal"
+            else ("running" if word == "native_running" else "unknown")
+        )
+        leases.append(
+            {
+                "lease_id": str(row.get("lease_id") or ""),
+                "occupancy": word or "unknown",
+                "native": native,
+                "acquired_at": _iso(row.get("acquired_at")),
+                "released_at": _iso(row.get("released_at")),
+            }
+        )
+    if any(word == "native_running" for word in words):
+        native_word = "running"
+        basis = "a lease holds the slot with a verified native handle — genuinely occupied"
+    elif any(word == "observed_terminal" for word in words) and not any(
+        word in _OCCUPANCY_UNPROVEN for word in words
+    ):
+        native_word = "terminal"
+        basis = "every observed lease released — the only branch evidence that frees a slot"
+    else:
+        native_word = "unknown"
+        basis = (
+            "occupancy is unproven (dispatched/draining/never-dispatched or no lease "
+            "observed) — uncertain occupancy HOLDS the slot, never reads as stopped"
+        )
+    return {"native": native_word, "basis": basis, "leases": leases}
+
+
+#: The amendment axis → the row's amount column (one axis, one amount —
+#: the #340 contract).
+_AXIS_AMOUNT_FIELDS: Final[Mapping[str, str]] = {
+    "usd": "amount_usd",
+    "calls": "amount_calls",
+    "tokens": "amount_tokens",
+    "wallclock": "amount_wallclock_s",
+}
+
+
+def _budget_axes(
+    budget: Mapping[str, Any] | None, amendments: Sequence[Any] | None
+) -> dict[str, Any]:
+    """The budget axes WITH their amendment history (R41-12): the numeric
+    limits, the reserve/exposure counters, the closing partition and every
+    recorded amendment (applied and refused — a refused amendment names
+    the limiting axis). An absent budget authority renders ``unknown``,
+    never a zeroed ledger."""
+    if budget is None:
+        return {
+            "status": "unknown",
+            "axes": {},
+            "closing_partition": None,
+            "amendments": [],
+            "amendments_refused": 0,
+            "note": "the budget authority was not queried — unknown, never a zeroed ledger",
+        }
+    amendment_rows: list[dict[str, Any]] = []
+    for row in amendments or []:
+        amendment = _norm(row)
+        if not amendment:
+            continue
+        axis = str(amendment.get("axis") or "")
+        field = _AXIS_AMOUNT_FIELDS.get(axis, "")
+        amount = amendment.get(field) if field else None
+        if amount is None:
+            amount = _first(amendment, "amount")
+        amendment_rows.append(
+            {
+                "command_id": str(amendment.get("command_id") or ""),
+                "axis": axis,
+                "amount": amount,
+                "status": str(amendment.get("status") or ""),
+                "refusal_reason": str(amendment.get("refusal_reason") or ""),
+                "limit_before": amendment.get("limit_before"),
+                "limit_after": amendment.get("limit_after"),
+                "applied_at": _iso(amendment.get("applied_at")),
+            }
+        )
+    axes: dict[str, Any] = {
+        "calls": {
+            "limit": budget.get("max_calls"),
+            "reserved": budget.get("reserved_calls"),
+            "consumed": budget.get("consumed_calls"),
+            "unresolved": budget.get("unresolved_calls"),
+        },
+        "tokens": {
+            "limit": budget.get("max_tokens"),
+            "reserved": budget.get("reserved_tokens"),
+            "consumed": budget.get("consumed_tokens"),
+            "unresolved": budget.get("unresolved_tokens"),
+        },
+        "wallclock": {
+            "limit_s": budget.get("wallclock_s"),
+        },
+        "usd": {
+            "basis": (
+                "the USD axis is enforced over the usage receipts (the closing gate's "
+                "cap); an usd amendment changes the effective cap, never a counter here"
+            ),
+        },
+    }
+    return {
+        "status": str(budget.get("status") or "unknown"),
+        "axes": axes,
+        "closing_partition": (
+            {
+                "policy": budget.get("closing_partition_policy"),
+                "reserved_calls": budget.get("closing_reserved_calls"),
+                "reserved_tokens": budget.get("closing_reserved_tokens"),
+            }
+            if budget.get("closing_partition_policy") is not None
+            else None
+        ),
+        "amendments": amendment_rows,
+        "amendments_refused": sum(1 for row in amendment_rows if row["status"] == "refused"),
+        "evidence": {
+            "of": "run budget",
+            "id": str(budget.get("budget_id") or budget.get("id") or ""),
+            "ref": _row_digest(budget),
+        },
+    }
+
+
+def lineage_view(
+    source_rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | None = None,
+    now: datetime | str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+    projection_inconsistent: bool = False,
+) -> dict[str, Any]:
+    """ONE lineage snapshot (R41-12) — the linked facts of the WHOLE
+    delivery lineage from the canonical stores, projected, never
+    re-derived:
+
+    - ``lineage`` — the root, the human round reference
+      (``round 4 of <root-8>``), the delivery HISTORY (delivery 1 +
+      rounds 2..N, ordered by round number — a delayed parent event
+      cannot reorder it) and the CURRENT round/attempt;
+    - ``target`` — the #359 COLLABORATION target (source branch, target
+      branch, the lineage's ONE MR), the persisted record — never a
+      UUID-prefix derivation; a refused legacy target says so;
+    - ``candidate`` — the CURRENT candidate with its role
+      (current/historical) and the supersession reference;
+    - ``checkpoint`` — the exact checkpoint (id + digest + fence +
+      activation receipt), or the honest coverage word;
+    - ``occupancy`` — the native occupancy word (#360: the current
+      execution decides; unproven occupancy stays ``unknown``, never
+      ``stopped``);
+    - ``budget`` — the axes WITH the amendment history (applied and
+      refused, the refused ones naming the limiting axis);
+    - ``command_states`` — the received → durably-accepted → dispatched
+      → applied → checkpointed ladder, each rung proven by its own
+      durable row (``proven_by``);
+    - ``unresolved_effects`` — the external effects that may still land;
+    - ``prerequisites`` — the explicit operator prerequisites and
+      ambiguities (:func:`lineage_prerequisites`);
+    - ``actions`` — the ADVISORY actions with the FULL subject naming
+      (the complete run id — #359 kept short prefixes display-only) and
+      the concrete command text an operator submits through the guarded
+      route.
+
+    Pure: reads the rows, writes nothing, executes nothing. Everything
+    passes the redaction guard at the end regardless.
+    """
+    run = _require_run(source_rows)
+    run_id = str(_first(run, "id", "run_id") or "")
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if projection is None:
+        projection = initial_projection(source_rows, moment)
+    rounds = [_norm(row) for row in source_rows.get("rounds") or [] if _norm(row)]
+    deliveries = _lineage_deliveries(run, rounds)
+    root_run_id = str(deliveries[0]["run_id"]) if deliveries else run_id
+
+    # the CURRENT round — the newest by round number; the ACTIVE child is
+    # the OPEN round's child (the one-outstanding-slot invariant), never
+    # the newest row's updated_at.
+    newest = deliveries[-1]
+    open_delivery = next(
+        (
+            entry
+            for entry in reversed(deliveries)
+            if entry["round_number"] >= 2 and entry["status"] in REVIEW_ROUND_OPEN_STATUSES
+        ),
+        None,
+    )
+    attempts = [_norm(row) for row in source_rows.get("attempts") or [] if _norm(row)]
+    active_attempt = attempts[-1] if attempts else None
+    current: dict[str, Any] = {
+        "reference": str(newest.get("reference") or lineage_reference(1, root_run_id)),
+        "round_number": newest.get("round_number"),
+        "round_ref": projection.round_ref,
+        "round_status": projection.round_status,
+        "status": str(newest.get("status") or ""),
+        "status_reason": str(newest.get("status_reason") or ""),
+        "active_child_run_id": str(open_delivery.get("run_id") or "") if open_delivery else "",
+        "open": open_delivery is not None,
+        "attempt": (
+            {
+                "attempt_id": str(_first(active_attempt, "attempt_id", "id") or ""),
+                "status": str(_first(active_attempt, "status") or "unknown") or "unknown",
+                "generation": _first(active_attempt, "generation"),
+                "at": _iso(_first(active_attempt, "started_at", "updated_at")),
+            }
+            if active_attempt
+            else None
+        ),
+        "basis": (
+            f"the lineage's newest delivery is {newest.get('reference')}"
+            + (
+                f" — its child run {str(open_delivery.get('run_id') or '')[:8]} is the active execution"
+                if open_delivery
+                else " — no round holds the lineage's outstanding correction slot"
+            )
+        ),
+    }
+
+    # the collaboration target (#359) — the persisted record
+    raw_target = source_rows.get("target")
+    target_row = _norm(raw_target) if raw_target is not None else {}
+    target_coverage = str((coverage or {}).get("target", "") or "") if coverage is not None else ""
+    if target_row:
+        target: dict[str, Any] = {
+            "status": str(target_row.get("status") or ""),
+            "provider": str(target_row.get("provider") or ""),
+            "project_ref": str(target_row.get("project_ref") or ""),
+            "source_branch": str(target_row.get("source_branch") or ""),
+            "target_branch": str(target_row.get("target_branch") or ""),
+            "mr_iid": target_row.get("mr_iid"),
+            "provenance": str(target_row.get("provenance") or ""),
+            "refusal_reason": str(target_row.get("refusal_reason") or ""),
+            "available": str(target_row.get("status") or "") == "active",
+            "evidence": {
+                "of": "collaboration target",
+                "id": str(target_row.get("id") or ""),
+                "ref": _row_digest(target_row),
+            },
+        }
+    else:
+        target = {
+            "status": target_coverage or "unknown",
+            "provider": "",
+            "project_ref": "",
+            "source_branch": "",
+            "target_branch": "",
+            "mr_iid": None,
+            "provenance": "",
+            "refusal_reason": "",
+            "available": False,
+            "evidence": None,
+            "note": (
+                "no collaboration target observed for this lineage"
+                + (
+                    " — the target authority was not queried"
+                    if target_coverage == "unknown"
+                    else " (a legacy lineage with no persisted target)"
+                )
+            ),
+        }
+
+    # the candidate — role current/historical + supersession. The LINEAGE
+    # rule widens #349's direct-parent supersession: ANY superseding round
+    # in the lineage's history makes THIS run's delivery historical (the
+    # root's delivery was superseded by round 2 however many further
+    # rounds followed); the lineage's CURRENT candidate lives on the open
+    # round's child run, named by id — never re-presented as this run's.
+    candidate_history = [str(sha) for sha in run.get("candidate_shas") or [] if str(sha)]
+    candidate_now = current_candidate(run, candidate_history)
+    superseding = next(
+        (
+            entry
+            for entry in reversed(deliveries)
+            if entry["round_number"] >= 2 and entry["status"] in REVIEW_ROUND_SUPERSEDING_STATUSES
+        ),
+        None,
+    )
+    superseded_by = projection.superseded_by_round or (
+        f"round:{superseding['round_number']}:{superseding['decision_id']}" if superseding else ""
+    )
+    candidate_fact: dict[str, Any] = {
+        "sha": candidate_now,
+        "role": ("historical" if superseded_by else ("current" if candidate_now else "none")),
+        "superseded_by": superseded_by,
+        "history_count": len(candidate_history),
+        "lineage_current_run": (
+            str(open_delivery.get("run_id") or "") if open_delivery else run_id
+        ),
+        "note": (
+            "superseded by a follow-up round — this delivery and its green evidence are "
+            "immutable HISTORY; the lineage's current candidate lives on the open round's "
+            "child run"
+            if superseded_by
+            else (
+                "the run's current candidate (the active pointer, else the newest member)"
+                if candidate_now
+                else "no candidate recorded"
+            )
+        ),
+        "evidence": {"of": "run", "id": run_id, "ref": _row_digest(run)},
+    }
+
+    # the exact checkpoint
+    checkpoints = [_norm(row) for row in source_rows.get("checkpoints") or [] if _norm(row)]
+    committed = [
+        row
+        for row in checkpoints
+        if _first(row, "committed_at") or str(_first(row, "status") or "") == "committed"
+    ]
+    checkpoint_row = committed[-1] if committed else (checkpoints[-1] if checkpoints else None)
+    checkpoint_coverage = (
+        str((coverage or {}).get("checkpoints", "") or "") if coverage is not None else ""
+    )
+    checkpoint_fact: dict[str, Any] = (
+        {
+            "checkpoint_id": str(_first(checkpoint_row, "checkpoint_id", "id") or ""),
+            "digest": str(_first(checkpoint_row, "digest") or ""),
+            "committed_at": _iso(_first(checkpoint_row, "committed_at")),
+            "activated_at": _iso(checkpoint_row.get("activated_at")) or None,
+            "activation": str(checkpoint_row.get("activation") or ""),
+            "fence": str(_first(checkpoint_row, "fence") or ""),
+            "coverage": checkpoint_coverage or "unknown",
+            "evidence": {
+                "of": "checkpoint",
+                "id": str(_first(checkpoint_row, "checkpoint_id", "id") or ""),
+                "ref": _row_digest(checkpoint_row),
+            },
+        }
+        if checkpoint_row is not None
+        else {
+            "checkpoint_id": "",
+            "digest": "",
+            "committed_at": "",
+            "activated_at": None,
+            "activation": "",
+            "fence": "",
+            "coverage": checkpoint_coverage or "unknown",
+            "evidence": None,
+            "note": (
+                "the checkpoint authority was not queried — unknown, never 'no checkpoint'"
+                if checkpoint_coverage == "unknown"
+                else "no committed checkpoint observed"
+            ),
+        }
+    )
+
+    # the verification — bound to the candidate it tested; unavailable
+    # stays unknown, never passed
+    verifications = [_norm(row) for row in source_rows.get("verifications") or [] if _norm(row)]
+    verification_coverage = (
+        str((coverage or {}).get("verifications", "") or "") if coverage is not None else ""
+    )
+    current_passes, _ = verification_binding(verifications, candidate_history, candidate_now)
+    if verification_coverage == "unknown" and not verifications:
+        verification_fact: dict[str, Any] = {
+            "binding": "unknown",
+            "verdict": "unknown",
+            "candidate_sha": candidate_now,
+            "note": "the verification authority was not queried — unknown, never passed",
+            "evidence": None,
+        }
+    elif current_passes and not superseded_by:
+        verification_fact = {
+            "binding": "current",
+            "verdict": "passed",
+            "candidate_sha": candidate_now,
+            "note": "a passed verification bound to the CURRENT candidate",
+            "evidence": {
+                "of": "verification",
+                "id": str(_first(current_passes[-1], "verification_id", "id") or ""),
+                "ref": _row_digest(current_passes[-1]),
+            },
+        }
+    elif current_passes:
+        verification_fact = {
+            "binding": "historical",
+            "verdict": "passed",
+            "candidate_sha": candidate_now,
+            "note": "the green evidence covers a SUPERSEDED delivery — history, never current readiness",
+            "evidence": {
+                "of": "verification",
+                "id": str(_first(current_passes[-1], "verification_id", "id") or ""),
+                "ref": _row_digest(current_passes[-1]),
+            },
+        }
+    else:
+        verification_fact = {
+            "binding": "none",
+            "verdict": "none",
+            "candidate_sha": candidate_now,
+            "note": "no passed verification binds the current candidate",
+            "evidence": None,
+        }
+
+    budget_fact = _budget_axes(source_rows.get("budget"), source_rows.get("amendments"))
+    occupancy_fact = _native_occupancy_of(occupancy)
+    command_states = command_state_rows(source_rows, coverage=coverage)
+    prerequisites = lineage_prerequisites(source_rows, coverage=coverage)
+
+    # the ADVISORY actions with the full subject naming + concrete command
+    actions: list[dict[str, Any]] = []
+    for action in RecoveryActions.plan(projection, "operator:read", "observer", at=moment):
+        actions.append(
+            {
+                "action": action.action,
+                "via": action.via,
+                "subject": action.subject,
+                "command": _printed_command(action, projection),
+                "digest": action.digest,
+                "expected_version": action.expected_version,
+                "expected_candidate": action.expected_candidate,
+                "expected_round": action.expected_round,
+                "expected_round_status": action.expected_round_status,
+                "safe_action": action.safe_action,
+                "at": action.at,
+            }
+        )
+
+    document: dict[str, Any] = {
+        "schema": LINEAGE_VIEW_SCHEMA,
+        "run_id": run_id,
+        "computed_at": _iso(moment),
+        "operator_state": projection.state,
+        "blocked_reason": projection.blocked_reason,
+        "lineage": {
+            "root_run_id": root_run_id,
+            "reference": current["reference"],
+            "deliveries": deliveries,
+            "current": current,
+            "rounds_recorded": len(rounds),
+        },
+        "target": target,
+        "candidate": candidate_fact,
+        "checkpoint": checkpoint_fact,
+        "verification": verification_fact,
+        "occupancy": occupancy_fact,
+        "budget": budget_fact,
+        "command_states": [dict(entry) for entry in command_states],
+        "command_state_vocabulary": list(COMMAND_STATES),
+        "unresolved_effects": [dict(effect) for effect in projection.unresolved_effects],
+        "prerequisites": prerequisites,
+        "actions": actions,
+        "actions_advisory": (
+            "action hints only — execution goes through the guarded command routes, "
+            "which reauthorize against the current world (the full subject, the "
+            "projection version, the candidate, the round AND its status); a stale "
+            "action is refused there with the current state named"
+        ),
+        "stale_or_inconsistent": bool(projection_inconsistent or projection.state == "stale"),
+        "linkage": (
+            "one lineage, one snapshot: the delivery history ordered by round number, "
+            "the persisted collaboration target, the current candidate's role, the "
+            "exact checkpoint, the native occupancy word, the budget axes with their "
+            "amendments and the command-state ladder — each fact from its canonical "
+            "store, each carrying its thin evidence link"
+        ),
+    }
+    if projection_inconsistent:
+        document["uncertainty"] = (
+            "the consistency fence moved while this snapshot was read — every fact may "
+            "describe a moved world; re-read before acting"
+        )
+    return redact(document)
+
+
+#: The concrete command shapes the lineage actions print (R41-12): every
+#: one names the FULL run id — #359 kept the 8-char prefixes display-only
+#: because historical rounds shared them, so a printed command resolving
+#: through a prefix would be ambiguous within a lineage. The observer
+#: role reads these; the approver submits them through the guarded route.
+def _printed_command(action: OperatorAction, projection: OperatorProjection) -> str:
+    """The concrete command text one action names — the FULL subject."""
+    run_id = action.subject.partition("@")[0] or projection.run_id
+    shapes: Final[Mapping[str, str]] = {
+        "pause": f"/pause {run_id}",
+        "resume": f"/resume {run_id}",
+        "steer": f"/steer {run_id} <corrected guidance>",
+        "answer": f"/answer {run_id} <answer>",
+        "retry": f"/retry {run_id}",
+        "cancel": f"/cancel {run_id}",
+        "reconcile": f"/reconcile {run_id}",
+        "probe": f"/status {run_id}",
+        "continue_review_only": f"/continue_review {run_id}",
+        "follow_up_correction": f"/fix on MR — re-raise the correction for {action.expected_round}",
+    }
+    return shapes.get(action.action, f"/status {run_id}")
+
+
+def render_lineage_comment(source_rows: Mapping[str, Any], **kwargs: Any) -> str:
+    """The ONE concise MR status comment for a whole lineage (R41-12):
+    the round reference, the target, the current state, the candidate,
+    the honest command ladder and the next action — the short lines a
+    native MR comment carries, ending in the machine-readable identity
+    marker that collapses replayed delivery to ONE current status. Pure."""
+    view = lineage_view(source_rows, **kwargs)
+    lineage = view["lineage"]
+    current = lineage["current"]
+    target = view["target"]
+    lines = [f"**Forge lineage — {lineage['reference']}** (root `{lineage['root_run_id'][:8]}`)"]
+    if target.get("source_branch"):
+        mr = f", MR !{target['mr_iid']}" if target.get("mr_iid") is not None else ""
+        lines.append(f"- **Target:** `{target['source_branch']}` → `{target['target_branch']}`{mr}")
+    elif target.get("status") == "refused":
+        lines.append(
+            f"- **Target:** refused — {target.get('refusal_reason') or 'unresolved legacy topology'}"
+        )
+    child = current.get("active_child_run_id") or view["run_id"]
+    state_line = f"- **Current:** run `{str(child)[:12]}` — {view['operator_state']}"
+    if view["blocked_reason"]:
+        state_line += f" ({view['blocked_reason']})"
+    lines.append(state_line)
+    candidate = view["candidate"]
+    if candidate["sha"]:
+        role = candidate["role"]
+        superseded = (
+            f", superseded by {candidate['superseded_by']}" if candidate["superseded_by"] else ""
+        )
+        lines.append(f"- **Candidate:** `{candidate['sha'][:12]}` ({role}{superseded})")
+    verification = view["verification"]
+    if verification["verdict"] in ("passed", "unknown"):
+        binding = verification["binding"]
+        lines.append(
+            f"- **Verification:** {verification['verdict']} ({binding})"
+            + (" — unavailable verification never reads as passed" if binding == "unknown" else "")
+        )
+    occupancy = view["occupancy"]
+    lines.append(f"- **Occupancy:** {occupancy['native']}")
+    for entry in view["command_states"]:
+        if entry["command_state"] == "unknown":
+            continue
+        note = (
+            " — NOT successful yet"
+            if "NOT successful" in str(entry.get("honest_note") or "")
+            else ""
+        )
+        lines.append(
+            f"- **Command:** {entry['kind'] or entry['command_id'] or '(inbox)'} is "
+            f"{entry['command_state'].replace('_', ' ')}{note}"
+        )
+    if view["unresolved_effects"]:
+        lines.append(
+            f"- **Effects:** {len(view['unresolved_effects'])} unresolved — reconcile before retry"
+        )
+    for prerequisite in view["prerequisites"]:
+        availability = "available" if prerequisite["available"] else "UNAVAILABLE prerequisite"
+        lines.append(
+            f"- **Next:** {prerequisite['code']} ({availability}) — {prerequisite['description']}"
+        )
+    identity = status_comment_identity(
+        run_id=view["run_id"],
+        state=str(view["operator_state"] or ""),
+        round_ref=str(current.get("round_ref") or ""),
+        candidate_sha=str(candidate["sha"] or ""),
+        verification_binding_word=str(verification["binding"] or ""),
+        extra={"lineage_reference": lineage["reference"], "occupancy": occupancy["native"]},
+    )
+    lines.append(
+        f"<!-- {STATUS_COMMENT_MARKER}:1 run={view['run_id']} identity={identity} "
+        f"lineage={lineage['reference']} -->"
+    )
+    return "\n".join(lines)
+
+
+#: The lineage support export's per-section FIELD ALLOWLISTS (the
+#: audit_export pattern): the credential-free slice serializes ONLY its
+#: declared fields — a secret, a raw reviewer brief or a checkpoint
+#: CONTENTS field a source row ever carried is dropped by construction,
+#: never rescued into the export.
+LINEAGE_SUPPORT_FIELDS: Final[Mapping[str, frozenset[str]]] = {
+    "lineage": frozenset({"root_run_id", "reference", "deliveries", "current", "rounds_recorded"}),
+    "target": frozenset(
+        {
+            "status",
+            "provider",
+            "project_ref",
+            "source_branch",
+            "target_branch",
+            "mr_iid",
+            "provenance",
+            "refusal_reason",
+            "available",
+        }
+    ),
+    "candidate": frozenset({"sha", "role", "superseded_by", "history_count"}),
+    "checkpoint": frozenset(
+        {
+            "checkpoint_id",
+            "digest",
+            "committed_at",
+            "activated_at",
+            "activation",
+            "fence",
+            "coverage",
+        }
+    ),
+    "occupancy": frozenset({"native", "basis", "leases"}),
+    "budget": frozenset(
+        {"status", "axes", "closing_partition", "amendments", "amendments_refused"}
+    ),
+    "command_states": frozenset(
+        {"command_id", "kind", "rung", "command_state", "at", "proven_by", "honest_note"}
+    ),
+    "unresolved_effects": frozenset({"operation_key", "operation", "target_ref", "status"}),
+    "prerequisites": frozenset({"code", "description", "available", "via"}),
+}
+
+#: The per-section entry bound of the lineage support slice (the
+#: diagnostics bound's precedent).
+LINEAGE_SUPPORT_MAX_ENTRIES: Final[int] = 12
+
+
+def _redaction_count(before: Any, after: Any) -> int:
+    """How many secret-looking VALUES the redaction guard dropped — the
+    ``support_export.redactions`` observability (recursive over the two
+    trees the guard's copy-on-write produced)."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        counted = 0
+        for key, value in before.items():
+            if key not in after:
+                continue  # the allowlist dropped the field, not the guard
+            counted += _redaction_count(value, after[key])
+        return counted
+    if isinstance(before, list) and isinstance(after, list):
+        return sum(
+            _redaction_count(left, right) for left, right in zip(before, after, strict=False)
+        )
+    if isinstance(before, str) and after == "[redacted]":
+        return 1
+    return 0
+
+
+def export_lineage_support(
+    source_rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | None = None,
+    now: datetime | str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+    projection_inconsistent: bool = False,
+    max_entries: int = LINEAGE_SUPPORT_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """The CREDENTIAL-FREE lineage support export (R41-12): the one
+    lineage snapshot bounded (per-section entry caps), ALLOWLISTED (only
+    the declared :data:`LINEAGE_SUPPORT_FIELDS` serialize — secrets, raw
+    briefs and checkpoint CONTENTS are dropped by construction) and
+    redaction-counted (``support_export.redactions`` — how many
+    secret-looking values the guard dropped anyway, the observability
+    the issue names). Pure."""
+    view = lineage_view(
+        source_rows,
+        projection=projection,
+        now=now,
+        coverage=coverage,
+        occupancy=occupancy,
+        projection_inconsistent=projection_inconsistent,
+    )
+    sections: dict[str, Any] = {}
+    for name, fields in LINEAGE_SUPPORT_FIELDS.items():
+        raw = view.get(name)
+        if isinstance(raw, list):
+            bounded, _ = _bounded(
+                [_allowlisted(dict(entry), fields) for entry in raw if isinstance(entry, dict)],
+                max_entries,
+            )
+            sections[name] = bounded
+        elif isinstance(raw, dict):
+            sections[name] = _allowlisted(dict(raw), fields)
+    document = {
+        "schema": LINEAGE_SUPPORT_SCHEMA,
+        "run_id": view["run_id"],
+        "computed_at": view["computed_at"],
+        "operator_state": view["operator_state"],
+        "stale_or_inconsistent": view["stale_or_inconsistent"],
+        "sections": sections,
+        "export": {
+            "fields": "allowlisted",
+            "max_entries_per_section": max_entries,
+            "credential_free": (
+                "secrets, raw reviewer briefs and checkpoint contents are omitted by "
+                "default — the allowlisted fields never carry them"
+            ),
+            "redactions": 0,
+        },
+    }
+    redacted_doc = redact(document)
+    redacted_doc["export"]["redactions"] = _redaction_count(document, redacted_doc)
+    return redacted_doc

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Q39-11 (#330) — build the accepted-task ledger from the REAL captures.
+"""Q39-11 (#330) + R41-13 (#368) — build the accepted-task ledgers from REAL captures.
 
 This reads the RECORDED evidence in-tree — the useful-WIP resume trace
 (``docs/evaluation/2026-09-25-useful-wip-resume/``, the #306 drill: the
@@ -10,6 +10,20 @@ front door exactly as ``scripts/build_economics_report.py`` does) — and
 joins each population into an :class:`AcceptedTaskLedger`: run → attempt
 → model-call receipt → native job → candidate → verification → human
 decision, one complete evidence chain per task.
+
+``--population review-loop`` (R41-13 / #368) builds the v2 artifact over
+the #364 review-and-correction capture
+(``docs/evaluation/2026-09-27-review-loop/`` — the richest real capture:
+delivery 1 + correction rounds 2/3 with their OWN finite budgets and
+closing partitions + a blocked round 4 + three honestly-failed attempts
++ a foreign-lineage blocked child, every lane job's SDK receipt and
+trace): the correction rounds fold under ONE root task through the #359
+``root_run_id``, the rounds keep INDEPENDENT candidate outcomes, the
+budget window carries the #340 amendment (limit_before/after history)
+and the #339 exposure quantities under an EXPLICIT versioned policy,
+and the recorded window totals ($0.8455 qualifying / $1.4797
+all-attempt) reconcile against the folded receipts — the unreceipted
+residual stays a bound, never a column.
 
 No model runs, no clocks, no fabrication. The honesty rules the module
 pins show up in the artifact's real numbers:
@@ -36,6 +50,10 @@ Usage::
 
     uv run python scripts/build_accepted_task_ledger.py \
         --out evaluation/economics/accepted-task-ledger-v1.json
+
+    uv run python scripts/build_accepted_task_ledger.py \
+        --population review-loop \
+        --out evaluation/economics/accepted-task-ledger-v2.json
 """
 
 from __future__ import annotations
@@ -54,11 +72,13 @@ if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from forge.adaptive.delivery_economics import (  # noqa: E402
+    TIME_MEASURES,
     AcceptedTaskLedgerBuilder,
     EconomicsLinker,
     EconomicsReport,
     ModelRate,
     RateCard,
+    accepted_ledger_v2_document,
 )
 from forge.adaptive.delivery_measurement import MeasurementLinker  # noqa: E402
 
@@ -71,6 +91,23 @@ USEFUL_WIP_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-25-useful-wip-resu
 EVIDENCE_PATH = USEFUL_WIP_DIR / "live-run-evidence.json"
 RECORD_PATH = USEFUL_WIP_DIR / "useful-wip-resume-2026-09-25.json"
 ALIGNMENT_PATH = USEFUL_WIP_DIR / "alignment-receipts.json"
+
+REVIEW_LOOP_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-27-review-loop"
+REVIEW_LOOP_EVIDENCE = REVIEW_LOOP_DIR / "live-run-evidence.json"
+REVIEW_LOOP_TRACES = REVIEW_LOOP_DIR / "traces"
+REVIEW_LOOP_RECORD = REPO_ROOT / "qualification" / "records" / "review-loop-2026-09-27.json"
+
+#: The #364 review-loop lineage, by the identities the capture records.
+_ROOT_RUN = "7319478e10b74f3c90d0e0ea43a9dc3f"
+_ROUND2_RUN = "bbd8d0d4885341fe858dafb3908207ed"
+_ROUND3_RUN = "17645ea9c6a247ef9b456ed614eb5c2a"
+_ROUND4_RUN = "2396987be7b64895b7b73af273211c91"
+_FAILED_BOOTSTRAP_RUN = "165dd1edab724b20b42c916991c53069"
+_FAILED_BUDGET_RUN = "fbe62ad5ecf946eb8f12caac95692904"
+_FAILED_SCOPE_RUN = "8be14a80312d47a8b274efaa4d6a0a73"
+_FOREIGN_CHILD_RUN = "6e0fdf3448ee4860b2bc34822db9489f"
+_FOREIGN_PARENT_RUN = "76a1088a3221486d8dac9ab7de54ad3b"
+_FAILED_BUDGET_ATTEMPT = "run-fbe62ad5ecf946eb"
 
 #: The useful-WIP interrupted arm's run (issue #2) and its accidental
 #: uninterrupted sibling (issue #1) — the two REAL works of the drill.
@@ -658,11 +695,1050 @@ def live_population() -> dict[str, Any] | None:
     )
 
 
+def _trace_envelope(job_id: int) -> tuple[str, str]:
+    """A lane job's trace envelope — the first and last trace-line stamps."""
+    candidates = sorted(REVIEW_LOOP_TRACES.glob(f"*job{job_id}.log"))
+    if not candidates:
+        return "", ""
+    lines = candidates[0].read_text(encoding="utf-8", errors="replace").splitlines()
+    stamps = [line.split()[0] for line in lines if line.split()]
+    if len(stamps) < 2:
+        return "", ""
+    return stamps[0], stamps[-1]
+
+
+def _block(parent: Any, key: str) -> dict[str, Any]:
+    """The dict child of a JSON block — {} when absent (never None)."""
+    child = parent.get(key) if isinstance(parent, dict) else None
+    return child if isinstance(child, dict) else {}
+
+
+def _rows(parent: Any, key: str) -> list[Any]:
+    """The list child of a JSON block — [] when absent (never None)."""
+    child = parent.get(key) if isinstance(parent, dict) else None
+    return child if isinstance(child, list) else []
+
+
+def review_loop_population() -> dict[str, Any] | None:
+    """R41-13 (#368): the #364 review-loop capture → the v2 lineage document.
+
+    Every row cites the evidence block it was read from — nothing is
+    guessed, no clock runs, no figure is invented. The population is the
+    capture's OWN spend frame: the root lineage (delivery 1 + rounds 2/3
+    + the blocked round 4 + the three honestly-failed delivery attempts)
+    plus the foreign-lineage blocked child whose lane spend never
+    reached the record as a figure (bounded by the window
+    reconciliation, never zero, never a column entry).
+    """
+    if not REVIEW_LOOP_EVIDENCE.is_file():
+        return None
+    evidence = _load_json(REVIEW_LOOP_EVIDENCE)
+    phases = _block(evidence, "phases")
+    delivery = _block(phases, "delivery")
+    round2 = _block(phases, "round2")
+    round3 = _block(phases, "round3")
+    negative = _block(phases, "negative")
+    align = _block(phases, "align")
+    setup = _block(phases, "setup")
+    preflight = _block(phases, "preflight")
+    failed_attempts = _rows(phases, "delivery_attempts_failed")
+    failed_by_run = {
+        str(row.get("run_id")): row for row in failed_attempts if isinstance(row, dict)
+    }
+    spend = _block(_block(phases, "collect"), "spend")
+    qualifying = _block(spend, "qualifying_breakdown")
+
+    # -- the SDK receipts (the evidence's own usage blocks) -------------
+    def sdk_receipt(
+        phase_key: str,
+        work_id: str,
+        attempt_id: str,
+        receipt_id: str,
+        *,
+        zero_spend_note: str = "",
+        cost_only_note: str = "",
+    ) -> dict[str, Any]:
+        usage = _block(_block(qualifying, phase_key), "usage")
+        row: dict[str, Any] = {
+            "receipt_id": receipt_id,
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "source": str(usage.get("source") or "claude-agent-sdk"),
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+            "recorded_in": f"spend.qualifying_breakdown.{phase_key}.usage"
+            if phase_key
+            else zero_spend_note or cost_only_note,
+        }
+        for name in ("input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens"):
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                row[name] = value
+        cost = usage.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            row["total_cost_usd"] = float(cost)
+        return row
+
+    budget_failed = failed_by_run.get(_FAILED_BUDGET_RUN, {}).get("budget") or {}
+    budget_failed_usage = failed_by_run.get(_FAILED_BUDGET_RUN, {}).get("usage") or {}
+
+    works: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    receipts: list[dict[str, Any]] = []
+
+    def add_work(work_id: str, harness_version: str) -> None:
+        works.append(
+            {
+                "work_id": work_id,
+                "outcome": "",
+                "model_version": "glm-5.3-flash",
+                "harness_version": harness_version,
+                "acceptance_contract": (
+                    "verification:precommitted-oracle (tests/test_text_utils.py +"
+                    " the round-2 contract, committed before any run)"
+                ),
+            }
+        )
+
+    def add_attempt(work_id: str, attempt_id: str, outcome: str) -> None:
+        attempts.append({"work_id": work_id, "attempt_id": attempt_id, "outcome": outcome})
+
+    wheel_qualifying = "claude-sdk-lane@forge-0.41.0(wheel-223d0f25)"
+    wheel_early = "claude-sdk-lane@forge-0.41.0(wheel-2616d221)"
+    for work_id in (
+        _ROOT_RUN,
+        _ROUND2_RUN,
+        _ROUND3_RUN,
+        _ROUND4_RUN,
+        _FAILED_BUDGET_RUN,
+        _FOREIGN_CHILD_RUN,
+    ):
+        add_work(work_id, wheel_qualifying)
+    add_work(_FAILED_BOOTSTRAP_RUN, "claude-sdk-lane@forge-0.41.0")
+    add_work(_FAILED_SCOPE_RUN, wheel_early)
+
+    # the qualifying rounds + the blocked round 4 (the negative arm's
+    # lane job ran and its SDK receipt is real spend inside the window)
+    for phase_key, work_id, attempt_id, outcome in (
+        ("delivery", _ROOT_RUN, "job1157", "superseded"),
+        ("round2", _ROUND2_RUN, "job1162", "superseded"),
+        ("round3", _ROUND3_RUN, "job1166", "accepted"),
+        ("negative", _ROUND4_RUN, "job1169", "rejected"),
+    ):
+        add_attempt(work_id, attempt_id, outcome)
+        receipts.append(sdk_receipt(phase_key, work_id, attempt_id, f"review-loop:{attempt_id}"))
+    # the honestly-failed delivery attempts (the capture's own frame)
+    add_attempt(_FAILED_BOOTSTRAP_RUN, "job1135", "rejected")
+    receipts.append(
+        {
+            "receipt_id": "review-loop:job1135",
+            "work_id": _FAILED_BOOTSTRAP_RUN,
+            "attempt_id": "job1135",
+            "source": "claude-agent-sdk",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+            "total_cost_usd": 0.0,
+            "recorded_in": (
+                "phases.delivery_attempts_failed[0].note — typed"
+                " FORGE_BOOTSTRAP_FAILED, zero model calls, zero spend (a"
+                " RECORDED zero, never an inferred one)"
+            ),
+        }
+    )
+    add_attempt(_FAILED_BUDGET_RUN, _FAILED_BUDGET_ATTEMPT, "rejected")
+    budget_receipt: dict[str, Any] = {
+        "receipt_id": f"review-loop:{_FAILED_BUDGET_ATTEMPT}",
+        "work_id": _FAILED_BUDGET_RUN,
+        "attempt_id": _FAILED_BUDGET_ATTEMPT,
+        "source": "claude-agent-sdk",
+        "provider": "claude-sdk-lane",
+        "model": "glm-5.3-flash",
+        "cost_basis": "provider-reported",
+        "completeness": "aggregate",
+        "recorded_in": "phases.delivery_attempts_failed[1].usage",
+    }
+    for name in ("input_tokens", "cached_input_tokens", "output_tokens"):
+        value = budget_failed_usage.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            budget_receipt[name] = value
+    cost = budget_failed_usage.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        budget_receipt["total_cost_usd"] = float(cost)
+    receipts.append(budget_receipt)
+    add_attempt(_FAILED_SCOPE_RUN, "job1141", "superseded")
+    receipts.append(
+        {
+            "receipt_id": "review-loop:job1141",
+            "work_id": _FAILED_SCOPE_RUN,
+            "attempt_id": "job1141",
+            "source": "claude-agent-sdk",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+            "total_cost_usd": 0.1876,
+            "recorded_in": (
+                "phases.delivery_attempts_failed[2].note — the lane/oracle/review"
+                " legs stand as evidence ($0.1876, recorded at 4dp; no token"
+                " counters reached the record)"
+            ),
+        }
+    )
+    # the foreign-lineage blocked child: the lane ran, its SDK figure
+    # never reached the record — NO receipt (unknown spend, never zero)
+    add_attempt(_FOREIGN_CHILD_RUN, "job1154", "rejected")
+
+    # -- native jobs (the GitLab lane jobs the attempts ran as) ---------
+    native_jobs: list[dict[str, Any]] = []
+    for job_id, work_id, attempt_id, pipeline_id, status, recorded_in in (
+        (
+            1135,
+            _FAILED_BOOTSTRAP_RUN,
+            "job1135",
+            "789",
+            "failed",
+            "phases.delivery_attempts_failed[0] (blocked at the bootstrap fence)",
+        ),
+        (
+            1141,
+            _FAILED_SCOPE_RUN,
+            "job1141",
+            "",
+            "success",
+            "traces/delivery1-job1141.log (resolved_work_id + Job succeeded)",
+        ),
+        (
+            1157,
+            _ROOT_RUN,
+            "job1157",
+            "811",
+            "success",
+            "phases.delivery.lane + traces/delivery1-job1157.log",
+        ),
+        (
+            1162,
+            _ROUND2_RUN,
+            "job1162",
+            "816",
+            "success",
+            "phases.round2.lane + traces/round2-job1162.log",
+        ),
+        (
+            1166,
+            _ROUND3_RUN,
+            "job1166",
+            "820",
+            "success",
+            "phases.round3.lane + traces/round3-job1166.log",
+        ),
+        (
+            1169,
+            _ROUND4_RUN,
+            "job1169",
+            "823",
+            "success",
+            "phases.negative.lane + traces/round4-negative-job1169.log",
+        ),
+        (
+            1154,
+            _FOREIGN_CHILD_RUN,
+            "job1154",
+            "808",
+            "",
+            "phases.round2_attempts_failed[0].live_found_defect.evidence_ids"
+            " (the lane turn ran; the job's own status never reached the record)",
+        ),
+    ):
+        began, ended = _trace_envelope(job_id)
+        native_jobs.append(
+            {
+                "job_id": f"job{job_id}",
+                "work_id": work_id,
+                "attempt_id": attempt_id,
+                "pipeline_id": pipeline_id,
+                "status": status,
+                "began_at": began,
+                "ended_at": ended,
+                "recorded_in": recorded_in,
+            }
+        )
+
+    # -- candidates + the precommitted oracle verifications -------------
+    candidates = [
+        {
+            "candidate_sha": "6e973202f1e6de4268d9363db2dbeb3c7c500e6c",
+            "work_id": _ROOT_RUN,
+            "attempt_id": "job1157",
+            "identity_state": "exact",
+            "recorded_in": "phases.delivery.candidate_sha + oracle",
+        },
+        {
+            "candidate_sha": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+            "work_id": _ROUND2_RUN,
+            "attempt_id": "job1162",
+            "identity_state": "exact",
+            "recorded_in": "phases.round2.candidate_sha + oracle",
+        },
+        {
+            "candidate_sha": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+            "work_id": _ROUND3_RUN,
+            "attempt_id": "job1166",
+            "identity_state": "exact",
+            "recorded_in": "phases.round3.candidate_sha + oracle",
+        },
+    ]
+    verifications = [
+        {
+            "verification_id": "review-loop:oracle-814",
+            "work_id": _ROOT_RUN,
+            "candidate_sha": "6e973202f1e6de4268d9363db2dbeb3c7c500e6c",
+            "producer": "gitlab-pipeline:precommitted-oracle",
+            "status": "success",
+            "tested_oid": "6e973202f1e6de4268d9363db2dbeb3c7c500e6c",
+            "recorded_in": "phases.delivery.oracle",
+        },
+        {
+            "verification_id": "review-loop:oracle-819",
+            "work_id": _ROUND2_RUN,
+            "candidate_sha": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+            "producer": "gitlab-pipeline:precommitted-oracle",
+            "status": "success",
+            "tested_oid": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+            "recorded_in": "phases.round2.oracle",
+        },
+        {
+            "verification_id": "review-loop:oracle-822",
+            "work_id": _ROUND3_RUN,
+            "candidate_sha": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+            "producer": "gitlab-pipeline:precommitted-oracle",
+            "status": "success",
+            "tested_oid": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+            "recorded_in": "phases.round3.oracle",
+        },
+    ]
+
+    # -- the human decision point: PENDING, named ------------------------
+    human_decisions = [
+        {
+            "work_id": _ROOT_RUN,
+            "state": "pending",
+            "channel": "draft-mr-awaiting-human",
+            "note": (
+                "Draft MR !4 on the lineage — a human merges, forge never does."
+                " The reviewer discussions WERE resolved through the API"
+                " surface (resolved_by forcewake, returncode 200) and the"
+                " closing reviews returned verdict ok — those are model/CI"
+                " decisions over the CANDIDATE, never the human acceptance;"
+                " the HUMAN acceptance of the lineage stays pending, named"
+            ),
+        }
+    ]
+
+    # -- the budget refusal (the designed fence) -------------------------
+    budget_events = [
+        {
+            "work_id": _FAILED_BUDGET_RUN,
+            "kind": "budget_refusal",
+            "at": "",
+            "reason": (
+                f"budget_exhausted: {budget_failed.get('consumed_tokens')}/"
+                f"{budget_failed.get('max_tokens')} tokens — the finite budget"
+                " EXHAUSTED at the token axis"
+            ),
+            "detail": (
+                "the closing review stood down (zero reviewer spend, the"
+                " standing block names the closing reserve; exactly the"
+                " designed fence); the operator resolution: the receipted"
+                " profile adjustment to 600k (the class stays finite) + a"
+                " fresh run"
+            ),
+            "observable": "budget.phase_exhaustion",
+        }
+    ]
+
+    # -- time windows, from the recorded timestamps only ------------------
+    time_windows: list[dict[str, Any]] = []
+    for job_id, work_id, attempt_id in (
+        (1141, _FAILED_SCOPE_RUN, "job1141"),
+        (1157, _ROOT_RUN, "job1157"),
+        (1162, _ROUND2_RUN, "job1162"),
+        (1166, _ROUND3_RUN, "job1166"),
+        (1169, _ROUND4_RUN, "job1169"),
+    ):
+        began, ended = _trace_envelope(job_id)
+        time_windows.append(
+            _window(
+                f"review-loop:job{job_id}:ci-runtime",
+                work_id,
+                attempt_id,
+                "ci_runtime",
+                "lane-job:trace-envelope",
+                _seconds(began, ended),
+                began,
+                ended,
+                "the runner trace's first → last line (the native runtime wall)",
+            )
+        )
+    for window_id, work_id, attempt_id, note in (
+        (
+            "review-loop:job1135:ci-runtime",
+            _FAILED_BOOTSTRAP_RUN,
+            "job1135",
+            "the bootstrap fence blocked before any lane turn — no trace exists; unknown, never zero",
+        ),
+        (
+            f"review-loop:{_FAILED_BUDGET_ATTEMPT}:ci-runtime",
+            _FAILED_BUDGET_RUN,
+            _FAILED_BUDGET_ATTEMPT,
+            "no lane job id or trace reached the record for this attempt — unknown, never zero",
+        ),
+        (
+            "review-loop:job1154:ci-runtime",
+            _FOREIGN_CHILD_RUN,
+            "job1154",
+            "the wrong-branch run's trace never reached the record — unknown, never zero",
+        ),
+    ):
+        time_windows.append(
+            _window(
+                window_id,
+                work_id,
+                attempt_id,
+                "ci_runtime",
+                "lane-job:trace-envelope",
+                None,
+                note=note,
+            )
+        )
+    # the round-2 dispatch anchor: the round-admitted reply observation,
+    # selected by CONTENT (never by list position — the evidence's order
+    # is not a fact)
+    round2_reply_at = ""
+    for row in sorted(
+        (row for row in _rows(round2, "failures") if isinstance(row, dict)),
+        key=lambda row: str(row.get("at") or ""),
+    ):
+        if "round-admitted reply" in str(row.get("message") or ""):
+            round2_reply_at = str(row.get("at") or "")
+            break
+    time_windows.extend(
+        [
+            _window(
+                "review-loop:delivery1:operator-wait",
+                _ROOT_RUN,
+                "job1157",
+                "operator_wait",
+                "review-loop:dispatch-observation→terminal",
+                _seconds(delivery.get("started_at"), (delivery.get("terminal") or {}).get("at")),
+                delivery.get("started_at"),
+                (delivery.get("terminal") or {}).get("at"),
+                "the delivery phase's recorded start → the ready_for_human terminal",
+            ),
+            _window(
+                "review-loop:round2:operator-wait",
+                _ROUND2_RUN,
+                "job1162",
+                "operator_wait",
+                "review-loop:dispatch-observation→terminal",
+                _seconds(round2_reply_at, (round2.get("terminal") or {}).get("at")),
+                round2_reply_at,
+                (round2.get("terminal") or {}).get("at"),
+                (
+                    "the reviewer-resolution wait: the /fix dispatch's own stamp"
+                    " never reached the record — the window runs from the"
+                    " round-admitted reply observation to the corrected"
+                    " candidate's ready terminal"
+                ),
+            ),
+            _window(
+                "review-loop:round3:operator-wait",
+                _ROUND3_RUN,
+                "job1166",
+                "operator_wait",
+                "review-loop:dispatch-observation→terminal",
+                _seconds(round3.get("started_at"), (round3.get("terminal") or {}).get("at")),
+                round3.get("started_at"),
+                (round3.get("terminal") or {}).get("at"),
+                "the round-3 phase's recorded start → the ready terminal (spans the kill/recovery)",
+            ),
+            _window(
+                "review-loop:round4:operator-wait",
+                _ROUND4_RUN,
+                "job1169",
+                "operator_wait",
+                "review-loop:dispatch-observation→terminal",
+                _seconds(negative.get("started_at"), negative.get("finished_at")),
+                negative.get("started_at"),
+                negative.get("finished_at"),
+                "the blocked round: the wait ended in the typed conflict, never a ready terminal",
+            ),
+        ]
+    )
+    kill = _block(round3, "kill")
+    time_windows.append(
+        _window(
+            "review-loop:round3:manual-rescue",
+            _ROUND3_RUN,
+            "job1166",
+            "manual_rescue",
+            "review-loop:kill→recovered-ready",
+            _seconds(kill.get("killed_at"), (round3.get("terminal") or {}).get("at")),
+            kill.get("killed_at"),
+            (round3.get("terminal") or {}).get("at"),
+            (
+                "the #358 worker-failure recovery: the child was killed at"
+                " ensure_draft_mr one second after committing the candidate;"
+                " the restart's own stamp never reached the record — the"
+                " window runs from the kill observation to the recovered"
+                " ready terminal"
+            ),
+        )
+    )
+    for window_id, work_id, attempt_id, note in (
+        (
+            "review-loop:delivery1:reviewer-effort",
+            _ROOT_RUN,
+            "job1157",
+            "the run-level closing reviewer ran (verdict ok on the exact candidate) — its duration never reached the record; unknown, never zero",
+        ),
+        (
+            "review-loop:round2:reviewer-effort",
+            _ROUND2_RUN,
+            "job1162",
+            (
+                "the round-2 review verified the obligation digest (verdict ok;"
+                " the digest refusals were the driver's recomputation) and the"
+                " discussions were resolved through the API surface — a"
+                " model/CI decision, never the human acceptance; the reviewer"
+                " duration is unrecorded, never zero"
+            ),
+        ),
+        (
+            "review-loop:round2:human-review-effort",
+            _ROUND2_RUN,
+            "job1162",
+            (
+                "the HUMAN reviewer's correction-contract commit (3878456c,"
+                " tests/test_round2_contract.py — red until corrected) is"
+                " recorded; its authoring duration never reached the record —"
+                " unknown, never zero"
+            ),
+        ),
+        (
+            "review-loop:round3:reviewer-effort",
+            _ROUND3_RUN,
+            "job1166",
+            "the round-3 review legs ran (the readiness gate held, the discussion resolved) — durations unrecorded, never zero",
+        ),
+    ):
+        time_windows.append(
+            _window(
+                window_id,
+                work_id,
+                attempt_id,
+                "reviewer_effort",
+                "review-loop:reviewer-leg",
+                None,
+                note=note,
+            )
+        )
+    for window_id, began_key, ended_key, population, note in (
+        (
+            "review-loop:align:setup",
+            align,
+            align,
+            "lab:align",
+            "the receipted budget-profile alignment (the 200k→600k pin) before any qualifying run",
+        ),
+        (
+            "review-loop:project-setup",
+            setup,
+            setup,
+            "lab:project-setup",
+            "the project/bot/variable setup phase (its recorded failures are the live-found fence findings)",
+        ),
+        (
+            "review-loop:preflight",
+            preflight,
+            preflight,
+            "lab:preflight",
+            "the doctor/health preflight before delivery 1",
+        ),
+    ):
+        time_windows.append(
+            _window(
+                window_id,
+                "",
+                "",
+                "setup_effort",
+                population,
+                _seconds(began_key.get("started_at"), ended_key.get("finished_at")),
+                began_key.get("started_at"),
+                ended_key.get("finished_at"),
+                note,
+            )
+        )
+
+    # -- the lineage rows (the #359 root_run_id join) ---------------------
+    lineage_runs = [
+        {
+            "run_id": _ROOT_RUN,
+            "relation": "root",
+            "root_run_id": _ROOT_RUN,
+            "round_number": 1,
+            "root_join_basis": "the delivery run itself (issue 5, MR !4's first delivery)",
+            "round_outcome": "ready_for_human",
+            "outcome_detail": (
+                "ordinary classic parent (active_plan_absent true); terminal"
+                " ready_for_human; the closing review verdict ok; the"
+                " candidate superseded by round 2's correction"
+            ),
+        },
+        {
+            "run_id": _ROUND2_RUN,
+            "relation": "round",
+            "root_run_id": _ROOT_RUN,
+            "parent_run_id": _ROOT_RUN,
+            "round_number": 2,
+            "root_join_basis": "round_rows[7fdaaa9da91b4db8896e949ae4166324].root_run_id",
+            "round_outcome": "ready_for_human",
+            "outcome_detail": (
+                "the corrected output visibly addressed the /fix"
+                " (slugify_parts_present, the oracle file untouched); the"
+                " reviewer obligation digest verified; the candidate"
+                " superseded by round 3's correction"
+            ),
+        },
+        {
+            "run_id": _ROUND3_RUN,
+            "relation": "round",
+            "root_run_id": _ROOT_RUN,
+            "parent_run_id": _ROUND2_RUN,
+            "round_number": 3,
+            "root_join_basis": "round_rows[0e463732c7ed46aba2186c89d99e2e7c].root_run_id",
+            "round_outcome": "ready_for_human",
+            "outcome_detail": (
+                "the #358 kill/restart recovery mid ensure_draft_mr; exactly"
+                " one provider commit for the round; terminal ready_for_human"
+            ),
+        },
+        {
+            "run_id": _ROUND4_RUN,
+            "relation": "round",
+            "root_run_id": _ROOT_RUN,
+            "round_number": 4,
+            "root_join_basis": (
+                "the lineage branch factory/5/7319478e named in the typed"
+                " conflict — no round row for round 4 reached the evidence"
+                " (the parent run id is unrecorded, never guessed)"
+            ),
+            "round_outcome": "blocked",
+            "outcome_detail": (
+                "candidate_rejected: branch_drift — the human's conflicting"
+                " commit moved the head mid-round (expected 7008c940…, actual"
+                " f9e17e25…); the child run blocked, the human commit"
+                " preserved (human_commit_is_head true)"
+            ),
+        },
+        {
+            "run_id": _FAILED_BOOTSTRAP_RUN,
+            "relation": "prior_attempt",
+            "root_run_id": _ROOT_RUN,
+            "round_number": 0,
+            "root_join_basis": (
+                "the capture's own delivery_attempts_failed attribution (the"
+                " task's failed delivery attempt — no round row exists, the"
+                " attribution is the evidence's, never a guess)"
+            ),
+            "round_outcome": "failed",
+            "outcome_detail": (
+                "blocked harness_infrastructure: the carrier variable was"
+                " PROTECTED; the lane failed CLOSED at the bootstrap fence"
+                " (job 1135, typed FORGE_BOOTSTRAP_FAILED, zero model calls,"
+                " zero spend — a recorded zero, never an inferred one)"
+            ),
+        },
+        {
+            "run_id": _FAILED_BUDGET_RUN,
+            "relation": "prior_attempt",
+            "root_run_id": _ROOT_RUN,
+            "round_number": 0,
+            "root_join_basis": "the capture's own delivery_attempts_failed attribution",
+            "round_outcome": "failed",
+            "outcome_detail": (
+                "the finite budget EXHAUSTED at the token axis"
+                f" ({budget_failed.get('consumed_tokens')}/{budget_failed.get('max_tokens')});"
+                " parked in reviewing under the reviewer-leg budget decision;"
+                " the resolution: the receipted 600k profile adjustment + a"
+                " fresh run"
+            ),
+        },
+        {
+            "run_id": _FAILED_SCOPE_RUN,
+            "relation": "prior_attempt",
+            "root_run_id": _ROOT_RUN,
+            "round_number": 0,
+            "root_join_basis": "the capture's own delivery_attempts_failed attribution",
+            "round_outcome": "superseded",
+            "outcome_detail": (
+                "ready_for_human, but the FIRST /fix (note 1472) classified"
+                " material_change — the frozen spec's allowed_paths was EMPTY"
+                " (the repo carried no .forge.yml); the honest material reply"
+                " landed (MR note 1474); the resolution: seed implement.paths"
+                " + a fresh run"
+            ),
+        },
+        {
+            "run_id": _FOREIGN_CHILD_RUN,
+            "relation": "programme_side",
+            "parent_run_id": _FOREIGN_PARENT_RUN,
+            "round_number": 0,
+            "root_join_basis": (
+                "parent_run_id 76a1088a (issue 4's lineage — a DIFFERENT"
+                " root) + the capture's failed_attempts_counted; the lane ran"
+                " and committed to the wrong branch (the #361 publisher"
+                " defect), its SDK figure never reached the record"
+            ),
+            "round_outcome": "blocked",
+            "outcome_detail": (
+                "blocked external_change: the candidate landed on"
+                " factory/4/6e0fdf34 beside the lineage surface"
+                " factory/4/76a1088a — the drift check correctly blocked the"
+                " run; the wrong-branch commit stands as evidence, never"
+                " merged, never the MR head"
+            ),
+        },
+    ]
+
+    # -- the budget window: rounds' own budgets, the amendment, exposure --
+    def round_budget(
+        block: dict[str, Any], run_id: str, round_number: int, recorded_in: str
+    ) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "round_number": round_number,
+            "max_calls": block.get("max_calls"),
+            "max_tokens": block.get("max_tokens"),
+            "wallclock_s": block.get("wallclock_s"),
+            "status": block.get("status"),
+            "closing_partition_policy": block.get("closing_partition_policy") or "",
+            "closing_reserved_calls": block.get("closing_reserved_calls"),
+            "closing_reserved_tokens": block.get("closing_reserved_tokens"),
+            "recorded_in": recorded_in,
+        }
+
+    round_budgets = [
+        round_budget(delivery.get("budget") or {}, _ROOT_RUN, 1, "phases.delivery.budget"),
+        round_budget(round2.get("budget") or {}, _ROUND2_RUN, 2, "phases.round2.budget"),
+        round_budget(round3.get("budget") or {}, _ROUND3_RUN, 3, "phases.round3.budget"),
+        {
+            "run_id": _FAILED_BUDGET_RUN,
+            "round_number": 0,
+            "max_calls": budget_failed.get("max_calls"),
+            "max_tokens": budget_failed.get("max_tokens"),
+            "status": budget_failed.get("status"),
+            "consumed_tokens": budget_failed.get("consumed_tokens"),
+            "recorded_in": "phases.delivery_attempts_failed[1].budget",
+        },
+    ]
+    align_receipts = _block(align, "receipts")
+    pins = _block(align_receipts, "pins")
+    profiles_pin = str(pins.get("FORGE_BUDGET_PROFILES") or "{}")
+    try:
+        profiles = json.loads(profiles_pin)
+    except ValueError:
+        profiles = {}
+    align_generated_at = str(align_receipts.get("generated_at") or "")
+    policy_version = "forge.budget-profiles/1@2026-09-27-align"
+    budget_amendments = [
+        {
+            "amendment_id": "review-loop:amend-standard-tokens-600k",
+            "run_id": _FAILED_BUDGET_RUN,
+            "scope": "profile:standard",
+            "command_id": "align:FORGE_BUDGET_PROFILES:standard.max_tokens",
+            "axis": "tokens",
+            "amount_tokens": 400000,
+            "reason": (
+                "the finite budget exhausted at the token axis on run"
+                " fbe62ad5 (196312/200000); the operator resolution — the"
+                " receipted profile adjustment, the class stays finite"
+            ),
+            "operator": "forcewake",
+            "status": "applied",
+            "limit_before": {"max_calls": 40, "max_tokens": 200000, "wallclock_s": 3600},
+            "limit_after": {"max_calls": 40, "max_tokens": 600000, "wallclock_s": 3600},
+            "applied_at": align_generated_at,
+            "policy_version": policy_version,
+            "recorded_in": (
+                "phases.align.receipts.pins.FORGE_BUDGET_PROFILES (the"
+                " receipted adjustment — both consumers recreated from the"
+                " same image with these pins) +"
+                " phases.delivery_attempts_failed[1].note"
+            ),
+        }
+    ]
+    exposure_rows = [
+        {
+            "run_id": _FAILED_BUDGET_RUN,
+            "axis": "tokens",
+            "consumed": budget_failed.get("consumed_tokens"),
+            "limit": budget_failed.get("max_tokens"),
+            "exhausted": True,
+            "closing_review_stood_down": True,
+            "note": (
+                "the designed fence observed live: exposure at the token axis"
+                " exhausted the budget; the closing review stood down with"
+                " zero reviewer spend, the standing block naming the closing"
+                " reserve"
+            ),
+            "recorded_in": "phases.delivery_attempts_failed[1]",
+        },
+        {
+            "run_id": _ROOT_RUN,
+            "axis": "tokens",
+            "consumed": None,
+            "limit": (delivery.get("budget") or {}).get("max_tokens"),
+            "exhausted": False,
+            "note": "consumption counters never reached the record (status open)",
+            "recorded_in": "phases.delivery.budget",
+        },
+        {
+            "run_id": _ROUND2_RUN,
+            "axis": "tokens",
+            "consumed": None,
+            "limit": (round2.get("budget") or {}).get("max_tokens"),
+            "exhausted": False,
+            "note": (
+                "the round's OWN finite budget with the closing partition"
+                " reserving 90000 tokens / 6 calls for the review"
+            ),
+            "recorded_in": "phases.round2.budget",
+        },
+        {
+            "run_id": _ROUND3_RUN,
+            "axis": "tokens",
+            "consumed": None,
+            "limit": (round3.get("budget") or {}).get("max_tokens"),
+            "exhausted": False,
+            "note": (
+                "the round's OWN finite budget with the closing partition"
+                " reserving 90000 tokens / 6 calls for the review"
+            ),
+            "recorded_in": "phases.round3.budget",
+        },
+    ]
+    collaboration_labels = [
+        {
+            "root_run_id": _ROOT_RUN,
+            "provider": "gitlab",
+            "project_ref": str((setup.get("project") or {}).get("id") or "160"),
+            "issue_iid": (delivery.get("issue") or {}).get("iid"),
+            "source_branch": "factory/5/7319478e",
+            "mr_iid": (delivery.get("mr") or {}).get("iid"),
+            "mr_state": (delivery.get("mr") or {}).get("state"),
+            "mr_draft": (delivery.get("mr") or {}).get("draft"),
+            "recorded_in": (
+                "phases.delivery.mr + phases.negative.typed_conflict (the"
+                " branch names the root) — the lineage's ONE MR, never moved"
+            ),
+        }
+    ]
+    cap = spend.get("cap_usd") if isinstance(spend.get("cap_usd"), (int, float)) else None
+    recorded_totals = {
+        "qualifying_lane_spend_usd": spend.get("qualifying_lane_spend_usd"),
+        "all_attempt_total_usd": spend.get("all_attempt_total_usd"),
+        "failed_attempt_lane_spend_usd": spend.get("failed_attempt_lane_spend_usd"),
+        "cap_usd": cap,
+    }
+    budget_policy = {
+        "version": policy_version,
+        "profiles": profiles,
+        "closing_partition": {
+            "version": "closing-partition/1",
+            "reserved_calls": 6,
+            "reserved_tokens": 90000,
+        },
+        "estimate_policy": (
+            "no rate card is armed for this capture — every priced entry is"
+            " provider-reported (the SDK's own meter); an estimate would"
+            " require a NEW versioned card (versions are additive, history"
+            " never rewritten)"
+        ),
+        "recorded_in": "phases.align.receipts.pins + phases.round2.budget",
+    }
+
+    records = {"works": works, "attempts": attempts, "receipts": receipts, "calls": [], "spans": []}
+    measurement = MeasurementLinker().link(**records)
+    report = EconomicsLinker().link(
+        measurement,
+        pilot={
+            "population": "review_loop_2026_09_27",
+            "issue": "R41-13 / #368 (the #364 review-loop live capture)",
+            "evidence": "docs/evaluation/2026-09-27-review-loop/",
+            "profile_version": "claude-sdk-lane@forge-0.41.0 / glm-5.3-flash",
+        },
+    )
+    ledger = AcceptedTaskLedgerBuilder().build(
+        report,
+        native_jobs=native_jobs,
+        candidates=candidates,
+        verifications=verifications,
+        human_decisions=human_decisions,
+        budget_events=budget_events,
+        time_windows=time_windows,
+        measurement_ledger=measurement,
+    )
+    document = accepted_ledger_v2_document(
+        ledger,
+        lineage_runs=lineage_runs,
+        round_budgets=round_budgets,
+        budget_amendments=budget_amendments,
+        exposure_rows=exposure_rows,
+        collaboration_labels=collaboration_labels,
+        budget_policy=budget_policy,
+        recorded_totals=recorded_totals,
+        cap_usd=float(cap) if cap is not None else None,
+        pilot={
+            "population": "review_loop_2026_09_27",
+            "issue": "R41-13 / #368 (the #364 review-loop live capture)",
+            "evidence": (
+                "docs/evaluation/2026-09-27-review-loop/ (live-run-evidence.json"
+                " + traces) + qualification/records/review-loop-2026-09-27.json"
+            ),
+            "recorded_cap_usd": cap,
+        },
+    )
+    document["measurement_ledger"] = measurement.to_document()
+    # the in-window foreign-parent lane job (issue 4's delivery, job 1148)
+    # ran but the capture's own spend population excludes it — noted,
+    # never silently dropped and never folded into this window's totals
+    notes = list(document.get("notes") or [])
+    notes.append(
+        "run 76a1088a (issue 4's delivery, lane job 1148 — wheel 2616d221)"
+        " also ran inside this window (its trace is recorded); the capture's"
+        " own spend population EXCLUDES it — its economics ride its own"
+        " lineage, never this window's totals"
+    )
+    document["notes"] = sorted(set(notes))
+    return document
+
+
+def _print_review_loop_summary(document: dict[str, Any]) -> None:
+    lineage = document["lineage"]
+    programme = document["costs"]["programme"]
+    columns = programme["columns"]
+    coverage = programme["coverage"]
+    measures = document["time_measures"]
+    print(f"wrote artifact:        {document['pilot'].get('artifact')}")
+    print(f"  schema:             {document['schema']}")
+    print(f"  identity chain:     {' → '.join(document['identity_chain'])}")
+    print(f"  works/attempts:     {programme['works']} / {coverage['attempts']}")
+    print(f"  receipt coverage:   {coverage['receipt_coverage']}")
+    print(
+        f"  provider-reported:  {columns['provider_reported_usd']['known_lower_bound_usd']}"
+        f" usd lower bound (exact={columns['provider_reported_usd']['exact']})"
+    )
+    for root_id, root_task in sorted(lineage["root_tasks"].items()):
+        all_attempt = root_task["all_attempt"]["columns"]["provider_reported_usd"]
+        print(
+            f"  root task {root_id[:8]}:    {root_task['attempts']} attempts"
+            f" ({len(root_task['prior_failed_attempts'])} prior failed +"
+            f" {len(root_task['rounds'])} rounds), all-attempt provider-reported"
+            f" {all_attempt['usd']} usd (exact={all_attempt['exact']})"
+        )
+        for round_row in root_task["rounds"]:
+            cost = round_row["incremental_cost"]["provider_reported_usd"]
+            label = (
+                "delivery 1"
+                if round_row["relation"] == "root"
+                else f"round {round_row['round_number']}"
+            )
+            print(
+                f"    {label:<11} {round_row['round_outcome']:<16}"
+                f" {cost['usd']} usd (candidate {(round_row['candidate_sha'] or 'none')[:8]})"
+            )
+        window = root_task["budget_window"]
+        print(
+            f"    budget cap:       {window['cap_usd']} usd, policy {window['policy'].get('version')}"
+        )
+        for amendment in window["amendments"]:
+            print(
+                f"    amendment:        {amendment['axis']} {amendment['command_id']}"
+                f" {amendment['limit_before'].get('max_tokens')}→{amendment['limit_after'].get('max_tokens')}"
+                f" ({amendment['status']})"
+            )
+        closing = window["exposure"]["closing_budget"]
+        print(
+            f"    exposure:         settled {closing['settled_usd']} / accrued-unsettled"
+            f" {closing['accrued_unsettled_usd']} / retained {closing['retained_liability_usd']}"
+            f" usd; unknown intervals {closing['unknown_intervals']}"
+        )
+        no_double = root_task["no_double_count"]
+        print(
+            f"    no double count:  receipts {no_double['receipt_ids']['distinct']}/"
+            f"{no_double['receipt_ids']['total']} unique, jobs"
+            f" {no_double['native_job_ids']['distinct']}/{no_double['native_job_ids']['total']},"
+            f" labels {no_double['delivery_labels_per_lineage']}"
+        )
+    for run_id, row in sorted(lineage["programme_side"].items()):
+        print(
+            f"  programme side {run_id[:8]}: {row['round_outcome']},"
+            f" receipts {row['coverage']['receipts_received']} — spend unknown, bounded, never zero"
+        )
+    reconciliation = lineage["window_reconciliation"]
+    print(f"  recorded totals:    {reconciliation['recorded_totals']}")
+    print(
+        f"  unreceipted resid:  {reconciliation.get('unreceipted_residual_usd')} usd"
+        f" → {reconciliation.get('attributed_to_runs')}"
+    )
+    for measure in TIME_MEASURES:
+        row = measures[measure]
+        total = row["stage_total_seconds"]
+        lower = row["stage_lower_bound_seconds"]
+        shape = f"total {total}" if total is not None else f"lower bound {lower}"
+        print(f"  {measure:<16} {shape} s (measured={row['measured']})")
+    observability = document["observability"]
+    print(
+        f"  human review+rescue:{observability['human.review_and_rescue_minutes']['minutes']}"
+        f" min (rescue {observability['human.review_and_rescue_minutes']['manual_rescue_minutes']},"
+        f" reviewer {observability['human.review_and_rescue_minutes']['reviewer_effort_minutes']})"
+    )
+    print(f"  identity gaps:      {observability['identity.gaps']}")
+    print(
+        f"  throughput rows:    {len(document['throughput']['rows'])} (durations and receipts never join → null)"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="the artifact output path")
+    parser.add_argument(
+        "--population",
+        choices=("useful-wip", "review-loop"),
+        default="useful-wip",
+        help="which recorded capture to fold (review-loop emits the v2 lineage document)",
+    )
     args = parser.parse_args(argv)
     out_path = args.out if args.out.is_absolute() else REPO_ROOT / args.out
+
+    if args.population == "review-loop":
+        document = review_loop_population()
+        if document is None:
+            print(
+                "the #364 review-loop evidence has not landed — nothing to build", file=sys.stderr
+            )
+            return 1
+        document["pilot"]["artifact"] = str(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+        )
+        _print_review_loop_summary(document)
+        return 0
 
     document = useful_wip_population()
     if document is None:
@@ -725,15 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
             f" ({row['failed_or_superseded_attempts_kept']} kept failed/superseded),"
             f" provider-reported {spent} usd, decision {row['outcome']}"
         )
-    for measure in (
-        "model_time",
-        "tool_time",
-        "ci_queue",
-        "ci_runtime",
-        "operator_wait",
-        "reviewer_effort",
-        "setup_effort",
-    ):
+    for measure in TIME_MEASURES:
         row = measures[measure]
         total = row["stage_total_seconds"]
         lower = row["stage_lower_bound_seconds"]

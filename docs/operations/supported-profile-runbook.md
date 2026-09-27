@@ -1,4 +1,4 @@
-# Supported-profile runbook (R38-06 / #307 · re-frozen Q39-07 / #326)
+# Supported-profile runbook (R38-06 / #307 · re-frozen Q39-07 / #326 · release-candidate freeze R41-08 / #363)
 
 How a second engineer installs the ONE exact supported deployment
 composition from immutable artifacts — and repeats the recorded result
@@ -32,32 +32,38 @@ what THAT manifest pins.
 ## 1. The frozen composition (identity card)
 
 Every axis below is a field in the manifest; `manifest_digest` (sha256
-over the canonical document) vouches for the whole file.
+over the canonical document) vouches for the whole file. Current freeze
+(digest `ab08a317…`, 2026-09-27 — the R41-08/#363 release-candidate
+freeze at the v0.41.0 build; the installer-facing copy of this card with
+the evidence-kind table lives in
+`docs/onboarding/cold-install-runbook.md` §1 — THAT is the normative
+install manifest document; this table is the maintenance-side view):
 
 | Axis | Frozen value | Receipt |
 | --- | --- | --- |
-| Promoted release (the historical install pin) | **0.37.0**, source `1ca2656…` | `docs/releases/evidence/v0.37.0/promotion.json` |
-| Newest promotion (named, NOT this composition) | **0.38.0**, source `854a5f4…` — `status: promoted, STILL NOT the qualified composition` | `docs/releases/evidence/v0.38.0/promotion.json` |
-| **The qualification composition (executed lab)** | `localhost/forge:dev` @ `sha256:33eb4622…` (image id `587e3392…`, rollback tag `pre-r3708-20260925T092917Z`, reports **0.38.0**, schema head **028**) — the WORKING-TREE build carrying #320/#321/#325 | the v2 alignment receipts + `qualification/inventory-2026-09-25-v2.json` |
-| **Lane install (the fresh-install target)** | the WORKING-TREE wheel `forge-0.38.0-py3-none-any.whl` @ `sha256:37fb5b0a…` (`lane.wheel`, source `local-uv-build`, path `dist/…`; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | `uv build` of the same tree |
-| Schema | head **028**, declared predecessor **027** | `alembic/versions/` chain |
+| Promoted release (the current install pin) | **v0.40.0**, source `68f22b81…`, image `sha256:45de67f5…`, wheel `150bf797…` (byte-identical to the v0.40.0 qualification wheel) | `docs/releases/evidence/v0.40.0/promotion.json` |
+| **The qualification composition (executed lab)** | `localhost/forge:dev` @ `sha256:ddcb9137…` (rollback tag `pre-r3708-20260926T132558Z`, reports **0.39.0**, schema head **031**) — the build that RAN the recorded traces (v2 + redemption) | the redemption alignment receipts + `qualification/inventory-2026-09-26-redemption.json` |
+| **Lane install (the fresh-install target)** | the CURRENT tree's wheel `forge-0.41.0-py3-none-any.whl` @ `sha256:bb8f18a8…` (`lane.wheel`, source `local-uv-build`, path `dist/…`; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) — **promotion PENDING** (the pre-release window: the v0.41.0 promotion runs against this tag) | `uv build` of the same tree |
+| Schema | head **032**, declared predecessor **031** | `alembic/versions/` chain |
 | Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ `sha256:3d74be37…` — **the bytes are frozen INTO the manifest** (the wheel ships no `ci/templates/`) | recovered from the v2 trace's committed CI, cross-checked against the trace record |
-| Lane of the executed trace | pushed sha `6df4020…` (main at the v0.38.0 evidence archive — the working tree is never pushed) | the v2 trace record `#task.lane_ref` |
+| Lane of the executed trace | pushed sha `6df4020…` (main at the v0.39.0 evidence archive — the working tree is never pushed) | the v2 trace record `#task.lane_ref` |
 | Runner | GitLab runner **id 4 `unraid`**, docker executor, online | `qualification/inventory-2026-09-25-v2.json` |
-| Harness | **claude-code 2.1.273** | `qualification/records/gitlab-ce-v1@0.37.0.json` |
+| Harness | **claude-code 2.1.273** | `qualification/records/gitlab-ce-v1@0.40.0.json` |
 | Model route | litellm **`fast`** → `openai/glm-5.3-flash`; lane model `glm-5.3-flash` via the z.ai Anthropic-compatible gateway | `litellm-config.yaml` + the record |
-| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) — BOTH live-qualified: the v2 trace rode the protected-variable mode; the 2026-09-26 redemption trace (R40-07/#343) rode runner-redemption end-to-end (§8a) | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` + `qualification/records/redemption-2026-09-26.json` |
+| Credential route | `gitlab-protected-variable` + `runner-redemption` (#303) — BOTH live-qualified on their recorded compositions: the v2 trace rode the protected-variable mode; the 2026-09-26 redemption trace (R40-07/#343) rode runner-redemption end-to-end (§8a); the CURRENT-composition grant pairing is #365's live trace | `forge.adaptive.credential_broker.PROFILE_DELIVERY_MODES` + `qualification/records/redemption-2026-09-26.json` |
 | Closing budget policy | `FORGE_CLOSING_RESERVE_USD=0.50`, `FORGE_SPEND_CAP_USD=2.50` on BOTH consumers; standard budget profile 40 calls / **480 000 tokens** / 3600 s | the v2 alignment receipts (`--extra-env` + `--budget-profiles`) |
 | Verification contract | required job **`smoke`**: six exact slugify cases + app rewired + legacy deleted; candidate may not touch `.gitlab-ci.yml` or `tests/`; PLUS the v2 revision marker (`__all__ = ["slugify"]` in `src/utils/text.py`) | the v2 live trace + the record |
 
-**The named divergence (read this first).** The promoted v0.37.0 image
-digest and the executed-lab digest DIFFER — and even the newest v0.38.0
-promotion predates the working tree this manifest qualifies. The
-composition being qualified IS the executed-lab build (the alignment
-image + the uv wheel of the same tree); its promotion is PENDING,
-never assumed. A cold install from this manifest installs the
-working-tree wheel by sha256; version equality never substitutes for
-composition equality (the exact Q39-07 defect this re-freeze closes).
+**The named divergence (read this first).** The promoted v0.40.0 image
+digest and the executed-lab digest (`ddcb9137…`) DIFFER by construction
+(the CI build of the tagged sha vs the podman working-tree build that
+RAN the traces) — both are bound, neither silently substituted. The
+fresh-install target is the CURRENT tree's 0.41.0 wheel: its promotion
+is PENDING, never assumed. A cold install from this manifest installs
+the working-tree wheel by sha256; version equality never substitutes
+for composition equality (the exact Q39-07 defect the freeze exists to
+prevent). The live arrows' composition honesty (which traces ran which
+build) is the @0.41.0 record's evidence-kind table.
 
 ## 2. Prerequisites
 
@@ -128,17 +134,18 @@ uv run python scripts/cold_install_check.py --mode upgrade
 
 The chain, on a throwaway `postgres:17-alpine` container:
 
-1. `alembic upgrade head` → `alembic downgrade 027` (the declared
+1. `alembic upgrade head` → `alembic downgrade 031` (the declared
    predecessor — via the repo chain, never the lab DB);
-2. seed real-shaped rows at 027 (the canary seed set: a run mid-flight,
+2. seed real-shaped rows at 031 (the canary seed set: a run mid-flight,
    its spec, steps, a control command, a publication intent);
 3. fingerprint (per-table row counts + sha256 over ordered identity
    strings — the canary pattern);
 4. `alembic upgrade head`;
-5. require: the **actual** transition `027 -> 028`
-   (`028_credential_receipts`) and every fingerprint preserved EXACTLY
-   (a changed table is named, never averaged away). The v2 executed
-   edge: **027 → 028, all five seeded tables preserved**.
+5. require: the **actual** transition `031 -> 032`
+   (`032_collaboration_targets`) and every fingerprint preserved EXACTLY
+   (a changed table is named, never averaged away). The executed edge at
+   this freeze: **031 → 032, every seeded table preserved** (the
+   receipt is the @0.41.0 record's `upgrade` block).
 
 ## 5. Verify an installed environment (read-only)
 
@@ -183,6 +190,12 @@ The manifest's `evidence_records` block — never merged into one blob:
    nothing; approvals live in `qualification/profile-approvals.json`
    (a human-maintained artifact), and the supported-profiles manifest
    holds `gitlab-ce-v1` at `pending-approval` until then.
+
+The per-release record adds the FIFTH kind's separation on top
+(`gitlab-ce-v1@0.41.0.json`): source review / release canary / native
+transport qualification / model-task execution / external acceptance —
+each entry marked CURRENT-composition vs HISTORICAL vs PENDING-live, so
+no historical trace is read as a current-profile arrow.
 
 The executed trace's own record —
 `qualification/records/supported-composition-v2-2026-09-25.json`
@@ -259,14 +272,20 @@ uv run python scripts/align_lab.py --apply \
   `data/` volume — gitignored, REFS only). Bind the run's canonical
   subject (`gitlab/-/<project_id>`) per provider route with the shipped
   registry API — never by hand-editing a value.
-- **The ref invariant (LIVE-FOUND, #343):** under the default
-  `EnvBroker`, the credential ref's env NAME must BE the binding's env
-  slot — bind `env:ANTHROPIC_AUTH_TOKEN` for the `anthropic-gateway`
-  route, and hold the value in the consumers' `ANTHROPIC_AUTH_TOKEN`.
-  A ref named for anything else (e.g. `env:FORGE_BROKER_MODEL_TOKEN`)
-  stages under its own name, and the redemption endpoint refuses typed
-  `staged_slot_mismatch` with ZERO emitted values — the guard held on
-  the first live dispatch; the configuration was wrong.
+- **The ref invariant (LIVE-FOUND, #343 — now PREFLIGHTED, #365):**
+  under the default `EnvBroker`, the credential ref's env NAME must BE
+  the binding's env slot — bind `env:ANTHROPIC_AUTH_TOKEN` for the
+  `anthropic-gateway` route, and hold the value in the consumers'
+  `ANTHROPIC_AUTH_TOKEN`. A ref named for anything else (e.g.
+  `env:FORGE_BROKER_MODEL_TOKEN`) stages under its own name, and the
+  redemption endpoint refuses typed `staged_slot_mismatch` with ZERO
+  emitted values — the guard held on the first live dispatch; the
+  configuration was wrong. R41-10 (#365) moved this from "discovered at
+  the endpoint" to a TWO-MOMENT preflight: `bind()` refuses the misbound
+  locator typed `binding_slot_mismatch`
+  (`preflight.binding_slot_mismatch`), and the lane package's own boot
+  preflight re-checks the DISPATCHED ref before the redemption call —
+  see [credential-rotation.md](credential-rotation.md) §0.
 - `FORGE_CREDENTIAL_TEMPLATE_DIR` must point at the SHIPPED templates
   (the wheel ships no `ci/templates/`; the containers get them through
   the shared `data/` volume).
@@ -297,6 +316,16 @@ uv run python scripts/align_lab.py --apply \
 - A lane whose redemption is refused fails CLOSED
   (`credential_redemption_failed`, zero model turns) — there is NO ambient
   fallback; the native `/retry <run> restart` continuation re-enters it.
+- **The CURRENT pairing is live-qualified (#365):** the control plane
+  AND the lane package of the SAME composition (the working-tree build +
+  its own pinned wheel, sha256-verified inside the lane job) — the
+  2026-09-27 trace
+  ([records/redemption-2026-09-27.json](../../qualification/records/redemption-2026-09-27.json))
+  re-proved the sentinel identity, the rotation/expiry/retirement arms
+  and the runner-side response fence on that pair. The rotation
+  procedure itself (rotate → typed refusals under the old revision →
+  corrective rebind → new grant → lane recovers) is its own runbook:
+  [credential-rotation.md](credential-rotation.md).
 
 ## 9. Re-freezing (when the composition legitimately moves)
 

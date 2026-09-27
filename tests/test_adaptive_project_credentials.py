@@ -27,12 +27,14 @@ from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.adaptive.project_credentials import (
     BINDING_SCHEMA,
     BINDING_SCHEMA_V1,
+    BINDING_SLOT_PREFLIGHT_OBSERVABILITY,
     DISPATCH_PROOF_SCHEMA,
     PROVIDER_ENV_VARS,
     PROVIDER_ROUTE_OF_DRIVER,
     ProjectCredentialBinding,
     ProjectCredentialRegistry,
     CredentialRefusal,
+    binding_slot_preflight,
     binding_subject_of_run,
     legacy_subject_for_project,
     provider_route_for_driver,
@@ -263,6 +265,46 @@ class TestDispatchEnforcement:
         )
         # the VALUE is never copied into the proof.
         assert CANARY_VALUE not in json.dumps(proof.as_document())
+
+
+class TestBindingSlotPreflight:
+    """R41-10 (#365): the locator-to-env-slot preflight — the misbound
+    ``env:`` locator is refused at BIND time (before any dispatch, before
+    any lane boots), naming both slots. The #343 live incident shape."""
+
+    def test_a_misbound_env_locator_is_refused_at_bind_time(self):
+        registry = _bound_registry()
+        with pytest.raises(CredentialRefusal, match="binding_slot_mismatch") as caught:
+            registry.bind(
+                SUBJECT_A,
+                "anthropic-gateway",
+                "env:FORGE_BROKER_MODEL_TOKEN",
+                bound_by="ops@a",
+            )
+        detail = caught.value.detail
+        assert detail["observability"] == BINDING_SLOT_PREFLIGHT_OBSERVABILITY
+        assert detail["locator_env_var"] == "FORGE_BROKER_MODEL_TOKEN"
+        assert detail["binding_env_var"] == "ANTHROPIC_AUTH_TOKEN"
+        assert CANARY_VALUE not in str(caught.value)  # refs and names only
+
+    def test_a_slot_named_env_locator_binds(self):
+        registry = _bound_registry()
+        binding = registry.bind(
+            SUBJECT_A, "anthropic-gateway", "env:ANTHROPIC_AUTH_TOKEN", bound_by="ops@a"
+        )
+        assert binding.credential_ref == "env:ANTHROPIC_AUTH_TOKEN"
+        assert binding.live
+
+    def test_a_non_env_locator_has_no_slot_invariant(self):
+        # A vault resolver stages under the binding's own slot, so the
+        # preflight does not apply — None means "no mismatch to name".
+        assert binding_slot_preflight("anthropic-gateway", "vault:kv/eng#42") is None
+        assert binding_slot_preflight("anthropic-gateway", "env:ANTHROPIC_AUTH_TOKEN") is None
+        mismatch = binding_slot_preflight("anthropic-gateway", "env:FORGE_BROKER_MODEL_TOKEN")
+        assert mismatch is not None
+        assert mismatch["observability"] == BINDING_SLOT_PREFLIGHT_OBSERVABILITY
+        assert mismatch["locator_env_var"] == "FORGE_BROKER_MODEL_TOKEN"
+        assert mismatch["binding_env_var"] == "ANTHROPIC_AUTH_TOKEN"
 
 
 class TestRotation:

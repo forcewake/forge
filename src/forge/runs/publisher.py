@@ -720,6 +720,7 @@ async def publish_candidate(
     writer: ChangesetWriter,
     run: FlowRun,
     bundle: CandidateBundle,
+    branch: str | None = None,
     commit_message: str | None = None,
     fence_check: FenceCheck | None = None,
     write_profile: str | None = None,
@@ -737,6 +738,12 @@ async def publish_candidate(
     proposal-only model nothing else ever pushed, so the guarded apply
     proves the branch did not move. The write-policy profile knobs (R18)
     pass straight through to the shared entry.
+
+    *branch* names the collaboration surface the candidate lands on — for
+    a review-round child that is the lineage's PERSISTED collaboration
+    target source branch, NEVER a re-derivation from the run id (R41-04).
+    Callers that pass nothing keep the legacy derivation (an ordinary
+    run's own factory branch — identical bytes for every non-round run).
     """
 
     async def _fetch(base_ref: str, paths: list[str]) -> dict[str, str]:
@@ -779,6 +786,7 @@ async def publish_candidate(
         session_factory=session_factory,
         fetch_base_contents=_fetch,
         native_publish=_write,
+        branch=branch,
         commit_message=commit_message,
         fence_check=fence_check,
         write_profile=write_profile,

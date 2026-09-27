@@ -40,7 +40,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -81,7 +81,6 @@ from forge.adaptive.credential_broker import (
     delivery_plan,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
-from forge.adaptive.models import PlanRevision
 from forge.adaptive.operator_view import with_status_comment_identity
 from forge.adaptive.project_credentials import (
     CredentialRefusal,
@@ -108,21 +107,17 @@ from forge.adaptive.revisions import (
     REQUEST_ROUND_LIMIT,
     REQUEST_STAGED,
     REQUEST_STALE_HEAD,
+    REQUEST_TARGET_REFUSED,
     REQUEST_WINDOW_CLOSED,
-    REVISION_CONTENT_KEY,
     REVISION_EXECUTOR_DIGEST_KEY,
     RevisionRebindRefused,
     ReviewFeedbackRefused,
     ReviewFeedbackRequest,
-    classic_spec_revision,
     classify_review_feedback,
-    correction_decision_id,
-    correction_invalidation_set,
     executor_digest_document,
     head_binding_guard,
     mark_review_feedback_request,
     parse_review_feedback_note,
-    plan_digest as revision_plan_digest,
     read_review_feedback_requests,
     record_review_feedback_request,
     referenced_paths_of,
@@ -130,8 +125,7 @@ from forge.adaptive.revisions import (
     resolve_approved_input,
     review_feedback_requests_of,
     review_feedback_summary_section,
-    review_correction_revision,
-    round_active_plan_seed,
+    review_obligation_digest,
     stage_review_correction,
 )
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
@@ -139,6 +133,7 @@ from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
     TRANSITION_EVENT_TYPE,
     ActionLog,
+    CollaborationTarget,
     Controller,
     FlowRun,
     FlowStatus,
@@ -169,6 +164,14 @@ from forge.durable import (
     settle_state_record,
 )
 from forge.durable.models import ReviewRound
+from forge.durable.collaboration import (
+    TARGET_MISMATCH_EVENT,
+    CollaborationTargetError,
+    admission_target,
+    round_reference,
+    target_for_run,
+    target_handle_mismatches,
+)
 from forge.durable.budgets import (
     AXIS_CALLS,
     AXIS_TOKENS,
@@ -196,6 +199,7 @@ from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.gitlab.schemas import Pipeline
 from forge.gateway.feedback import max_review_rounds
 from forge.harnesses.brief_envelope import build_brief_envelope
 from forge.orchestrator.project_config import ConfigReadResult, read_project_config
@@ -242,6 +246,16 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.publisher import publish_candidate
+
+# R41-17 (#372): the review-round child admission — the ONE named
+# application service for the admission's write composition (the #356
+# child-before-budget transaction) and its own integrity arbiters.
+from forge.runs.round_admission import (
+    RoundAdmissionSeams,
+    admit_round_child,
+    plan_round_child,
+    round_slot_integrity_conflict,
+)
 from forge.runs.revival import (
     RECONCILE_RE,
     STATUS_RE,
@@ -280,7 +294,7 @@ from forge.runs.spec import (
     load_verified_spec,
     task_text_digest,
 )
-from forge.runs.stubs import factory_branch, plan_digest_of
+from forge.runs.stubs import plan_digest_of
 from forge.runs.verification import (
     PRODUCER_GITLAB_PIPELINE,
     VerificationProfile,
@@ -321,6 +335,68 @@ _RESUMABLE_ADVANCE_STATUSES = frozenset(
 #: one-active-run invariant would refuse, stranding the mid-planning run with
 #: its gate never opened).
 _RESUMABLE_PLAN_STATUSES = frozenset({"preflight", "planning"})
+
+#: R41-03 (#358): the four round-head classification outcomes, decided from
+#: the round's OWN publication identities (PublicationIntent rows, the
+#: journal's succeeded commit actions, the recorded candidate) BEFORE the
+#: base-head fence runs. A crashed round's head is its OWN native commit
+#: more often than not — the fence alone would misread it as foreign.
+_ROUND_HEAD_OWN = "own"
+_ROUND_HEAD_NOT_DISPATCHED = "not_dispatched"
+_ROUND_HEAD_UNKNOWN = "unknown"
+_ROUND_HEAD_FOREIGN = "foreign"
+
+#: R41-05 (#360): clock-skew allowance between forge's lease clock
+#: (``native_intent_at``) and the provider's pipeline ``created_at`` — a
+#: pipeline created up to this long BEFORE the intent still counts as the
+#: current attempt's (provider clock drift, replication lag). The intent is
+#: persisted BEFORE the provider call, so this window only ever widens the
+#: current side, never admits a genuinely historical pipeline.
+_OCCUPANCY_INTENT_SKEW = timedelta(seconds=300)
+
+#: R41-05 (#360): pipeline sources that are NEVER a coding attempt's
+#: occupancy. A merge-request verification pipeline runs for the REVIEW
+#: surface (merged-result/detached contexts), not for the dispatched
+#: harness — charging it as coding capacity is the out-of-scope policy
+#: the issue names, so it classifies as history.
+_OCCUPANCY_NON_CODING_SOURCES = frozenset({"merge_request"})
+
+
+@dataclass(frozen=True)
+class _OccupancyCorrelation:
+    """The CURRENT execution attempt's correlation facts (R41-05, #360).
+
+    Everything the branch-search occupancy probe needs to decide which of
+    the run-owned branch's pipelines belong to the attempt whose start
+    intent the lease carries — collected from the R41-03 identity surfaces
+    (the lease's dispatch window, the journal, the commit intents, the
+    round bases), never from the branch listing itself:
+
+    - ``intent_at`` — the attempt's dispatch window start (the lease's
+      ``native_intent_at``, persisted before the provider call);
+    - ``live_pipeline_id`` — a VERIFIED handle for THIS attempt: the
+      provider answered a harness start after ``intent_at`` (the journal's
+      succeeded row). Zero when no verified handle exists;
+    - ``prior_pipeline_ids`` — every pipeline id an EARLIER attempt of
+      this run recorded (journal rows before the window, the recorded
+      harness evidence, a superseded lease handle): ids are per-project
+      monotone, so anything at or below the newest of these is history;
+    - ``base_shas`` — the identities this attempt builds ON (the run's
+      recorded base, the round's approved head, the intents' expected
+      parents): a pipeline running one of them is the predecessor's;
+    - ``effect_shas`` — the candidate/effect identities THIS attempt
+      recorded (journal commit shas and intent effects inside the window):
+      a pipeline running one of them is the current attempt's.
+    """
+
+    run_id: str
+    branch: str
+    intent_at: datetime | None
+    live_pipeline_id: int = 0
+    prior_pipeline_ids: frozenset[int] = frozenset()
+    base_shas: frozenset[str] = frozenset()
+    effect_shas: frozenset[str] = frozenset()
+
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
@@ -443,6 +519,14 @@ _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{8,32})\b")
 _CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 #: ``/retry [run-id]`` — bare retries the issue's latest failed/blocked run.
 _RETRY_RE = re.compile(r"/retry(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
+#: ``/status round N of <root-short>`` (R41-04) — the human round
+#: reference forge prints. READ RESOLUTION ONLY: it names the round's
+#: child run for the read-only snapshot; it never authorizes anything
+#: (the destructive commands still require the full run id) and it never
+#: feeds publication (which keys on the target's recorded branch).
+_STATUS_ROUND_RE = re.compile(
+    r"/status\s+round\s+(\d+)\s+of\s+([0-9a-fA-F]{8,32})\b", re.IGNORECASE
+)
 
 #: The journaled kind of a /go refusal reply (one per ignored /go note).
 _GO_REFUSAL_KIND = "go_refusal_note"
@@ -908,6 +992,25 @@ class RunService:
                         evidence={"requested_by": author_username},
                     )
                 )
+                await session.flush()
+                # R41-04 (#359): the admission materializes the run's
+                # COLLABORATION TARGET in the same transaction — the
+                # persisted branch/MR surface every leg of this lineage
+                # (delivery 1 and its review rounds) resolves through.
+                # The source branch is minted HERE, once; nothing
+                # downstream re-derives it from the run id.
+                target = admission_target(
+                    provider="gitlab",
+                    project_id=project_id,
+                    issue_iid=issue_iid,
+                    run_id=run_id,
+                    target_branch=self._target_branch(),
+                )
+                session.add(target)
+                await session.flush()
+                admitted = await session.get(FlowRun, run_id)
+                assert admitted is not None  # flushed two lines above
+                admitted.target_id = target.id
                 await controller.transition(run_id, FlowStatus.PREFLIGHT)
                 await session.commit()
         except IntegrityError:
@@ -1907,7 +2010,6 @@ class RunService:
         # resolution makes the two equal; reading them from the run keeps the
         # dispatch honest even if resolution were ever widened.
         retry_project_id = 0
-        retry_issue_iid: int | None = None
         rejection = ""
         status = ""
         status_reason = ""
@@ -1929,7 +2031,6 @@ class RunService:
             if run is not None:
                 run_id = run.id
                 retry_project_id = int(run.project_id)
-                retry_issue_iid = run.issue_iid
                 # A11 delivery identity first: a redelivered /retry is a
                 # no-op; a different delivery while an attempt is in flight
                 # is refused before any status-based wording can mislead.
@@ -1975,6 +2076,30 @@ class RunService:
                 source_attempt = int(run.cancellation_generation or 0)
         if run_id is None:
             logger.info("/retry on issue !%s — no retryable run", issue_iid)
+            return
+
+        # R41-04 (#359): the retry re-dispatches onto the run's
+        # COLLABORATION target branch — resolved BEFORE the revival
+        # commits, so an unresolved topology refuses the retry with its
+        # typed reason instead of reviving work that cannot publish.
+        try:
+            retry_branch = await self._collaboration_branch(run_id)
+        except CollaborationTargetError as exc:
+            logger.error(
+                "/retry for run %s refused — collaboration target unresolved (%s)",
+                run_id[:8],
+                exc.detail,
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                f"🔁 `/retry` for run `{run_id[:8]}` refused — the collaboration "
+                f"target could not be resolved (`{exc.code}`). Nothing was "
+                "re-dispatched; an operator must reconcile the recorded "
+                f"branch/MR topology.\n\n*This is an automated message.*",
+                run_id,
+                "retry_rejected_note",
+            )
             return
 
         # R37-07 (#288): the typed recovery request — the ``restart`` verb is
@@ -2126,7 +2251,10 @@ class RunService:
             return
         action_id = attempt.action_id
 
-        branch = factory_branch(retry_issue_iid, run_id)
+        # R41-04 (#359): the resolved target branch (see the pre-revival
+        # guard above) — the work continues in place on the SAME recorded
+        # collaboration surface, never a re-derivation.
+        branch = retry_branch
         logger.info(
             "Run %s retried by @%s — re-dispatching %s (cycle %d, continuation %s)",
             run_id[:8],
@@ -2227,28 +2355,56 @@ class RunService:
         effects; the only write is the journaled reply note itself.
         """
         match = STATUS_RE.search(note_text or "")
-        if match is None:
+        round_match = _STATUS_ROUND_RE.search(note_text or "")
+        if match is None and round_match is None:
             return
         if issue_iid is None:
             logger.info("/status off-issue — ignoring")
             return
 
-        requested = (match.group(1) or "").lower()
+        requested = (match.group(1) or "").lower() if match else ""
         run_id: str | None = None
         async with self._session_factory() as session:
-            run = await resolve_status_target(
-                session,
-                provider="gitlab",
-                project_id=project_id,
-                issue_iid=issue_iid,
-                requested=requested,
-            )
-            if run is None:
-                body = (
-                    "## Forge — status\n\nNo forge run found on this issue yet. "
-                    "Start one with `@forge /implement`.\n\n*This is an automated message.*"
+            if round_match is not None:
+                # R41-04 (#359): the round reference — resolve the
+                # lineage by its root prefix (unambiguous EVEN for
+                # legacy lineages whose children share the root's
+                # prefix: every match agrees on the same lineage root),
+                # then the round row's child. Display resolution only.
+                run = await self._resolve_round_reference(
+                    session,
+                    project_id=project_id,
+                    issue_iid=issue_iid,
+                    requested=round_match.group(2).lower(),
+                    round_number=int(round_match.group(1)),
                 )
-                logger.info("/status on issue !%s — no run", issue_iid)
+            else:
+                run = await resolve_status_target(
+                    session,
+                    provider="gitlab",
+                    project_id=project_id,
+                    issue_iid=issue_iid,
+                    requested=requested,
+                )
+            if run is None:
+                if round_match is not None:
+                    reference = round_reference(
+                        int(round_match.group(1)), round_match.group(2).lower()
+                    )
+                    body = (
+                        f"## Forge — status\n\n`{reference}` matched no round of this "
+                        "issue's lineage (round 1 is the original delivery; later rounds "
+                        "exist only while their review round was admitted). Use the "
+                        "reference exactly as printed, or the full run id.\n\n"
+                        "*This is an automated message.*"
+                    )
+                    logger.info("/status round reference %s — no match", reference)
+                else:
+                    body = (
+                        "## Forge — status\n\nNo forge run found on this issue yet. "
+                        "Start one with `@forge /implement`.\n\n*This is an automated message.*"
+                    )
+                    logger.info("/status on issue !%s — no run", issue_iid)
             else:
                 snapshot = await collect_status_snapshot(session, run)
                 body = with_status_comment_identity(format_status_reply(snapshot), snapshot)
@@ -2870,6 +3026,85 @@ class RunService:
         )
         return root, list(rounds)
 
+    async def _resolve_round_reference(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: int,
+        issue_iid: int | None,
+        requested: str,
+        round_number: int,
+    ) -> FlowRun | None:
+        """``round N of <prefix>`` → the run that round names (R41-04).
+
+        The prefix anchors the LINEAGE, not one run: every run of this
+        issue matching it is walked to its lineage root, and the
+        reference resolves only when they all agree (a legacy lineage's
+        children SHARE the root's 8-hex prefix — they must collapse to
+        the same root, never fork the answer; two DISTINCT lineages
+        colliding on one prefix refuse). Round 1 is the root delivery
+        itself; round N ≥ 2 is the recorded round row's child run.
+        ``None`` when nothing matches — the caller answers with the
+        honest no-match reply.
+
+        This is DISPLAY/READ resolution only: it never feeds a write,
+        an authorization or a publication ref.
+        """
+        matches = (
+            (
+                await session.execute(
+                    select(FlowRun)
+                    .where(
+                        FlowRun.provider == "gitlab",
+                        FlowRun.project_id == project_id,
+                        FlowRun.issue_iid == issue_iid,
+                        FlowRun.id.like(f"{requested}%"),
+                    )
+                    .order_by(FlowRun.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not matches:
+            return None
+        roots: set[str] = set()
+        for candidate_run in matches:
+            root, _rounds = await self._round_lineage(session, candidate_run.id)
+            roots.add(root)
+        if len(roots) != 1:
+            logger.info(
+                "Round reference prefix %s spans %d lineages — refusing",
+                requested[:8],
+                len(roots),
+            )
+            return None
+        root = roots.pop()
+        if round_number == 1:
+            return await session.get(FlowRun, root)
+        row = (
+            (
+                await session.execute(
+                    select(ReviewRound)
+                    .where(
+                        ReviewRound.root_run_id == root, ReviewRound.round_number == round_number
+                    )
+                    .order_by(ReviewRound.id.desc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            return None
+        return await session.get(FlowRun, row.child_run_id)
+
+    #: The round admission's own uniqueness arbiters (R41-01) live in
+    #: ``forge.runs.round_admission`` (``round_slot_integrity_conflict``)
+    #: beside the transaction they judge — ONE owner for the admission's
+    #: write composition since R41-17 (#372).
+
     async def _admit_review_round(
         self,
         project_id: int,
@@ -2889,11 +3124,15 @@ class RunService:
         same ``stale_head`` fence the pre-ready route applies — human
         edits preserved, never force-pushed); and the bounded round count
         (``FORGE_MAX_REVIEW_ROUNDS``) must not be exhausted. The admission
-        itself is ONE transaction: the round row, the child run (walked to
-        ``proposing`` over the legal graph, seeded with the round's
-        active-plan representation), the copied frozen spec, the confirmed
-        MR reservation on the SAME branch, the child's OWN budget opened
-        from that spec, and the admission outbox row — or nothing at all.
+        itself is ONE transaction — R41-17 (#372) extracted it as the ONE
+        named application service ``forge.runs.round_admission``: the
+        round row, the child run — created and FLUSHED FIRST, then walked
+        to ``proposing`` over the legal graph, seeded with the round's
+        active-plan representation (R41-01: the child exists before the
+        budget that keys on it opens) — the copied frozen spec, the
+        confirmed MR reservation on the SAME branch, the child's OWN
+        budget opened from that spec, and the admission outbox row — or
+        nothing at all.
         """
         if mr_iid is None:
             logger.info("Review round for run %s without an MR — ignoring", run_id[:8])
@@ -2970,6 +3209,29 @@ class RunService:
             )
             return
 
+        # R41-04 (#359): the round rides the lineage's PERSISTED
+        # collaboration target — the child gets an INDEPENDENT run id;
+        # branch and MR identity come from the target, never from the
+        # id. A legacy parent (admitted before the target column
+        # existed) is adopted ONCE here: the adapter derives, validates
+        # against recorded MR/source information and materializes; an
+        # unresolved topology records a REFUSAL and this round is
+        # refused with zero writes.
+        try:
+            target = await self._resolve_collaboration_target(run_id)
+        except CollaborationTargetError as exc:
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_TARGET_REFUSED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_target_refused_body(run_id, exc),
+            )
+            return
+
         # The round's plan derives from exactly two verified sources: the
         # parent's frozen RunSpec (digest-verified read) and the accepted
         # request. A parent that staged an adaptive revision chains from
@@ -2990,7 +3252,6 @@ class RunService:
             return
         async with self._session_factory() as session:
             parent = await self._get_run(session, run_id)
-            parent_evidence = dict(parent.evidence or {})
             spec_row = (
                 (
                     await session.execute(
@@ -3003,200 +3264,98 @@ class RunService:
                 .scalars()
                 .first()
             )
-        # Copy the frozen bytes VERBATIM (never a re-serialization): the
-        # child's spec digest check recomputes over these exact bytes.
-        spec_document = dict(spec_row.document) if spec_row is not None else spec.to_document()
-        spec_digest_value = str(parent.spec_digest or (spec_row.digest if spec_row else "") or "")
-        active_raw = parent_evidence.get(ACTIVE_PLAN_KEY)
-        content_raw = active_raw.get(REVISION_CONTENT_KEY) if isinstance(active_raw, dict) else None
-        decision_id = correction_decision_id(run_id, request.note_id)
-        # The lineage id: the child SHARES the parent's 8-hex branch prefix
-        # so every branch-deriving leg (implementer, publisher, CI poll,
-        # drift checks) lands on the SAME factory branch — the MR stays
-        # the collaboration surface by construction, not by re-wiring.
-        child_id = f"{run_id[:8]}{uuid4().hex[:24]}"
-        if isinstance(content_raw, dict) and content_raw:
-            try:
-                base_revision = PlanRevision.model_validate(dict(content_raw))
-            except Exception as exc:  # pydantic ValidationError — unreadable
-                await mark_review_feedback_request(
-                    self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
-                )
-                await self._reply_review_feedback(
-                    project_id,
-                    mr_iid,
-                    run_id,
-                    request.note_id,
-                    self._rf_refused_body(
-                        run_id,
-                        ReviewFeedbackRefused(
-                            "content_unreadable",
-                            f"the parent's active revision does not parse: {type(exc).__name__}",
-                        ),
-                    ),
-                )
-                return
-            round_revision = review_correction_revision(base_revision, request)
-            revised_from = str(active_raw.get("plan_digest") or "") if active_raw else ""
-        else:
-            round_revision = classic_spec_revision(
-                work_id=child_id, spec=spec_document, request=request
-            )
-            revised_from = str(spec.plan_digest or "")
-        round_number = len(rounds) + 2  # delivery 1 is round 1 (never a row)
-        last_candidate = str(list(parent.candidate_shas or [])[-1]) if parent.candidate_shas else ""
-        invalidation = (
-            correction_invalidation_set(
-                last_candidate,
-                {
-                    "review": {"applicability": last_candidate},
-                    "verification": {"applicability": last_candidate},
-                    "pipeline": {"applicability": last_candidate},
-                },
-            )
-            if last_candidate
-            else {}
+        # R41-04 (#359): the PRE-WRITE handle guard — every recorded
+        # collaboration handle (the run row's MR, the round's MR, the
+        # provider MR document's source branch, the repository identity)
+        # must agree with the target row BEFORE anything is written. A
+        # disagreement is the ``collaboration.target_mismatch``
+        # observability row and a refusal; zero writes.
+        mismatches = target_handle_mismatches(
+            target=target,
+            run_mr_iid=parent.mr_iid,
+            round_mr_iid=mr_iid,
+            provider_mr_source_branch=str(getattr(mr, "source_branch", "") or ""),
+            project_ref=str(project_id),
         )
-        child_evidence = {
-            "requested_by": request.actor,
-            "backend": str(parent_evidence.get("backend") or "").strip(),
-            "review_round": {
-                "parent_run_id": run_id,
-                "root_run_id": root,
-                "round_number": round_number,
-                "note_id": request.note_id,
-                "decision_id": decision_id,
-                "base_head_sha": request.head_sha,
-                "mr_iid": mr_iid,
-            },
-            "round_invalidation": invalidation,
-            ACTIVE_PLAN_KEY: round_active_plan_seed(
-                round_revision,
-                revised_from_digest=revised_from,
-                decision_id=decision_id,
-            ),
-            # The round inherits its OWN copy of the request: the child's
-            # readiness gate then holds the candidate until the reviewer
-            # resolves the originating discussion (the human decision —
-            # forge never resolves it).
-            "review_feedback_requests": {
-                request.note_id: request.with_status(
-                    REQUEST_DISPATCHED, decision_id=decision_id
-                ).document()
-            },
-        }
-
+        if mismatches:
+            await self._record_target_mismatch(run_id, target, mismatches)
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_TARGET_REFUSED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_target_mismatch_body(run_id, mismatches),
+            )
+            return
+        # R41-17 (#372): the child's admission PLAN derives purely from
+        # the two verified sources (the parent's frozen spec + the
+        # accepted request) in the round admission service — the
+        # derivation and the write composition have ONE owner; the typed
+        # ``content_unreadable`` refusal is answered here on the operator
+        # surface, exactly as before the extraction.
         try:
-            async with self._session_factory() as session:
-                controller = Controller(session)
-                parent = await self._get_run(session, run_id)
-                if parent.status != FlowStatus.READY_FOR_HUMAN.value:
-                    # The run moved between the read and the admission —
-                    # the pre-ready staged route (or the window answer)
-                    # owns the request now; nothing is admitted.
-                    raise ReviewFeedbackRefused(
-                        "parent_moved",
-                        f"run {run_id!r} is {parent.status!r}, not ready_for_human",
-                    )
-                # The child's OWN budget admission (R40-04 discipline): a
-                # new round is never funded by an amendment — it opens its
-                # own ledger from the SAME frozen spec ceilings, closing
-                # share partitioned up front.
-                from forge.adaptive.closing_budget import ClosingReservePolicy, closing_partition
-                from forge.durable import open_budget_from_spec
+            plan = plan_round_child(
+                parent=parent,
+                spec=spec,
+                spec_row=spec_row,
+                root=root,
+                rounds_count=len(rounds),
+                mr_iid=mr_iid,
+                target_id=target.id,
+                request=request,
+            )
+        except ReviewFeedbackRefused as exc:
+            if exc.code != "content_unreadable":
+                raise
+            await mark_review_feedback_request(
+                self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
+            )
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_refused_body(run_id, exc),
+            )
+            return
 
-                spec_limits = budget_limits_from_spec(spec_document)
-                partition = (
-                    closing_partition(spec_limits, ClosingReservePolicy.from_env())
-                    if spec_limits is not None
-                    else None
-                )
-                if spec_limits is not None:
-                    await open_budget_from_spec(
-                        session,
-                        run_id=child_id,
-                        spec_document=spec_document,
-                        spec_digest=spec_digest_value or None,
-                        closing_reserved_calls=partition.calls if partition else None,
-                        closing_reserved_tokens=partition.tokens if partition else None,
-                        closing_partition_policy=(partition.policy_version if partition else None),
-                    )
-                session.add(
-                    FlowRun(
-                        id=child_id,
-                        project_id=parent.project_id,
-                        issue_iid=parent.issue_iid,
-                        provider="gitlab",
-                        mr_iid=mr_iid,
-                        base_sha=request.head_sha,
-                        spec_digest=parent.spec_digest,
-                        config_digest=parent.config_digest,
-                        plan_digest=revision_plan_digest(round_revision),
-                        evidence=child_evidence,
-                    )
-                )
-                reason = f"review round {round_number} admitted (note {request.note_id})"
-                await controller.transition(child_id, FlowStatus.PREFLIGHT, reason=reason)
-                await controller.transition(child_id, FlowStatus.PLANNING, reason=reason)
-                await controller.transition(child_id, FlowStatus.WAITING_APPROVAL, reason=reason)
-                await controller.transition(child_id, FlowStatus.PROPOSING, reason=reason)
-                session.add(
-                    RunSpec(
-                        id=uuid4().hex,
-                        run_id=child_id,
-                        schema_version=(
-                            int(spec_row.schema_version)
-                            if spec_row is not None
-                            else EXECUTABLE_SPEC_SCHEMA_VERSION
-                        ),
-                        document=spec_document,
-                        digest=spec_digest_value or str(parent.spec_digest or ""),
-                    )
-                )
-                session.add(
-                    MRReservation(
-                        flow_run_id=child_id,
-                        branch=factory_branch(parent.issue_iid, child_id),
-                        status="confirmed",
-                        mr_iid=mr_iid,
-                    )
-                )
-                session.add(
-                    ReviewRound(
-                        id=uuid4().hex,
-                        parent_run_id=run_id,
-                        child_run_id=child_id,
-                        root_run_id=root,
-                        round_number=round_number,
-                        note_id=request.note_id,
-                        mr_iid=mr_iid,
-                        base_head_sha=request.head_sha,
-                        decision_id=decision_id,
-                        requested_by=request.actor,
-                        status="admitted",
-                    )
-                )
-                session.add(
-                    Outbox(
-                        flow_run_id=child_id,
-                        event_type="review_round.admitted",
-                        payload={
-                            "run_id": child_id,
-                            "parent_run_id": run_id,
-                            "root_run_id": root,
-                            "round_number": round_number,
-                            "note_id": request.note_id,
-                            "decision_id": decision_id,
-                            "base_head_sha": request.head_sha,
-                            "requested_by": request.actor,
-                        },
-                    )
-                )
-                await session.commit()
-        except IntegrityError:
+        # R41-17 (#372): the child-admission TRANSACTION (FlowRun flush →
+        # budget → spec → round → reservation → outbox) is the ONE named
+        # application service — ``forge.runs.round_admission.admit_round_
+        # child`` — carrying the #356 child-before-budget ordering and
+        # the #359 in-transaction target re-read. The seams are explicit
+        # immutable context values resolved from THIS module's globals at
+        # call time, so the production mutation surfaces (Controller /
+        # MRReservation) keep binding where the tests patch them.
+        try:
+            child_id = await admit_round_child(
+                RoundAdmissionSeams(
+                    session_factory=self._session_factory,
+                    controller=Controller,
+                    reservation_model=MRReservation,
+                ),
+                plan,
+                parent_run_id=run_id,
+                project_id=project_id,
+                mr_iid=mr_iid,
+                root=root,
+                target=target,
+                request=request,
+            )
+        except IntegrityError as exc:
             # Two authorized corrections raced the same head: the open-round
             # partial unique index is the arbiter — this caller is the
             # loser, deterministically (the row that committed wins).
+            # R41-01 (#356): ONLY the admission's own uniqueness arbiters
+            # land here; an unrelated integrity failure is a genuine
+            # defect and propagates — no orphan child, no false
+            # conflicting-correction answer for a request that never had
+            # a competitor.
+            if not round_slot_integrity_conflict(exc):
+                raise
             async with self._session_factory() as session:
                 _root, rounds_now = await self._round_lineage(session, run_id)
             winner = next(
@@ -3231,23 +3390,24 @@ class RunService:
             run_id,
             request.note_id,
             REQUEST_ROUND_ADMITTED,
-            decision_id=decision_id,
-            invalidation=invalidation,
+            decision_id=plan.decision_id,
+            invalidation=plan.invalidation,
         )
         await self._reply_review_feedback(
             project_id,
             mr_iid,
             run_id,
             request.note_id,
-            self._rf_round_admitted_body(run_id, child_id, round_number, request),
+            self._rf_round_admitted_body(run_id, child_id, plan.round_number, request, root),
         )
         logger.info(
-            "Review round %d admitted for run %s — child %s (head %s, root %s)",
-            round_number,
+            "Review round %d admitted for run %s — child %s (head %s, root %s, target %s)",
+            plan.round_number,
             run_id[:8],
             child_id[:8],
             request.head_sha[:8],
             root[:8],
+            target.id[:8],
         )
         await self._dispatch_review_round(child_id, project_id, request)
 
@@ -3283,6 +3443,18 @@ class RunService:
                 .scalars()
                 .first()
             )
+            if row is not None and row.status not in self._ROUND_OPEN_STATUSES:
+                # R41-03: a reconciler settled this round (foreign head,
+                # terminal child) between its read and this dispatch — a
+                # stale dispatcher stands down rather than drive a settled
+                # round's child. The guarded lifecycle mark cannot revive
+                # the row; this is the matching entry guard.
+                logger.info(
+                    "Review round for child %s is %s — standing the dispatch down",
+                    child_id[:8],
+                    row.status,
+                )
+                return
             first_dispatch = row is not None and row.status == "admitted"
         context = self._rf_correction_context(request)
         reason = f"review round correction: discussion {request.discussion_id or request.note_id}"
@@ -3318,22 +3490,52 @@ class RunService:
             child_id,
         )
 
-    async def _mark_review_round(self, child_id: str, status: str, reason: str = "") -> None:
-        """Apply ONE round-row lifecycle transition (idempotent per run)."""
+    async def _mark_review_round(
+        self,
+        child_id: str,
+        status: str,
+        reason: str = "",
+        *,
+        expected: tuple[str, ...] | None = None,
+    ) -> bool:
+        """Apply ONE round-row lifecycle transition (idempotent per run).
+
+        R41-03: the transition is EXPECTED-STATE GUARDED — the UPDATE
+        carries the statuses it may move FROM (default: the open statuses),
+        so the write is a compare-and-set at the database. A dispatcher
+        whose view predates a settle can never overwrite
+        ``completed``/``stale``/``ended`` back to ``dispatched``, and two
+        reconcilers racing the same round collapse to one winner. Returns
+        whether THIS caller performed the transition.
+        """
+        guard = tuple(expected) if expected is not None else self._ROUND_OPEN_STATUSES
         async with self._session_factory() as session:
             row = (
                 (
                     await session.execute(
-                        select(ReviewRound).where(ReviewRound.child_run_id == child_id).limit(1)
+                        select(ReviewRound.status)
+                        .where(ReviewRound.child_run_id == child_id)
+                        .limit(1)
                     )
                 )
                 .scalars()
                 .first()
             )
-            if row is None or row.status == status:
-                return
-            row.status = status
-            row.status_reason = reason[:200] if reason else None
+            if row is None or row == status or row not in guard:
+                return False
+            moved = (
+                await session.execute(
+                    update(ReviewRound)
+                    .where(
+                        ReviewRound.child_run_id == child_id,
+                        ReviewRound.status.in_(guard),
+                    )
+                    .values(status=status, status_reason=reason[:200] if reason else None)
+                )
+            ).rowcount  # type: ignore[attr-defined]
+            if moved != 1:
+                await session.rollback()
+                return False
             session.add(
                 Outbox(
                     flow_run_id=child_id,
@@ -3342,6 +3544,7 @@ class RunService:
                 )
             )
             await session.commit()
+            return True
 
     async def evaluate_review_rounds(self) -> None:
         """The bounded review-round pass (R40-02) — the reconciler's shape.
@@ -3351,11 +3554,15 @@ class RunService:
         CLOSES (freeing the lineage's one outstanding-correction slot and
         recording the delivery relationship as complete); a round still
         ``admitted`` (or whose child sits mid-advance after a crash) is
-        re-driven — the head fence first, then the advance leg, which is
-        mid-leg idempotent. At most ONE child round and ONE effect intent
-        ever survive a restart: the round row is the admission's
-        idempotency, and the advance adopts any journaled effect before
-        creating a new one.
+        re-driven — the round's OWN effects classified first (R41-03),
+        then the head fence, then the advance leg, which is mid-leg
+        idempotent. At most ONE child round and ONE effect intent ever
+        survive a restart: the round row is the admission's idempotency,
+        and the advance adopts any journaled effect before creating a new
+        one. A second bounded scan settles the STRANDED children — work
+        units a settled round left non-terminal (the pre-R41-03 stale
+        path's orphan shape) — each one explicitly and journaled, never a
+        bulk mark.
         """
         async with self._session_factory() as session:
             rows = (
@@ -3375,6 +3582,7 @@ class RunService:
             except Exception:
                 # One broken round must not stall the pass.
                 logger.exception("Review-round pass failed for round %s", round_id[:8])
+        await self._reconcile_stranded_round_children()
 
     async def _reconcile_one_review_round(self, round_id: str) -> None:
         """Close or re-drive ONE open round (see :meth:`evaluate_review_rounds`)."""
@@ -3400,7 +3608,12 @@ class RunService:
                 await self._mark_review_round(row.child_run_id, "dispatched")
             return
         # The round never dispatched, or a crash left the child mid-advance:
-        # fence the head, then (re-)drive the SAME advance leg.
+        # classify the head against the round's OWN effects FIRST (R41-03),
+        # fence the base second, then (re-)drive the SAME advance leg. The
+        # round's native commit may already have landed while the child
+        # still sits in committing/ensuring_draft_mr — evidence, usage and
+        # MR bookkeeping land later — and the fence alone would misread the
+        # round's own candidate as a foreign head.
         requests = review_feedback_requests_of(
             (await self._read_run_evidence(row.child_run_id)) or {}
         )
@@ -3410,39 +3623,448 @@ class RunService:
                 row.child_run_id, "ended", "the child carries no request record"
             )
             return
+        head = await self._read_mr_head(project_id, row.mr_iid, issue_iid, row.child_run_id)
+        resolution, effect_sha = await self._classify_round_head(row, child, head)
+        if resolution == _ROUND_HEAD_OWN:
+            # The exact own effect (identity-proven) is the current head:
+            # resume at the correct post-publication phase — the advance
+            # adopts the journaled effect, no regeneration, no second
+            # commit, no second MR.
+            await self._emit_round_effect_resolution(row, child, head, resolution, effect_sha)
+            logger.info(
+                "Review round %s (child %s, attempt cycle %d) — head %s is the round's "
+                "OWN effect; resuming the post-publication phase (no second commit)",
+                row.id[:8],
+                row.child_run_id[:8],
+                int(child.commit_cycle or 1),
+                (effect_sha or head)[:8],
+            )
+            await self._dispatch_review_round(row.child_run_id, project_id, request)
+            return
+        if resolution == _ROUND_HEAD_UNKNOWN:
+            # An open intent's outcome is unproven and the probe could not
+            # arbitrate: the uncertainty stays visible (the open intent row
+            # and its next probe own it); nothing is staled and nothing is
+            # published blindly. The publication-intent scanner resolves
+            # the intent; the next pass re-classifies.
+            await self._emit_round_effect_resolution(row, child, head, resolution, "")
+            logger.warning(
+                "Review round %s (child %s) — publication outcome unresolved at head %s; "
+                "leaving the round open for the intent scanner (no dispatch, no stale)",
+                row.id[:8],
+                row.child_run_id[:8],
+                head[:8],
+            )
+            return
+        # not_dispatched or foreign: the base fence decides — a head that
+        # moved off the approved base is the typed stale-head conflict.
         try:
-            head = await self._read_mr_head(project_id, row.mr_iid, issue_iid, row.child_run_id)
             head_binding_guard(row.base_head_sha, head)
         except ReviewFeedbackRefused:
-            await self._mark_review_round(
-                row.child_run_id, "stale", "the MR head moved off the approved base"
-            )
-            await mark_review_feedback_request(
-                self._session_factory, row.parent_run_id, row.note_id, REQUEST_STALE_HEAD
-            )
-            await self._reply_review_feedback(
-                project_id,
-                row.mr_iid,
-                row.parent_run_id,
-                row.note_id,
-                self._rf_stale_head_body(row.parent_run_id, request),
-                allow_repeat=True,
-            )
+            await self._emit_round_effect_resolution(row, child, head, _ROUND_HEAD_FOREIGN, "")
+            await self._settle_round_foreign_head(row, child, request, head)
             return
         await self._dispatch_review_round(row.child_run_id, project_id, request)
 
+    async def _classify_round_head(
+        self, row: ReviewRound, child: FlowRun, head: str
+    ) -> tuple[str, str]:
+        """Classify the round's CURRENT MR head against its OWN effects (R41-03).
+
+        The EXISTING publication identities decide — the child's ``commit``
+        intents (operation key, expected parents, the effect sha they
+        recorded), the journal's succeeded commit actions and the
+        ``published_candidate`` evidence — and only when an OPEN intent's
+        outcome is unproven AND the head moved does the branch listing
+        arbitrate (the R11 marker + parent probe). A commit message alone
+        never identifies an effect (F07). Returns ``(outcome, effect_sha)``:
+
+        - ``own`` — the head IS an effect this round owns by identity: the
+          advance leg re-enters and adopts it (also the head-intact open
+          intent case, where the writer's probe-mediated recovery — adopt
+          or the A12 certainty window — is the correct resumption);
+        - ``not_dispatched`` — the round owns no publication record and the
+          head still equals the approved base: the plain dispatch path;
+        - ``unknown`` — an open intent's outcome is unproven and the probe
+          cannot arbitrate (read failure or ambiguity): uncertainty stays
+          visible; nothing is staled, nothing published;
+        - ``foreign`` — the head moved and no own identity explains it.
+
+        R41-04 (#359): the branch is the child's COLLABORATION target
+        source branch (the persisted surface), never an id derivation —
+        a refusal propagates to the reconciler's per-round isolation.
+        """
+        branch = await self._collaboration_branch(child.id)
+        async with self._session_factory() as session:
+            intents = [
+                intent
+                for intent in await intents_for_run(session, child.id)
+                if intent.operation == "commit" and intent.target_ref == branch
+            ]
+            journal_results = (
+                (
+                    await session.execute(
+                        select(ActionLog.remote_result).where(
+                            ActionLog.flow_run_id == child.id,
+                            ActionLog.action_kind == "commit",
+                            ActionLog.correlation_id == branch,
+                            ActionLog.status == "succeeded",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            published = (child.evidence or {}).get("published_candidate")
+        own_shas = {
+            sha
+            for sha in (str((result or {}).get("sha") or "") for result in journal_results)
+            if sha
+        }
+        for intent in intents:
+            if intent.provider_object_id:
+                own_shas.add(str(intent.provider_object_id))
+        if isinstance(published, dict) and published.get("sha"):
+            own_shas.add(str(published["sha"]))
+        if head in own_shas:
+            return _ROUND_HEAD_OWN, head
+        open_intents = [intent for intent in intents if intent.status in OPEN_STATES]
+        if not open_intents:
+            if head == row.base_head_sha:
+                return _ROUND_HEAD_NOT_DISPATCHED, ""
+            # Terminal intents only (failed/duplicated): the round's own
+            # effect provably never landed, and the head moved — a foreign
+            # change owns the tip.
+            return _ROUND_HEAD_FOREIGN, ""
+        if head == row.base_head_sha:
+            # The intent is unproven but nothing foreign moved the head:
+            # the writer's probe-mediated recovery decides on re-entry —
+            # adopt, or the A12 certainty window. Never a blind publication.
+            return _ROUND_HEAD_OWN, ""
+        return await self._probe_round_open_intent(child, open_intents[0], head)
+
+    async def _probe_round_open_intent(
+        self, child: FlowRun, intent: PublicationIntent, head: str
+    ) -> tuple[str, str]:
+        """Arbitrate one OPEN intent against the moved head (the R11 probe).
+
+        Exactly the writer's recovery table: a commit proves it is THIS
+        round's effect only when its message carries the intent's exact
+        ``(forge-op:<key>)`` marker AND its parents equal the intent-time
+        expectation. One match at the head ⇒ ``own``; one match BELOW a
+        foreign tip, or zero matches with the head moved ⇒ ``foreign``
+        (human commits preserved, never force-fixed); a read failure or
+        ambiguity ⇒ ``unknown`` — uncertainty stays visible.
+        """
+        try:
+            commits = await self._gitlab.list_commits(child.project_id, intent.target_ref)
+        except GitLabAPIError:
+            logger.exception(
+                "Round-head probe read failed for branch %r — leaving the outcome "
+                "unknown (no dispatch, no stale)",
+                intent.target_ref,
+            )
+            return _ROUND_HEAD_UNKNOWN, ""
+        hits = commit_matches(
+            commits,
+            operation_key=intent.operation_key,
+            expected_parent_oid=intent.expected_parent_oid,
+        )
+        if len(hits) > 1:
+            # A double write or a key bug — inconclusive, never a guess.
+            return _ROUND_HEAD_UNKNOWN, ""
+        if len(hits) == 1:
+            if hits[0] == head:
+                return _ROUND_HEAD_OWN, hits[0]
+            # The round's own effect landed and something foreign sits on
+            # top of it — the tip is foreign, the effect is preserved.
+            return _ROUND_HEAD_FOREIGN, hits[0]
+        # Zero identity matches: whatever moved the head is not this intent.
+        return _ROUND_HEAD_FOREIGN, ""
+
+    async def _emit_round_effect_resolution(
+        self,
+        row: ReviewRound,
+        child: FlowRun,
+        head: str,
+        resolution: str,
+        effect_sha: str,
+    ) -> None:
+        """R41-03 observability: ``review_round.effect_resolution{own,foreign,unknown}``.
+
+        One row per DISTINCT ``(resolution, head)`` — a resolution that
+        repeats on later ticks (an ``unknown`` whose probe stays down, an
+        ``own`` awaiting its re-drive) is already visible as the newest
+        event, so only a CHANGE re-journals. The payload carries the exact
+        round/attempt/effect the recovery decided on.
+        """
+        async with self._session_factory() as session:
+            last = (
+                (
+                    await session.execute(
+                        select(Outbox.payload)
+                        .where(
+                            Outbox.flow_run_id == row.child_run_id,
+                            Outbox.event_type == "review_round.effect_resolution",
+                        )
+                        .order_by(Outbox.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if (
+                isinstance(last, dict)
+                and last.get("resolution") == resolution
+                and last.get("head_sha") == head
+            ):
+                return
+            session.add(
+                Outbox(
+                    flow_run_id=row.child_run_id,
+                    event_type="review_round.effect_resolution",
+                    payload={
+                        "run_id": row.child_run_id,
+                        "round_id": row.id,
+                        "round_number": row.round_number,
+                        "resolution": resolution,
+                        "head_sha": head,
+                        "effect_sha": effect_sha,
+                        "base_head_sha": row.base_head_sha,
+                        "attempt_cycle": int(child.commit_cycle or 1),
+                    },
+                )
+            )
+            await session.commit()
+
+    async def _settle_round_foreign_head(
+        self, row: ReviewRound, child: FlowRun, request: ReviewFeedbackRequest, head: str
+    ) -> None:
+        """Genuine foreign head: round AND child settle together (R41-03).
+
+        ONE transaction owns the whole typed conflict: the round moves to
+        ``stale`` (expected-state guarded — a concurrent dispatcher cannot
+        overwrite it), the child parks ``blocked`` with the foreign-head
+        reason, its FUTURE PUBLICATION RIGHTS are revoked
+        (``cancel_requested`` + scheduled steps withdrawn, so no in-flight
+        leg can still write) and the execution lease is released — the
+        lineage's one outstanding-round slot frees at the same commit. The
+        MR and every human commit stay exactly as they are: forge never
+        resets, never force-pushes. The parent request's stale-head mark
+        and the reviewer reply ride after the atomic settle (both
+        idempotent); a reconciler that lost the CAS race owns nothing.
+        """
+        reason = (
+            f"review_round_foreign_head: the MR head moved off the approved base "
+            f"{row.base_head_sha[:12]}… to {str(head)[:12]}… — human commits are "
+            "preserved; re-raise the correction against the current head"
+        )
+        settled = False
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            child_row = await session.get(FlowRun, row.child_run_id)
+            if child_row is not None and child_row.status not in {
+                status.value for status in TERMINAL_STATUSES
+            }:
+                try:
+                    await controller.transition(
+                        row.child_run_id, FlowStatus.BLOCKED, reason=reason[:200]
+                    )
+                    child_row.cancel_requested = True
+                    await session.execute(
+                        update(StepRun)
+                        .where(
+                            StepRun.flow_run_id == row.child_run_id,
+                            StepRun.status == "scheduled",
+                        )
+                        .values(status="cancelled")
+                    )
+                except InvalidTransition:
+                    # A terminal landing won the race — only the round row
+                    # still needs its owner.
+                    pass
+            settled = (
+                await session.execute(
+                    update(ReviewRound)
+                    .where(
+                        ReviewRound.id == row.id,
+                        ReviewRound.status.in_(self._ROUND_OPEN_STATUSES),
+                    )
+                    .values(
+                        status="stale",
+                        status_reason="the MR head moved off the approved base",
+                    )
+                )
+            ).rowcount == 1  # type: ignore[attr-defined]
+            if settled:
+                session.add(
+                    Outbox(
+                        flow_run_id=row.child_run_id,
+                        event_type="review_round.status",
+                        payload={
+                            "run_id": row.child_run_id,
+                            "status": "stale",
+                            "reason": "the MR head moved off the approved base",
+                        },
+                    )
+                )
+            await session.commit()
+        if not settled:
+            logger.info(
+                "Review round %s was settled concurrently — this reconciler owns nothing",
+                row.id[:8],
+            )
+            return
+        await self._release_execution_lease(row.child_run_id, "review_round:foreign_head")
+        await mark_review_feedback_request(
+            self._session_factory, row.parent_run_id, row.note_id, REQUEST_STALE_HEAD
+        )
+        await self._reply_review_feedback(
+            child.project_id,
+            row.mr_iid,
+            row.parent_run_id,
+            row.note_id,
+            self._rf_stale_head_body(row.parent_run_id, request),
+            allow_repeat=True,
+        )
+        logger.warning(
+            "Review round %s (child %s) staled on the foreign head %s — child blocked, "
+            "publication rights revoked, human commits preserved",
+            row.id[:8],
+            row.child_run_id[:8],
+            str(head)[:8],
+        )
+
+    async def _reconcile_stranded_round_children(self) -> None:
+        """R41-03: settle the children a settled round left runnable.
+
+        The pre-fix stale path closed round rows WITHOUT settling their
+        mid-advance children — "round closed stale, child left runnable"
+        had no single owner. This pass inventories the stranded shape
+        (a SETTLED round row whose child run is still non-terminal) and
+        settles each child EXPLICITLY — one journaled, logged decision per
+        row naming its round — never a bulk mark.
+        """
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ReviewRound.id)
+                        .join(FlowRun, FlowRun.id == ReviewRound.child_run_id)
+                        .where(
+                            ReviewRound.status.not_in(self._ROUND_OPEN_STATUSES),
+                            FlowRun.status.not_in([status.value for status in TERMINAL_STATUSES]),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for round_id in rows:
+            try:
+                await self._settle_stranded_round_child(round_id)
+            except Exception:
+                # One stranded child must not stall the pass.
+                logger.exception("Stranded round-child pass failed for round %s", round_id[:8])
+
+    async def _settle_stranded_round_child(self, round_id: str) -> None:
+        """Settle ONE stranded child (see :meth:`_reconcile_stranded_round_children`)."""
+        async with self._session_factory() as session:
+            row = await session.get(ReviewRound, round_id)
+            if row is None or row.status in self._ROUND_OPEN_STATUSES:
+                return  # the round re-opened or vanished — not stranded
+            child = await session.get(FlowRun, row.child_run_id)
+            if child is None or child.status in {status.value for status in TERMINAL_STATUSES}:
+                return  # already settled, or the missing-row shape
+            child_status = child.status
+            reason = (
+                f"review_round_settled: round {row.id[:8]} is {row.status!r} — the child "
+                "cannot keep the lineage's active slot; re-raise the correction as a "
+                "new review round"
+            )[:200]
+        moved = False
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            child_row = await session.get(FlowRun, row.child_run_id)
+            if (
+                child_row is not None
+                and child_row.status == child_status
+                and child_row.status not in {status.value for status in TERMINAL_STATUSES}
+            ):
+                try:
+                    await controller.transition(row.child_run_id, FlowStatus.BLOCKED, reason)
+                    child_row.cancel_requested = True
+                    await session.execute(
+                        update(StepRun)
+                        .where(
+                            StepRun.flow_run_id == row.child_run_id,
+                            StepRun.status == "scheduled",
+                        )
+                        .values(status="cancelled")
+                    )
+                    moved = True
+                except InvalidTransition:
+                    pass
+            await session.commit()
+        if moved:
+            await self._release_execution_lease(row.child_run_id, "review_round:settled_child")
+            logger.warning(
+                "Review round %s is %s but child %s was %s — stranded child blocked "
+                "(publication rights revoked, slot released)",
+                row.id[:8],
+                row.status,
+                row.child_run_id[:8],
+                child_status,
+            )
+
     @staticmethod
     def _rf_round_admitted_body(
-        run_id: str, child_id: str, round_number: int, request: ReviewFeedbackRequest
+        run_id: str,
+        child_id: str,
+        round_number: int,
+        request: ReviewFeedbackRequest,
+        root_run_id: str = "",
     ) -> str:
+        # R41-04 (#359): the human round reference — concise, unambiguous
+        # within the repository, and NOT an authorization token: the
+        # read-only commands accept it, the destructive ones print the
+        # FULL run id (references cannot authorize).
+        reference = round_reference(round_number, root_run_id or run_id)
         return (
-            f"**Review round {round_number} opened** for run `{run_id[:8]}` — the ready "
-            f"delivery stays as history; round `{child_id}` starts from the approved "
-            f"MR head `{request.head_sha[:12]}`… (human edits included) with its own "
+            f"**Review round {round_number} opened** for run `{run_id[:8]}` "
+            f"({reference}) — the ready delivery stays as history; round "
+            f"`{child_id}` starts from the approved MR head "
+            f"`{request.head_sha[:12]}`… (human edits included) with its own "
             "budget, and the required checks + the review rerun on the NEW candidate "
             "before any readiness claim.\n\n"
+            f"- Follow it: `@forge /status {reference}`\n"
+            f"- Stop it: `@forge /cancel {child_id}` (the full id — the round "
+            "reference is display and read-resolution only, never authority)\n\n"
             "Forge never merges and never resolves this discussion — resolve the "
             f"thread when the correction satisfies you.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_target_refused_body(run_id: str, exc: CollaborationTargetError) -> str:
+        return (
+            f"Review feedback on run `{run_id[:8]}` is recorded, but the lineage's "
+            "collaboration target could not be resolved "
+            f"(`{exc.code}`: {exc.detail}) — no branch was inferred and nothing "
+            "was written. An operator must reconcile the recorded branch/MR "
+            f"topology before a round can be admitted.{_automated_footer()}"
+        )
+
+    @staticmethod
+    def _rf_target_mismatch_body(run_id: str, mismatches: list[str]) -> str:
+        listed = "\n".join(f"- {item}" for item in mismatches)
+        return (
+            f"Review feedback on run `{run_id[:8]}` is recorded, but the recorded "
+            "collaboration handles disagree — nothing was written:\n\n"
+            f"{listed}\n\n"
+            "The branch and merge request a round would publish to are pinned by "
+            "the persisted collaboration target; a disagreement is resolved by an "
+            f"operator, never by picking one handle.{_automated_footer()}"
         )
 
     @staticmethod
@@ -3574,9 +4196,19 @@ class RunService:
         request and publication) is the branch's own head — the same read
         the drift checks use. The MR sha is the fallback when the branch
         read fails.
+
+        R41-04 (#359): the branch read is the run's COLLABORATION target
+        source branch (the persisted surface), never an id derivation —
+        a ``GitLabAPIError`` on the read (branch renamed/deleted between
+        reads included) falls back to the MR document sha exactly as
+        before; an unresolved target propagates the typed refusal to the
+        caller (the admission's own refusal path answers it; the
+        reconciler pass isolates it per round).
         """
         try:
-            head = await self._gitlab.get_branch_head(project_id, factory_branch(issue_iid, run_id))
+            head = await self._gitlab.get_branch_head(
+                project_id, await self._collaboration_branch(run_id)
+            )
         except GitLabAPIError:
             head = ""
         if head:
@@ -4450,6 +5082,15 @@ class RunService:
             return
         plan_summary, files_hint = spec.plan_summary, list(spec.plan_files_hint)
         await self._record_spec_drift(project_id, run_id, spec)
+        # R41-04 (#359): the publication ref is the run's COLLABORATION
+        # target source branch — resolved BEFORE the proposal so the
+        # proposer's id-derived default is rebound (a modern round's
+        # independent child id would otherwise fork a NEW branch and
+        # MR). An unresolved target parks the run typed before any paid
+        # call.
+        source_branch = await self._collaboration_branch_or_block(run_id)
+        if source_branch is None:
+            return
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
         # ADR-0017 §3 (R06): mid-leg, the persisted record — not a fresh
         # re-derivation — says what this attempt actually started from.
@@ -4495,6 +5136,11 @@ class RunService:
                 attempt.cycle,
                 len(changeset.changes),
             )
+            # R41-04 (#359): a resumed manifest rebinds to the target
+            # branch too (a no-op for manifests recorded after #359; a
+            # legacy manifest's id-derived default corrects here, before
+            # any effect leg consumes it).
+            changeset = replace(changeset, branch=source_branch)
         else:
             try:
                 changeset = await self._implementer.propose(
@@ -4527,6 +5173,12 @@ class RunService:
                 else:
                     await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
                 return
+            # R41-04 (#359): rebind the proposer's branch suggestion to
+            # the run's collaboration source branch BEFORE the manifest
+            # persists — the recorded manifest carries the target ref,
+            # and every downstream leg (writer, MR, intents) consumes
+            # the one contract.
+            changeset = replace(changeset, branch=source_branch)
             # R06: persist the attempt (number, manifest, previous candidate)
             # the moment it materializes — the durable record a resumed walk
             # continues from.
@@ -4795,6 +5447,14 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
             return
         await self._record_spec_drift(project_id, run_id, spec)
+
+        # R41-04 (#359): the harness branch cut is the run's COLLABORATION
+        # target source branch (resolved before any I/O — a modern round's
+        # independent child id must fork nothing). A refused/unresolved
+        # target parks the run typed, zero provider calls.
+        collaboration_branch = await self._collaboration_branch_or_block(run_id)
+        if collaboration_branch is None:
+            return
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
@@ -5176,6 +5836,10 @@ class RunService:
                 driver=driver or spec.harness_driver,
                 attempt_base=run.base_sha or "",
                 timeout_seconds=spec.harness_timeout,
+                # R41-04 (#359): the run's recorded collaboration source
+                # branch — the backend cuts THIS ref, never an id
+                # re-derivation.
+                source_branch=collaboration_branch,
             )
             # Q35-04: the native-start intent, persisted BEFORE the
             # provider call. ``backend.start`` cuts the factory branch and
@@ -5186,7 +5850,7 @@ class RunService:
             # decides the remaining uncertainty. Without this write a
             # lost start response would free the slot on local status
             # while the pipeline runs.
-            intent_ref = f"gitlab:pipeline:{project_id}@{factory_branch(run.issue_iid, run.id)}"
+            intent_ref = f"gitlab:pipeline:{project_id}@{collaboration_branch}"
             await record_native_start_intent(self._session_factory, run_id, intent_ref)
             # Q39-02 (#321): the resolved ApprovedInput and its
             # executor-input digest persist BESIDE the native-start intent
@@ -5936,7 +6600,11 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
             return
 
-        branch = factory_branch(issue_iid, run_id)
+        # R41-04 (#359): the drift check reads the run's COLLABORATION
+        # target source branch — never an id derivation.
+        branch = await self._collaboration_branch_or_block(run_id)
+        if branch is None:
+            return
 
         # Verdict invalidation (ADR-0006/0008): a human push on the bot branch
         # invalidates any pipeline verdict — block, never overwrite.
@@ -6306,7 +6974,18 @@ class RunService:
         # Candidate FRESHNESS: the shortcut binds to the LIVE branch head,
         # re-read now — a push that landed since the recorded decision
         # invalidates the shortcut (the required verification reruns).
-        head = await self._gitlab.get_branch_head(project_id, factory_branch(issue_iid, run_id))
+        # R41-04 (#359): the head read is the COLLABORATION target source
+        # branch; an unresolved target is a typed refusal of the shortcut.
+        try:
+            review_only_branch = await self._collaboration_branch(run_id)
+        except CollaborationTargetError as exc:
+            return {
+                "allowed": False,
+                "reason": "collaboration_target_unresolved",
+                "detail": exc.detail,
+                "observable": OBSERVABLE_REVIEW_ONLY_RECOVERY,
+            }
+        head = await self._gitlab.get_branch_head(project_id, review_only_branch)
         current_binding = CandidateBinding(
             candidate_sha=str(head or candidate_sha),
             tested_identity=str(verification.get("tested_oid") or candidate_sha),
@@ -6504,6 +7183,73 @@ class RunService:
         }
         return outcome
 
+    async def _closing_review_input(self, run_id: str) -> str:
+        """The closing reviewer's brief — the ACTIVE approved input (R41-06).
+
+        The captured defect: the reviewer's ``plan_summary`` came from the
+        legacy ``_read_plan_evidence`` read, whose source (the
+        ``evidence.plan`` section) ONLY the planning leg writes. A review
+        round's child is admitted straight into ``proposing`` — it never
+        plans — so its closing review was briefed with the EMPTY STRING:
+        no correction text, no plan, no constraints, while the executor
+        itself consumed the #321 ``ApprovedInput`` resolved from the
+        ACTIVE_PLAN seed. The fix is the canonical reader: the reviewer
+        is briefed from the SAME join the executor was —
+        :func:`resolve_approved_input` over the run's durable state, so a
+        round child's brief carries the folded correction revision (the
+        new correction text with its full provenance and the inherited
+        constraints), and an adaptive parent's brief carries the ACTIVE
+        revision, never the superseded spec bytes.
+
+        Degradation stays honest and read-only: this is a briefing, not
+        an execution authorization, so a spec or rebind refusal falls
+        back to the legacy plan-evidence text (logged) instead of
+        blocking readiness — the same bytes the ordinary pre-revision
+        world always reviewed under.
+        """
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except SpecInvalid as exc:
+            logger.info(
+                "Run %s closes review without a resolvable spec (%s) — the"
+                " legacy plan evidence briefs the reviewer",
+                run_id[:8],
+                exc,
+            )
+            summary, _ = await self._read_plan_evidence(run_id)
+            return summary
+        try:
+            approved_input = await resolve_approved_input(
+                self._session_factory,
+                run_id,
+                task_title=spec.task_title,
+                task_description=spec.task_description,
+                spec_plan_text=spec.plan_summary,
+                spec_plan_digest=spec.plan_digest,
+                allowed_writes=spec.allowed_paths,
+            )
+        except RevisionRebindRefused as exc:
+            logger.warning(
+                "closing_review.input_degraded: run %s could not resolve its"
+                " approved input [%s] — the legacy plan evidence briefs the"
+                " reviewer (never the superseded spec bytes)",
+                run_id[:8],
+                exc.code,
+            )
+            summary, _ = await self._read_plan_evidence(run_id)
+            return summary
+        if approved_input.revision_bound:
+            logger.info(
+                "closing_review.input: run %s briefs under active revision %d"
+                " (digest %s, decision %s) — source %s",
+                run_id[:8],
+                approved_input.active_revision,
+                approved_input.plan_digest[:12],
+                approved_input.activated_by_decision[:12] or "unknown",
+                approved_input.source,
+            )
+        return approved_input.brief()
+
     async def _review_and_ready(
         self,
         run_id: str,
@@ -6565,23 +7311,45 @@ class RunService:
         # R07 bounded step ``review``: a review already persisted for THIS
         # candidate sha is replayed — the reviewer (a paid model call) runs
         # exactly once per (run, cycle, candidate). A different sha (a new
-        # candidate after a repair) legitimately re-reviews.
-        plan_summary, _ = await self._read_plan_evidence(run_id)
+        # candidate after a repair) legitimately re-reviews. R41-06: the
+        # sha alone no longer proves applicability — the replay also
+        # requires the record's OBLIGATION digest (the reviewer brief +
+        # the candidate + the code-requesting corrections' text/head/
+        # policy) to match the CURRENT obligation identity, so a
+        # materially changed correction on the same sha re-reviews
+        # instead of borrowing a stale verdict.
+        plan_summary = await self._closing_review_input(run_id)
+        requests = await read_review_feedback_requests(self._session_factory, run_id)
+        obligation = review_obligation_digest(
+            plan_text=plan_summary,
+            candidate_sha=candidate_sha,
+            requests=_required_feedback_requests(requests, mr_iid),
+        )
         stored = await self._read_review_evidence(run_id)
+        reuse_reason = _review_reuse_refusal(stored, candidate_sha, obligation)
         if (
             isinstance(stored, dict)
             and stored.get("sha") == candidate_sha
             and str(stored.get("verdict") or "")
+            and reuse_reason is None
         ):
             verdict = str(stored.get("verdict") or "")
             summary = str(stored.get("summary") or "")
             findings = _findings_from_evidence(stored.get("findings"))
             logger.info(
-                "Run %s replays its persisted review of %s — no second model call",
+                "Run %s replays its persisted review of %s (obligation %s) — no second model call",
                 run_id[:8],
                 candidate_sha[:8],
+                obligation[:12],
             )
         else:
+            if reuse_reason is not None:
+                logger.info(
+                    "Run %s refuses to reuse its persisted review of %s — %s; re-reviewing",
+                    run_id[:8],
+                    candidate_sha[:8],
+                    reuse_reason,
+                )
             try:
                 review = await self._reviewer.review(
                     project_id=project_id,
@@ -6635,6 +7403,9 @@ class RunService:
                     "sha": candidate_sha,  # ADR-0008: the review approves THIS sha
                     "summary": summary,
                     "findings": findings,
+                    # R41-06: the applicability identity this verdict
+                    # answers — the replay compares it, never the sha alone.
+                    "obligation_digest": obligation,
                 }
             }
             await self._merge_run_evidence(run_id, review_evidence)
@@ -6652,8 +7423,12 @@ class RunService:
         # F19 (ADR-0018 §5): post-review freshness — the branch head must
         # still BE the reviewed candidate the moment the run goes ready. The
         # pre-review external_change check cannot cover a push that lands
-        # while the review is in flight.
-        branch = factory_branch(issue_iid, run_id)
+        # while the review is in flight. R41-04 (#359): the branch is the
+        # COLLABORATION target source branch (an unresolved target parks
+        # the run typed before the read).
+        branch = await self._collaboration_branch_or_block(run_id)
+        if branch is None:
+            return
         try:
             head = await self._gitlab.get_branch_head(project_id, branch)
         except GitLabAPIError as exc:
@@ -6687,14 +7462,13 @@ class RunService:
         # Q39-13 (#332): the final summary names the resolved and the
         # still-open discussions and the tested candidate (the section
         # renders empty — byte-identical legacy comment — for runs that
-        # never recorded review feedback).
-        feedback_section = ""
-        requests = await read_review_feedback_requests(self._session_factory, run_id)
-        if requests:
-            states = self._discussion_resolution_states(
-                await self._discussions_or_none(project_id, mr_iid)
-            )
-            feedback_section = review_feedback_summary_section(requests, states, candidate_sha)
+        # never recorded review feedback). R41-06: when the discussions
+        # surface is UNREADABLE the section names the resolution UNKNOWN —
+        # a best-effort handoff never claims a state it could not read.
+        feedback_section = await self._closing_feedback_section(
+            requests, project_id, mr_iid, candidate_sha
+        )
+        await self._release_readiness_hold(run_id)
 
         # ADR-0027: the reason and the finalization iron checks have ONE
         # shared source (forge.runs.consistency) across GitLab/GitHub/Azure.
@@ -6744,30 +7518,70 @@ class RunService:
         resolvable-discussion model (the REVIEWER resolves the thread;
         forge never resolves, never merges, never marks the human
         decision complete). A plain non-resolvable thread can never
-        resolve and therefore never gates; an unreadable discussions
-        surface degrades with a logged warning rather than deadlocking
-        the run. When discussions are still open, ONE summary note (per
-        candidate — the A11 dedup) names the resolved and still-open
-        threads so the reviewer knows exactly what blocks readiness.
+        resolve and therefore never gates.
+
+        R41-06 — the required-resolution vs best-effort policy split.
+        With required obligations on THIS run's MR, an UNKNOWN resolution
+        BLOCKS: an unreadable discussions surface or a required
+        discussion deleted from the MR parks the run under the typed
+        ``readiness.blocked_by.evidence_unavailable`` reason — unknown
+        renders as unknown, never a confirmed-human-resolution claim and
+        never a silent ready (a transport failure is never an approval).
+        Without required obligations the surface is advisory: the run
+        hands off best-effort and the final summary names what it could
+        not read. A request recorded on ANOTHER MR never gates this one —
+        the resolution join is scoped to the run's own collaboration
+        surface, so a foreign thread id cannot hold or release this
+        delivery. ONE summary note per candidate (the A11 dedup) names
+        what blocks readiness either way.
         """
         requests = await read_review_feedback_requests(self._session_factory, run_id)
-        required = [
-            request
-            for request in requests.values()
-            if request.classification == IN_SCOPE_CORRECTION_CLASS
-            and request.status in (REQUEST_STAGED, REQUEST_DISPATCHED)
-        ]
+        required = _required_feedback_requests(requests, mr_iid)
         if not required or mr_iid is None:
             return False
         discussions = await self._discussions_or_none(project_id, mr_iid)
         if discussions is None:
-            return False  # degraded honestly — logged at the read
+            await self._hold_readiness_for_unknown_signal(
+                run_id,
+                project_id,
+                mr_iid,
+                candidate_sha,
+                required,
+                reason=(
+                    "the discussions surface is unreadable, so the resolution "
+                    "of the required correction discussions is unknown"
+                ),
+            )
+            return True
         states = self._discussion_resolution_states(discussions)
+        present = {discussion.id for discussion in discussions}
         unresolved = [
             request
             for request in required
             if request.discussion_id in states and not states[request.discussion_id]
         ]
+        deleted = [
+            request
+            for request in required
+            if request.discussion_id and request.discussion_id not in present
+        ]
+        if deleted:
+            # The thread that carried a required correction is gone from
+            # a READABLE surface: the human's resolution signal was
+            # deleted, not given — the obligation is neither resolved nor
+            # confirmably open. Hold with the unknown named.
+            await self._hold_readiness_for_unknown_signal(
+                run_id,
+                project_id,
+                mr_iid,
+                candidate_sha,
+                deleted,
+                reason=(
+                    "the discussion threads named below no longer exist on "
+                    "this merge request, so their resolution is unknown"
+                ),
+            )
+            return True
         if not unresolved:
             return False
         logger.info(
@@ -6776,6 +7590,18 @@ class RunService:
             run_id[:8],
             candidate_sha[:8],
             len(unresolved),
+        )
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "readiness": {
+                    "blocked_by": {
+                        "code": "",
+                        "feedback": _discussion_names(unresolved),
+                        "evidence_unavailable": [],
+                    }
+                }
+            },
         )
         section = review_feedback_summary_section(requests, states, candidate_sha)
         await self._post_deduped_mr_note(
@@ -6790,6 +7616,109 @@ class RunService:
             f"continues to readiness on its next pass.{_automated_footer()}",
         )
         return True
+
+    async def _hold_readiness_for_unknown_signal(
+        self,
+        run_id: str,
+        project_id: int,
+        mr_iid: int,
+        candidate_sha: str,
+        required: list[ReviewFeedbackRequest],
+        *,
+        reason: str,
+    ) -> None:
+        """Park a green candidate whose required resolution signal is
+        UNKNOWN (R41-06) — the typed ``evidence_unavailable`` hold.
+
+        The run stays in its current non-ready state (the reconciler
+        re-drives the gate each pass); the ``readiness.blocked_by``
+        evidence names the axis, and ONE MR note (deduped per candidate)
+        names the unknown discussions and the way back to a readable
+        signal. Nothing claims the human resolved anything, and nothing
+        ever resolves a thread on the run's behalf.
+        """
+        logger.info(
+            "Run %s holds a green candidate at %s — %d required review "
+            "discussion(s) have an UNKNOWN resolution (%s)",
+            run_id[:8],
+            candidate_sha[:8],
+            len(required),
+            reason,
+        )
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "readiness": {
+                    "blocked_by": {
+                        "code": "",
+                        "feedback": [],
+                        "evidence_unavailable": _discussion_names(required),
+                    }
+                }
+            },
+        )
+        names = "\n".join(f"- {name}" for name in _discussion_names(required))
+        await self._post_deduped_mr_note(
+            project_id,
+            mr_iid,
+            run_id,
+            f"review-feedback-evidence:{run_id}:{candidate_sha}",
+            "## Candidate held — discussion resolution unknown\n\n"
+            f"{reason.strip().rstrip('.')}. The resolution of:\n\n{names}\n\n"
+            "is **not resolved** and cannot be confirmed right now — readiness "
+            "is held until the resolution signal is readable again (re-raise "
+            "the request on a live discussion thread if the original was "
+            "deleted). No resolution is claimed or performed by forge."
+            f"{_automated_footer()}",
+        )
+
+    async def _closing_feedback_section(
+        self,
+        requests: dict[str, ReviewFeedbackRequest],
+        project_id: int,
+        mr_iid: int | None,
+        candidate_sha: str,
+    ) -> str:
+        """The final summary's review-feedback block (R41-06 tri-state).
+
+        A readable surface renders the canonical section (resolved /
+        still-open — the Q39-13 shape, byte-identical). An unreadable
+        surface renders the best-effort handoff: the discussions are
+        named with their resolution UNKNOWN — never a resolved or
+        still-open claim the degraded read cannot back.
+        """
+        if not requests:
+            return ""
+        discussions = await self._discussions_or_none(project_id, mr_iid)
+        if discussions is None:
+            lines = ["**Review feedback:**", f"- Tested candidate: `{candidate_sha}`"]
+            lines.append("Discussion resolution unknown (surface unreadable):")
+            lines.extend(
+                f"- {request.discussion_id or request.note_id} "
+                f"({request.classification}, @{request.actor}) — resolution unconfirmed"
+                for request in sorted(requests.values(), key=lambda request: request.note_id)
+            )
+            return "\n".join(lines)
+        return review_feedback_summary_section(
+            requests, self._discussion_resolution_states(discussions), candidate_sha
+        )
+
+    async def _release_readiness_hold(self, run_id: str) -> None:
+        """Record that a previously-held readiness released (R41-06).
+
+        Only a run that actually recorded a ``readiness`` hold writes the
+        release — the clear shape names every axis empty, so the audit
+        reads "held, then released" instead of an unexplained lift.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            held = isinstance((run.evidence or {}).get("readiness"), dict)
+        if not held:
+            return
+        await self._merge_run_evidence(
+            run_id,
+            {"readiness": {"blocked_by": {"code": "", "feedback": [], "evidence_unavailable": []}}},
+        )
 
     async def _post_deduped_mr_note(
         self, project_id: int, mr_iid: int, run_id: str, key: str, body: str
@@ -6872,9 +7801,15 @@ class RunService:
         and the whole context to ``REPAIR_CONTEXT_MAX_CHARS`` (ADR-0013).
         """
         sections: list[str] = []
-        issue_iid = await self._read_issue_iid(run_id)
-        if issue_iid is not None:
-            branch = factory_branch(issue_iid, run_id)
+        # R41-04 (#359): the previous-commit context reads the run's
+        # COLLABORATION target source branch. The context is DISPLAY for
+        # the next proposal — an unresolved target skips the section (the
+        # enforcement legs already parked the run typed).
+        try:
+            branch = await self._collaboration_branch(run_id)
+        except CollaborationTargetError:
+            branch = ""
+        if branch:
             try:
                 # F28: the branch object carries the head commit (incl. the
                 # message) — no paginated commit-history read here either.
@@ -7831,10 +8766,26 @@ class RunService:
             project_id,
             settle_seconds=self._publish_settle_seconds(),
         )
+        # R41-04 (#359) — LIVE-FOUND (the R41-09 #364 live trace, run
+        # 6e0fdf34): the harness publication path passed NO branch, so the
+        # shared publisher fell back to the run-id derivation and a review
+        # round's child committed onto ``factory/<issue>/<child8>`` — a
+        # SECOND branch beside the lineage's collaboration surface — and
+        # the (correctly target-resolving) drift check then blocked the
+        # run ``external_change``. The publisher is one of the
+        # branch-consuming legs that must resolve through the PERSISTED
+        # collaboration target, never a re-derivation: resolve it here and
+        # pin the publication to the lineage's recorded source branch. A
+        # refused/unresolved target blocks the run (typed, zero provider
+        # calls) instead of guessing.
+        source_branch = await self._collaboration_branch_or_block(run_id)
+        if source_branch is None:
+            return
         result = await publish_candidate(
             gitlab=self._gitlab,
             session_factory=self._session_factory,
             writer=writer,
+            branch=source_branch,
             run=run,
             bundle=bundle,
             fence_check=_fence_valid,
@@ -7894,7 +8845,12 @@ class RunService:
             run = await self._get_run(session, run_id)
             mr_iid = run.mr_iid
             cycle = run.commit_cycle or 1
-        branch = factory_branch(run.issue_iid, run_id)
+        # R41-04 (#359): the harness candidate's Draft MR rides the run's
+        # COLLABORATION target source branch — never an id derivation (a
+        # modern round child must land on the lineage's surface).
+        branch = await self._collaboration_branch_or_block(run_id)
+        if branch is None:
+            return
         try:
             if mr_iid is not None:
                 await self._update_draft_mr(project_id, run_id, mr_iid, branch, sha, cycle)
@@ -8119,6 +9075,74 @@ class RunService:
 
     def _target_branch(self) -> str:
         return getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main"
+
+    # ------------------------------------------------------------------
+    # R41-04 (#359) — branch identity through the collaboration target
+    # ------------------------------------------------------------------
+
+    async def _resolve_collaboration_target(self, run_id: str) -> CollaborationTarget:
+        """The run's collaboration target — the live link, or the ONE
+        legacy materialization (validated against recorded MR/source
+        information; an unresolved topology raises the typed refusal
+        AND records a refusal row — never an inferred branch)."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            return await target_for_run(session, run, target_branch=self._target_branch())
+
+    async def _collaboration_branch(self, run_id: str) -> str:
+        """The run's source branch, resolved through the target row.
+
+        The ONLY branch source for the GitLab lane from #359: the
+        publisher, the drift checks, the harness dispatch, CI collection
+        and the operator surface all resolve here — never a re-derivation
+        from the run id (the boundary test confines exactly that).
+        """
+        target = await self._resolve_collaboration_target(run_id)
+        return str(target.source_branch or "")
+
+    async def _collaboration_branch_or_block(self, run_id: str) -> str | None:
+        """:meth:`_collaboration_branch` for the enforcement legs — a
+        refused/unresolved target BLOCKS the run (typed reason, zero
+        provider calls) instead of guessing a branch."""
+        try:
+            return await self._collaboration_branch(run_id)
+        except CollaborationTargetError as exc:
+            logger.error(
+                "Run %s collaboration target refused [%s] — %s",
+                run_id[:8],
+                exc.code,
+                exc.detail,
+            )
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"{exc.code}: {exc.detail}"[:200])
+            return None
+
+    async def _record_target_mismatch(
+        self, run_id: str, target: CollaborationTarget, mismatches: list[str]
+    ) -> None:
+        """The ``collaboration.target_mismatch`` observability row (no writes
+        to any collaboration surface — the guard precedes them)."""
+        detail = "; ".join(mismatches)
+        logger.error(
+            "Run %s collaboration target mismatch — %s (target %s, branch %s)",
+            run_id[:8],
+            detail,
+            target.id[:8],
+            target.source_branch,
+        )
+        async with self._session_factory() as session:
+            session.add(
+                Outbox(
+                    flow_run_id=run_id,
+                    event_type=TARGET_MISMATCH_EVENT,
+                    payload={
+                        "run_id": run_id,
+                        "target_id": target.id,
+                        "source_branch": target.source_branch,
+                        "mismatches": mismatches,
+                    },
+                )
+            )
+            await session.commit()
 
     def _compile_harness_selection(self) -> HarnessSelection:
         """ADR-0023 §2: preference ∩ lanes → the frozen harness decision.
@@ -8728,8 +9752,329 @@ class RunService:
             await controller.complete_action(action_id, status, remote_result)  # type: ignore[arg-type]
             await session.commit()
 
-    def _native_occupancy_probe(self) -> NativeProbe:
-        """The GitLab occupancy probe for :func:`reconcile_draining` (Q35-04).
+    @staticmethod
+    def _parse_pipeline_created_at(raw: str | None) -> datetime | None:
+        """Parse a pipeline's provider-side ``created_at`` stamp (best-effort).
+
+        Accepts the ISO-8601 shapes GitLab answers with (``...Z`` suffix or
+        an explicit offset). Anything unparseable or missing answers ``None``
+        — a degraded timestamp degrades correlation, it never guesses.
+        """
+        if not raw:
+            return None
+        text = raw.strip()
+        if text.endswith(("Z", "z")):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return as_aware_utc(parsed)
+
+    @staticmethod
+    def _classify_branch_pipeline(pipeline: Pipeline, corr: _OccupancyCorrelation) -> str:
+        """Correlate ONE branch-listing row with the current attempt (pure).
+
+        Returns ``current`` (this attempt's execution), ``history`` (an
+        earlier attempt's or an unrelated pipeline — never charges or frees
+        the slot) or ``ambiguous`` (neither side provable). The checks run
+        strongest-evidence first; identity and monotone-id bounds dominate
+        timestamps so a degraded ``created_at`` cannot misattribute a
+        recorded row:
+
+        - an id an earlier attempt recorded → ``history`` (ids are
+          per-project monotone);
+        - a sha this attempt builds ON (recorded base/round head/expected
+          parent) → ``history`` — the predecessor's verification;
+        - a merge-request verification source → ``history`` (never coding
+          occupancy — the issue's policy line);
+        - ``created_at`` inside the intent's dispatch window (skew-tolerant)
+          → ``current``; before it → ``history``;
+        - no usable ``created_at``: a sha this attempt recorded as its own
+          effect → ``current`` when the id also clears the prior-id bound;
+          otherwise an id strictly above every recorded prior → ``current``
+          (a fresh pipeline on the run-owned branch); anything else →
+          ``ambiguous``.
+        """
+        if pipeline.id in corr.prior_pipeline_ids:
+            return "history"
+        sha = (pipeline.sha or "").strip()
+        if sha and sha in corr.base_shas:
+            return "history"
+        if (pipeline.source or "").lower() in _OCCUPANCY_NON_CODING_SOURCES:
+            return "history"
+        created = RunService._parse_pipeline_created_at(pipeline.created_at)
+        if created is not None:
+            if corr.intent_at is not None:
+                window_start = as_aware_utc(corr.intent_at) - _OCCUPANCY_INTENT_SKEW
+                if created < window_start:
+                    return "history"
+            return "current"
+        newest_prior = max(corr.prior_pipeline_ids, default=0)
+        if pipeline.id <= newest_prior:
+            return "history"
+        if sha and sha in corr.effect_shas:
+            return "current"
+        if corr.prior_pipeline_ids:
+            # Above every recorded earlier execution, on the run-owned
+            # branch: a fresh start this attempt must own.
+            return "current"
+        return "ambiguous"
+
+    @classmethod
+    def _branch_search_occupancy(
+        cls, pipelines: list[Pipeline], corr: _OccupancyCorrelation
+    ) -> NativeStatus:
+        """The occupancy verdict over one correlated branch listing (pure).
+
+        The R41-05 decision table — the current execution decides, never a
+        convenient terminal row from a previous round:
+
+        - any ``current`` pipeline ACTIVE → RUNNING (the lease keeps its
+          slot: the capacity is genuinely occupied — the mixed-history
+          shape a historical ``success`` plus a current ``running`` used
+          to misread as TERMINAL);
+        - ``current`` pipelines exist and every one is terminal → TERMINAL
+          (a CORRELATED terminal execution — the only branch evidence that
+          releases a slot);
+        - else, any ACTIVE ``ambiguous`` pipeline → RUNNING (an active job
+          on the run-owned branch that may be this attempt's: occupancy is
+          retained, never picked conveniently);
+        - otherwise (empty listing, or history/verification only) →
+          UNKNOWN: an empty response is NOT proof of never-started while
+          the original start can still be accepted or appear after a
+          delay — the lease keeps draining with its age visible, the
+          settlement/reconciliation protocol the occupancy machinery
+          already runs.
+        """
+
+        def _active(pipeline: Pipeline) -> bool:
+            return (pipeline.status or "").lower() in _CI_ACTIVE_STATUSES
+
+        current = [p for p in pipelines if cls._classify_branch_pipeline(p, corr) == "current"]
+        if any(_active(p) for p in current):
+            return NativeStatus.RUNNING
+        if current:
+            return NativeStatus.TERMINAL
+        ambiguous = [p for p in pipelines if cls._classify_branch_pipeline(p, corr) == "ambiguous"]
+        if any(_active(p) for p in ambiguous):
+            return NativeStatus.RUNNING
+        return NativeStatus.UNKNOWN
+
+    @staticmethod
+    def _gitlab_intent_ref_shape(ref: str | None) -> tuple[int, str] | None:
+        """``(project, branch)`` when *ref* is the GitLab intent shape."""
+        if not ref or not ref.startswith("gitlab:pipeline:"):
+            return None
+        body = ref.split(":", 1)[1]
+        if not body.startswith("pipeline:"):
+            return None
+        marker = body.split(":", 1)[1]
+        if "@" not in marker:
+            return None
+        project_raw, _, branch = marker.partition("@")
+        try:
+            return int(project_raw), branch
+        except ValueError:
+            return None
+
+    async def _correlation_for_lease(
+        self, session: AsyncSession, lease, project_id: int, branch: str
+    ) -> _OccupancyCorrelation | None:
+        """Collect ONE lease's correlation facts on an open session (the
+        shared core of the single-key and the snapshot collectors —
+        identical semantics by construction), R41-05 (#360).
+
+        The lease names the run and the dispatch window; the R41-03
+        identity surfaces supply everything else — the journal's
+        harness-start rows split at the window into a verified LIVE
+        handle versus earlier attempts' recorded ids, the journal's
+        succeeded commit shas and the commit intents' effects inside the
+        window become the attempt's own effect identities, and the run's
+        recorded base, the intents' expected parents and the round's
+        approved head become the predecessor identities. All from durable
+        rows recorded at dispatch time — the branch listing itself never
+        feeds the correlation (that would be assuming the conclusion).
+        """
+        if not lease.run_id:
+            return None
+        run = await session.get(FlowRun, lease.run_id)
+        if run is None:
+            return None
+        intent_at = as_aware_utc(lease.native_intent_at) if lease.native_intent_at else None
+
+        live_pipeline_id = 0
+        prior_ids: set[int] = set()
+        effect_shas: set[str] = set()
+        base_shas: set[str] = set()
+        if run.base_sha:
+            base_shas.add(str(run.base_sha))
+        harness_starts = (
+            await session.execute(
+                select(ActionLog.created_at, ActionLog.remote_result).where(
+                    ActionLog.flow_run_id == run.id,
+                    ActionLog.action_kind == "harness_start",
+                    ActionLog.status == "succeeded",
+                )
+            )
+        ).all()
+        for created_at, remote_result in harness_starts:
+            pipeline_id = int((remote_result or {}).get("pipeline_id") or 0)
+            if not pipeline_id:
+                continue
+            stamp = as_aware_utc(created_at) if created_at is not None else None
+            if intent_at is not None and stamp is not None and stamp >= intent_at:
+                # The provider answered a start AFTER this attempt's
+                # intent — a verified handle for the CURRENT attempt.
+                live_pipeline_id = max(live_pipeline_id, pipeline_id)
+                continue
+            prior_ids.add(pipeline_id)
+        commit_effects = (
+            await session.execute(
+                select(ActionLog.created_at, ActionLog.remote_result).where(
+                    ActionLog.flow_run_id == run.id,
+                    ActionLog.action_kind == "commit",
+                    ActionLog.correlation_id == branch,
+                    ActionLog.status == "succeeded",
+                )
+            )
+        ).all()
+        for created_at, remote_result in commit_effects:
+            sha = str((remote_result or {}).get("sha") or "")
+            if not sha:
+                continue
+            stamp = as_aware_utc(created_at) if created_at is not None else None
+            if intent_at is None or stamp is None or stamp >= intent_at:
+                effect_shas.add(sha)
+        for intent in await intents_for_run(session, run.id):
+            if intent.operation != "commit" or intent.target_ref != branch:
+                continue
+            if intent.expected_parent_oid:
+                base_shas.add(str(intent.expected_parent_oid))
+            if not intent.provider_object_id:
+                continue
+            stamp = as_aware_utc(intent.created_at) if intent.created_at is not None else None
+            if intent_at is None or stamp is None or stamp >= intent_at:
+                effect_shas.add(str(intent.provider_object_id))
+        for round_base in (
+            (
+                await session.execute(
+                    select(ReviewRound.base_head_sha).where(ReviewRound.child_run_id == run.id)
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            if round_base:
+                base_shas.add(str(round_base))
+        harness_evidence = (run.evidence or {}).get("harness")
+        if isinstance(harness_evidence, dict):
+            recorded = int(harness_evidence.get("pipeline_id") or 0)
+            if recorded and recorded != live_pipeline_id:
+                # In this probe's path the lease carries no handle, so a
+                # recorded harness pipeline id belongs to an EARLIER
+                # attempt (the current attempt's handle write is the
+                # lease write that would have routed us to it).
+                prior_ids.add(recorded)
+        lease_handle = str(lease.native_handle or "")
+        if lease_handle.startswith(f"gitlab:pipeline:{project_id}:"):
+            recorded = int(lease_handle.rsplit(":", 1)[1] or 0)
+            if recorded and recorded != live_pipeline_id:
+                prior_ids.add(recorded)
+        return _OccupancyCorrelation(
+            run_id=str(run.id),
+            branch=branch,
+            intent_at=intent_at,
+            live_pipeline_id=live_pipeline_id,
+            prior_pipeline_ids=frozenset(prior_ids),
+            base_shas=frozenset(base_shas),
+            effect_shas=frozenset(effect_shas),
+        )
+
+    async def _occupancy_correlation(
+        self, intent_ref: str, project_id: int, branch: str
+    ) -> _OccupancyCorrelation | None:
+        """The single-key spelling: the correlation for the OPEN lease
+        carrying *intent_ref* (used when the probe runs standalone, not
+        under the reconciler's open transaction)."""
+        from forge.adaptive.admission import ExecutionLease
+
+        async with self._session_factory() as session:
+            lease = (
+                (
+                    await session.execute(
+                        select(ExecutionLease)
+                        .where(
+                            ExecutionLease.native_intent_ref == intent_ref,
+                            ExecutionLease.released_at.is_(None),
+                        )
+                        .order_by(ExecutionLease.native_intent_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if lease is None:
+                return None
+            return await self._correlation_for_lease(session, lease, project_id, branch)
+
+    async def _collect_draining_correlations(self) -> dict[str, _OccupancyCorrelation]:
+        """Snapshot the correlation facts for EVERY open lease whose GitLab
+        start intent is unresolved — one short session, fully closed
+        BEFORE :func:`reconcile_draining` opens its own.
+
+        The reconciler's probe pass must never open a nested session
+        while the reconciler's transaction is open: on a single-connection
+        pool the two would share one transaction and the inner session's
+        close would roll the reconciler's pending releases back. The
+        snapshot removes the need — the probe answers from memory plus
+        provider reads alone. A lease that appears after the snapshot
+        misses its key this tick (the probe reads UNKNOWN, the lease
+        keeps draining, age visible) and joins the next tick.
+        """
+        from forge.adaptive.admission import ExecutionLease
+
+        correlations: dict[str, _OccupancyCorrelation] = {}
+        async with self._session_factory() as session:
+            leases = (
+                (
+                    await session.execute(
+                        select(ExecutionLease).where(
+                            ExecutionLease.released_at.is_(None),
+                            ExecutionLease.native_intent_ref.is_not(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for lease in leases:
+                shape = self._gitlab_intent_ref_shape(lease.native_intent_ref)
+                if shape is None:
+                    continue  # another provider's marker, or a handle shape
+                project_id, branch = shape
+                correlation = await self._correlation_for_lease(session, lease, project_id, branch)
+                if correlation is not None:
+                    correlations[str(lease.native_intent_ref)] = correlation
+        return correlations
+
+    async def _native_pipeline_handle_status(
+        self, project_id: int, pipeline_id: int
+    ) -> NativeStatus:
+        """The handle-shaped verdict: one ``get_pipeline`` read (Q35-04)."""
+        pipeline = await self._gitlab.get_pipeline(project_id, pipeline_id)
+        return (
+            NativeStatus.RUNNING
+            if (pipeline.status or "").lower() in _CI_ACTIVE_STATUSES
+            else NativeStatus.TERMINAL
+        )
+
+    def _native_occupancy_probe(
+        self, correlations: Mapping[str, _OccupancyCorrelation] | None = None
+    ) -> NativeProbe:
+        """The GitLab occupancy probe for :func:`reconcile_draining` (Q35-04),
+        correlated with the CURRENT execution attempt (R41-05, #360).
 
         Two key shapes, both provider-prefixed so a foreign lease reads
         UNKNOWN (each provider's reconciler owns its own keys):
@@ -8738,11 +10083,27 @@ class RunService:
           dispatch recorded: one ``get_pipeline`` read, terminal when the
           status left the active set;
         - ``gitlab:pipeline:<project>@<branch>`` — the intent marker of a
-          start whose handle never landed (lost response): pipelines on
-          the run-OWNED factory branch decide it — none means the start
-          never created a job (capacity returns), any pipeline terminal
-          means the job finished, otherwise running. A provider error
-          raises and reads UNKNOWN: uncertain occupancy holds.
+          start whose handle never landed (lost response). The branch
+          listing is CORRELATED with the attempt's recorded identities
+          (:meth:`_occupancy_correlation` /
+          :meth:`_collect_draining_correlations`): each pipeline's sha
+          against the attempt's base/effect identities, its id against
+          every id an earlier attempt recorded, its ``created_at``
+          against the intent's dispatch window, and verification
+          pipelines are never coding occupancy. Any CURRENT pipeline
+          active → RUNNING (the lease keeps its slot); only a
+          fully-terminal CORRELATED set → TERMINAL; an empty or
+          history-only listing is NOT never-started (the original start
+          can still land) → UNKNOWN, the lease keeps draining with its
+          age visible. A verified live handle for the attempt answers
+          through the handle-shaped read instead, so the two probes
+          AGREE for the same recorded execution. A provider error raises
+          and reads UNKNOWN: uncertain occupancy holds.
+
+        *correlations* is the reconciler tick's PRE-COLLECTED snapshot
+        (same semantics, no session opened while the caller's
+        transaction runs); without it each intent key collects its own
+        facts — the standalone spelling tests and one-off probes use.
         """
 
         async def probe(key: str) -> NativeStatus:
@@ -8754,20 +10115,41 @@ class RunService:
             body = payload.split(":", 1)[1]
             if "@" in body:  # the intent shape: <project>@<branch>
                 project_raw, _, branch = body.partition("@")
-                pipelines = await self._gitlab.list_pipelines(int(project_raw), ref=branch)
-                if not pipelines:
-                    return NativeStatus.TERMINAL  # nothing ever started
-                statuses = {(p.status or "").lower() for p in pipelines}
-                if statuses - _CI_ACTIVE_STATUSES:
-                    return NativeStatus.TERMINAL
-                return NativeStatus.RUNNING
+                project_id = int(project_raw)
+                if correlations is not None:
+                    # The tick's snapshot: a key it does not carry joined
+                    # after collection — UNKNOWN this pass, next tick owns it.
+                    correlation = correlations.get(key)
+                else:
+                    correlation = await self._occupancy_correlation(key, project_id, branch)
+                if correlation is None:
+                    return NativeStatus.UNKNOWN  # no open lease carries this marker
+                if correlation.live_pipeline_id:
+                    return await self._native_pipeline_handle_status(
+                        project_id, correlation.live_pipeline_id
+                    )
+                # An unavailable provider (429/503/…) raises out of the
+                # listing read: the reconciler reads UNKNOWN and the lease
+                # keeps draining with its age visible.
+                pipelines = await self._gitlab.list_pipelines(project_id, ref=branch)
+                verdict = self._branch_search_occupancy(pipelines, correlation)
+                if verdict is NativeStatus.UNKNOWN:
+                    age = ""
+                    if correlation.intent_at is not None:
+                        age = f" ({int((datetime.now(timezone.utc) - correlation.intent_at).total_seconds())}s after the intent)"
+                    logger.warning(
+                        "Branch-search occupancy for run %s on %s unresolved%s — "
+                        "no current-attempt pipeline observed (%d listing row(s), "
+                        "all history/verification or empty); the lease keeps "
+                        "draining: the original start can still land",
+                        correlation.run_id[:8],
+                        branch,
+                        age,
+                        len(pipelines),
+                    )
+                return verdict
             project_raw, _, pipeline_raw = body.partition(":")
-            pipeline = await self._gitlab.get_pipeline(int(project_raw), int(pipeline_raw))
-            return (
-                NativeStatus.RUNNING
-                if (pipeline.status or "").lower() in _CI_ACTIVE_STATUSES
-                else NativeStatus.TERMINAL
-            )
+            return await self._native_pipeline_handle_status(int(project_raw), int(pipeline_raw))
 
         return probe
 
@@ -8776,10 +10158,22 @@ class RunService:
 
         The same evidence discipline as the release: a slot frees only
         when its native job is OBSERVED terminal through the provider
-        probe. Undecidable keys stay draining with their age visible
+        probe — correlated with the CURRENT execution attempt (R41-05),
+        never with any historical pipeline on the branch. Undecidable
+        keys stay draining with their age visible
         (:func:`forge.adaptive.admission.occupancy_report`).
+
+        The correlation snapshot is collected BEFORE the reconciler's own
+        session opens (:meth:`_collect_draining_correlations`): the probe
+        then runs on memory plus provider reads alone, so it never opens
+        a nested session inside the reconciler's open transaction (a
+        single-connection pool would otherwise interleave the two and
+        the inner close could roll the pending releases back).
         """
-        return await reconcile_draining(self._session_factory, self._native_occupancy_probe())
+        correlations = await self._collect_draining_correlations()
+        return await reconcile_draining(
+            self._session_factory, self._native_occupancy_probe(correlations)
+        )
 
     async def _release_execution_lease(self, run_id: str, reason: str) -> None:
         """Free the run's execution slot — from EVIDENCE, never local
@@ -8945,6 +10339,70 @@ def _findings_from_evidence(raw: Any) -> list[dict]:
     if not isinstance(raw, list):
         return []
     return [_finding_dict(entry) for entry in raw if isinstance(entry, dict)]
+
+
+def _required_feedback_requests(
+    requests: Mapping[str, ReviewFeedbackRequest], mr_iid: int | None
+) -> list[ReviewFeedbackRequest]:
+    """The code-requesting corrections gating THIS run's candidate (R41-06).
+
+    ONE definition shared by the readiness gate, the obligation digest
+    and the reviewer's brief: the live (staged/dispatched) in-scope
+    corrections, scoped to the run's OWN MR — a request recorded on
+    another MR never gates this delivery, whatever discussion id it
+    carries (``mr_iid is None`` is the MR-less shape: nothing to scope
+    by, every live obligation stays in the set so the digest remains
+    deterministic).
+    """
+    return sorted(
+        (
+            request
+            for request in requests.values()
+            if request.classification == IN_SCOPE_CORRECTION_CLASS
+            and request.status in (REQUEST_STAGED, REQUEST_DISPATCHED)
+            and (mr_iid is None or int(request.mr_iid) == int(mr_iid))
+        ),
+        key=lambda request: request.note_id,
+    )
+
+
+def _discussion_names(requests: Iterable[ReviewFeedbackRequest]) -> list[str]:
+    """The stable names a readiness hold records per required request."""
+    return [
+        request.discussion_id or request.note_id
+        for request in sorted(requests, key=lambda request: request.note_id)
+    ]
+
+
+def _review_reuse_refusal(
+    stored: Mapping[str, Any] | None, candidate_sha: str, obligation: str
+) -> str | None:
+    """Why a candidate-bound persisted review may NOT be replayed (R41-06).
+
+    ``None`` when there is nothing to refuse (no record, a record bound
+    to a different candidate, or a verdictless record — the fresh-review
+    cases) or when the record's obligation identity MATCHES the current
+    one (the replay is exactly what R07 promised). A refusal reason only
+    when the record LOOKS reusable by sha: it predates the obligation
+    identity (no digest — an unknown applicability is never assumed; the
+    reviewer re-runs once and the record is rewritten WITH its digest),
+    or the obligation MATERIALLY changed under the same sha (a different
+    correction text/head/policy or a different approved input — the sha
+    alone never proves the verdict still applies).
+    """
+    if not isinstance(stored, Mapping) or stored.get("sha") != candidate_sha:
+        return None
+    if not str(stored.get("verdict") or ""):
+        return None
+    stored_obligation = str(stored.get("obligation_digest") or "")
+    if not stored_obligation:
+        return "the persisted review predates the obligation identity (digest unknown)"
+    if stored_obligation != obligation:
+        return (
+            f"the obligation changed under the same sha (stored {stored_obligation[:12]},"
+            f" current {obligation[:12]})"
+        )
+    return None
 
 
 def _review_mr_comment(verdict: str, summary: str, findings: list[dict]) -> str:

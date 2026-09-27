@@ -173,12 +173,26 @@ class TestGatewayRouting:
         assert task.task_type == "event"
 
     async def test_duplicate_implement_note_is_deduplicated(self, app, client):
-        app.state.task_queue.is_duplicate = AsyncMock(return_value=True)
-        resp = await client.post(
+        """R41-02 (#357): the deduplicated answer is backed by the COMMITTED
+        inbox row (the Redis marker is only a post-commit cache hint) — the
+        first delivery lands durably, the replay deduplicates, and exactly
+        ONE wake-up was submitted."""
+        first = await client.post(
             "/webhook", json=note_payload("@forge /implement"), headers=webhook_headers()
         )
-        assert resp.json()["deduplicated"] is True
-        app.state.task_queue.submit.assert_not_awaited()
+        assert first.status_code == 202
+        assert first.json()["run_command"] is True
+        second = await client.post(
+            "/webhook", json=note_payload("@forge /implement"), headers=webhook_headers()
+        )
+        assert second.json()["deduplicated"] is True
+        assert app.state.task_queue.submit.await_count == 1  # one wake-up only
+        from forge.durable import EventInbox, StepRun
+
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1  # ONE durable command
 
     async def test_plain_mention_note_keeps_legacy_path(self, app, client):
         """Notes without a run command stay on the orchestrator event path."""

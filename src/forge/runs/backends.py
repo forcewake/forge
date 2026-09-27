@@ -297,6 +297,12 @@ class BackendStartSpec:
     repair, retry, recovery) — the adapter NEVER re-resolves model/target
     from live settings: a post-approval settings change or a worker
     restart cannot move what the gate approved.
+
+    R41-04 (#359): ``source_branch`` is the run's COLLABORATION target
+    source branch, resolved by the owning service before the dispatch —
+    the ref the backend cuts. It is absent only for legacy transport
+    callers, which fall back to the run-id derivation (no review rounds
+    exist on that path).
     """
 
     model: str
@@ -304,6 +310,7 @@ class BackendStartSpec:
     driver: str
     attempt_base: str
     timeout_seconds: int = 0
+    source_branch: str | None = None
 
 
 class CITharnessBackend:
@@ -349,7 +356,12 @@ class CITharnessBackend:
         plan: str,
         spec: BackendStartSpec | None = None,
     ) -> str:
-        branch = factory_branch(run.issue_iid, run.id)
+        # R41-04 (#359): the branch the lane cuts is the run's recorded
+        # collaboration source branch when the dispatch carried it; the
+        # run-id derivation remains only the legacy transport fallback.
+        branch = (spec.source_branch if spec and spec.source_branch else None) or factory_branch(
+            run.issue_iid, run.id
+        )
         # D05: the factory branch is cut from the ATTEMPT OID — the frozen
         # snapshot the diff builds against — never from the target branch
         # NAME (``main`` may have moved past the approval; the branch then

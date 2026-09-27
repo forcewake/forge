@@ -1,4 +1,4 @@
-# Delivery economics: accepted items priced by real identities (R37-13, Q39-11)
+# Delivery economics: accepted items priced by real identities (R37-13, Q39-11, R41-13)
 
 How forge explains what an accepted work item — and the whole programme
 — actually cost, joining REAL recorded ledgers to the executions and
@@ -7,12 +7,16 @@ acceptance decisions that produced them. Module:
 `tests/test_delivery_economics.py`; builders:
 `scripts/build_economics_report.py` (the economics report) and
 `scripts/build_accepted_task_ledger.py` (the accepted-task ledger,
-Q39-11). The executed report over the lab pilot's real recorded ledgers
-is committed at
+Q39-11, and the review-loop lineage fold, R41-13). The executed report
+over the lab pilot's real recorded ledgers is committed at
 [`evaluation/economics/lab-economics-v1.json`](../evaluation/economics/lab-economics-v1.json);
 the accepted-task ledger over the useful-WIP resume trace plus the #310
 SDK receipts is committed at
-[`evaluation/economics/accepted-task-ledger-v1.json`](../evaluation/economics/accepted-task-ledger-v1.json).
+[`evaluation/economics/accepted-task-ledger-v1.json`](../evaluation/economics/accepted-task-ledger-v1.json);
+the lineage-folded v2 ledger over the #364 review-and-correction
+capture is committed at
+[`evaluation/economics/accepted-task-ledger-v2.json`](../evaluation/economics/accepted-task-ledger-v2.json)
+(the v1 artifact is never overwritten).
 
 ## The join chain
 
@@ -266,3 +270,119 @@ The ledger's `observability` block carries the issue's gauges:
 `delivery.accepted_all_attempt_cost`, `delivery.programme_cost_per_accepted`,
 `cost.coverage`, `delivery.human_minutes`, plus `budget.closing_reserve`,
 `budget.phase_exhaustion` and `delivery.review_only_recovery`.
+
+## The review-lineage fold (R41-13 / #368)
+
+`fold_review_lineage()` / `accepted_ledger_v2_document()` extend the
+accepted-task ledger with the correction-loop shape (stamp
+`forge.delivery.accepted-ledger/2`; the identity chain gains the
+`root_run` link). The join: every run of a lineage names its
+`root_run_id` — the #359 collaboration identity the round rows carry
+and the lineage branch (`factory/<issue>/<root-short>`) names — plus a
+`root_join_basis` naming HOW it joined (a round row's `root_run_id`,
+the typed conflict's branch, the capture's own failed-attempt
+attribution). Correction rounds and prior failed attempts fold under
+the ONE root task; a run of another lineage stays programme-side, never
+folded into a root.
+
+- **No double counting across parent and child.** Each receipt id,
+  native job id and delivery label is counted ONCE over the root task's
+  member chains — the fold emits the proof (`no_double_count` with
+  distinct-vs-total counts, `delivery_labels_per_lineage: 1`); a repeat
+  receipt identity refuses exactly as the report's cross-run guard does
+  (counted under its first sorted attribution, the second scope's exact
+  total degrades to unknown — never a second copy of the spend). The
+  lineage's ONE MR is recorded once at the root (`collaboration_label`).
+- **Independent candidate outcomes.** Every round row carries its OWN
+  `round_outcome` (`ready_for_human` / `blocked` / …), its candidate
+  sha and its incremental cost — the round's own receipts, never a
+  re-slice of the parent's.
+- **The budget window rides the root, versioned.** Each round's OWN
+  finite budget (limits, status, the closing partition's reserved
+  calls/tokens) is listed; the #340 `budget_amendments` rows ride with
+  their `limit_before`/`limit_after` history; the #339 exposure
+  quantities ride twice — per-axis (`consumed`/`limit`/`exhausted`,
+  the closing-review-stood-down fence) and the finality-aware closing
+  fold (`settled`/`accrued_unsettled`/`retained_liability`) over the
+  root task's receipts under the window cap. The policy block carries
+  an EXPLICIT `version` (the receipted budget-profile pin); a later
+  change writes new rows and documents — history is never rewritten.
+- **Windows are separate measures.** `manual_rescue` (the
+  kill-recovery gap) joins the seven v1 measures as its own window;
+  `human.review_and_rescue_minutes` stays `null` while reviewer effort
+  is unmeasured (a partial is never presented as a total — the measured
+  components ride `time_measures`).
+- **Unknown spend stays bounded, never zero.** The window
+  reconciliation states the recorded totals beside the folded receipts;
+  the residual is attributed to the unreceipted lane runs and BOUNDED
+  there — never added to a cost column (a figure the SDK never reported
+  is a bound, not spend).
+- **The human acceptance is an identified decision.** The reviewer
+  resolutions in a capture (discussions resolved through the API,
+  closing-review verdicts) are model/CI decisions over the candidate —
+  the HUMAN acceptance of the lineage is its own pending point, named;
+  per-accepted economics stay undefined at 0 accepted items, with the
+  denominators stated.
+
+### Building the v2 artifact
+
+```
+uv run python scripts/build_accepted_task_ledger.py \
+    --population review-loop \
+    --out evaluation/economics/accepted-task-ledger-v2.json
+```
+
+The script reads the #364 capture
+(`docs/evaluation/2026-09-27-review-loop/` — the evidence bundle plus
+every lane job's trace) and the durable record
+(`qualification/records/review-loop-2026-09-27.json`), and is
+byte-deterministic on rerun; reordering every input list changes no
+byte; `AcceptedTaskLedger.from_document()` replays the stored document
+and re-folds the lineage byte-identically (there is no second truth
+store).
+
+### The committed v2 ledger's honest numbers
+
+- 8 works / 8 attempts; 7 receipted (coverage 0.875) — the
+  unreceipted one is the foreign-lineage blocked child (`6e0fdf34`, the
+  wrong-branch run of the #361 publisher defect; its SDK figure never
+  reached the record).
+- The root task `7319478e` (issue 5's lineage, MR !4): **7 attempts**
+  — 3 honestly-failed delivery attempts + delivery 1 + rounds 2/3 +
+  the blocked round 4 — all-attempt provider-reported **$1.256064
+  EXACT** (every attempt SDK-receipted; the bootstrap-fence attempt's
+  zero is RECORDED, never inferred). Round incremental costs:
+  delivery 1 $0.2112472, round 2 $0.1980048, round 3 $0.1968864,
+  round 4 (blocked) $0.2394448.
+- The recorded window totals reconcile: qualifying rounds fold to
+  $0.845583 against the recorded $0.8455 (4dp); the recorded
+  all-attempt $1.4797 leaves a **$0.223636 unreceipted residual**
+  attributed to `6e0fdf34` and bounded there — never a column entry.
+  The programme keeps a $1.256064 lower bound with coverage 0.875.
+- The budget window: each round's own 600k-token budget (rounds 2/3
+  with the `closing-partition/1` reserve of 90000 tokens / 6 calls),
+  the prior attempt's exhausted 200k fence (196312/200000 consumed, the
+  closing review stood down), and the amendment
+  `standard.max_tokens 200000→600000` under
+  `forge.budget-profiles/1@2026-09-27-align`.
+- The human decision is **pending** (draft MR !4; the reviewer
+  resolutions are model/CI decisions): 0 accepted items, per-accepted
+  economics undefined — never zero, denominators stated.
+- Time, from recorded timestamps only: native runtime (trace
+  envelopes) lower bound 492.905 s over five traced jobs (three
+  untraced windows stay unknown); human wait 1364.815 s exact (four
+  dispatch→terminal windows); manual rescue 283.072 s exact (the
+  round-3 kill→recovered-ready window); setup lower bound 55.621 s
+  (three different lab clocks — the total is withheld); model, tool
+  and CI-queue time and reviewer effort are named gaps;
+  `human.review_and_rescue_minutes` is `null` (rescue 4.718 min
+  measured, reviewer effort unknown); no throughput rows exist —
+  receipts and durations never join, so every rate stays null.
+- Observability: `usage.coverage_by_source` (7 SDK receipts, 1
+  unreceipted attempt), `accepted_work.total_cost_lower_bound`
+  ($1.256064 task-local, pending, beside the programme bound),
+  `human.review_and_rescue_minutes`, `review_round.incremental_cost`
+  and `identity.gaps` (0 — every link joined).
+- Run `76a1088a` (issue 4's delivery, job 1148) also ran in-window
+  (its trace is recorded) but the capture's own spend population
+  excludes it — noted, never folded into this window's totals.

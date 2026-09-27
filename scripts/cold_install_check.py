@@ -842,14 +842,33 @@ def verify_installed(manifest: Mapping[str, Any], observed: InstalledObservation
             )
         )
     head = str(observed.schema_head)
-    if head == str(manifest["control_plane"]["schema_revision"]["head"]):
-        findings.append(Finding("control_plane.schema", "match", f"alembic head {head}"))
+    # R41-08 (#363): the schema axis follows the version axis's TWO-bound
+    # pattern — the manifest pins the repo-chain HEAD the next deployment
+    # migrates to AND the executed lab's deployed head (the build that ran
+    # the recorded traces; a re-freeze can move the head before the lab
+    # re-aligns). A deployed head matching NEITHER bound stays a refusal.
+    pinned_head = str(manifest["control_plane"]["schema_revision"]["head"])
+    lab_head = str(manifest["control_plane"]["executed_lab"].get("deployed_schema_head") or "")
+    schema_binds = {pinned_head, lab_head} - {""}
+    if head in schema_binds:
+        binds_named = (
+            "the pinned head"
+            if head == pinned_head
+            else "the executed-lab bind (the composition that ran the traces)"
+        )
+        findings.append(
+            Finding(
+                "control_plane.schema",
+                "match",
+                f"alembic head {head} — matches {binds_named} ({', '.join(sorted(schema_binds))} are the manifest's bound schema identities)",
+            )
+        )
     else:
         findings.append(
             Finding(
                 axis="control_plane.schema",
                 severity="refusal",
-                detail=f"the deployed alembic head is {head or '(unobservable)'} but the manifest pins {manifest['control_plane']['schema_revision']['head']}",
+                detail=f"the deployed alembic head is {head or '(unobservable)'} but the manifest pins {', '.join(sorted(schema_binds))}",
             )
         )
     caps_ok = observed.app_caps_numerical and observed.worker_caps_numerical
@@ -1874,7 +1893,41 @@ def run_upgrade(
         if rehearse_rollback:
             # the ROLLBACK leg: head -> the declared predecessor, on the
             # SAME disposable database, with the data-bearing rows in place.
+            # R41-08 (#363): the honest-downgrade guards (the 029/030/031/
+            # 032 precedent) refuse a downgrade that would destroy linkage
+            # evidence while guarded rows exist — the rehearsal OBSERVES the
+            # typed refusal first (exactly the runbook §8a table), then
+            # follows the documented operator path: archive the linkage rows
+            # EXPLICITLY (recorded in the receipt — the acceptance the
+            # refusal names) and retry the declared edge on the disposable
+            # database. A refusal for any OTHER reason stays a refusal.
             rolled_back = _alembic(shell, database_url, "downgrade", predecessor)
+            if rolled_back.returncode != 0 and _is_guarded_downgrade_refusal(rolled_back):
+                refusal_tail = rolled_back.stderr.strip()[-400:]
+                archived = _archive_guarded_rows(shell, container)
+                receipt["rollback_guard"] = {
+                    "typed_refusal": refusal_tail,
+                    "archived_rows": archived,
+                    "operator_path": (
+                        "the honest-downgrade guard refused while linkage rows existed "
+                        "(the runbook §8a refusal); the rehearsal archived the counted rows "
+                        "into this receipt and retried the declared edge — the named loss "
+                        "is accepted explicitly, never silently"
+                    ),
+                }
+                findings.append(
+                    Finding(
+                        axis="rollback.guard.refusal",
+                        severity="match",
+                        detail=(
+                            "the honest-downgrade guard REFUSED the rollback while linkage "
+                            f"rows existed ({', '.join(f'{t}={n}' for t, n in archived.items()) or 'no rows'}) "
+                            "— the typed refusal the runbook documents, observed before the "
+                            "archive-then-retry operator path executed on the disposable database"
+                        ),
+                    )
+                )
+                rolled_back = _alembic(shell, database_url, "downgrade", predecessor)
             if rolled_back.returncode != 0:
                 raise CheckRefused(
                     f"the rollback rehearsal's alembic downgrade {head} failed: "
@@ -1980,6 +2033,85 @@ def _psql_single(shell: ShellProbe, container: str, sql: str) -> str:
     if completed.returncode != 0:
         raise CheckRefused(f"psql refused: {completed.stderr.strip()[:200]}")
     return completed.stdout.strip().splitlines()[0].strip() if completed.stdout.strip() else ""
+
+
+#: The tables whose migrations refuse a data-bearing downgrade (the
+#: honest-downgrade guards: 029 operation_grants, 030 budget_amendments,
+#: 031 review_rounds, 032 collaboration_targets — linkage evidence is
+#: never dropped by a downgrade). A rollback rehearsal crossing one of
+#: these edges observes the guard, then archives per the operator path.
+_GUARDED_LINKAGE_TABLES: tuple[str, ...] = (
+    "collaboration_targets",
+    "review_rounds",
+    "budget_amendments",
+    "operation_grants",
+)
+
+#: The guards' shared refusal marker (verbatim from the migrations).
+_GUARDED_DOWNGRADE_MARKER = "is never dropped by a downgrade"
+
+
+def _is_guarded_downgrade_refusal(completed: Any) -> bool:
+    """Did this alembic downgrade fail BECAUSE an honest-downgrade guard
+    fired (rows exist), rather than for any other reason?"""
+    return _GUARDED_DOWNGRADE_MARKER in str(completed.stderr or "")
+
+
+def _archive_guarded_rows(shell: ShellProbe, container: str) -> dict[str, int]:
+    """The documented operator path on the DISPOSABLE database: count and
+    delete the guarded linkage rows, returning what was archived.
+
+    The counts land in the receipt — THAT is the explicit archive the
+    guards' refusal texts demand (the named loss, accepted deliberately;
+    the disposable rehearsal never touches real data). Tables absent at
+    the current head are skipped (count 0, nothing deleted).
+    """
+    archived: dict[str, int] = {}
+    for table in _GUARDED_LINKAGE_TABLES:
+        counted = shell.run(
+            [
+                "podman",
+                "exec",
+                container,
+                "psql",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-t",
+                "-A",
+                "-c",
+                f"SELECT count(*) FROM {table};",
+            ]
+        )
+        if counted.returncode != 0:
+            continue  # the table does not exist at this head — nothing to archive
+        count = int(counted.stdout.strip() or "0")
+        if not count:
+            continue
+        deleted = shell.run(
+            [
+                "podman",
+                "exec",
+                container,
+                "psql",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                f"DELETE FROM {table};",
+            ]
+        )
+        if deleted.returncode != 0:
+            raise CheckRefused(
+                f"archiving {table} for the guarded rollback refused: "
+                f"{deleted.stderr.strip()[-300:]}"
+            )
+        archived[table] = count
+    return archived
 
 
 # ---------------------------------------------------------------------------

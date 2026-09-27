@@ -1,0 +1,102 @@
+2026-09-27T05:54:02.337620Z 00O [0KRunning with gitlab-runner 19.3.2 (23a5dafc)[0;m
+2026-09-27T05:54:02.337630Z 00O [0K  on unraid _SiXkuJy4, system ID: r_NXEuCjKK5zfa[0;m
+2026-09-27T05:54:02.337651Z 00O section_start:1790488442:prepare_executor[0K
+2026-09-27T05:54:02.337653Z 00O+[0K[36;1mPreparing the "docker" executor[0;m[0;m
+2026-09-27T05:54:02.347469Z 00O [0KUsing Docker executor with image node:22-bookworm ...[0;m
+2026-09-27T05:54:03.586359Z 00O [0KUsing effective pull policy of [always] for container node:22-bookworm[0;m
+2026-09-27T05:54:03.587006Z 00O [0KPulling docker image node:22-bookworm ...[0;m
+2026-09-27T05:54:04.525099Z 00O [0KUsing docker image sha256:b37a4d56eedb5e42bca59c8d4782fa550e741fba5dbce943c53767d3ceee57e6 for node:22-bookworm with digest node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7 ...[0;m
+2026-09-27T05:54:04.525106Z 00O section_end:1790488444:prepare_executor[0K
+2026-09-27T05:54:04.525168Z 00O+section_start:1790488444:prepare_script[0K
+2026-09-27T05:54:04.525171Z 00O+[0K[36;1mPreparing environment[0;m[0;m
+2026-09-27T05:54:04.525577Z 00O [0KUsing effective pull policy of [always] for container sha256:f926c7b4a23f37e59ef6d9020053f30e1e4d2df3ff2aff01c392bdf8efeaab66[0;m
+2026-09-27T05:54:04.863332Z 01O Running on runner-sixkujy4-project-160-concurrent-0 via 0ca6dbc5868b...
+2026-09-27T05:54:05.076966Z 00O section_end:1790488445:prepare_script[0K
+2026-09-27T05:54:05.077422Z 00O+section_start:1790488445:get_sources[0K
+2026-09-27T05:54:05.077427Z 00O+[0K[36;1mGetting source from Git repository[0;m[0;m
+2026-09-27T05:54:05.458650Z 01O [32;1mGitaly correlation ID: 01M3GPTX87GKZVBXHKW24PT7AC[0;m
+2026-09-27T05:54:05.463722Z 01O [32;1mFetching changes with git depth set to 20...[0;m
+2026-09-27T05:54:05.466250Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-review-loop-2026-09-27/.git/
+2026-09-27T05:54:05.468331Z 01O [32;1mCreated fresh repository.[0;m
+2026-09-27T05:54:05.687417Z 01O [32;1mChecking out cab00049 as detached HEAD (ref is factory/3/8be14a80)...[0;m
+2026-09-27T05:54:05.691950Z 01O Removing .pytest_cache/
+2026-09-27T05:54:05.692185Z 01O Removing src/utils/__pycache__/
+2026-09-27T05:54:05.692187Z 01O Removing tests/__pycache__/
+2026-09-27T05:54:05.733272Z 01O 
+2026-09-27T05:54:05.733276Z 01O [32;1mSkipping Git submodules setup[0;m
+2026-09-27T05:54:05.891967Z 00O section_end:1790488445:get_sources[0K
+2026-09-27T05:54:05.893093Z 00O+section_start:1790488445:step_script[0K
+2026-09-27T05:54:05.893099Z 00O+[0K[36;1mExecuting "step_script" stage of the job script[0;m[0;m
+2026-09-27T05:54:05.893107Z 00O [0KUsing effective pull policy of [always] for container node:22-bookworm[0;m
+2026-09-27T05:54:05.893695Z 00O [0KUsing docker image sha256:b37a4d56eedb5e42bca59c8d4782fa550e741fba5dbce943c53767d3ceee57e6 for node:22-bookworm with digest node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7 ...[0;m
+2026-09-27T05:54:06.369892Z 01O [32;1m$ for attempt in 1 2 3; do # collapsed multi-line command[0;m
+2026-09-27T05:54:08.974657Z 01O 
+2026-09-27T05:54:08.974661Z 01O added 2 packages in 2s
+2026-09-27T05:54:09.028795Z 01O 2.1.273 (Claude Code)
+2026-09-27T05:54:09.032816Z 01O [32;1m$ apt-get update -qq && apt-get install -y -qq python3 python3-pip >/dev/null[0;m
+2026-09-27T05:54:11.411090Z 01E debconf: delaying package configuration, since apt-utils is not installed
+2026-09-27T05:54:15.238061Z 01O [32;1m$ python3 -m pip install --quiet --no-input --break-system-packages uv[0;m
+2026-09-27T05:54:16.745914Z 01E WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
+2026-09-27T05:54:16.805092Z 01O [32;1m$ uv python install 3.13[0;m
+2026-09-27T05:54:16.925468Z 01E Downloading cpython-3.13.15-linux-x86_64-gnu (download) (33.4MiB)
+2026-09-27T05:54:17.700410Z 01E  Downloaded cpython-3.13.15-linux-x86_64-gnu (download)
+2026-09-27T05:54:17.707485Z 01E Installed Python 3.13.15 in 896ms
+2026-09-27T05:54:17.707487Z 01E  + cpython-3.13.15-linux-x86_64-gnu (python3.13)
+2026-09-27T05:54:17.707597Z 01E warning: `/root/.local/bin` is not on your PATH. To use installed Python executables, run `export PATH="/root/.local/bin:$PATH"` or `uv python update-shell`.
+2026-09-27T05:54:17.712842Z 01O [32;1m$ uv venv /tmp/forge-lane-venv --python 3.13[0;m
+2026-09-27T05:54:17.846371Z 01E Using CPython 3.13.15
+2026-09-27T05:54:17.846375Z 01E Creating virtual environment at: /tmp/forge-lane-venv
+2026-09-27T05:54:17.847087Z 01E Activate with: source /tmp/forge-lane-venv/bin/activate
+2026-09-27T05:54:17.848917Z 01O [32;1m$ curl -fsSL --max-time 180 -o "/tmp/forge-0.41.0-py3-none-any.whl" "${FORGE_LANE_WHEEL}"[0;m
+2026-09-27T05:54:17.910362Z 01O [32;1m$ echo "${FORGE_LANE_WHEEL_SHA256}  /tmp/forge-0.41.0-py3-none-any.whl" | sha256sum -c -[0;m
+2026-09-27T05:54:17.919405Z 01O /tmp/forge-0.41.0-py3-none-any.whl: OK
+2026-09-27T05:54:17.919459Z 01O [32;1m$ uv pip install --quiet --python /tmp/forge-lane-venv/bin/python "forge[interactive] @ file:///tmp/forge-0.41.0-py3-none-any.whl"[0;m
+2026-09-27T05:54:19.803493Z 01O [32;1m$ echo "forge lane package version=$(/tmp/forge-lane-venv/bin/python -c 'import forge; print(forge.__version__)') wheel=${FORGE_LANE_WHEEL} sha256=${FORGE_LANE_WHEEL_SHA256}"[0;m
+2026-09-27T05:54:19.845611Z 01O forge lane package version=0.41.0 wheel=http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl sha256=2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4
+2026-09-27T05:54:19.845615Z 01O [32;1m$ export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"[0;m
+2026-09-27T05:54:19.845715Z 01O [32;1m$ git config user.name "forge"[0;m
+2026-09-27T05:54:19.849390Z 01O [32;1m$ git config user.email "forge@users.noreply.gitlab.com"[0;m
+2026-09-27T05:54:19.850889Z 01O [32;1m$ git remote set-url origin "https://forge:${FORGE_BOT_READ_TOKEN:-forge:placeholder}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"[0;m
+2026-09-27T05:54:19.852311Z 01O [32;1m$ git remote set-url --push origin FORBIDDEN[0;m
+2026-09-27T05:54:19.853760Z 01O [32;1m$ mkdir -p .forge[0;m
+2026-09-27T05:54:19.854865Z 01O [32;1m$ mkdir -p .git/info && echo ".forge/" >> .git/info/exclude[0;m
+2026-09-27T05:54:19.855898Z 01O [32;1m$ git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true[0;m
+2026-09-27T05:54:20.144199Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-review-loop-2026-09-27
+2026-09-27T05:54:20.144203Z 01E  * branch            factory/3/8be14a80 -> FETCH_HEAD
+2026-09-27T05:54:20.149337Z 01O [32;1m$ git checkout --detach "$FORGE_ATTEMPT_BASE"[0;m
+2026-09-27T05:54:20.151226Z 01E HEAD is now at cab0004 seed: the shipped SDK lane template verbatim + the wheel-override CI + the precommitted independent oracle (committed before any run) — R41-09/#364
+2026-09-27T05:54:20.151508Z 01O [32;1m$ printf '%s\n' "$FORGE_PLAN" > .forge/brief.md[0;m
+2026-09-27T05:54:20.151573Z 01O [32;1m$ printf '{"resume_mode":"%s","checkpoint":"%s","attempt_generation":"%s","decision_id":"%s","control_url":"%s","token_dispatched":%s}\n' \ # collapsed multi-line command[0;m
+2026-09-27T05:54:20.152292Z 01O forge dispatch envelope: resume=fresh checkpoint=none attempt=0
+2026-09-27T05:54:20.152294Z 01O [32;1m$ export FORGE_CLAUDE_MODEL="${FORGE_CLAUDE_MODEL:-${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}}"[0;m
+2026-09-27T05:54:20.152294Z 01O [32;1m$ export FORGE_CLAUDE_CWD="$PWD"[0;m
+2026-09-27T05:54:20.152295Z 01O [32;1m$ if [ -n "${FORGE_CREDENTIAL_REF:-}" ] && [ "${FORGE_CREDENTIAL_REDEEM:-}" != "1" ]; then # collapsed multi-line command[0;m
+2026-09-27T05:54:20.152386Z 01O [32;1m$ # before_script created .forge/; the phase owns its receipts — keep # collapsed multi-line command[0;m
+2026-09-27T05:55:17.710172Z 01E lane_driver: claude-sdk-lane exit=completed reason=completed
+2026-09-27T05:55:17.841001Z 01O forge lane: driver_exit=0 (completed)
+2026-09-27T05:55:18.593052Z 01O {
+2026-09-27T05:55:18.593056Z 01O   "base_oid": "cab000497248ed2c9a4216429f955c6e81985868",
+2026-09-27T05:55:18.593057Z 01O   "checkpoint_binding": "fresh",
+2026-09-27T05:55:18.593058Z 01O   "checkpoint_id": "",
+2026-09-27T05:55:18.593058Z 01O   "diff_digest": "db16b669d01b336feb1fe0be55a5d499854b5a5c4c37d1d755067867bc49df41",
+2026-09-27T05:55:18.593059Z 01O   "diff_path": "/builds/forcewake/forge-review-loop-2026-09-27/forge-output/candidate.diff",
+2026-09-27T05:55:18.593059Z 01O   "generation_path": "/builds/forcewake/forge-review-loop-2026-09-27",
+2026-09-27T05:55:18.593060Z 01O   "resolved_work_id": "8be14a80312d47a8b274efaa4d6a0a73",
+2026-09-27T05:55:18.593060Z 01O   "source": "checkout",
+2026-09-27T05:55:18.593060Z 01O   "zero_change": false
+2026-09-27T05:55:18.593061Z 01O }
+2026-09-27T05:55:18.595444Z 01O FORGE_CANDIDATE:{"attempt_base": "cab000497248ed2c9a4216429f955c6e81985868", "artifact": "candidate.diff", "exit": "completed"}
+2026-09-27T05:55:18.595446Z 01O FORGE_RESULT:{"head": "cab000497248ed2c9a4216429f955c6e81985868", "summary": "candidate artifacts; proposal-only lane"}
+2026-09-27T05:55:18.595447Z 01O FORGE_LANE_OUTCOME:{"driver_exit": "completed", "collector_exit": 0, "candidate_state": "candidate"}
+2026-09-27T05:55:18.765938Z 00O section_end:1790488518:step_script[0K
+2026-09-27T05:55:18.766404Z 00O+section_start:1790488518:upload_artifacts_on_success[0K
+2026-09-27T05:55:18.766408Z 00O+[0K[36;1mUploading artifacts for successful job[0;m[0;m
+2026-09-27T05:55:19.083596Z 01O [32;1mUploading artifacts...[0;m
+2026-09-27T05:55:19.120598Z 01E .forge/candidate.diff: found 1 matching artifact files and directories[0;m 
+2026-09-27T05:55:19.120602Z 01E .forge/candidate.meta.json: found 1 matching artifact files and directories[0;m 
+2026-09-27T05:55:19.280456Z 01E Uploading artifacts as "archive" to coordinator... 201 Created[0;m  correlation_id[0;m=01M3GPX8F9YXJFWV45X1DG53E5 id[0;m=1141 status[0;m=201 token[0;m=67_bqLy2G
+2026-09-27T05:55:19.451659Z 00O section_end:1790488519:upload_artifacts_on_success[0K
+2026-09-27T05:55:19.451893Z 00O+section_start:1790488519:cleanup_file_variables[0K
+2026-09-27T05:55:19.451896Z 00O+[0K[36;1mCleaning up project directory and file based variables[0;m[0;m
+2026-09-27T05:55:19.897989Z 00O section_end:1790488519:cleanup_file_variables[0K
+2026-09-27T05:55:20.486669Z 00O [32;1mJob succeeded[0;m

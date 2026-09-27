@@ -71,6 +71,52 @@ assertions fail under the patch):
 
 MG-A (the `/fix`//`ask` feedback ingress, #337) is `test_feedback_ingress.py`'s FI-1 trace with FI-5's two registration-revert arms. All five classes are REQUIRED traces in `scripts/pg_gate.py` (a removed arm is the marker-removal mutation the manifest check detects). The traces write `forge.trace-record/1` execution records (source sha + evidence class) when `FORGE_TRACE_RECORD_DIR` is set — the pg-gate report embeds them. See `docs/operations/production-entry-mutation-gates.md`.
 
+## The production matrix (R41-07 / #362, `test_production_matrix.py`)
+
+The COMBINATION layer the review asked for: the defects of the R41 cycle
+lived in compositions (admission + finite budget; own commit + head
+fence; Redis marker + failed persistence), so the qualification is a
+small REQUIRED matrix driven through the SAME seams a customer uses —
+native webhook routing (a REAL ASGI gateway subprocess), durable worker
+entry (the INSTALLED `run_step_worker` + `run_reconciler` +
+`run_step_reaper` composition in its own OS process —
+`production_matrix_worker.py`), the ACTUAL budget helpers, real SQL
+transactions and the SHIPPED collector. The stubs replace the MODEL
+only (the deterministic agents behind `build_default_agents`) and the
+runner's file edits — never the policy under test.
+
+- **MX-1** — the 24 parametrized arms:
+  `finite/unlimited × builtin/harness × initial/correction/retry ×
+  Redis-present/absent` on the GitLab lane, each a complete production
+  path asserting every axis it crosses (the frozen budget rows read
+  through `budget_for_run`/`budget_block_reason`; the round child with
+  an INDEPENDENT id on the shared collaboration target and its OWN
+  budget; the retry re-dispatch riding the target branch; the replay
+  answered `deduplicated` with exactly ONE durable step, marker or not;
+  the harness dispatch ledger's frozen RunSpec variables; the closing
+  review's `obligation_digest`).
+- **MX-2** — the fault windows, all REAL process kills, the worker and
+  the API dying INDEPENDENTLY: the acceptance commit (gateway kill —
+  the correction recovers with NO resend), the child admission (worker
+  kill inside the admission transaction — NOTHING partial survives),
+  the native commit (the open publication intent recovers through the
+  installed reconciler's probe) and the journal completion (the round
+  pass classifies the head `review_round.effect_resolution{own}` and
+  adopts it), plus the occupancy mixed-history window (a prior
+  attempt's terminal beside the current attempt's running keeps the
+  lease; only the correlated terminal releases).
+- **MX-3** — the mutation pairings, each defect seeded into the process
+  that executes its policy and paired with the SAME baseline sequence:
+  `budget-before-child` (pre-#356), `pre-commit-cache` on the
+  correction path (pre-#357), `base-guard-first` (pre-#358) and
+  `any-terminal-occupancy` (pre-#360, oversubscribes at capacity one).
+
+All three classes are REQUIRED traces in `scripts/pg_gate.py`; the
+gate's unit tests pin that the LIVE collection carries the full
+24-cell cross. The evidence quotes and the honesty rules live in
+`docs/operations/production-entry-mutation-gates.md` (the R41-07
+section).
+
 ## The fakes
 
 - **`fake_native_server.py`** — stdlib HTTP server run as a subprocess

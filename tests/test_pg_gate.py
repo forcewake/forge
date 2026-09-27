@@ -138,6 +138,22 @@ class TestManifestCheck:
             "tests/production_entry/test_mutation_gates.py"
             "::TestMG3GrantPersistenceUnderConcurrentEvidence"
             "::test_the_projection_preserves_a_concurrent_evidence_write",
+            # R41-07 (#362): the production-path qualification matrix —
+            # the composed arms, the fault windows, the mutation pairings.
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX1TheProductionMatrix::test_the_complete_production_path[finite-builtin-initial-noredis]",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX1TheProductionMatrix::test_the_complete_production_path[finite-harness-correction-redis]",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX1TheProductionMatrix::test_the_complete_production_path[unlimited-harness-retry-noredis]",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX2TheFaultWindows::test_gateway_killed_after_commit_the_correction_recovers",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX2TheFaultWindows::test_mixed_history_keeps_the_lease_only_correlated_terminal_releases",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX3TheMutationArms::test_budget_before_child_restored_kills_the_finite_round",
+            "tests/production_entry/test_production_matrix.py"
+            "::TestMX3TheMutationArms::test_any_terminal_occupancy_restored_oversubscribes",
         ]
         assert gate.missing_required(manifest) == []
         matches = gate.required_test_ids(manifest)
@@ -169,6 +185,11 @@ class TestManifestCheck:
             "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
+            # the #362 matrix present (this test isolates the
+            # accounting-race mutation):
+            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [
@@ -204,6 +225,9 @@ class TestManifestCheck:
             "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
         ]
         production_entry, checkpoint = gate.PROFILES[0], gate.PROFILES[1]
         assert gate.missing_required(pe_only, gate.traces_for_profile(production_entry)) == []
@@ -230,6 +254,9 @@ class TestManifestCheck:
             "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
             "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [
@@ -270,7 +297,7 @@ class TestManifestCheck:
                 "tests/test_x.py::TestA::test_two[param]",
                 "",
                 "95 tests collected in 0.42s",
-                "-- Docs: https://docs.pytest.org/en/stable/how-to/...",
+                "-- Docs: https://docs.pytest.org/en/stable/pytest/...",
                 "=== warnings ===",
             ]
         )
@@ -278,6 +305,92 @@ class TestManifestCheck:
             "tests/test_x.py::TestA::test_one",
             "tests/test_x.py::TestA::test_two[param]",
         ]
+
+
+class TestR4107MatrixTraces:
+    """R41-07 (#362): the production matrix, its fault windows and its
+    mutation pairings are REQUIRED production-entry traces — a removed
+    arm, window or mutation is the same marker-removal mutation the
+    manifest check detects, and the matrix's full cross must collect."""
+
+    def test_a_removed_matrix_arm_refuses(self, gate: ModuleType) -> None:
+        # The mutation: the whole MX-1 matrix class was deleted — its ids
+        # no longer collect, and the gate must refuse.
+        manifest = [
+            # every OTHER required trace present (one node id each)…
+            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
+            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
+            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
+            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres::test_x",
+            "tests/test_credential_audit.py::TestRealPostgres"
+            "::test_concurrent_redemptions_and_evidence_writers_survive",
+            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
+            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
+            "tests/production_entry/test_production_entry.py"
+            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
+            "tests/production_entry/test_feedback_ingress.py"
+            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
+            "tests/production_entry/test_feedback_ingress.py"
+            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
+            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
+            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
+            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
+            # …MX-2 and MX-3 present, MX-1 REMOVED:
+            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+        ]
+        absent = gate.missing_required(manifest)
+        assert [trace.label for trace in absent] == [
+            "R41-07 (#362) MX-1 the production matrix (24 composed arms)"
+        ]
+
+    def test_the_matrix_traces_belong_to_the_production_entry_profile(
+        self, gate: ModuleType
+    ) -> None:
+        labels = {
+            "R41-07 (#362) MX-1 the production matrix (24 composed arms)",
+            "R41-07 (#362) MX-2 the fault-window barriers (real process kills)",
+            "R41-07 (#362) MX-3 the mutation pairings (each defect seeded)",
+        }
+        scoped = {trace.label for trace in gate.traces_for_profile(gate.PROFILES[0])}
+        assert labels <= scoped  # PROFILES[0] is production-entry
+
+    def test_the_live_matrix_collection_covers_the_full_cross(self, gate: ModuleType) -> None:
+        """The matrix is data, not flags: the LIVE collection must carry
+        every finite/unlimited × builtin/harness × initial/correction/
+        retry × redis/noredis cell — a dropped parametrize entry or a
+        renamed class refuses, never quietly shrinks the matrix."""
+        import subprocess
+
+        collected = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "tests/production_entry/test_production_matrix.py",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert collected.returncode == 0, collected.stderr
+        manifest = gate.parse_collected_manifest(collected.stdout)
+        matrix_arms = [node for node in manifest if "::TestMX1TheProductionMatrix::" in node]
+        expected = {
+            f"[{budget}-{backend}-{leg}-{redis_mode}]"
+            for budget in ("finite", "unlimited")
+            for backend in ("builtin", "harness")
+            for leg in ("initial", "correction", "retry")
+            for redis_mode in ("redis", "noredis")
+        }
+        actual = {node.rsplit("[", 1)[-1].removesuffix("]") for node in matrix_arms}
+        expected = {cell.removesuffix("]").removeprefix("[") for cell in expected}
+        assert actual == expected, (expected - actual, actual - expected)
 
 
 # ---------------------------------------------------------------------------

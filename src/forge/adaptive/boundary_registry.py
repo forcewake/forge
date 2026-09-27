@@ -46,6 +46,15 @@ for the #353 extraction: a THIRD module starting to apply amendments
 unregistered is an architecture failure, and the GitHub leg's legacy
 evidence ledger is gone by the same change).
 
+R41-17 (#372, ADR-0034's map refreshed) added the tenth and eleventh
+entries — the command-acceptance DEDUP decision (one owner helper per
+#357; the GitLab router's inline probe→confirm spelling removed in the
+same change) and the review-round CHILD ADMISSION (the #372 extraction:
+one named application service for the #356 child-before-budget
+transaction and its integrity arbiters) — plus the three allow-sets
+DEDUP_CACHE_PROBE_MODULES / LEGACY_EVENT_DEDUP_CALLERS /
+ROUND_ADMISSION_CALLERS below.
+
 This module is deliberately IMPORT-LIGHT (pure stdlib data, no forge
 imports): the registry must be loadable by tooling and tests without
 importing any owner.
@@ -71,11 +80,13 @@ __all__ = [
     "BUDGET_AMENDMENT_APPLICANTS",
     "COMPOSED_DISPATCH_ENTRIES",
     "CONTINUATION_MODE_CONSTRUCTION_MODULES",
+    "DEDUP_CACHE_PROBE_MODULES",
     "GC_SWEEP_ENTRYPOINTS",
     "GC_UNLINK_EXEMPT_RECEIVERS",
     "GRANT_PERSISTED_SURFACES",
     "LEGACY_CARRIER_DERIVATION_MODULES",
     "LEGACY_CARRIER_FUNCTIONS",
+    "LEGACY_EVENT_DEDUP_CALLERS",
     "LEGACY_LOOKUP_CHAIN_MODULES",
     "LEGACY_LOOKUP_CONFINED_FUNCTION",
     "MODE_VOCABULARY_HOME",
@@ -83,6 +94,7 @@ __all__ = [
     "REDEMPTION_GRANT_LOADERS",
     "REDEMPTION_REGISTRY_LOOKUPS",
     "RESOLVE_REPOSITORY_CALLERS",
+    "ROUND_ADMISSION_CALLERS",
     "boundary_by_name",
     "owner_modules",
 ]
@@ -444,6 +456,12 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.durable",
             "forge.adaptive.closing_budget",
             "forge.factory.llm",
+            # R41-17 (#372): the round admission service opens the
+            # CHILD's own budget through the owner's spec-limit seam
+            # (budget_limits_from_spec — a READ, never an amendment; a
+            # new round is funded by its OWN ledger, not by amending
+            # the parent's).
+            "forge.runs.round_admission",
             "forge.runs.revival",
             "forge.runs.service",
         ),
@@ -513,6 +531,99 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "ONE native platform is qualified (GitLab MR notes, #337); "
             "GitHub and Azure DevOps ingresses never parse the verbs — "
             "parity is not claimed."
+        ),
+    ),
+    AuthorityBoundary(
+        # R41-17 (#372, ADR-0034 §1 refresh)
+        name="command_acceptance_dedup",
+        decision=(
+            "WHETHER a provider delivery is a DUPLICATE: the Redis marker "
+            "is a post-commit positive-cache HINT, the committed inbox row "
+            "is the authority — a cache hit without a record proceeds as a "
+            "first delivery, and the answer ``deduplicated`` certifies a "
+            "durable command exists."
+        ),
+        owner_modules=("forge.gateway.durable_ingress",),
+        allowed_dependents=(
+            # The three provider gateways consume the SAME helpers
+            # (cache_confirms_duplicate / mark_delivered_best_effort /
+            # inbox_record_exists). R41-17 (#372) removed the GitLab
+            # router's inline spelling of the probe→confirm sequence —
+            # the residual duplicate #357 left behind — in the same
+            # change the two ported gateways adopted the helpers.
+            "forge.gateway.azure_webhook",
+            "forge.gateway.github_webhook",
+            "forge.gateway.router",
+        ),
+        enforcement=(
+            "Name confinement: the dedup-cache probe (was_delivered) may "
+            "be called only inside the owner (DEDUP_CACHE_PROBE_MODULES); "
+            "the legacy SET-NX probe (is_duplicate) only in the legacy "
+            "orchestrator EVENT lane (LEGACY_EVENT_DEDUP_CALLERS) whose "
+            "duplicate answer certifies nothing durable; the gateways "
+            "must keep reaching cache_confirms_duplicate (the inverse "
+            "guard — a gateway that stops calling the helper has "
+            "re-spelled the decision)."
+        ),
+        negative_contract=(
+            "No gateway may answer ``deduplicated`` from a cache hit "
+            "without the authoritative inbox lookup, set a marker before "
+            "the ingest commit, or front a DURABLE COMMAND with the SET-NX "
+            "probe — a marker claimed before a failed transaction turns "
+            "redeliveries into successful empty duplicates (the P02 "
+            "schedule)."
+        ),
+        honest_gaps=(
+            "The legacy orchestrator event lane (router's task-queue "
+            "fall-through for non-command events) keeps its own SET-NX "
+            "is_duplicate — a DIFFERENT decision documented on "
+            "worker.queue.is_duplicate: its answer certifies nothing "
+            "durable, so the P02 hazard does not apply; it is confined, "
+            "not removed."
+        ),
+    ),
+    AuthorityBoundary(
+        # R41-17 (#372) — the extraction's owner entry
+        name="review_round_admission",
+        decision=(
+            "WHETHER a post-readiness reviewer correction admits a NEW "
+            "child round, and the admission's WRITE COMPOSITION: the "
+            "child FlowRun created and FLUSHED before its OWN budget "
+            "opens from the same frozen spec ceilings (#356 ordering), "
+            "the copied frozen spec, the confirmed reservation on the "
+            "collaboration target's branch, the round row and the "
+            "admission outbox row — ONE transaction or nothing — plus "
+            "the admission's own uniqueness arbiters."
+        ),
+        owner_modules=("forge.runs.round_admission",),
+        allowed_dependents=(
+            # The ONE admitting service: the eligibility ladder and the
+            # reply/refusal rungs stay in the service; the write
+            # composition is the owner's (the #372 extraction).
+            "forge.runs.service",
+        ),
+        enforcement=(
+            "ROUND_ADMISSION_CALLERS confines every reference to the "
+            "admission service's surface (admit_round_child / "
+            "plan_round_child / RoundAdmissionSeams / "
+            "round_slot_integrity_conflict) to the owner and the one "
+            "service entry; the inverse guards keep the seam honest — "
+            "the service must still call admit_round_child, and the "
+            "owner must still compose the transaction (the child flush, "
+            "open_budget_from_spec call-time, the ReviewRound row)."
+        ),
+        negative_contract=(
+            "No second module may admit a round, re-spell the "
+            "child-before-budget transaction, fund a round by amending "
+            "the PARENT's budget, or arbitrate an admission integrity "
+            "conflict with its own constraint list — a provider service "
+            "admitting rounds beside the owner is the defect class this "
+            "boundary exists to catch."
+        ),
+        honest_gaps=(
+            "The review-round lane is GitLab-only today (the feedback "
+            "admission boundary's honest gap); GitHub and Azure carry no "
+            "round admission to bypass with."
         ),
     ),
 )
@@ -685,6 +796,37 @@ BUDGET_AMENDMENT_APPLICANTS: tuple[str, ...] = (
     "forge.durable.budgets",
     "forge.runs.service",
     "forge.runs.github_service",
+)
+
+#: R41-17 (#372) — the only modules that may PROBE the dedup-cache
+#: marker directly: the owner (forge.gateway.durable_ingress — the ONE
+#: cache_confirms_duplicate helper every gateway answers through). A
+#: gateway spelling ``queue.was_delivered(...)`` itself is re-implementing
+#: the #357 decision (probe→confirm) — exactly the inline copy the GitLab
+#: router carried until #372 removed it in the same change the check
+#: landed.
+DEDUP_CACHE_PROBE_MODULES: tuple[str, ...] = ("forge.gateway.durable_ingress",)
+
+#: The only module that may use the SET-NX ``is_duplicate`` probe: the
+#: legacy orchestrator EVENT lane (the task-queue fall-through for
+#: non-command events). Its duplicate answer certifies NOTHING durable
+#: (worker.queue.is_duplicate's docstring is the contract), so the P02
+#: hazard does not apply — confined, not removed. Any OTHER module using
+#: it (above all: in front of a durable command ingest) is the
+#: pre-#357 shape recurring.
+LEGACY_EVENT_DEDUP_CALLERS: tuple[str, ...] = ("forge.gateway.router",)
+
+#: R41-17 (#372) — the only modules that may reference the round
+#: admission service's surface (admit_round_child / plan_round_child /
+#: RoundAdmissionSeams / round_slot_integrity_conflict): the owner (the
+#: transaction + its arbiters) and the ONE service entry that admits
+#: rounds. A third module referencing the seam — above all a provider
+#: service admitting rounds beside the owner — is the architecture
+#: failure the check reports, and the inverse guards keep the
+#: registration drained-honest.
+ROUND_ADMISSION_CALLERS: tuple[str, ...] = (
+    "forge.runs.round_admission",
+    "forge.runs.service",
 )
 
 

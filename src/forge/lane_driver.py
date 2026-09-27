@@ -430,6 +430,58 @@ class LaneCredentialRedemptionError(RuntimeError):
     body could echo credential material into the job log)."""
 
 
+#: R41-10 (#365) — the marker the lane-side locator-to-env-slot preflight
+#: raises with (mirrors
+#: :data:`forge.adaptive.project_credentials.BINDING_SLOT_PREFLIGHT_OBSERVABILITY`;
+#: spelled here so the lane's job trace names it without importing the
+#: control plane). The operator-misbound-slot problem #343 found LIVE: a
+#: dispatched ``env:`` locator naming a slot other than this lane's
+#: provider-route slot could previously only be discovered as the
+#: endpoint's typed ``staged_slot_mismatch`` AFTER the redemption call —
+#: this preflight refuses at lane boot, BEFORE the call.
+BINDING_SLOT_PREFLIGHT_MARKER = "preflight.binding_slot_mismatch"
+
+
+def lane_binding_slot_preflight(env: Mapping[str, str] | None = None) -> str | None:
+    """Is the DISPATCHED credential locator compatible with this lane's
+    provider-route env slot — checked BEFORE the redemption call.
+
+    Returns ``None`` when the pair is compatible (or the locator is not
+    an ``env:`` one); otherwise the refusal REASON naming both slots (the
+    ref and the expected env var — names only, never values), raised by
+    :func:`redeem_lane_credential` as a
+    :class:`LaneCredentialRedemptionError` before any HTTP call, any
+    credential application and any vendor client construction. The
+    control-plane twin refuses the same pair at BIND time
+    (:func:`forge.adaptive.project_credentials.binding_slot_preflight`);
+    this lane-side twin is the defense that rides the DISPATCHED
+    envelope, so a registry document written past the bind seam (an
+    operator editing the persisted document by hand — the #343 incident
+    shape) still fails closed at the lane, with a message the operator
+    can act on."""
+    source = os.environ if env is None else env
+    ref = (source.get(CREDENTIAL_REF_ENV) or "").strip()
+    scheme, sep, name = ref.partition(":")
+    if scheme != "env" or not sep:
+        return None
+    route = _lane_provider_route(source)
+    from forge.adaptive.project_credentials import PROVIDER_ENV_VARS
+
+    expected_slot = PROVIDER_ENV_VARS.get(route, "")
+    locator_slot = name.strip()
+    if not expected_slot or not locator_slot or locator_slot == expected_slot:
+        return None
+    return (
+        f"{BINDING_SLOT_PREFLIGHT_MARKER}: the dispatched credential ref {ref!r} is "
+        f"an env locator naming slot {locator_slot!r}, but this lane's provider "
+        f"route {route!r} consumes {expected_slot!r} — the broker would stage the "
+        "value outside the binding's slot (the endpoint refuses typed "
+        "staged_slot_mismatch); refusing BEFORE the redemption call: no "
+        "credential applied, no vendor client constructed, an ambient "
+        "credential never substitutes"
+    )
+
+
 def redemption_requested(env: Mapping[str, str] | None = None) -> bool:
     """Whether ``FORGE_CREDENTIAL_REDEEM`` is truthy in *env* (default off)."""
     source = os.environ if env is None else env
@@ -637,6 +689,12 @@ def redeem_lane_credential(env: MutableMapping[str, str] | None = None) -> dict[
             " — FORGE_CREDENTIAL_REDEEM=1 demands the ref, the lane-control"
             " dial-out pair and the work id; an ambient credential is never used"
         )
+    # R41-10 (#365) — the locator-to-env-slot PREFLIGHT: refuse a misbound
+    # dispatched ref BEFORE the redemption call (names both slots; zero
+    # endpoint traffic, zero credentials applied).
+    slot_mismatch = lane_binding_slot_preflight(source)
+    if slot_mismatch:
+        raise LaneCredentialRedemptionError(slot_mismatch)
     try:
         response = httpx.get(
             url.rstrip("/") + LANE_CREDENTIAL_REDEEM_ROUTE,

@@ -1,0 +1,463 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem' \u2014 observed 2026-09-27, the same axis the @0.41.0 record pins)",
+  "capabilities": [
+    "review-rounds-correction-loop"
+  ],
+  "composition": {
+    "control_plane": "the working-tree alignment build (image sha256:11c4bb30\u2026, reports 0.41.0, schema head 032) \u2014 recreated NEVER rebuilt for the credential-mode switch (three env pins; receipts in alignment-receipts.json)",
+    "lane_package": "forge-0.41.0 wheel @ sha256 223d0f2598957939\u2026 (sha256-verified in-job; the #365 pairing)",
+    "template": "the shipped claude-sdk-lane template VERBATIM (committed, included BY local include) + the ONE install-seam override"
+  },
+  "credential_probe": {
+    "gitlab-protected-variable": {
+      "alive": true,
+      "label": "gitlab-protected-variable",
+      "latency_s": 1.3,
+      "max_tokens": 8,
+      "model": "glm-5.3-flash",
+      "status": 200,
+      "token_sha256_16": "800223712be70ebe",
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 14,
+        "output_tokens": 8,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      }
+    },
+    "runner-redemption-broker": {
+      "alive": false,
+      "error_message_head": "token expired or incorrect",
+      "error_type": "401",
+      "label": "runner-redemption-broker",
+      "latency_s": 0.19,
+      "max_tokens": 8,
+      "status": 401,
+      "token_sha256_16": "6e3098b52d8991dc"
+    }
+  },
+  "credential_route": "gitlab-protected-variable (FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN, protected+masked; the lane's real model calls rode it \u2014 the route probed ALIVE this window while the runner-redemption broker token answered 401 token-expired, typed)",
+  "evidence": [
+    {
+      "artifact_sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
+      "capability": "review-rounds-correction-loop",
+      "class": "live-provider",
+      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=CURRENT-TREE+THE-ONE-PATCH. The R41-09 (#364) complete review-and-correction loop on ONE real GitLab CE profile: delivery 1 ready_for_human (ordinary classic parent, oracle green on the exact sha) \u2192 a nonconflicting human edit \u2192 the native /fix \u2192 the budgeted child round from the exact current head \u2192 the new candidate on the SAME MR \u2192 the oracle on the exact new candidate \u2192 the closing reviewer's obligation digest verified \u2192 replay idempotence \u2192 a second distinct correction with the #358 worker-failure recovery (exactly one provider commit per publication effect) \u2192 the conflicting-head typed conflict with the human commit preserved. The model legs rode the gitlab-protected-variable route (probed ALIVE; the broker token 401 typed). Full narrative: the trace section below + docs/evaluation/2026-09-27-review-loop/README.md",
+      "executed_at": "2026-09-27T07:24:55.699256+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-27-review-loop/live-run-evidence.json",
+    "docs/evaluation/2026-09-27-review-loop/alignment-receipts.json",
+    "docs/evaluation/2026-09-27-review-loop/README.md"
+  ],
+  "executed_at": "2026-09-27T07:24:55.699250+00:00",
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:f6ff63089bb82af5c7bbf195a2aa56ee2d722c0e0fe19bad4e15b2e8bcf9b114",
+  "legacy": false,
+  "live_found": {
+    "budget_fence_positive": "run fbe62ad5: the claude-code harness fills a ~200k-token context regardless of task size (196,312/200,000 consumed), the finite budget EXHAUSTED at the token axis and the closing review stood down with zero reviewer spend \u2014 the designed fence, observed live",
+    "doctor_ambient_names": "check_harness_lanes matches DRIVER_CREDENTIAL_VARS names only (not delivery-mode aware): under the native route it cannot see the FORGE_MODEL_<SEGMENT> carrier and fails project.harness_chain \u2014 the SAME value is additionally provisioned under the ambient name so the app's own doctor stays green (minimal patch proposal recorded; NOT patched this window \u2014 the composition identity stays frozen)",
+    "empty_scope_fail_closed": "run 8be14a80: without the target repo's .forge.yml implement.paths the frozen spec's allowed_paths is EMPTY and every /fix classifies material_change (fail-closed; the honest reply landed, MR note 1474) \u2014 the repo-side scope declaration is mandatory onboarding for the review-loop surface",
+    "mr_sha_lag": "the GitLab MR document's sha field lags a just-pushed commit by seconds \u2014 the driver reads the branch head directly",
+    "protected_variable_visibility": "a PROTECTED GitLab CI variable reaches only protected refs; the factory branches are not protected, so the lane failed CLOSED at its bootstrap fence (typed FORGE_BOOTSTRAP_FAILED, zero model calls) \u2014 the carrier is masked, NOT protected, on this lab",
+    "publisher_branch_defect": {
+      "composition_note": "the patched tree was rebuilt mid-window (wheel 2616d221 -> 223d0f25, image 11c4bb30 -> f6ff6308) \u2014 the #365 precedent; the re-freeze binds the new receipts",
+      "evidence": "run 6e0fdf34 blocked external_change; wrong-branch commit c75f66e0 on factory/4/6e0fdf34; the post-patch rounds publish on the lineage branch",
+      "patch": "_adopt_harness_change resolves _collaboration_branch_or_block(run_id) (typed block on a refused target, zero provider calls) and threads branch= through publish_candidate; callers passing nothing keep the legacy derivation (byte-identical for non-round runs)",
+      "root_cause": "src/forge/runs/publisher.py::publish_candidate had no branch parameter and service.py::_adopt_harness_change passed none \u2014 the one #359 branch-consuming leg still deriving from the run id",
+      "suite": "FULL uv run pytest -q green with the patch: 9016 passed, 75 skipped (the baseline)",
+      "what": "the harness publication path passed NO branch to publish_candidate; a review round's child committed onto factory/<issue>/<child8> \u2014 a SECOND branch beside the lineage's collaboration surface \u2014 and the (target-resolving) drift check blocked the run external_change"
+    }
+  },
+  "oracle_contract": "the precommitted independent oracle: tests/test_text_utils.py (the slugify six-case pattern + the three file shapes) run by the smoke CI job on every candidate; the round-2 contract (tests/test_round2_contract.py \u2014 the HUMAN reviewer's file, added before the authorized /fix) runs in the SAME job",
+  "outcome": "pass",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 the protected-variable semantics observed live: a PROTECTED CI variable reaches only protected refs (the factory branches are not; the carrier is masked, not protected on this lab), and the MR document's sha field lags a just-pushed commit by seconds",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-27",
+  "record_id": "gitlab-ce-v1-Q4109-review-loop-2026-09-27",
+  "release_version": "0.41.0",
+  "runtime_dependency_fingerprint": "lane install forge[interactive] @ file:///tmp/forge-0.41.0-py3-none-any.whl (sha256 223d0f25\u2026, verified in-job; the tree's uv build carrying EXACTLY the live-found publisher branch patch beyond the 2616d221 freeze) with claude-code CLI pinned 2.1.273; control plane = the working-tree alignment build (image sha256:f6ff6308\u2026, v0.41.0, schema 032)",
+  "runtime_recipe": "python-3.13 (uv in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker (image sha256:f6ff6308\u2026, v0.41.0, schema 032) under FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable; the wheelhost (:8481) served the pinned wheel over the lab LAN",
+  "spend": {
+    "all_attempt_total_usd": 1.4797,
+    "cap_usd": 2.5,
+    "cost_basis": "every lane job's own SDK usage receipt (candidate.meta.json: total_cost_usd) \u2014 the qualifying rounds AND the three honestly-failed attempts; the planner/closing-review model calls ride the control plane's litellm route inside each run's budget ledger",
+    "failed_attempt_lane_spend_usd": 0.6342,
+    "failed_attempts_counted": [
+      "165dd1edab724b20b42c916991c53069",
+      "fbe62ad5ecf946eb8f12caac95692904",
+      "8be14a80312d47a8b274efaa4d6a0a73",
+      "6e0fdf3448ee4860b2bc34822db9489f"
+    ],
+    "qualifying_breakdown": {
+      "delivery": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.2112,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 155136,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 32995,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 155136,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.2112472,
+              "inputTokens": 32995,
+              "maxOutputTokens": 32000,
+              "outputTokens": 2412,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 2412,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.2112472
+        }
+      },
+      "negative": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.2394,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 183744,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 35144,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 183744,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.2394448,
+              "inputTokens": 35144,
+              "maxOutputTokens": 32000,
+              "outputTokens": 3106,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 3106,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.2394448
+        }
+      },
+      "round2": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.198,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 173184,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 19997,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 173184,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.1980048,
+              "inputTokens": 19997,
+              "maxOutputTokens": 32000,
+              "outputTokens": 4169,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 4169,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.1980048
+        }
+      },
+      "round3": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.1969,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 134912,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 32476,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 134912,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.19688639999999996,
+              "inputTokens": 32476,
+              "maxOutputTokens": 32000,
+              "outputTokens": 2000,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 2000,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.19688639999999996
+        }
+      }
+    },
+    "qualifying_lane_spend_usd": 0.8455
+  },
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "trace": {
+    "delivery_1": {
+      "budget": {
+        "closing_partition_policy": null,
+        "closing_reserved_calls": null,
+        "closing_reserved_tokens": null,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "6e973202f1e6de4268d9363db2dbeb3c7c500e6c",
+      "closing_review_verdict": "ok",
+      "mr_draft": true,
+      "mr_iid": 4,
+      "oracle_pipeline": 814,
+      "ordinary_parent_active_plan_absent": true,
+      "run_id": "7319478e10b74f3c90d0e0ea43a9dc3f"
+    },
+    "negative_conflicting_head": {
+      "child_run_id": "2396987be7b64895b7b73af273211c91",
+      "conflicting_commit": {
+        "commit_sha": "f9e17e257d417df65e675f8d83afe3da150c6248",
+        "head_after": "f9e17e257d417df65e675f8d83afe3da150c6248",
+        "path": "src/utils/text.py"
+      },
+      "fix_note": {
+        "head_at_note": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+        "note_id": 1519
+      },
+      "preservation": {
+        "branch_commits": [
+          {
+            "author_name": "Pavel",
+            "created_at": "2026-09-27T06:57:07.000+00:00",
+            "id": "f9e17e257d417df65e675f8d83afe3da150c6248",
+            "short_id": "f9e17e25",
+            "title": "human edit (conflicting): touch src/utils/text.py mid-round"
+          },
+          {
+            "author_name": "forge",
+            "created_at": "2026-09-27T06:51:49.000+00:00",
+            "id": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+            "short_id": "7008c940",
+            "title": "forge: implement 5 (run 17645ea9) (forge-op:713713f63891)"
+          },
+          {
+            "author_name": "forge",
+            "created_at": "2026-09-27T06:40:12.000+00:00",
+            "id": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+            "short_id": "f72223ce",
+            "title": "forge: implement 5 (run bbd8d0d4) (forge-op:82a9d1b5e9ef)"
+          },
+          {
+            "author_name": "Pavel",
+            "created_at": "2026-09-27T06:37:52.000+00:00",
+            "id": "3878456c31de9eb8b508f05346e54129523e01bc",
+            "short_id": "3878456c",
+            "title": "human review: add the round-2 correction contract (red until corrected)"
+          },
+          {
+            "author_name": "forge",
+            "created_at": "2026-09-27T06:37:14.000+00:00",
+            "id": "6e973202f1e6de4268d9363db2dbeb3c7c500e6c",
+            "short_id": "6e973202",
+            "title": "forge: implement 5 (run 7319478e) (forge-op:5ddf80716ef2)"
+          },
+          {
+            "author_name": "Pavel",
+            "created_at": "2026-09-27T06:03:44.000+00:00",
+            "id": "9f7d227859b37a7a3458cfb1d36c0bd2ba9746b5",
+            "short_id": "9f7d2278",
+            "title": "seed: declare the implement write scope (.forge.yml) \u2014 the review-feedback classification is fail-closed witho"
+          },
+          {
+            "author_name": "Pavel",
+            "created_at": "2026-09-27T05:23:56.000+00:00",
+            "id": "cab000497248ed2c9a4216429f955c6e81985868",
+            "short_id": "cab00049",
+            "title": "seed: the shipped SDK lane template verbatim + the wheel-override CI + the precommitted independent oracle (co"
+          }
+        ],
+        "head_after_dust": "f9e17e257d417df65e675f8d83afe3da150c6248",
+        "human_commit_is_head": true,
+        "human_commit_sha": "f9e17e257d417df65e675f8d83afe3da150c6248"
+      },
+      "round_number": 4,
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "candidate_rejected: branch_drift: branch 'factory/5/7319478e' head drifted: expected '7008c940b2d8a6f50f60847c93a9e601ce9e3bf9', actual 'f9e17e257d417df65e675f8d83afe3da150c6248'"
+      }
+    },
+    "replay": {
+      "deltas": {
+        "bot_commits": 0,
+        "pipelines": 0,
+        "requests": 0,
+        "round_rows": 0
+      },
+      "redelivery": {
+        "body_head": "{\"status\":\"accepted\",\"event\":\"note\",\"deduplicated\":true}",
+        "delivery_uuid": "03266880-b751-4dbd-ad4a-fbed0650269f",
+        "note_id": 1497,
+        "status_code": 202
+      },
+      "verdict": "no extra child/turn/commit"
+    },
+    "round_2": {
+      "base_head_is_human_edit_head": true,
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_diff_paths": [
+        "src/app.py",
+        "src/utils/legacy.py",
+        "src/utils/text.py",
+        "tests/test_round2_contract.py"
+      ],
+      "candidate_sha": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+      "child_run_id": "bbd8d0d4885341fe858dafb3908207ed",
+      "correction_visible": {
+        "oracle_file_untouched": true,
+        "slugify_parts_present": true
+      },
+      "fix_note": {
+        "discussion_id": "d9656ff1e521a7c7776e92d95b28de9d6f67289c",
+        "head_at_note": "3878456c31de9eb8b508f05346e54129523e01bc",
+        "note_id": 1497
+      },
+      "human_edit": {
+        "commit_sha": "3878456c31de9eb8b508f05346e54129523e01bc",
+        "head_after": "3878456c31de9eb8b508f05346e54129523e01bc",
+        "path": "tests/test_round2_contract.py",
+        "shape": "new-file-nonconflicting"
+      },
+      "oracle_pipeline": 819,
+      "provider_commit_count_after": 2,
+      "readiness_gate_held": {
+        "note": "the child reached ready without the gate holding \u2014 recorded honestly",
+        "observed": false
+      },
+      "reviewer_obligation": {
+        "active_plan_seed": {
+          "activated_by_decision": "rd-review-6a51722689a9a1ab",
+          "plan_digest": "e5e29635f6460c07105aa9d10d4b404bb0a3f9d371772fa3c8b4290003b660f5",
+          "revised_from_digest": "8e866690b9ef981fd306a25896e7c9f48af559be094044e6c7818cc4624c6087"
+        },
+        "brief_carries_correction_text": true,
+        "brief_head": "Implementation plan \u2014 active revision 2 of spec-1807289ddba54f38 (digest e5e29635f6460c07105aa9d10d4b404bb0a3f9d371772fa3c8b4290003b660f5)\nActivated by approved",
+        "recomputed_digest": "53a248876c27361b91b41d624378a52ede68bc0954e0f5cb54efa8fdf02507ca",
+        "recorded_digest": "53a248876c27361b91b41d624378a52ede68bc0954e0f5cb54efa8fdf02507ca",
+        "required_obligations": 1,
+        "review_verdict": "ok",
+        "reviewed_sha": "f72223ce698c5f4c3137ab7f72185c492bf47876"
+      },
+      "reviewer_resolve": {
+        "discussion_id": "d9656ff1e521a7c7776e92d95b28de9d6f67289c",
+        "resolved_by": "forcewake",
+        "returncode": 200
+      },
+      "round_number": 2
+    },
+    "round_3_second_correction_and_worker_failure": {
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+      "child_run_id": "17645ea9c6a247ef9b456ed614eb5c2a",
+      "correction_visible": {
+        "docstring_marker_present": true
+      },
+      "fix_note": {
+        "discussion_id": "42e8c1f637a37d5cac8ecd3b553de92f668a362d",
+        "head_at_note": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+        "note_id": 1508
+      },
+      "oracle_pipeline": 822,
+      "recovery_own_commit_count": 1,
+      "round_number": 3,
+      "worker_kill": {
+        "bot_commits_before": 2,
+        "commit_sha": "7008c940b2d8a6f50f60847c93a9e601ce9e3bf9",
+        "killed_at": "2026-09-27T06:51:50.194435+00:00",
+        "observed_child_phase_at_kill": "ensuring_draft_mr",
+        "restart": "started"
+      }
+    },
+    "rounds_table_final": [
+      {
+        "base_head_sha": "3878456c31de9eb8b508f05346e54129523e01bc",
+        "child_run_id": "bbd8d0d4885341fe858dafb3908207ed",
+        "decision_id": "rd-review-6a51722689a9a1ab",
+        "id": "7fdaaa9da91b4db8896e949ae4166324",
+        "mr_iid": 4,
+        "note_id": "1497",
+        "parent_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "requested_by": "forcewake",
+        "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "round_number": 2,
+        "status": "completed",
+        "status_reason": "child run ready_for_human"
+      },
+      {
+        "base_head_sha": "f72223ce698c5f4c3137ab7f72185c492bf47876",
+        "child_run_id": "17645ea9c6a247ef9b456ed614eb5c2a",
+        "decision_id": "rd-review-2d008f8ad8c5a909",
+        "id": "0e463732c7ed46aba2186c89d99e2e7c",
+        "mr_iid": 4,
+        "note_id": "1508",
+        "parent_run_id": "bbd8d0d4885341fe858dafb3908207ed",
+        "requested_by": "forcewake",
+        "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "round_number": 3,
+        "status": "completed",
+        "status_reason": "child run ready_for_human"
+      }
+    ]
+  },
+  "validation_findings": [],
+  "verification_contract": "the oracle pipeline green on the EXACT candidate sha of every delivery; the reviewer obligation digest recomputed by the driver over the seeded correction revision == the recorded digest; exactly ONE provider commit per publication effect across the whole trace; the bot never merges, never resolves a discussion, never deploys",
+  "wheel_sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2"
+}

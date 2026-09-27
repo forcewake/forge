@@ -290,6 +290,33 @@ REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
         ),
         profile="production-entry",
     ),
+    # R41-07 (#362): the production-path qualification matrix — the
+    # finite/unlimited × builtin/harness × initial/correction/retry ×
+    # Redis-present/absent arms, the four fault-window barriers (real
+    # process kills) and the four mutation pairings. A removed arm is the
+    # same marker-removal mutation the manifest check detects.
+    RequiredTrace(
+        label="R41-07 (#362) MX-1 the production matrix (24 composed arms)",
+        pattern=re.compile(
+            r"tests/production_entry/test_production_matrix\.py"
+            r"::TestMX1TheProductionMatrix::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R41-07 (#362) MX-2 the fault-window barriers (real process kills)",
+        pattern=re.compile(
+            r"tests/production_entry/test_production_matrix\.py::TestMX2TheFaultWindows::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R41-07 (#362) MX-3 the mutation pairings (each defect seeded)",
+        pattern=re.compile(
+            r"tests/production_entry/test_production_matrix\.py::TestMX3TheMutationArms::"
+        ),
+        profile="production-entry",
+    ),
 )
 
 #: Lab-environment-bound traces: executed wherever the local lab exists

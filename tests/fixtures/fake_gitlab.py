@@ -244,6 +244,14 @@ class FakeGitLab:
         ]
         return [Pipeline.model_validate(p) for p in found]
 
+    async def get_pipeline(self, project_id: int, pipeline_id: int) -> Pipeline:
+        """One pipeline by id — 404 when absent (the client's contract)."""
+        self.calls.append(("get_pipeline", (project_id, pipeline_id)))
+        for p in self.pipelines:
+            if p["id"] == pipeline_id:
+                return Pipeline.model_validate(p)
+        raise GitLabAPIError(404, f"pipeline {pipeline_id} not found")
+
     async def create_pipeline(
         self, project_id: int, ref: str, variables: list[dict] | None = None
     ) -> dict:

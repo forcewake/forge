@@ -62,7 +62,9 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -70,11 +72,10 @@ from fastapi.responses import JSONResponse
 from forge.adaptive.command_router import (
     ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
 )
-from forge.adaptive.command_router import adaptive_command_set, route_adaptive_command_note
+from forge.adaptive.command_router import adaptive_command_set
 from forge.durable import ingest_event
+from forge.gateway.durable_ingress import cache_confirms_duplicate, mark_delivered_best_effort
 from forge.gateway.mention import extract_mention
-from forge.worker.steps import STEP_WAKE_KEY, schedule_command_step
-from forge.worker.tasks import create_run_command_task
 
 logger = logging.getLogger(__name__)
 
@@ -581,15 +582,16 @@ async def _ingest_github_event(
             return _record_inbox_only(
                 request, background_tasks, event, delivery, connection_id, project_id, payload
             )
-        if run_command.get("command") == "adaptive_control":
-            # NXT-10: adaptive control verbs take the mailbox leg
-            # (ControlCommandRouter), not the classic run-command step path.
-            return _ingest_github_adaptive_control(
-                request, background_tasks, run_command, event=event
-            )
         source_event_id = github_source_event_id(
             connection_id, event, action, f"comment:{run_command['note_id']}"
         )
+        if run_command.get("command") == "adaptive_control":
+            # NXT-10 / R41-02: the adaptive verbs take the SAME durable
+            # inbox + scheduled-step acceptance as the classic commands; the
+            # step executor routes to the ControlCommandRouter.
+            return await _ingest_github_adaptive_control(
+                request, background_tasks, run_command, source_event_id, event=event
+            )
         return await _ingest_github_run_command(
             request, background_tasks, run_command, source_event_id
         )
@@ -736,76 +738,70 @@ def _record_inbox_only(
 
     # Non-command deliveries are audit-only: persist via the request's
     # background tasks so the 2XX GitHub expects within 10 seconds is never
-    # delayed by the write (research §2.2). Failures are logged, never fatal.
+    # delayed by the write (research §2.2). Failures are logged, never
+    # fatal. R41-02 honesty: the response precedes the write, so it never
+    # claims the record — "accepted" is the whole truthful answer.
     background_tasks.add_task(_write)
-    return JSONResponse(
-        status_code=202, content={"status": "accepted", "event": event, "recorded": True}
-    )
+    return JSONResponse(status_code=202, content={"status": "accepted", "event": event})
 
 
-def _ingest_github_adaptive_control(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    run_command: dict[str, Any],
-    *,
-    event: str = "issue_comment",
-) -> JSONResponse:
-    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
-
-    Mirrors the GitLab ``_ingest_adaptive_control``: the ``202`` answers
-    immediately and the ControlCommandRouter leg runs as a background task
-    (authorize → resolve the run → mailbox → ONE journaled reply per note
-    id). GitHub retries nothing, but a manual redelivery re-enters the
-    router idempotently (mailbox key + A11 note journal).
-    """
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if session_factory is None:
-        logger.warning("Adaptive command without a database — not routed")
-        return JSONResponse(
-            status_code=202,
-            content={"status": "accepted", "event": event, "adaptive_command": False},
-        )
-    background_tasks.add_task(
-        route_adaptive_command_note,
-        request.app.state.settings,
-        session_factory,
-        run_command,
-    )
-    return JSONResponse(
-        status_code=202,
-        content={"status": "accepted", "event": event, "adaptive_command": True},
-    )
-
-
-async def _ingest_github_run_command(
+async def _durable_ingest_github_command(
     request: Request,
     background_tasks: BackgroundTasks,
     run_command: dict[str, Any],
     source_event_id: str,
     *,
     event: str = "issue_comment",
-) -> Any:
-    """Transactional ingress for GitHub run commands (ADR-0017 §1 semantics).
+) -> dict[str, Any]:
+    """Transactional ingress for GitHub run commands (ADR-0017 §1, R41-02).
 
-    Mirrors the GitLab ``_ingest_run_command``: ONE transaction persists the
-    inbox row and the first scheduled step; the ``202`` is answered only
-    after that commit. Redis remains a wake-up accelerator — the inbox
-    unique index is the dedup authority.
+    ONE transaction persists the inbox row (native delivery identity) and
+    the first scheduled step; the ``202`` is answered only after that
+    commit, so the command is durable in Postgres before it is
+    acknowledged — the ONE durable-acceptance rule every actionable
+    command obeys (/implement, /go, /fix-equivalents, /pause, /steer,
+    /approve-revision alike).
+
+    R41-02 (#357) — ported from the GitLab ``_ingest_run_command``:
+
+    - the Redis dedup marker is a post-commit cache, never the authority:
+      a cache hit is confirmed against the committed inbox row before any
+      ``deduplicated`` answer, and an orphaned marker (the pre-commit
+      SET-NX of a failed transaction) proceeds as a first delivery;
+    - the queue submit and the step-wake push after the commit remain
+      wake-up accelerators — losing them (or Redis entirely) costs one
+      step-worker poll interval, never correctness;
+    - a persistence outage refuses honestly (503, retryable by the
+      provider) instead of acknowledging an unsaved command.
     """
-    queue = getattr(request.app.state, "task_queue", None)
+    # Call-time imports, exactly like the GitLab ingest: the kill matrix
+    # patches these module attributes in the gateway subprocess, and the
+    # ingest path must see the patched seam.
+    from forge.durable import ingest_event
+    from forge.worker.steps import STEP_WAKE_KEY, schedule_command_step
+    from forge.worker.tasks import create_run_command_task
+
+    settings = request.app.state.settings
     session_factory = getattr(request.app.state, "session_factory", None)
+    queue = getattr(request.app.state, "task_queue", None)
     note_id = run_command["note_id"]
+    marker_keys = [f"run:{run_command['connection_id']}:{note_id}"]
 
-    if queue is not None:
-        # Fast-path dedup only — a false negative is caught by the inbox index.
-        if await queue.is_duplicate(f"run:{run_command['connection_id']}:{note_id}"):
-            return JSONResponse(
-                status_code=202,
-                content={"status": "accepted", "event": event, "deduplicated": True},
-            )
+    if session_factory is None:
+        # Honesty (R41-02): without the durable store there is NOTHING to
+        # accept against — a 2xx here would certify a command no worker can
+        # ever find. Refuse with the retryable 5xx instead.
+        logger.error("GitHub run command without a database — refusing (no durable acceptance)")
+        raise HTTPException(status_code=503, detail="Database not configured — command refused")
 
-    if session_factory is not None:
-        deduplicated = False
+    if queue is not None and await cache_confirms_duplicate(
+        queue, marker_keys, session_factory, source_event_id
+    ):
+        return {"status": "accepted", "event": event, "deduplicated": True}
+
+    deduplicated = False
+    started = time.monotonic()
+    try:
         async with session_factory() as session:
             async with session.begin():
                 _, created = await ingest_event(
@@ -823,13 +819,36 @@ async def _ingest_github_run_command(
                     )
                 else:
                     deduplicated = True
-        if deduplicated:
-            return JSONResponse(
-                status_code=202,
-                content={"status": "accepted", "event": event, "deduplicated": True},
-            )
+    except Exception as exc:
+        # Bounded retryable failure: the provider redelivers on 5xx and the
+        # next attempt finds NO marker (markers are post-commit only), so
+        # the command lands exactly once. Never a successful acceptance
+        # claim over a lost write.
+        logger.exception(
+            "GitHub run command ingress transaction failed — refusing (retryable), identity=%s",
+            source_event_id[:12],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Durable ingress failed — delivery not acknowledged",
+        ) from exc
+    logger.info(
+        "ingress.durable_accept provider=github command=%s identity=%s latency_ms=%.1f "
+        "deduplicated=%s",
+        run_command["command"],
+        source_event_id[:12],
+        (time.monotonic() - started) * 1000.0,
+        deduplicated,
+    )
 
     if queue is not None:
+        # Wake-up accelerators only — Postgres owns the work (ADR-0017).
+        # Every write here happens strictly AFTER the commit (or after the
+        # authoritative duplicate read) and is best-effort: Redis loss
+        # changes latency, never correctness.
+        await mark_delivered_best_effort(queue, marker_keys)
+        if deduplicated:
+            return {"status": "accepted", "event": event, "deduplicated": True}
         try:
             # The wake task must address the step that was actually
             # scheduled (its inbox identity), not a recomputed one — two
@@ -845,33 +864,69 @@ async def _ingest_github_run_command(
                 await redis_manager.lpush(STEP_WAKE_KEY, source_event_id)
             except Exception:
                 logger.debug("GitHub run command step wake-up failed", exc_info=True)
-        return JSONResponse(
-            status_code=202,
-            content={
-                "status": "accepted",
-                "event": event,
-                "queued": True,
-                "run_command": True,
-            },
-        )
+        return {"status": "accepted", "event": event, "queued": True, "run_command": True}
 
-    if session_factory is not None:
-        # No Redis — dev fallback: execute the persisted step in-process,
-        # through the SAME claim/lease/fence protocol as the worker.
-        from forge.worker.steps import run_pending_command_step
-        from uuid import uuid4
+    if deduplicated:
+        # No queue to refresh — the authoritative read already proved the
+        # record; nothing to execute (the original delivery's step stands).
+        return {"status": "accepted", "event": event, "deduplicated": True}
 
-        background_tasks.add_task(
-            run_pending_command_step,
-            session_factory,
-            request.app.state.settings,
-            request.app.state.forge_config,
-            source_event_id,
-            owner=f"gateway-github-{uuid4().hex[:6]}",
-        )
-        return JSONResponse(
-            status_code=202,
-            content={"status": "accepted", "event": event, "run_command": True},
-        )
+    # No Redis — dev fallback: execute the ALREADY-COMMITTED step
+    # in-process, through the SAME claim/lease/fence protocol as the
+    # worker. The BackgroundTask is an execution nudge, never the
+    # durability mechanism — the step row survives its loss and a fresh
+    # worker (or the reaper) claims it. (Imported at call time: the kill
+    # matrix patches the module attribute, and the nudge must see it.)
+    from forge.worker.steps import run_pending_command_step
 
-    return JSONResponse(status_code=202, content={"status": "accepted", "event": event})
+    background_tasks.add_task(
+        run_pending_command_step,
+        session_factory,
+        settings,
+        request.app.state.forge_config,
+        source_event_id,
+        owner=f"gateway-github-{uuid4().hex[:6]}",
+    )
+    return {"status": "accepted", "event": event, "run_command": True}
+
+
+async def _ingest_github_run_command(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_command: dict[str, Any],
+    source_event_id: str,
+    *,
+    event: str = "issue_comment",
+) -> JSONResponse:
+    """The classic run-command surface over the durable core (R41-02)."""
+    payload = await _durable_ingest_github_command(
+        request, background_tasks, run_command, source_event_id, event=event
+    )
+    return JSONResponse(status_code=202, content=payload)
+
+
+async def _ingest_github_adaptive_control(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_command: dict[str, Any],
+    source_event_id: str,
+    *,
+    event: str = "issue_comment",
+) -> JSONResponse:
+    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
+
+    R41-02 (#357): the adaptive surface obeys the ONE durable-acceptance
+    rule — the SAME inbox + scheduled-step transaction as /implement and
+    /status, acknowledged only after the commit. The scheduled step's
+    executor (:func:`forge.adaptive.command_router.execute_adaptive_command_step`)
+    drives the ControlCommandRouter (authorize → resolve the run → mailbox
+    decision → ONE journaled reply per note id); a process death between
+    the 202 and the routing leaves the step ``scheduled`` and a fresh
+    worker recovers it — no after-response BackgroundTask as the durability
+    mechanism. GitHub retries nothing, but a manual redelivery re-enters
+    the router idempotently (mailbox key + A11 note journal).
+    """
+    result = await _durable_ingest_github_command(
+        request, background_tasks, run_command, source_event_id, event=event
+    )
+    return JSONResponse(status_code=202, content={**result, "adaptive_command": True})

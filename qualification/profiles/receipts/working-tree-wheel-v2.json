@@ -1,8 +1,8 @@
 {
   "built_for": "the v2 qualification composition (forge#326)",
   "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
-  "name": "forge-0.40.0-py3-none-any.whl",
-  "path": "dist/forge-0.40.0-py3-none-any.whl",
-  "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+  "name": "forge-0.41.0-py3-none-any.whl",
+  "path": "dist/forge-0.41.0-py3-none-any.whl",
+  "sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
   "source": "local-uv-build"
 }

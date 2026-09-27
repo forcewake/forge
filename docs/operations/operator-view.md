@@ -669,3 +669,153 @@ a stated LOWER BOUND on how long a safe action has been decidable;
 human reaction time is recorded nowhere and is never invented).
 `operator.stale_action_refusal` is the typed refusal code above — an
 event, not a quantity, so it renders in refusal reasons only.
+
+## 15. The lineage view (R41-12, #367) — ONE work lineage, acknowledgement-aware recovery
+
+Rounds changed what an operator is looking at: a root delivery, active
+child rounds, a shared MR, new budgets, independent recovery state — and
+UUID-prefix references that confused which work was current. The lineage
+view PROJECTS the authoritative facts of the WHOLE delivery lineage into
+ONE snapshot. No new lifecycle, no dashboard: the same rows, the same
+guarded commands, composed.
+
+The surface is the detail route's `lineage` block
+(`forge.adaptive.operator_view.lineage_view`) over four NEW reader
+sections — `target` (the #359 persisted collaboration target), `budget`
+and `amendments` (the run's ledger with its #340 history) and `inbox`
+(the #357 durable webhook rows for the run's project — the RECEIVED
+rung of the command ladder). The rounds read widened to the lineage:
+every round row of the resolved root, so the ROOT's own view sees
+rounds 2..N, not just the first one naming it as parent.
+
+### 15.1 The snapshot shape
+
+| Section | What it names | Canonical rows |
+|---|---|---|
+| `lineage` | the root, the human reference `round 4 of 7319478e` (#359's spelling — display/read resolution only), the delivery HISTORY (delivery 1 + rounds 2..N ordered by round number) and the CURRENT round (reference, machine ref, status, the OPEN round's child as the active execution) | `review_rounds` (by `root_run_id`) + the run row |
+| `target` | the persisted collaboration surface: source branch, target branch, the lineage's ONE MR; a REFUSED legacy target renders its typed reason, never an inferred branch | `collaboration_targets` |
+| `candidate` | the run's candidate with its role (`current`/`historical`) and the supersession reference — ANY superseding round in the lineage makes this run's delivery historical; the lineage's current candidate lives on the open round's child run, named by id | the run row + round rows |
+| `checkpoint` | the exact checkpoint: id, digest, fence, activation receipt — or the honest coverage word (`unknown`, never "no checkpoint") | the checkpoint authority |
+| `verification` | the verdict BOUND to the candidate it tested; an unavailable authority renders `unknown`, never `passed` | the run's verification evidence |
+| `occupancy` | the native occupancy word `running` / `terminal` / `unknown` (#360's rule: the CURRENT execution decides — `terminal` requires an OBSERVED release; unproven occupancy HOLDS the slot and never renders as stopped) | `execution_leases` |
+| `budget` | the axes (calls/tokens/wallclock limits, reserves, consumption, unresolved) WITH the amendment history — applied and refused, a refused amendment naming the limiting axis | `run_budgets` + `budget_amendments` |
+| `command_states` | the command ladder below | `control_commands` + `event_inbox` |
+| `unresolved_effects` | the external effects that may still land | `publication_intents` |
+| `prerequisites` | the explicit operator prerequisites below | derived from the rows |
+
+A delayed parent event cannot change the displayed active child: the
+delivery history orders by ROUND NUMBER and the active child keys on
+the OPEN round (the one-outstanding-slot invariant), never on row
+recency.
+
+### 15.2 The command-state ladder — which durable row distinguishes each state
+
+The review's core ask: a pause is NOT "successful" because a comment
+was accepted. The #357 durable-acceptance work made the rungs
+distinguishable, and the lineage view renders them:
+
+| Command state | The durable row that proves it |
+|---|---|
+| `received` | the `event_inbox` row — the provider delivery landed in SQL, nothing more |
+| `durably_accepted` | the `control_commands` row (the 202 contract: inbox + scheduled step COMMITTED — a worker WILL attempt it) |
+| `dispatched` | the rung `dispatching`/`vendor_accepted`/`outcome_unknown`, or the lease's persisted `native_intent_at` — the dispatch is in flight; a comment ACK is NOT a safe state |
+| `applied` | the command's `applied_at` — the lane acked APPLYING it |
+| `checkpointed` | the rung `checkpointed` PLUS the committed checkpoint row — a pause's loop closes HERE and nowhere earlier |
+| `refused` | the rung `rejected`/`expired` — spent without applying |
+| `unknown` | the command authority was not observed — never guessed |
+
+A pause below `checkpointed` carries the honest note in the render
+("the pause is NOT successful yet"), and the operator state machine
+already agrees: `pause_pending`, not `safely_paused`.
+
+### 15.3 Action versioning — the full subject, reauthorized server-side
+
+Every offered action names the FULL subject — the complete run id plus
+the round reference (`subject: "<run-id>@round:4:<decision>"`), and the
+printed command carries the complete run id. #359 kept 8-char prefixes
+display-only precisely because historical rounds shared them; a printed
+command resolving through a prefix would be ambiguous within a lineage.
+
+Submission reauthorizes server-side against the CURRENT world — four
+fences, each refusing with the typed `operator.stale_action_refusal`
+(#349) and the current state + safe next action named:
+
+1. the projection version (CTL-04 CAS — a stale status comment's
+   action never applies);
+2. the candidate (the exact sha the action was planned for);
+3. the round REFERENCE (the delivery or round moved);
+4. **the round STATUS** (#367's extension): a round that settles
+   (`stale`/`completed`/`ended`) without a successor keeps its
+   reference but changes its status — an action planned while the
+   round was open is refused once it settled, whatever the version
+   number says.
+
+### 15.4 The explicit operator prerequisites
+
+The ambiguous evidence and the unavailable prerequisites render as
+NAMED rows (`prerequisites`), each with its one-line remediation, its
+guarded route or runbook, and whether it is available NOW:
+
+- `stale_head` — the MR head moved off the approved base (the #364
+  round-4 shape: the typed `branch_drift` / the R41-03 settle). Human
+  commits are preserved, never reset; the remediation is to RE-RAISE
+  the correction against the CURRENT head (`native-note:/fix`),
+  which admits a new round from the exact current head.
+- `missing_checkpoint` — the lineage stands paused on a checkpoint the
+  authority reads `missing`/`unknown`: restore from the backup receipt
+  or retire (`runbook:backup-restore`) BEFORE any resume is offered.
+- `expired_credential` — a revoked/expired authority (the #364 finding:
+  the broker token answering `401 token-expired`): rotate or rebind
+  (`runbook:token-rotation`); a retry can never restore withdrawn
+  authority.
+
+### 15.5 The MR comment and the credential-free support export
+
+`render_lineage_comment` is the ONE concise MR status comment: the
+round reference, the target (branch → branch, MR), the current run and
+state, the candidate's role, the honest command ladder, the occupancy
+word and the next action — one block, bounded, ending in the stable
+`forge-status` identity marker (a replayed delivery of the same world
+carries the SAME identity).
+
+`export_lineage_support` (the bundle's `lineage_support` section) is
+the credential-free slice: bounded per section, ALLOWLISTED per field
+(`LINEAGE_SUPPORT_FIELDS`) — secrets, raw reviewer briefs and
+checkpoint CONTENTS are omitted by construction, never rescued — and
+redaction-counted: `support_export.redactions` states how many
+secret-looking values the guard caught anyway. The observability set
+this adds: `operator.time_to_safe_action` (already in the read-model),
+`support_export.redactions` (the export), and
+`projection.stale_or_inconsistent` (the read-model's lineage fold — a
+flag, never a blended measure; the manual DB-repair surface is the
+prerequisites + actions above, which link the guarded routes and
+runbooks).
+
+### 15.6 The runbook — recovering a stale-head round (the blinded-operator walk)
+
+The seeded ordinary failure (live-verified in the #364 trace): a round
+blocked on a moved head with the human commit preserved.
+
+1. Read the view (`GET /operator/runs/<root-run-id>`): the lineage
+   block names the current round (`round 4 of <root>`, status
+   `stale`), the pause you feared is `dispatched` — NOT successful —
+   occupancy is `unknown` (never "stopped"), and the ONE offered
+   recovery is the `stale_head` prerequisite (available, via
+   `native-note:/fix`).
+2. Do NOT replay an action planned before the settle: the guarded
+   route refuses it with `operator.stale_action_refusal` naming the
+   round-status move. Re-decide against the current world.
+3. Execute the offered action: a `/fix` note on the MR re-raises the
+   correction against the CURRENT head — the admission creates the
+   next round from the EXACT current MR head (the preserved human
+   commit becomes the new round's `base_head_sha`; nothing is reset,
+   nothing force-pushed).
+4. Re-read the view: the reference is now `round 5 of <root>`, the new
+   child is the active execution, and the stale-head prerequisite is
+   gone. Leave the MR comment.
+
+This walk is pinned end-to-end as an automated test
+(`tests/test_lineage_view.py::TestTheBlindedOperatorWalk`): a blinded
+operator class that sees ONLY rendered documents recovers the seeded
+world through the view's own offered actions, with the stale replay
+refused first and the human commit preserved as the new base.

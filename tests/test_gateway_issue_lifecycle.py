@@ -389,15 +389,19 @@ class TestAdaptiveCommandIngress:
         assert steps == []
 
     async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        """R41-02 (#357): the adaptive verb takes the SAME durable acceptance
+        as /implement — the inbox row + scheduled ``adaptive_control`` step
+        commit BEFORE the 202, and the step executor routes to the
+        ControlCommandRouter."""
         routed: list[dict] = []
 
         async def fake_route(settings, session_factory, note):
             routed.append(note)
             return {"status": "applied"}
 
-        import forge.gateway.router as gateway_router_module
+        import forge.adaptive.command_router as adaptive_module
 
-        monkeypatch.setattr(gateway_router_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", fake_route)
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
         response = await self._post(client, "@forge /pause feedface1")
 
@@ -406,19 +410,102 @@ class TestAdaptiveCommandIngress:
             "status": "accepted",
             "event": "note",
             "adaptive_command": True,
+            "queued": True,
+            "run_command": True,
         }
-        (note,) = routed
-        assert note["command"] == "adaptive_control"
-        assert note["adaptive_verb"] == "pause"
-        assert note["provider"] == "gitlab"
-        assert note["project_id"] == PROJECT_ID
-        assert note["issue_iid"] == ISSUE_IID
-        assert note["author_username"] == "alice"
-        assert note["note_text"] == "@forge /pause feedface1"
-        # The mailbox leg never schedules a classic run-command step.
+        # The durable acceptance: ONE inbox row + ONE scheduled step, the
+        # step identity IS the inbox identity — before the 202 returned.
         async with app.state.session_factory() as session:
-            steps = (await session.execute(select(StepRun))).scalars().all()
-        assert steps == []
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1
+        assert inbox[0].payload["command"] == "adaptive_control"
+        assert inbox[0].payload["adaptive_verb"] == "pause"
+        assert inbox[0].payload["provider"] == "gitlab"
+        assert inbox[0].payload["project_id"] == PROJECT_ID
+        assert inbox[0].payload["issue_iid"] == ISSUE_IID
+        assert inbox[0].payload["author_username"] == "alice"
+        assert inbox[0].payload["note_text"] == "@forge /pause feedface1"
+        assert steps[0].source_event_id == inbox[0].source_event_id
+        assert steps[0].step_name == "adaptive_control"
+        assert steps[0].status == "scheduled"
+        # The routing itself runs as the step executor, never inline here.
+        assert routed == []
+
+    async def test_the_step_executor_routes_the_persisted_command(self, app, monkeypatch):
+        """The scheduled adaptive step dispatches to the control router via
+        the step runtime's payload dispatch (execute_step_payload) — with a
+        routing failure raised, the step retries instead of succeeding."""
+        import forge.adaptive.command_router as adaptive_module
+        from forge.worker.steps import execute_step_payload
+
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(dict(note))
+            return {"status": "applied"}
+
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", fake_route)
+        payload = {
+            "command": "adaptive_control",
+            "adaptive_verb": "pause",
+            "provider": "gitlab",
+            "project_id": PROJECT_ID,
+            "issue_iid": ISSUE_IID,
+            "note_id": 991,
+            "note_text": "/pause",
+        }
+        await execute_step_payload(app.state.session_factory, app.state.settings, None, payload)
+        (note,) = routed
+        assert note["adaptive_verb"] == "pause"
+
+        failures: list[str] = []
+
+        async def failing_route(settings, session_factory, note):
+            failures.append("raised")
+            return {"status": "error", "reason": "routing failed"}
+
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", failing_route)
+        with pytest.raises(RuntimeError):
+            await execute_step_payload(app.state.session_factory, app.state.settings, None, payload)
+        assert failures == ["raised"]  # an unrouted command must NOT succeed
+
+    async def test_a_redelivered_adaptive_note_collapses_onto_one_command(
+        self, app, client, monkeypatch
+    ):
+        """Exact replay: ONE logical command, one scheduled step — the
+        deduplicated answer is backed by the committed inbox row."""
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        first = await self._post(client, "@forge /steer tighten the error handling")
+        replay = await self._post(client, "@forge /steer tighten the error handling")
+
+        assert first.json()["adaptive_command"] is True
+        assert replay.json()["deduplicated"] is True
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1
+
+    async def test_two_distinct_steering_messages_stay_distinct(self, app, client, monkeypatch):
+        """Genuine repeated decisions are NOT delivery replays: two different
+        steer notes carry different note ids, so two durable commands."""
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        await self._post(client, "@forge /steer tighten the error handling")
+        payload = self._note("@forge /steer prefer the functional style")
+        payload["object_attributes"]["id"] = 31338
+        response = await client.post(
+            "/webhook",
+            json=payload,
+            headers={"X-Gitlab-Token": TEST_WEBHOOK_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+        assert response.json()["adaptive_command"] is True
+        assert "deduplicated" not in response.json()
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 2 and len(steps) == 2
+        assert len({row.source_event_id for row in inbox}) == 2
 
     async def test_bot_note_is_never_routed(self, app, client, monkeypatch):
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
@@ -435,15 +522,6 @@ class TestAdaptiveCommandIngress:
     async def test_adaptive_note_on_an_mr_is_not_routed(self, app, client, monkeypatch):
         """Gate notes are issue-bound: an MR-note /pause is not routed (the
         same boundary every non-/security run command has)."""
-        routed: list[dict] = []
-
-        async def fake_route(settings, session_factory, note):
-            routed.append(note)
-            return {"status": "applied"}
-
-        import forge.gateway.router as gateway_router_module
-
-        monkeypatch.setattr(gateway_router_module, "route_adaptive_command_note", fake_route)
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
         payload = _load("note_mr.json")
         payload["user"]["username"] = "alice"
@@ -455,7 +533,6 @@ class TestAdaptiveCommandIngress:
         )
 
         assert response.json().get("adaptive_command") is None
-        assert routed == []
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []

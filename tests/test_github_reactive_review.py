@@ -592,7 +592,10 @@ class TestPullRequestIngress:
         )
         response = await self.post(client, body)
 
-        assert response.json()["recorded"] is True
+        assert response.json() == {
+            "status": "accepted",
+            "event": "pull_request",
+        }
         inbox, steps = await self.rows(app)
         assert len(inbox) == 1 and steps == []
 
@@ -600,7 +603,10 @@ class TestPullRequestIngress:
         body = self.payload("pull_request_synchronize.json", action="closed")
         response = await self.post(client, body)
 
-        assert response.json()["recorded"] is True
+        assert response.json() == {
+            "status": "accepted",
+            "event": "pull_request",
+        }
         inbox, steps = await self.rows(app)
         assert len(inbox) == 1
         assert inbox[0].event_type == "github:pull_request"

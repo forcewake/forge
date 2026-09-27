@@ -64,8 +64,12 @@ async def run_reconciler(
             # R40-02 (#338): the bounded review-ROUND pass — close rounds
             # whose child work unit reached a terminal status (freeing the
             # lineage's ONE outstanding-correction slot) and re-drive the
-            # rounds a crash left between admission and the advance leg
-            # (head-fenced, at most one child + one effect intent).
+            # rounds a crash left between admission and the advance leg.
+            # R41-03 (#358): the re-drive classifies the head against the
+            # round's OWN publication effects BEFORE the base-head fence
+            # (own effects adopted, never staled; a genuinely foreign head
+            # settles round AND child together) and a second bounded scan
+            # settles children a settled round left runnable.
             service.evaluate_review_rounds,
         ):
             try:

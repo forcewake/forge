@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,13 @@ from forge import __version__
 from forge.adaptive.command_router import (
     ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
     adaptive_command_set,
-    route_adaptive_command_note,
 )
 from forge.adaptive.revisions import parse_review_feedback_note
 from forge.durable.models import FlowRun, StepRun
+from forge.gateway.durable_ingress import (
+    cache_confirms_duplicate,
+    mark_delivered_best_effort,
+)
 from forge.gateway.feedback import (
     REVIEW_FEEDBACK_NOTE_COMMANDS as _REVIEW_FEEDBACK_NOTE_COMMANDS,
     review_feedback_command_set,
@@ -351,21 +355,41 @@ def _capture_webhook_payload(
         logger.warning("Failed to capture webhook payload", exc_info=True)
 
 
+# R41-02 parity: the authoritative duplicate lookup lives in
+# forge.gateway.durable_ingress (imported above) — ONE implementation
+# shared by all three provider gateways, never duplicated per gateway.
+# R41-17 (#372) closed the residual: this gateway CONSUMES the shared
+# cache_confirms_duplicate/mark_delivered_best_effort helpers like the
+# GitHub and Azure gateways do — the probe→confirm sequence is no longer
+# spelled inline here (a second spelling of the #357 decision).
+
+
 async def _ingest_run_command(
     request: Request,
     background_tasks: BackgroundTasks,
     event: GitLabEvent,
     run_command: dict[str, Any],
 ) -> dict[str, Any]:
-    """Transactional ingress for run commands (ADR-0017 §1).
+    """Transactional ingress for run commands (ADR-0017 §1, R41-02).
 
     ONE transaction persists the inbox row (native delivery identity) and the
     first scheduled step; the ``202`` is answered only after that commit, so
-    the command is durable in Postgres before it is acknowledged. The Redis
-    dedup check in front of the transaction is an accelerator, not the
-    authority — the inbox unique index decides; the queue submit and the
-    step-wake push after the commit are accelerators too, and losing them
-    only costs one step-worker poll interval.
+    the command is durable in Postgres before it is acknowledged — the ONE
+    durable-acceptance rule every actionable command obeys (/implement,
+    /go, /fix, /pause, /steer, /approve-revision alike).
+
+    R41-02 (#357) demoted the Redis dedup marker from decision to cache:
+
+    - the marker is only SET AFTER the commit (a positive cache), and a
+      cache hit still performs the authoritative SQL lookup above before
+      answering ``deduplicated`` — a marker without a record proceeds as a
+      first delivery, so the P02 schedule (SET-NX ok → SQL fails → retry
+      within the TTL) can no longer produce a successful empty duplicate;
+    - the queue submit and the step-wake push after the commit remain
+      wake-up accelerators — losing them (or Redis entirely) costs one
+      step-worker poll interval, never correctness;
+    - a persistence outage refuses honestly (503, retryable by the
+      provider) instead of acknowledging an unsaved command.
     """
     from forge.durable import ingest_event
     from forge.worker.steps import (
@@ -394,30 +418,32 @@ async def _ingest_run_command(
     source_event_id = command_source_event_id(
         run_command["command"], run_command["project_id"], note_id
     )
+    delivery_uuid = str(run_command.get("delivery_uuid") or "")
+    is_feedback = run_command.get("command") == "review_feedback"
+    marker_keys = [f"run:{run_command['project_id']}:{note_id}"]
+    if delivery_uuid:
+        marker_keys.insert(0, f"delivery:{delivery_uuid}")
 
-    if queue is not None:
-        # R40-01 transport-layer dedup (feedback commands): the per-delivery
-        # UUID GitLab stamps (``X-Gitlab-Event-UUID``). A manual redelivery
-        # carries a NEW uuid, so this layer catches only exact network
-        # replays — the logical layer below (the inbox unique index over the
-        # note identity: command + project + note id) is the authority that
-        # collapses ANY redelivery onto ONE request.
-        delivery_uuid = str(run_command.get("delivery_uuid") or "")
-        is_feedback = run_command.get("command") == "review_feedback"
-        if delivery_uuid and await queue.is_duplicate(f"delivery:{delivery_uuid}"):
-            if is_feedback:
-                logger.info("feedback.duplicate_delivery layer=transport uuid=%s", delivery_uuid)
-            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
-        # Content-stable identity: re-delivered note webhooks collapse. This
-        # SET-NX check is the fast path only — a false negative still gets
-        # caught by the inbox unique index below.
-        if await queue.is_duplicate(f"run:{run_command['project_id']}:{note_id}"):
-            if is_feedback:
-                logger.info("feedback.duplicate_delivery layer=logical note=%s", note_id)
-            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
+    if session_factory is None:
+        # Honesty (R41-02): without the durable store there is NOTHING to
+        # accept against — a 2xx here would certify a command no worker can
+        # ever find. Refuse with the retryable 5xx instead.
+        logger.error("Run command without a database — refusing (no durable acceptance possible)")
+        raise HTTPException(status_code=503, detail="Database not configured — command refused")
 
-    if session_factory is not None:
-        deduplicated = False
+    if queue is not None and await cache_confirms_duplicate(
+        queue, marker_keys, session_factory, source_event_id
+    ):
+        # R41-17 (#372): the ONE shared decision helper answers — the
+        # GitLab gateway no longer spells the probe→confirm sequence
+        # inline (the residual duplicate #357 left behind on this leg).
+        if is_feedback:
+            logger.info("feedback.duplicate_delivery layer=cache-confirmed note=%s", note_id)
+        return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
+
+    deduplicated = False
+    started = time.monotonic()
+    try:
         async with session_factory() as session:
             async with session.begin():
                 _, created = await ingest_event(
@@ -435,11 +461,37 @@ async def _ingest_run_command(
                     )
                 else:
                     deduplicated = True
-        if deduplicated:
-            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
+    except Exception as exc:
+        # Bounded retryable failure: the provider redelivers on 5xx and the
+        # next attempt finds NO marker (markers are post-commit only), so
+        # the command lands exactly once. Never a successful acceptance
+        # claim over a lost write.
+        logger.exception(
+            "Run command ingress transaction failed — refusing (retryable), identity=%s",
+            source_event_id[:12],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Durable ingress failed — delivery not acknowledged",
+        ) from exc
+    logger.info(
+        "ingress.durable_accept command=%s identity=%s latency_ms=%.1f deduplicated=%s",
+        run_command["command"],
+        source_event_id[:12],
+        (time.monotonic() - started) * 1000.0,
+        deduplicated,
+    )
 
     if queue is not None:
         # Wake-up accelerators only — Postgres owns the work (ADR-0017).
+        # Every write here happens strictly AFTER the commit (or after the
+        # authoritative duplicate read) and is best-effort: Redis loss
+        # changes latency, never correctness (the shared helper).
+        await mark_delivered_best_effort(queue, marker_keys)
+        if deduplicated:
+            if is_feedback:
+                logger.info("feedback.duplicate_delivery layer=sql note=%s", note_id)
+            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
         try:
             await queue.submit(create_run_command_task(run_command, note_id=note_id))
         except Exception:
@@ -457,51 +509,49 @@ async def _ingest_run_command(
             "run_command": True,
         }
 
-    if session_factory is not None:
-        # No Redis — dev fallback: execute the persisted step in-process,
-        # through the SAME claim/lease/fence protocol as the worker.
-        background_tasks.add_task(
-            run_pending_command_step,
-            session_factory,
-            settings,
-            request.app.state.forge_config,
-            source_event_id,
-            owner=f"gateway-{uuid4().hex[:6]}",
-        )
-        return {"status": "accepted", "event": event.object_kind, "run_command": True}
+    if deduplicated:
+        # No queue to refresh — the authoritative read already proved the
+        # record; nothing to execute (the original delivery's step stands).
+        return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
 
-    return {"status": "accepted", "event": event.object_kind}
+    # No Redis — dev fallback: execute the ALREADY-COMMITTED step
+    # in-process, through the SAME claim/lease/fence protocol as the
+    # worker. The BackgroundTask is an execution nudge, never the
+    # durability mechanism — the step row survives its loss and a fresh
+    # worker (or the reaper) claims it.
+    background_tasks.add_task(
+        run_pending_command_step,
+        session_factory,
+        settings,
+        request.app.state.forge_config,
+        source_event_id,
+        owner=f"gateway-{uuid4().hex[:6]}",
+    )
+    return {"status": "accepted", "event": event.object_kind, "run_command": True}
 
 
-def _ingest_adaptive_control(
+async def _ingest_adaptive_control(
     request: Request,
     background_tasks: BackgroundTasks,
     run_command: dict[str, Any],
-    object_kind: str,
+    event: GitLabEvent,
 ) -> dict[str, Any]:
     """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
 
-    The classic run commands answer ``202`` only after their inbox row +
-    first step commit; the adaptive surface answers ``202`` immediately and
-    routes in a background task — the durable decision record for these
-    commands is the work-scoped control mailbox
-    (:class:`~forge.adaptive.wiring.OperatorControlService`), reached
-    idempotently: the mailbox dedups by the note-keyed idempotency key and
-    the operator reply is journaled once per note id (the /retry A11
-    pattern). A redelivered webhook is therefore a no-op, and a lost
-    background task is recovered by the provider's webhook redelivery.
+    R41-02 (#357): the adaptive surface obeys the ONE durable-acceptance
+    rule — the SAME inbox + scheduled-step transaction as /implement and
+    /fix, acknowledged only after the commit. The scheduled step's executor
+    (:func:`forge.adaptive.command_router.execute_adaptive_command_step`)
+    drives the ControlCommandRouter (authorize → resolve the run → mailbox
+    decision → ONE journaled reply per note id); a process death between
+    the 202 and the routing leaves the step ``scheduled`` and a fresh
+    worker recovers it — no reliance on the provider's redelivery and no
+    after-response BackgroundTask as the durability mechanism. The mailbox
+    itself stays command-idempotent (note-keyed idempotency keys, the
+    /retry A11 journal pattern), so a re-executed step adds nothing.
     """
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if session_factory is None:
-        logger.warning("Adaptive command without a database — not routed")
-        return {"status": "accepted", "event": object_kind, "adaptive_command": False}
-    background_tasks.add_task(
-        route_adaptive_command_note,
-        request.app.state.settings,
-        session_factory,
-        run_command,
-    )
-    return {"status": "accepted", "event": object_kind, "adaptive_command": True}
+    result = await _ingest_run_command(request, background_tasks, event, run_command)
+    return {**result, "adaptive_command": True}
 
 
 @router.get("/health")
@@ -797,11 +847,10 @@ async def webhook(
                 "refusal_reason": run_command["refusal_reason"],
             }
         if run_command.get("command") == "adaptive_control":
-            # NXT-10: adaptive control verbs take the mailbox leg, not the
-            # durable run-command step path.
-            return _ingest_adaptive_control(
-                request, background_tasks, run_command, event.object_kind
-            )
+            # NXT-10 / R41-02: the adaptive verbs take the SAME durable
+            # inbox + scheduled-step acceptance as the classic commands;
+            # the step executor routes to the ControlCommandRouter.
+            return await _ingest_adaptive_control(request, background_tasks, run_command, event)
         if run_command.get("command") == "review_feedback":
             # R40-01: the transport identity rides the metadata (audit +
             # transport-layer dedup); the LOGICAL identity stays the note

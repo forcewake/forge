@@ -1,0 +1,83 @@
+{
+  "authority_contract_version": "keyed operation_grants authority rows (migration 029, #341) on the lab's schema head 032: every grant in the trace was minted by the native dispatch path — never seeded (asserted: zero rows before /go on the qualifying run). This cycle's composition carries the #341/#342 machinery PLUS the R41-10 locator-to-env-slot preflight (src/forge/adaptive/project_credentials.py::binding_slot_preflight at bind time; src/forge/lane_driver.py::lane_binding_slot_preflight at lane boot) — the src delta beyond the ab08a317 freeze is exactly that preflight, recorded prominently in the note.",
+  "capabilities": [
+    "operation-grant-redemption"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "runner-redemption (FORGE_CREDENTIAL_DELIVERY=runner-redemption pinned EXPLICITLY on both consumers across five receipted alignments — selection, 20s expire window, 240s restart window, 20s restarted-plane arm, canonical restore): the dispatch mints the operation grant BEFORE the provider call, the lane exchanges its attempt-scoped HMAC lane token at GET /lane/credentials/redeem, the EnvBroker resolves the bound ref env:ANTHROPIC_AUTH_TOKEN, exactly ONE env slot is set with the family's strays scrubbed, and every redemption lands in the append-only credential_redemptions ledger (8 rows for this project, all grant-joined at their binding revisions; typed refusals leave NO row — 0 refused rows exist)",
+  "evidence": [
+    {
+      "artifact_sha256": "c1e7d8d4a823fe73faf564b38ae84638a96d466641f59c48337e4d7924a277cc",
+      "capability": "operation-grant-redemption",
+      "class": "live-provider",
+      "covers": "COMPOSITION=ab08a317-the-current-tree (+exactly the R41-10 preflight delta; re-frozen as 57d3839f…) · CLASS=live-provider · the CURRENT-pairing redemption trace (executed 2026-09-27, disposable project 151 forge-redemption-pairing-2026-09-27, deleted after capture): the control plane from the CURRENT working tree (image sha256:11c4bb30, v0.41.0, schema 032) AND the lane installing the SAME composition's pinned wheel (forge-0.41.0-py3-none-any.whl sha256 2616d221…, sha256-verified INSIDE the lane job before install and echoed into the trace — the pairing proof asserts the lane's own marker). Arms, all live: the sentinel consumer proof (run a4d0062b, grant 28560fdf minted at /go under binding revision 1, the lane's bootstrap redemption joined grant→redemption bd7f2c70→attempt 0→consumer, the recorder captured EXACTLY ONE model call whose Authorization matches the BROKER-selected sentinel while the FRESH competing AMBIENT sentinel never appeared); the response-rejection arm BY THE INSTALLED WHEEL on the real runner (scratch job 1094: wrong attempt/route/ref/slot/binding-revision/expiry/operation all refused typed credential_redemption_failed before any vendor client, the correct document passes, the lane-side preflight refuses the misbound locator — the full offline matrix stays covered by the #342 suites, this arm proves the INSTALLED bytes carry the fence); the PREFLIGHT arm (the shipped registry's bind() refuses env:FORGE_BROKER_MODEL_TOKEN typed binding_slot_mismatch / preflight.binding_slot_mismatch at the bind moment; the same misbound binding hand-written PAST the bind seam — the #343 incident shape — dispatched at the CURRENT lane, which refused at ITS OWN boot preflight with zero redemption endpoint calls and zero model calls, then the corrective rebind (rev 2) recovered the lane with the broker sentinel presented); the ROTATION arm (same-ref rebind rev 2→3 between the mint of grant fbd2acb4 and the lane's redemption: the endpoint answered 403 binding_revision_mismatch naming authorized revision 2 vs live 3 with zero emitted values, the real lane failed CLOSED with the recorder silent, and the post-rotation grant a6c776d1 redeemed at revision 3 — the recovery semantic; wrong-ref and wrong-route probes refused typed grant_ref_mismatch / grant_route_mismatch on the live attempt); GENERATION RETIREMENT (gen-5 lane followed its own grant 2ace0652; gen-4's token refused typed superseded); EXPIRY (20s window: the endpoint AND the real lane refused typed grant_expired — arm A; the 240s arm restarted forge-app COLD mid-window with the deadline column byte-identical after the restart and an idempotent in-window replay (200, grant 0886de18, redemption 0c03a225, 222.6 s to deadline) through the RESTARTED plane; arm C restarted the plane before the mint and refused the expired grant typed grant_expired through the restarted plane on a LIVE attempt whose lane then failed closed).",
+      "executed_at": "2026-09-27T03:20:00+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-27-redemption-pairing/live-run-evidence.json",
+    "docs/evaluation/2026-09-27-redemption-pairing/alignment-receipts.json",
+    "docs/evaluation/2026-09-27-redemption-pairing/README.md",
+    "docs/operations/credential-rotation.md",
+    "qualification/inventory-2026-09-27-redemption-pairing.json",
+    "qualification/records/redemption-2026-09-26.json"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:11c4bb3095334db261379552d74b8e9d6958f0ae7dc380f13aeb49326ba0a248",
+  "legacy": false,
+  "note": "R41-10 (#365) closure record — the CURRENT pairing's grant-consumer proof. Posture: (1) COMPOSITION: the #363 freeze (manifest ab08a317) pinned this tree's build; this cycle added the R41-10 preflight to src/forge (project_credentials.py + lane_driver.py, minimal and suite-green — REPORTED PROMINENTLY), rebuilt the wheel (bb8f18a8… → 2616d221…) and re-aligned the lab (image ddcb9137 → 11c4bb30, schema 031→032); the re-freeze (manifest 57d3839f…) binds the new receipts — the lineage is ab08a317 + exactly the preflight delta, never an unexplained drift. (2) THE PAIRING: the lane installs the composition's own pinned wheel, sha256-verified before install and echoed by the lane itself (the shipped SDK-lane template included VERBATIM by local include from the disposable project; the ONE override is the install seam — the git+${FORGE_LANE_REF} line swapped for the wheel ladder the GitHub template documents). (3) The consumer-identity proof keeps #343's controlled-endpoint allowance: ZERO real model calls rode the redeemed credential (the recorder route); the 6 planner calls (5466 tokens, glm-5.3-flash via litellm — two spent on honestly-recorded install-miss runs) sit well under the $0.15 planner bound; the separately authorized real-model pass stays a distinct evidence class. (4) LIVE-FOUND and recorded honestly: (a) uv validates the wheel FILENAME from a PEP 508 direct reference — the downloaded artifact must carry its real wheel name (the first lane install refused 'Must have a Python tag'); (b) a factory /retry REUSES the run's recorded attempt base — a CI fix lands only through a FRESH run, never a retry of the frozen base; (c) a /retry against a waiting_harness run is refused by the continuation gate (the lane's terminal report takes a beat to park the run); (d) the endpoint's refusal precedence on a TERMINAL attempt is attempt_terminal BEFORE grant_expired — the expiry probe must ride a LIVE attempt, and a warm runner parks a /retry's lane inside ~90 s (the restart arm was re-cut restart-first + fresh issue for exactly this); (e) the typed binding_revision_mismatch refusal IS observable directly at the endpoint (403 with the typed detail — #343 could only read it from the app log). (5) The broker sentinel is the value the consumers already hold (carried from #343 — the redemption machinery delivers whatever value the broker holds; the identity proof is about WHICH value arrives, and the AMBIENT competitor is fresh this cycle). (6) Native-secret success stays DISTINCT from redemption success (this record claims the redemption capability only). (7) The human approval on the profile stays PENDING (qualification/profile-approvals.json — this record claims none).",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-27 (the third live observation; identical to the 0.39.0/0.40.0 records')",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-27",
+  "qualification_redemption_negative_coverage": {
+    "note": "the LIVE arms only the real lane/endpoint could prove on the CURRENT pairing; the full offline refusal matrix stays covered by tests/test_operation_grant.py (77), test_credential_consumption.py (28), test_credential_broker.py (59), test_credential_audit.py (18) and test_adaptive_project_credentials.py — NOT repeated live beyond the installed-wheel reject arm",
+    "typed_refusals_observed_live": [
+      "binding_slot_mismatch at BIND time (the shipped registry's own preflight; observability preflight.binding_slot_mismatch; the lane-side twin refused the same locator at lane boot with zero endpoint calls)",
+      "binding_revision_mismatch AT THE ENDPOINT (403 with the typed detail; authorized rev 2 vs live rev 3; the lane failed closed, zero model calls)",
+      "grant_ref_mismatch (live attempt)",
+      "grant_route_mismatch (live attempt)",
+      "grant_expired (20s window: the endpoint typed AND the real lane failed closed; and through the RESTARTED plane on a live attempt in arm C)",
+      "superseded-generation lane token (gen-4 refused after gen-5's dispatch)",
+      "attempt_terminal (the precedence observation: a finished attempt answers terminal before expiry — recorded as its own typed finding)"
+    ],
+    "zero_successful_retrievals": true
+  },
+  "record_id": "gitlab-ce-v1-Q4110-redemption-pairing-2026-09-27",
+  "refusal_resolution": [
+    {
+      "action": "run a bounded real-model dispatch under the runner-redemption route (the identity proof used the recording endpoint; zero real model calls rode the redeemed credential)",
+      "owner": "next live drill (maintainer authorization)",
+      "refusal": "the consumer-identity proof class permits a controlled model endpoint, and this trace used it again — the real-provider lane pass needs its own spend authorization",
+      "status": "open"
+    },
+    {
+      "action": "rotate the broker-held model credential on the consumers (the value carried from #343 answers 401 token-expired on real model calls)",
+      "owner": "maintainer (Pavel) — the known operator item; blocked the deployment-ops model-leg drill",
+      "refusal": "the redemption machinery delivers whatever value the broker holds — the identity proof (WHICH value arrives) is complete, but real-model redemption passes need a live credential",
+      "status": "open"
+    },
+    {
+      "action": "record the human approval decision in qualification/profile-approvals.json",
+      "owner": "maintainer (Pavel)",
+      "refusal": "profile approval is a separate human artifact this record deliberately does not claim",
+      "status": "open"
+    },
+    {
+      "action": "the preflight landed (bind-time + lane-boot) with the rotation runbook at docs/operations/credential-rotation.md",
+      "owner": "closed in this cycle",
+      "refusal": "the #343 operator-misbound-slot problem — previously discoverable only as the endpoint's staged_slot_mismatch after a lane booted",
+      "status": "resolved"
+    }
+  ],
+  "release_version": "0.41.0",
+  "runtime_dependency_fingerprint": "lane install forge[interactive] @ file:///tmp/forge-0.41.0-py3-none-any.whl (sha256 2616d221…, verified in-job; the CURRENT tree's own wheel — the composition the re-frozen manifest pins) with claude-code CLI pinned 2.1.273; control plane = the working-tree alignment build (image sha256:11c4bb30, v0.41.0, schema 032)",
+  "runtime_recipe": "python-3.13 (uv in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker aligned by scripts/align_lab.py with FORGE_CREDENTIAL_DELIVERY=runner-redemption (five receipted runs); the recorder (podman forge-recorder :8480) and the wheel host (podman forge-wheelhost :8481) served the lane's model route and the pinned wheel over the lab LAN",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "verification_contract": "the SHIPPED claude-sdk-lane template VERBATIM (sha256 3d74be37 — byte-identical to the frozen profile's template) committed into the disposable project and included BY local include; the ONE local override is the lane job's before_script install seam (the git+${FORGE_LANE_REF} line swapped for the sha256-verified wheel ladder; rules/variables/script/artifacts stay the included template's); the qualifying lane's own trace must carry the pairing echo (forge lane package version=0.41.0 wheel=… sha256=2616d221…) and the consumer receipt (credential_consumption) whose grant_id joins the authority row; the recording model endpoint must capture EXACTLY the broker-selected sentinel's digest while the fresh ambient sentinel's digest appears nowhere; the candidate diff was never the object (the driver leg fails fast at the recorder — recorded honestly; consumer_status stays staged-unresolved, no model-usage claim)",
+  "wheel_sha256": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4"
+}

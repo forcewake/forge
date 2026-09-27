@@ -103,6 +103,11 @@ class Pipeline(BaseModel):
     sha: str | None = None
     web_url: str | None = None
     source: str | None = None
+    #: R41-05 (#360): the provider-side creation stamp — the time-ref the
+    #: occupancy probe correlates a branch listing's rows against the
+    #: attempt's dispatch window. Optional because listings from older
+    #: fakes/tests may omit it; absence degrades correlation, never breaks it.
+    created_at: str | None = None
 
 
 class Job(BaseModel):

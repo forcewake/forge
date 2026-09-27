@@ -37,6 +37,26 @@ beside every aggregate, and the #325 closing-budget shapes (the
 closing reserve, budget refusals and the review-only recovery)
 separately visible per work.
 
+R41-13 (#368) adds the LINEAGE FOLD (stamp
+``forge.delivery.accepted-ledger/2``): the review-and-correction loop's
+child rounds join under ONE root task through the #359 collaboration
+identity (``root_run_id`` — the round rows carry it, the lineage branch
+names it), every round keeping its OWN finite budget, its OWN candidate
+outcome and its OWN receipts while the root task's all-attempt cost
+carries them all with NO double counting (receipt ids, native job ids
+and the delivery label — the ONE MR of the lineage — are each counted
+once across parent and child; a repeat identity refuses exactly as the
+report's cross-run guard does). The rounds' budget window shows the
+#340 amendment rows with their ``limit_before``/``limit_after`` history
+and the #339 exposure quantities (the axis exposure and the
+finality-aware closing fold) riding the root, all bound to an EXPLICIT
+versioned policy (the rate-card / budget-profile version rides the
+document, so a later change cannot rewrite historical approvals);
+``manual_rescue`` joins the time measures as its OWN window (the
+kill-recovery gap is never a reviewer minute), and
+``accepted_ledger_v2_document`` emits the v2 artifact over a real
+capture.
+
 The honesty rules, all pinned by ``tests/test_delivery_economics.py``:
 
 - **The join chain** — work id → execution attempt id → usage receipt →
@@ -113,11 +133,17 @@ __all__ = [
     "AcceptanceRecord",
     "AcceptedTaskLedger",
     "AcceptedTaskLedgerBuilder",
+    "ACCEPTED_LEDGER_SCHEMA_V2",
     "AttemptChain",
+    "BudgetAmendmentLink",
     "BudgetEventLink",
     "COST_COLUMN_BILLING",
     "COST_COLUMN_PRICE_CARD",
     "COST_COLUMN_PROVIDER_REPORTED",
+    "LINEAGE_CHAIN",
+    "LINEAGE_RELATIONS",
+    "LineageRun",
+    "CollaborationLabel",
     "CandidateLink",
     "CrossRunJoin",
     "ECONOMICS_SCHEMA",
@@ -129,21 +155,26 @@ __all__ = [
     "EconomicsLinker",
     "EconomicsReport",
     "EvidenceClassError",
+    "ExposureRow",
     "HumanDecisionLink",
     "IDENTITY_CHAIN",
     "ModelRate",
     "NativeJobLink",
     "RateCard",
     "ReviewRecoveryInput",
+    "ROUND_OUTCOMES",
+    "RoundBudgetWindow",
     "STAGE_SECONDS_KEYS",
     "TIME_MEASURES",
     "TimeWindow",
     "VerificationLink",
     "WorkChain",
+    "accepted_ledger_v2_document",
     "assert_latency_guards",
     "assert_no_unmatched_rates",
     "classify_receipt",
     "decode_throughput",
+    "fold_review_lineage",
     "operator_summary",
     "reconcile_with_budget",
     "redact_for_operator",
@@ -1869,7 +1900,10 @@ IDENTITY_CHAIN: tuple[str, ...] = (
 
 #: The time measures the issue names as DIFFERENT quantities — never
 #: folded into one another, never divided across populations (Q39-11
-#: scope item 4). Each measure folds only its own recorded windows.
+#: scope item 4, extended by R41-13). Each measure folds only its own
+#: recorded windows. ``manual_rescue`` (R41-13) is the operator's
+#: kill/recovery gap — a DIFFERENT window from reviewer effort and from
+#: the human wait, never folded into either.
 TIME_MEASURES: tuple[str, ...] = (
     "model_time",
     "tool_time",
@@ -1877,6 +1911,7 @@ TIME_MEASURES: tuple[str, ...] = (
     "ci_runtime",
     "operator_wait",
     "reviewer_effort",
+    "manual_rescue",
     "setup_effort",
 )
 
@@ -2929,6 +2964,42 @@ class AcceptedTaskLedger:
             "recorded_recovery_events": recoveries,
         }
 
+    def _budget_section_over(
+        self, chains: Sequence[WorkChain], *, cap_usd: float | None = None
+    ) -> dict[str, Any]:
+        """The closing-budget fold over a POPULATION of chains (R41-13).
+
+        The lineage-level budget window: every member chain's receipts
+        fold under ONE cap (the recorded window cap), so the #339
+        finality-aware exposure quantities — settled, accrued-unsettled,
+        retained liability, settlement release — ride the ROOT task
+        exactly as they ride one work in :meth:`_budget_section`. A
+        receipt without a figure is an UNKNOWN interval, never a zero;
+        the five (seven) fields stay distinguishable, never blended.
+        """
+        rows: list[IngestedUsageRow] = []
+        for chain in sorted(chains, key=lambda row: row.work_id):
+            for _attempt, entries in self._attempt_rows(chain):
+                for entry in entries:
+                    rows.append(
+                        IngestedUsageRow(
+                            work_id=chain.work_id,
+                            attempt_id=entry.attempt_id,
+                            receipt_id=entry.receipt_id,
+                            source=entry.source,
+                            route=_route_from_key(entry.route_key),
+                            cost_usd=entry.billed_usd,
+                            cost_basis=(
+                                _entry_cost_basis(entry) if entry.billed_usd is not None else ""
+                            ),
+                            cost_lower_bound_usd=(
+                                entry.billed_usd if entry.billed_usd is not None else 0.0
+                            ),
+                            completeness="aggregate",
+                        )
+                    )
+        return closing_budget_report(rows, cap_usd=cap_usd, policy=ClosingReservePolicy()).to_json()
+
     def _time_measures(self) -> dict[str, Any]:
         """Fold the time windows per measure — populations never mix."""
         rows = [
@@ -3091,10 +3162,11 @@ class AcceptedTaskLedger:
         with no second truth store.
         """
         stamp = _text(document.get("schema")) or ACCEPTED_LEDGER_SCHEMA
-        if stamp != ACCEPTED_LEDGER_SCHEMA:
+        if stamp not in (ACCEPTED_LEDGER_SCHEMA, ACCEPTED_LEDGER_SCHEMA_V2):
             raise ValueError(
                 f"accepted-task ledger carries schema {stamp!r},"
-                f" expected {ACCEPTED_LEDGER_SCHEMA!r}"
+                f" expected {ACCEPTED_LEDGER_SCHEMA!r} or"
+                f" {ACCEPTED_LEDGER_SCHEMA_V2!r}"
             )
         report = EconomicsReport.from_document(document.get("economics") or {})
 
@@ -3244,3 +3316,891 @@ def assert_no_unmatched_rates(document: Mapping[str, Any]) -> None:
                 _walk(item, f"{path}[{index}]")
 
     _walk(document, "")
+
+
+# ----------------------------------------------------------------------
+# R41-13 (#368) — the review-lineage fold: rounds under ONE root task
+# ----------------------------------------------------------------------
+
+
+#: The versioned stamp of the lineage-folded accepted-task ledger (v2 —
+#: the v1 artifact is never overwritten; a v2 document EXTENDS it).
+ACCEPTED_LEDGER_SCHEMA_V2 = "forge.delivery.accepted-ledger/2"
+
+#: The lineage identity chain (v2): the #359 collaboration root joins
+#: the rounds; every round keeps its own attempts, receipts, native
+#: jobs, candidates and verification — the fold never flattens them.
+LINEAGE_CHAIN: tuple[str, ...] = (
+    "root_run",
+    "round",
+    "attempt",
+    "model_call",
+    "native_job",
+    "candidate",
+    "verification",
+    "human_decision",
+)
+
+#: The lineage relations a run can carry (closed vocabulary). ``root``
+#: is delivery 1; ``round`` is a correction round child (joined by the
+#: recorded ``root_run_id``); ``prior_attempt`` is a failed attempt of
+#: the SAME task that predates delivery 1 (no round row exists — the
+#: join basis must be named); ``programme_side`` is a run of ANOTHER
+#: lineage whose spend belongs to the programme, never to this root.
+LINEAGE_RELATIONS: tuple[str, ...] = ("root", "round", "prior_attempt", "programme_side")
+
+#: The independent candidate outcomes a lineage run can carry (the
+#: round's OWN terminal — never coerced to its parent's).
+ROUND_OUTCOMES: tuple[str, ...] = (
+    "ready_for_human",
+    "blocked",
+    "failed",
+    "superseded",
+    "unknown",
+)
+
+
+def _sorted_mapping(block: Any) -> dict[str, Any]:
+    """Rebuild a JSON block with sorted keys — the canonical stored form."""
+    if not isinstance(block, Mapping):
+        return {}
+    return {str(key): block[key] for key in sorted(block)}
+
+
+@dataclass(frozen=True)
+class LineageRun:
+    """One run's place in a delivery lineage (the #359 collaboration join).
+
+    ``root_run_id`` is the join key the round rows carry (delivery 1 of
+    the lineage); ``root_join_basis`` names HOW the run joined its root
+    — the recorded anchor (``round_rows.root_run_id``, the lineage
+    branch, the capture's own failed-attempt attribution) — so the fold
+    never silently guesses a parent. ``round_outcome`` is the run's OWN
+    terminal (``ready_for_human`` / ``blocked`` / …): independent
+    candidate outcomes, never the root's.
+    """
+
+    run_id: str
+    relation: str
+    root_run_id: str = ""
+    parent_run_id: str = ""
+    round_number: int = 0
+    root_join_basis: str = ""
+    round_outcome: str = ""
+    outcome_detail: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "relation": self.relation,
+            "root_run_id": self.root_run_id,
+            "parent_run_id": self.parent_run_id,
+            "round_number": self.round_number,
+            "root_join_basis": self.root_join_basis,
+            "round_outcome": self.round_outcome,
+            "outcome_detail": self.outcome_detail,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> LineageRun:
+        relation = _text(block.get("relation"))
+        outcome = _text(block.get("round_outcome"))
+        return cls(
+            run_id=_text(block.get("run_id")),
+            relation=relation if relation in LINEAGE_RELATIONS else "programme_side",
+            root_run_id=_text(block.get("root_run_id")),
+            parent_run_id=_text(block.get("parent_run_id")),
+            round_number=_nn_int(block.get("round_number")) or 0,
+            root_join_basis=_text(block.get("root_join_basis")),
+            round_outcome=outcome if outcome in ROUND_OUTCOMES else "unknown",
+            outcome_detail=_text(block.get("outcome_detail")),
+        )
+
+
+@dataclass(frozen=True)
+class RoundBudgetWindow:
+    """One round's OWN finite budget (the recorded run-budget block).
+
+    R41-13 scope: each correction round ran under its OWN budget — the
+    limits, the status and the closing partition (the reserved calls
+    and tokens the closing review may still spend) ride the lineage's
+    budget window verbatim; consumption counters appear only where the
+    record carried them (an absent counter is ``None``, never zero).
+    """
+
+    run_id: str
+    round_number: int = 0
+    max_calls: int | None = None
+    max_tokens: int | None = None
+    wallclock_s: int | None = None
+    status: str = ""
+    closing_partition_policy: str = ""
+    closing_reserved_calls: int | None = None
+    closing_reserved_tokens: int | None = None
+    consumed_calls: int | None = None
+    consumed_tokens: int | None = None
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "round_number": self.round_number,
+            "max_calls": self.max_calls,
+            "max_tokens": self.max_tokens,
+            "wallclock_s": self.wallclock_s,
+            "status": self.status,
+            "closing_partition_policy": self.closing_partition_policy,
+            "closing_reserved_calls": self.closing_reserved_calls,
+            "closing_reserved_tokens": self.closing_reserved_tokens,
+            "consumed_calls": self.consumed_calls,
+            "consumed_tokens": self.consumed_tokens,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> RoundBudgetWindow:
+        return cls(
+            run_id=_text(block.get("run_id")),
+            round_number=_nn_int(block.get("round_number")) or 0,
+            max_calls=_nn_int(block.get("max_calls")),
+            max_tokens=_nn_int(block.get("max_tokens")),
+            wallclock_s=_nn_int(block.get("wallclock_s")),
+            status=_text(block.get("status")),
+            closing_partition_policy=_text(block.get("closing_partition_policy")),
+            closing_reserved_calls=_nn_int(block.get("closing_reserved_calls")),
+            closing_reserved_tokens=_nn_int(block.get("closing_reserved_tokens")),
+            consumed_calls=_nn_int(block.get("consumed_calls")),
+            consumed_tokens=_nn_int(block.get("consumed_tokens")),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class BudgetAmendmentLink:
+    """One #340 budget-amendment row, inside the lineage's budget window.
+
+    The durable row's shape verbatim: the native ``command_id`` (unique
+    per run — a redelivery replays, never double-applies), the ONE axis
+    changed, the typed refusal when refused, and the
+    ``limit_before``/``limit_after`` history — the moved limit auditable
+    against what stood before. ``policy_version`` binds the amendment
+    to the explicit versioned policy it was approved under: a later
+    policy change writes NEW rows, history is never rewritten.
+    """
+
+    amendment_id: str
+    run_id: str = ""
+    scope: str = ""
+    command_id: str = ""
+    axis: str = ""
+    amount_usd: float | None = None
+    amount_calls: int | None = None
+    amount_tokens: int | None = None
+    amount_wallclock_s: int | None = None
+    reason: str = ""
+    operator: str = ""
+    status: str = ""
+    refusal_reason: str = ""
+    limit_before: Mapping[str, Any] = field(default_factory=dict)
+    limit_after: Mapping[str, Any] = field(default_factory=dict)
+    applied_at: str = ""
+    policy_version: str = ""
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "amendment_id": self.amendment_id,
+            "run_id": self.run_id,
+            "scope": self.scope,
+            "command_id": self.command_id,
+            "axis": self.axis,
+            "amount_usd": self.amount_usd,
+            "amount_calls": self.amount_calls,
+            "amount_tokens": self.amount_tokens,
+            "amount_wallclock_s": self.amount_wallclock_s,
+            "reason": self.reason,
+            "operator": self.operator,
+            "status": self.status,
+            "refusal_reason": self.refusal_reason,
+            "limit_before": _sorted_mapping(self.limit_before),
+            "limit_after": _sorted_mapping(self.limit_after),
+            "applied_at": self.applied_at,
+            "policy_version": self.policy_version,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> BudgetAmendmentLink:
+        return cls(
+            amendment_id=_text(block.get("amendment_id")),
+            run_id=_text(block.get("run_id")),
+            scope=_text(block.get("scope")),
+            command_id=_text(block.get("command_id")),
+            axis=_text(block.get("axis")),
+            amount_usd=_nn_float(block.get("amount_usd")),
+            amount_calls=_nn_int(block.get("amount_calls")),
+            amount_tokens=_nn_int(block.get("amount_tokens")),
+            amount_wallclock_s=_nn_int(block.get("amount_wallclock_s")),
+            reason=_text(block.get("reason")),
+            operator=_text(block.get("operator")),
+            status=_text(block.get("status")),
+            refusal_reason=_text(block.get("refusal_reason")),
+            limit_before=_sorted_mapping(block.get("limit_before")),
+            limit_after=_sorted_mapping(block.get("limit_after")),
+            applied_at=_text(block.get("applied_at")),
+            policy_version=_text(block.get("policy_version")),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class ExposureRow:
+    """One #339 exposure quantity — an axis consumed against its limit.
+
+    ``consumed``/``limit`` appear only where the record carried them;
+    ``exhausted`` is the recorded status fact; ``closing_review_stood_down``
+    names the designed fence (the reviewer leg refused with zero reviewer
+    spend, the standing block naming the closing reserve).
+    """
+
+    run_id: str
+    axis: str
+    consumed: float | None = None
+    limit: float | None = None
+    exhausted: bool = False
+    closing_review_stood_down: bool = False
+    note: str = ""
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "axis": self.axis,
+            "consumed": self.consumed,
+            "limit": self.limit,
+            "exhausted": self.exhausted,
+            "closing_review_stood_down": self.closing_review_stood_down,
+            "note": self.note,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> ExposureRow:
+        return cls(
+            run_id=_text(block.get("run_id")),
+            axis=_text(block.get("axis")),
+            consumed=_nn_float(block.get("consumed")),
+            limit=_nn_float(block.get("limit")),
+            exhausted=bool(block.get("exhausted")),
+            closing_review_stood_down=bool(block.get("closing_review_stood_down")),
+            note=_text(block.get("note")),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+@dataclass(frozen=True)
+class CollaborationLabel:
+    """The lineage's ONE delivery label (the #359 collaboration surface).
+
+    The MR identity, the source branch and the target branch belong to
+    the LINEAGE, never to a round: the fold records the label once at
+    the root — a round carrying a different label is a conflict, never
+    a second delivery.
+    """
+
+    root_run_id: str
+    provider: str = ""
+    project_ref: str = ""
+    issue_iid: int | None = None
+    source_branch: str = ""
+    target_branch: str = ""
+    mr_iid: int | None = None
+    mr_state: str = ""
+    mr_draft: bool | None = None
+    recorded_in: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "root_run_id": self.root_run_id,
+            "provider": self.provider,
+            "project_ref": self.project_ref,
+            "issue_iid": self.issue_iid,
+            "source_branch": self.source_branch,
+            "target_branch": self.target_branch,
+            "mr_iid": self.mr_iid,
+            "mr_state": self.mr_state,
+            "mr_draft": self.mr_draft,
+            "recorded_in": self.recorded_in,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> CollaborationLabel:
+        draft = block.get("mr_draft")
+        return cls(
+            root_run_id=_text(block.get("root_run_id")),
+            provider=_text(block.get("provider")),
+            project_ref=_text(block.get("project_ref")),
+            issue_iid=_nn_int(block.get("issue_iid")),
+            source_branch=_text(block.get("source_branch")),
+            target_branch=_text(block.get("target_branch")),
+            mr_iid=_nn_int(block.get("mr_iid")),
+            mr_state=_text(block.get("mr_state")),
+            mr_draft=None if draft is None else bool(draft),
+            recorded_in=_text(block.get("recorded_in")),
+        )
+
+
+def _lineage_round_row(
+    ledger: AcceptedTaskLedger,
+    run: LineageRun,
+    budget: RoundBudgetWindow | None,
+) -> dict[str, Any]:
+    """One lineage run's rendered row — its OWN cost and candidate outcome."""
+    chain = ledger.chain_by_id(run.run_id)
+    columns = ledger._fold_columns([chain] if chain is not None else [])
+    coverage = ledger._coverage_block([chain] if chain is not None else [])
+    candidate = ""
+    native_job = ""
+    receipt_ids: list[str] = []
+    if chain is not None:
+        for attempt in sorted(chain.attempts, key=lambda row: row.attempt_id):
+            if attempt.native_job is not None and not native_job:
+                native_job = attempt.native_job.job_id
+            if attempt.candidate is not None and not candidate:
+                candidate = attempt.candidate.candidate_sha
+            receipt_ids.extend(attempt.receipt_ids)
+    return {
+        "run_id": run.run_id,
+        "relation": run.relation,
+        "root_run_id": run.root_run_id,
+        "parent_run_id": run.parent_run_id,
+        "round_number": run.round_number,
+        "root_join_basis": run.root_join_basis,
+        "round_outcome": run.round_outcome,
+        "outcome_detail": run.outcome_detail,
+        "candidate_sha": candidate or None,
+        "native_job_id": native_job or None,
+        "receipt_ids": sorted(receipt_ids),
+        "incremental_cost": columns,
+        "coverage": coverage,
+        "budget": budget.to_json() if budget is not None else None,
+    }
+
+
+def fold_review_lineage(
+    ledger: AcceptedTaskLedger | Mapping[str, Any],
+    *,
+    lineage_runs: Sequence[Mapping[str, Any]] = (),
+    round_budgets: Sequence[Mapping[str, Any]] = (),
+    budget_amendments: Sequence[Mapping[str, Any]] = (),
+    exposure_rows: Sequence[Mapping[str, Any]] = (),
+    collaboration_labels: Sequence[Mapping[str, Any]] = (),
+    budget_policy: Mapping[str, Any] | None = None,
+    recorded_totals: Mapping[str, Any] | None = None,
+    cap_usd: float | None = None,
+) -> dict[str, Any]:
+    """Fold the correction rounds under their ONE root task (R41-13).
+
+    The join: every :class:`LineageRun` names its ``root_run_id`` (the
+    #359 collaboration identity — the round rows carry it, the lineage
+    branch names it) and HOW it joined (``root_join_basis``); rounds and
+    prior attempts fold under the root, programme-side runs stay their
+    own works, and a run the spend ledger never saw surfaces as an
+    identity gap — never a silent drop. The no-double-count rules: each
+    receipt id, native job id and the delivery label is counted ONCE
+    across parent and child (the ledger's cross-run guard already
+    refuses a repeat receipt identity; the fold PROVES the check with
+    counts); every round keeps its OWN candidate outcome, budget window
+    and incremental cost; the root task's all-attempt cost is the fold
+    over the member chains — never a re-sum of per-round numbers. An
+    unreceipted run's spend stays unknown and bounded (the recorded
+    window totals reconcile against the folded receipts; the residual
+    is ATTRIBUTED and bounded, never added to a column).
+    """
+    if not isinstance(ledger, AcceptedTaskLedger):
+        ledger = AcceptedTaskLedger.from_document(ledger)
+    gaps: list[EconomicsConflict] = []
+    notes: list[str] = []
+
+    def _collapse(
+        rows: Sequence[Mapping[str, Any]], key_of: Any, *, gap_kind: str = ""
+    ) -> dict[str, Mapping[str, Any]]:
+        by_key: dict[str, Mapping[str, Any]] = {}
+        for row in rows:
+            key = key_of(row)
+            if not key:
+                continue
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = dict(row)
+            elif _canonical_row(dict(row)) != _canonical_row(dict(existing)):
+                by_key[key] = max((dict(row), dict(existing)), key=_canonical_row)
+                if gap_kind:
+                    gaps.append(
+                        EconomicsConflict(
+                            kind="identity",
+                            identity=f"{gap_kind}:{key}",
+                            detail=(
+                                f"two differing {gap_kind} records claim one identity"
+                                f" ({key}) — the canonical form is kept, never merged"
+                            ),
+                        )
+                    )
+        return by_key
+
+    runs = {
+        key: LineageRun.from_json(row)
+        for key, row in _collapse(lineage_runs, lambda row: _text(row.get("run_id"))).items()
+    }
+    budgets_by_run = {
+        key: RoundBudgetWindow.from_json(row)
+        for key, row in _collapse(round_budgets, lambda row: _text(row.get("run_id"))).items()
+    }
+    amendments = [
+        BudgetAmendmentLink.from_json(row)
+        for _key, row in _collapse(
+            budget_amendments, lambda row: _text(row.get("amendment_id"))
+        ).items()
+    ]
+    exposures = [
+        ExposureRow.from_json(row)
+        for _key, row in _collapse(
+            exposure_rows,
+            lambda row: "\x1f".join((_text(row.get("run_id")), _text(row.get("axis")))),
+        ).items()
+    ]
+    labels = [
+        CollaborationLabel.from_json(row)
+        for _key, row in _collapse(
+            collaboration_labels, lambda row: _text(row.get("root_run_id"))
+        ).items()
+    ]
+
+    # -- group the runs under their roots --------------------------------
+    chains_by_work = {chain.work_id: chain for chain in ledger.chains}
+    root_ids: set[str] = set()
+    for run in runs.values():
+        if run.relation == "root":
+            if run.root_run_id and run.root_run_id != run.run_id:
+                gaps.append(
+                    EconomicsConflict(
+                        kind="lineage",
+                        identity=f"root:{run.run_id}",
+                        detail=(
+                            f"a root run names root_run_id {run.root_run_id!r}"
+                            f" different from its own id {run.run_id!r} — the"
+                            " run renders as named, never re-parented"
+                        ),
+                    )
+                )
+            root_ids.add(run.run_id)
+        elif run.relation in ("round", "prior_attempt"):
+            root = run.root_run_id or run.run_id
+            root_ids.add(root)
+            if not run.root_run_id:
+                gaps.append(
+                    EconomicsConflict(
+                        kind="lineage",
+                        identity=f"round:{run.run_id}",
+                        detail=(
+                            f"a {run.relation} run carries no root_run_id — it"
+                            " folds under its own id as the only recorded root,"
+                            " never a guessed parent"
+                        ),
+                    )
+                )
+
+    root_tasks: dict[str, dict[str, Any]] = {}
+    for root_id in sorted(root_ids):
+        members = sorted(
+            (
+                run
+                for run in runs.values()
+                if run.run_id == root_id
+                or (run.root_run_id == root_id and run.relation in ("round", "prior_attempt"))
+            ),
+            key=lambda run: (run.round_number, run.run_id),
+        )
+        root_chain = chains_by_work.get(root_id)
+        if root_chain is None:
+            gaps.append(
+                EconomicsConflict(
+                    kind="lineage",
+                    identity=f"root:{root_id}",
+                    detail=(
+                        "the root run the rounds name never reached the spend"
+                        " ledger — the rounds stay visible under it, the root's"
+                        " own spend is unknown, never zero"
+                    ),
+                )
+            )
+        member_chains = [
+            chains_by_work[run.run_id]
+            for run in members
+            if run.run_id in chains_by_work and run.relation != "programme_side"
+        ]
+        missing = sorted(run.run_id for run in members if run.run_id not in chains_by_work)
+        for run_id in missing:
+            gaps.append(
+                EconomicsConflict(
+                    kind="lineage",
+                    identity=f"lineage_run:{run_id}",
+                    detail=(
+                        f"lineage run {run_id} names no work the spend ledger saw"
+                        " — the run stays visible in the fold, its spend is"
+                        " unknown, never zero"
+                    ),
+                )
+            )
+        rounds = [
+            _lineage_round_row(
+                ledger,
+                run,
+                budgets_by_run.get(run.run_id),
+            )
+            for run in members
+            if run.relation in ("root", "round")
+        ]
+        prior = [
+            _lineage_round_row(ledger, run, budgets_by_run.get(run.run_id))
+            for run in members
+            if run.relation == "prior_attempt"
+        ]
+        # -- the no-double-count proofs over the member chains ---------
+        receipt_ids = [
+            entry.receipt_id
+            for chain in member_chains
+            for _attempt, rows in ledger._attempt_rows(chain)
+            for entry in rows
+        ]
+        job_ids = [
+            attempt.native_job.job_id
+            for chain in member_chains
+            for attempt in chain.attempts
+            if attempt.native_job is not None
+        ]
+        root_labels = [label for label in labels if label.root_run_id == root_id]
+        if len(root_labels) > 1:
+            gaps.append(
+                EconomicsConflict(
+                    kind="lineage",
+                    identity=f"collaboration_label:{root_id}",
+                    detail=(
+                        f"{len(root_labels)} delivery labels claim one lineage —"
+                        " the first sorted identity is kept, a lineage never"
+                        " carries two MRs"
+                    ),
+                )
+            )
+        human = root_chain.human_decision if root_chain is not None else None
+        accepted_count = 1 if (human is not None and human.state == "accepted") else 0
+        root_task: dict[str, Any] = {
+            "root_run_id": root_id,
+            "rounds": rounds,
+            "prior_failed_attempts": prior,
+            "attempts": sum(len(chain.attempts) for chain in member_chains),
+            "denominators": {
+                "root_task_attempts": sum(len(chain.attempts) for chain in member_chains),
+                "rounds": len(rounds),
+                "prior_failed_attempts": len(prior),
+                "accepted_items": accepted_count,
+                "note": (
+                    "task-local denominators: every attempt of the root task"
+                    " (prior failures, delivery 1 and the correction rounds);"
+                    " per-accepted economics need a CLOSED human decision —"
+                    " undefined at 0 accepted items, never zero"
+                ),
+            },
+            "all_attempt": {
+                "columns": ledger._fold_columns(member_chains),
+                "coverage": ledger._coverage_block(member_chains),
+            },
+            "human_decision": (human.to_json() if human is not None else None),
+            "budget_window": {
+                "cap_usd": _round6(cap_usd),
+                "policy": _sorted_mapping(budget_policy),
+                "round_budgets": [
+                    budgets_by_run[run.run_id].to_json()
+                    for run in sorted(members, key=lambda row: (row.round_number, row.run_id))
+                    if run.run_id in budgets_by_run
+                ],
+                "amendments": [
+                    amendment.to_json()
+                    for amendment in sorted(
+                        amendments,
+                        key=lambda row: (row.applied_at, row.amendment_id),
+                    )
+                    if amendment.run_id in {run.run_id for run in members} or amendment.scope
+                ],
+                "exposure": {
+                    "axes": [
+                        row.to_json()
+                        for row in sorted(exposures, key=lambda row: (row.run_id, row.axis))
+                        if row.run_id in {run.run_id for run in members}
+                    ],
+                    "closing_budget": ledger._budget_section_over(member_chains, cap_usd=cap_usd),
+                },
+            },
+            "collaboration_label": (
+                sorted(root_labels, key=lambda row: _canonical_row(row.to_json()))[0].to_json()
+                if root_labels
+                else None
+            ),
+            "no_double_count": {
+                "receipt_ids": {
+                    "total": len(receipt_ids),
+                    "distinct": len(set(receipt_ids)),
+                    "unique": len(receipt_ids) == len(set(receipt_ids)),
+                },
+                "native_job_ids": {
+                    "total": len(job_ids),
+                    "distinct": len(set(job_ids)),
+                    "unique": len(job_ids) == len(set(job_ids)),
+                },
+                "delivery_labels_per_lineage": len(root_labels),
+                "note": (
+                    "each receipt, native job and delivery label counted ONCE"
+                    " across parent and child rounds — a repeat identity refuses"
+                    " exactly as the cross-run guard does (counted under its"
+                    " first sorted attribution, never a second copy)"
+                ),
+            },
+        }
+        root_tasks[root_id] = root_task
+
+    # -- programme-side runs (other lineages, never folded into a root) --
+    programme_side: dict[str, dict[str, Any]] = {}
+    for run_id in sorted(runs):
+        run = runs[run_id]
+        if run.relation != "programme_side":
+            continue
+        row = _lineage_round_row(ledger, run, budgets_by_run.get(run.run_id))
+        row["why_programme_side"] = (
+            run.root_join_basis
+            or "the run names a parent outside this capture's lineage — its spend belongs to the programme, never to a root task here"
+        )
+        programme_side[run_id] = row
+
+    # -- the window reconciliation (recorded totals vs folded receipts) --
+    reconciliation: dict[str, Any] = {"recorded_totals": _sorted_mapping(recorded_totals)}
+    programme_columns = ledger._fold_columns(ledger.chains)
+    reconciliation["folded"] = {
+        column: {
+            "known_lower_bound_usd": programme_columns[column]["known_lower_bound_usd"],
+            "exact": programme_columns[column]["exact"],
+        }
+        for column in ACCEPTED_COST_COLUMNS
+    }
+    # the qualifying ROUNDS folded (the root's rounds only — prior failed
+    # attempts are not qualifying rounds) beside the recorded qualifying
+    # figure: a tight corroboration, stated per root task.
+    recorded_qualifying = _nn_float((recorded_totals or {}).get("qualifying_lane_spend_usd"))
+    rounds_folded: dict[str, float] = {}
+    for root_id, root_task in sorted(root_tasks.items()):
+        rounds_lower_values = [
+            (
+                round_row["incremental_cost"][COST_COLUMN_PROVIDER_REPORTED][
+                    "known_lower_bound_usd"
+                ]
+                or 0.0
+            )
+            for round_row in root_task["rounds"]
+        ]
+        rounds_lower = _sum(rounds_lower_values)
+        rounded_lower = _round6(rounds_lower)
+        if rounds_lower_values and rounded_lower is not None:
+            rounds_folded[root_id] = rounded_lower
+    if rounds_folded:
+        reconciliation["qualifying_rounds_folded_usd"] = dict(sorted(rounds_folded.items()))
+        if recorded_qualifying is not None:
+            reconciliation["qualifying_rounds_recorded_usd"] = _round6(recorded_qualifying)
+    recorded_all = _nn_float((recorded_totals or {}).get("all_attempt_total_usd"))
+    folded_lower = programme_columns[COST_COLUMN_PROVIDER_REPORTED]["known_lower_bound_usd"]
+    if recorded_all is not None and folded_lower is not None:
+        residual = round(recorded_all - folded_lower, 6)
+        unreceipted = sorted(
+            chain.work_id
+            for chain in ledger.chains
+            if not any(
+                entry.basis != "refused"
+                for _attempt, rows in ledger._attempt_rows(chain)
+                for entry in rows
+            )
+        )
+        reconciliation["unreceipted_residual_usd"] = _round6(residual)
+        reconciliation["attributed_to_runs"] = unreceipted
+        reconciliation["note"] = (
+            "the recorded window total reconciles against the folded receipts:"
+            f" {_round6(residual)} usd never reached the record as a receipt —"
+            " attributed to the unreceipted lane runs above and BOUNDED there,"
+            " never added to a cost column (a figure the SDK never reported is"
+            " a bound, not spend)"
+        )
+    root_tasks_out = dict(sorted(root_tasks.items()))
+
+    return {
+        "chain": list(LINEAGE_CHAIN),
+        "root_tasks": root_tasks_out,
+        "programme_side": dict(sorted(programme_side.items())),
+        "window_reconciliation": reconciliation,
+        "identity_gaps": [
+            row.to_json() for row in sorted(gaps, key=lambda row: (row.kind, row.identity))
+        ],
+        "notes": sorted(set(notes)),
+    }
+
+
+def _minutes_over(ledger: AcceptedTaskLedger, measure: str) -> float | None:
+    """Minutes over one time measure — ``None`` when any window is unknown."""
+    windows = [window.seconds for window in ledger.time_windows if window.measure == measure]
+    if not windows or any(seconds is None for seconds in windows):
+        return None
+    return _round6(_sum([seconds or 0.0 for seconds in windows]) / 60.0)
+
+
+def accepted_ledger_v2_document(
+    ledger: AcceptedTaskLedger,
+    *,
+    lineage_runs: Sequence[Mapping[str, Any]] = (),
+    round_budgets: Sequence[Mapping[str, Any]] = (),
+    budget_amendments: Sequence[Mapping[str, Any]] = (),
+    exposure_rows: Sequence[Mapping[str, Any]] = (),
+    collaboration_labels: Sequence[Mapping[str, Any]] = (),
+    budget_policy: Mapping[str, Any] | None = None,
+    recorded_totals: Mapping[str, Any] | None = None,
+    cap_usd: float | None = None,
+    pilot: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """The v2 artifact: the accepted-task ledger WITH the lineage fold.
+
+    The v1 body rides verbatim (chains, columns, measures, budget
+    sections); v2 adds the ``lineage`` section and re-stamps the
+    document ``forge.delivery.accepted-ledger/2`` — the v1 artifact is
+    never overwritten. The observability block gains the issue's
+    gauges: ``usage.coverage_by_source``,
+    ``accepted_work.total_cost_lower_bound``,
+    ``human.review_and_rescue_minutes`` and
+    ``review_round.incremental_cost``, each a pure fold of the same
+    document (no second truth store).
+    """
+    document = dict(ledger.to_document())
+    lineage = fold_review_lineage(
+        ledger,
+        lineage_runs=lineage_runs,
+        round_budgets=round_budgets,
+        budget_amendments=budget_amendments,
+        exposure_rows=exposure_rows,
+        collaboration_labels=collaboration_labels,
+        budget_policy=budget_policy,
+        recorded_totals=recorded_totals,
+        cap_usd=cap_usd,
+    )
+    document["schema"] = ACCEPTED_LEDGER_SCHEMA_V2
+    document["identity_chain"] = list(LINEAGE_CHAIN)
+    document["lineage"] = lineage
+    if pilot:
+        document["pilot"] = {**document.get("pilot", {}), **dict(sorted(pilot.items()))}
+
+    # -- coverage by source: receipts received per source namespace ----
+    by_source: dict[str, dict[str, int]] = {}
+    for chain in sorted(ledger.chains, key=lambda row: row.work_id):
+        for _attempt, rows in ledger._attempt_rows(chain):
+            received = [entry for entry in rows if entry.basis != "refused"]
+            if received:
+                for source in sorted({entry.source for entry in received}):
+                    row = by_source.setdefault(source, {"receipts": 0, "attempts_covered": 0})
+                    row["receipts"] += len(received)
+                    row["attempts_covered"] += 1
+    unreceipted_attempts = sum(
+        1
+        for chain in ledger.chains
+        for _attempt, rows in ledger._attempt_rows(chain)
+        if not any(entry.basis != "refused" for entry in rows)
+    )
+
+    # -- review_round.incremental_cost (per root task, per round) -------
+    incremental: dict[str, dict[str, dict[str, Any]]] = {}
+    for root_id, root_task in sorted(lineage["root_tasks"].items()):
+        rounds: dict[str, dict[str, Any]] = {}
+        for round_row in root_task["rounds"]:
+            if round_row["relation"] == "root" or not round_row["round_number"]:
+                continue
+            rounds[str(round_row["round_number"])] = {
+                column: {
+                    "usd": round_row["incremental_cost"][column]["usd"],
+                    "known_lower_bound_usd": round_row["incremental_cost"][column][
+                        "known_lower_bound_usd"
+                    ],
+                }
+                for column in ACCEPTED_COST_COLUMNS
+            }
+        if rounds:
+            incremental[root_id] = dict(sorted(rounds.items()))
+
+    reviewer_minutes = _minutes_over(ledger, "reviewer_effort")
+    rescue_minutes = _minutes_over(ledger, "manual_rescue")
+    combined = (
+        _round6(((reviewer_minutes or 0.0) + (rescue_minutes or 0.0)))
+        if reviewer_minutes is not None and rescue_minutes is not None
+        else None
+    )
+    observability = dict(document["observability"])
+    observability["usage.coverage_by_source"] = {
+        **{source: dict(sorted(row.items())) for source, row in sorted(by_source.items())},
+        "unreceipted_attempts": unreceipted_attempts,
+    }
+    observability["accepted_work.total_cost_lower_bound"] = {
+        **{
+            root_id: {
+                "decision_state": root_task["human_decision"]["state"]
+                if root_task["human_decision"]
+                else "unknown",
+                "columns": {
+                    column: root_task["all_attempt"]["columns"][column]["known_lower_bound_usd"]
+                    for column in ACCEPTED_COST_COLUMNS
+                },
+                "attempts": root_task["attempts"],
+            }
+            for root_id, root_task in sorted(lineage["root_tasks"].items())
+        },
+        "programme": {
+            column: reconciliation_row["known_lower_bound_usd"]
+            for column, reconciliation_row in lineage["window_reconciliation"]["folded"].items()
+        },
+    }
+    observability["human.review_and_rescue_minutes"] = {
+        "minutes": combined,
+        "reviewer_effort_minutes": reviewer_minutes,
+        "manual_rescue_minutes": rescue_minutes,
+        "note": (
+            "the combined figure needs BOTH measures fully measured — an"
+            " unknown reviewer effort keeps it null, never a partial presented"
+            " as a total (each measured component rides time_measures)"
+        ),
+    }
+    observability["review_round.incremental_cost"] = dict(sorted(incremental.items()))
+    observability["identity.gaps"] = len(lineage["identity_gaps"]) + len(
+        document.get("identity_gaps") or []
+    )
+    document["observability"] = observability
+    notes = list(document.get("notes") or [])
+    notes.extend(
+        (
+            "child rounds fold under ONE root task by the recorded root_run_id —"
+            " every round keeps its own candidate outcome and budget; receipt"
+            " ids, native job ids and the delivery label are each counted once"
+            " across parent and child (R41-13)",
+            "the budget policy and rate card ride the document under explicit"
+            " versions — a later change writes NEW rows and documents, history"
+            " is never rewritten (R41-13)",
+        )
+    )
+    if lineage["identity_gaps"]:
+        notes.append(
+            f"{len(lineage['identity_gaps'])} lineage identity gap(s) — each names"
+            " its broken link, none is dropped"
+        )
+    document["notes"] = sorted(set(notes))
+    assert_latency_guards(document)
+    assert_no_unmatched_rates(document)
+    return document

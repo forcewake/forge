@@ -99,7 +99,9 @@ from forge.database import reset_engine
 from forge.durable.models import FlowRun, OperationGrant
 from forge.models.base import Base
 from forge.lane_driver import (
+    BINDING_SLOT_PREFLIGHT_MARKER,
     expected_redemption_identity,
+    lane_binding_slot_preflight,
     verify_redemption_response,
 )
 from forge.main import create_app
@@ -1025,6 +1027,57 @@ class TestRunnerVerification:
         del document["redemption_deadline"]
         with pytest.raises(Exception, match="credential_redemption_failed.*redemption_deadline"):
             verify_redemption_response(document, expected=self._expected())
+
+
+# ----------------------------------------------------------------------
+# R41-10 (#365): the lane-side locator-to-env-slot PREFLIGHT — the
+# operator-misbound-slot refusal moved BEFORE the redemption call.
+# ----------------------------------------------------------------------
+
+
+class TestLaneBindingSlotPreflight:
+    def test_a_slot_named_locator_passes(self):
+        assert (
+            lane_binding_slot_preflight(
+                {
+                    "FORGE_WORK_ID": WORK,
+                    "FORGE_LANE_DRIVER": "claude",
+                    "FORGE_CREDENTIAL_REF": GRANTED_REF,
+                }
+            )
+            is None
+        )
+
+    def test_a_misbound_locator_names_both_slots(self):
+        # The #343 incident shape: an env locator naming the slot the
+        # BROKER value sat in, not the slot THIS route consumes.
+        reason = lane_binding_slot_preflight(
+            {
+                "FORGE_WORK_ID": WORK,
+                "FORGE_LANE_DRIVER": "claude",
+                "FORGE_CREDENTIAL_REF": "env:FORGE_BROKER_MODEL_TOKEN",
+            }
+        )
+        assert reason is not None
+        assert reason.startswith(BINDING_SLOT_PREFLIGHT_MARKER)
+        assert "FORGE_BROKER_MODEL_TOKEN" in reason
+        assert "ANTHROPIC_AUTH_TOKEN" in reason
+        assert "anthropic-gateway" in reason
+
+    def test_a_non_env_locator_needs_no_slot_match(self):
+        assert (
+            lane_binding_slot_preflight(
+                {
+                    "FORGE_WORK_ID": WORK,
+                    "FORGE_LANE_DRIVER": "claude",
+                    "FORGE_CREDENTIAL_REF": "vault:kv/eng#42",
+                }
+            )
+            is None
+        )
+
+    def test_a_lane_without_a_ref_names_no_mismatch(self):
+        assert lane_binding_slot_preflight({"FORGE_WORK_ID": WORK}) is None
 
     def test_the_expected_identity_reads_the_envelope_revision(self):
         identity = expected_redemption_identity(

@@ -589,7 +589,10 @@ def gitlab_native(tmp_path: Path) -> FakeGitLabNative:
         stderr=subprocess.DEVNULL,
     )
     deadline = time.monotonic() + 20.0
-    while not ready.is_file():
+    # R41-10: wait for CONTENT, not existence — the fake server creates the
+    # ready file before writing the port (observed flaky under full-suite
+    # load: an empty read raced json.loads('')).
+    while not (ready.is_file() and ready.read_text().strip()):
         if process.poll() is not None:
             process.wait(timeout=10)  # R37-18: join even the dead child
             raise AssertionError("the fake gitlab server died at startup")

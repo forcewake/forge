@@ -70,6 +70,28 @@ FROZEN_DIGEST = profile_manifest_digest(
     )
 )
 
+#: R41-04 (#359): manifest digests an executed ops report may still be
+#: bound to although the manifest moved on — each entry names the freeze
+#: the report was EXECUTED under and is deleted when a newer dated
+#: report re-binds. The schema-032 re-freeze changed ONLY
+#: ``control_plane.schema_revision`` (head 031→032) and the derived
+#: digest; every other frozen axis reproduced byte-identically, so the
+#: executed drills' observations remain the receipts' values.
+_SUPERSEDED_PROFILE_DIGESTS = frozenset(
+    {
+        # the 2026-09-26 ops run — executed under schema head 031, the
+        # v0.40.0 release-prep freeze; superseded by the R41-04 re-freeze.
+        "bc147b0904cdad753cce959edefe407c923f16c5a8bcb45472743f7e7aa2bcf0",
+        # the 2026-09-27 redemption-pairing freeze — superseded by the
+        # R41-09 (#364) re-freeze: the live-found publisher branch patch
+        # moved the wheel (2616d221… -> 223d0f25…) and the lab image
+        # (11c4bb30… -> f6ff6308…); the executed drills' observations
+        # remain the receipts' values (every other frozen axis reproduced
+        # byte-identically).
+        "57d3839f96632925050bb516e49f35be3ccab4ac77b762fc2b88b9b0a8472bb0",
+    }
+)
+
 
 def _frozen_manifest() -> dict:
     return json.loads(FROZEN_PROFILE.read_text(encoding="utf-8"))
@@ -708,17 +730,26 @@ class TestExecutedReport:
     def test_the_executed_report_is_the_sanitized_summary_bound_to_the_profile(self):
         document = json.loads(EXECUTED_REPORT.read_text(encoding="utf-8"))
         assert document["schema"] == PUBLISHED_REPORT_STAMP
-        assert document["profile"]["manifest_digest"] == FROZEN_DIGEST
+        # R41-04 (#359): the 2026-09-26 executed report was bound to the
+        # PRE-032 freeze. The schema-032 re-freeze moved the manifest
+        # digest WITHOUT a lab ops re-run (every non-schema axis
+        # reproduced identically — the receipt-sourcing test proves
+        # it); the next ops run writes a dated report bound to the
+        # then-current digest and the superseded record below is
+        # deleted with it. A report bound to anything NOT current or
+        # recorded-here still fails.
+        accepted = {FROZEN_DIGEST} | _SUPERSEDED_PROFILE_DIGESTS
+        assert document["profile"]["manifest_digest"] in accepted
         assert document["profile"]["qualification"] == PROFILE_QUALIFIED
         assert document["summary"]["profile_qualification"] == PROFILE_QUALIFIED
         # Every drill row names the digest.
         assert document["drills"], "the executed report carries no drills"
         for drill in document["drills"]:
-            assert drill["profile"]["manifest_digest"] == FROZEN_DIGEST
+            assert drill["profile"]["manifest_digest"] in accepted
             assert drill["outcome"] in {"pass", "fail"}
         # The measured-limits table is the runbook's numbers.
         limits = document["measured_limits"]
-        assert limits["profile"]["manifest_digest"] == FROZEN_DIGEST
+        assert limits["profile"]["manifest_digest"] in accepted
         for key in (
             "concurrency",
             "pause_cancel_responsiveness",

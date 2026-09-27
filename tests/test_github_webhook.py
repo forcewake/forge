@@ -117,7 +117,7 @@ class TestSignature:
         application = create_app(settings=github_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -177,7 +177,7 @@ class TestIngress:
         application = create_app(settings=github_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -231,6 +231,10 @@ class TestIngress:
         assert inbox[0].payload["issue_is_pr"] is True
 
     async def test_redelivered_command_is_deduplicated(self, app, client: AsyncClient):
+        """R41-02 (#357): the deduplicated answer is backed by the COMMITTED
+        inbox row (the Redis marker is only a post-commit cache hint) — the
+        first delivery lands durably, the replay deduplicates, and exactly
+        ONE wake-up was submitted."""
         first, inbox, steps = await self.post_event(client, app, "issue_comment_created.json")
         body = load_payload("issue_comment_created.json")
         second = await client.post("/webhook/github", content=body, headers=signed_headers(body))
@@ -242,10 +246,32 @@ class TestIngress:
             "deduplicated": True,
         }
         assert len(inbox) == 1
+        assert app.state.task_queue.submit.await_count == 1  # one wake-up only
         # The re-delivery created no second step row.
         async with app.state.session_factory() as session:
             all_steps = (await session.execute(select(StepRun))).scalars().all()
         assert len(all_steps) == 1
+
+    async def test_command_without_a_database_is_refused(self, tmp_path):
+        """R41-02: without the durable store there is NOTHING to accept
+        against — the honest answer is the retryable 503, never a 202 that
+        certifies a command no worker can find."""
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
+                application.state.session_factory = None  # the DB is gone
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = load_payload("issue_comment_created.json")
+                    response = await ac.post(
+                        "/webhook/github", content=body, headers=signed_headers(body)
+                    )
+            assert response.status_code == 503
+        finally:
+            reset_engine()
 
     async def test_non_command_comment_recorded_without_step(self, app, client: AsyncClient):
         payload = json.loads(load_payload("issue_comment_created.json"))
@@ -254,7 +280,9 @@ class TestIngress:
         response = await client.post("/webhook/github", content=body, headers=signed_headers(body))
 
         assert response.status_code == 202
-        assert response.json() == {"status": "accepted", "event": "issue_comment", "recorded": True}
+        # R41-02 honesty: the audit-only write happens after the response,
+        # so the payload never claims the record.
+        assert response.json() == {"status": "accepted", "event": "issue_comment"}
         async with app.state.session_factory() as session:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
             steps = (await session.execute(select(StepRun))).scalars().all()
@@ -407,7 +435,7 @@ class TestLabeledTrigger:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     body = load_payload("issues_labeled.json")
@@ -435,7 +463,7 @@ class TestLabeledTrigger:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     payload = self.labeled_payload(label="bug")
@@ -444,7 +472,8 @@ class TestLabeledTrigger:
                     headers["X-GitHub-Event"] = "issues"
                     response = await ac.post("/webhook/github", content=body, headers=headers)
 
-                assert response.json()["recorded"] is True
+                # R41-02 honesty: the audit-only write trails the response.
+                assert response.json() == {"status": "accepted", "event": "issues"}
                 async with application.state.session_factory() as session:
                     inbox = (await session.execute(select(EventInbox))).scalars().all()
                     steps = (await session.execute(select(StepRun))).scalars().all()
@@ -547,7 +576,7 @@ class TestIssueEditedTrigger:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     body = load_payload("issues_edited.json")
@@ -613,7 +642,7 @@ class TestUnlabeledTrigger:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     body = load_payload("issues_unlabeled.json")
@@ -649,7 +678,7 @@ class TestPayloadCapture:
         )
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             application.state.capture_dir = capture_dir
             yield application
         reset_engine()
@@ -708,7 +737,7 @@ class TestGitHubBotLoginLoopGuard:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     payload = json.loads(load_payload("issue_comment_created.json"))
@@ -741,7 +770,7 @@ class TestGitHubBotLoginLoopGuard:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     payload = json.loads(load_payload("issues_labeled.json"))
@@ -773,7 +802,7 @@ class TestGitHubBotLoginLoopGuard:
         try:
             async with application.router.lifespan_context(application):
                 application.state.task_queue = AsyncMock()
-                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
                 transport = ASGITransport(app=application)
                 async with AsyncClient(transport=transport, base_url="http://test") as ac:
                     payload = json.loads(load_payload("issues_labeled.json"))
@@ -809,7 +838,7 @@ class TestAdaptiveCommandIngress:
         application = create_app(settings=github_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -831,21 +860,25 @@ class TestAdaptiveCommandIngress:
         response = await client.post("/webhook/github", content=body, headers=signed_headers(body))
 
         assert response.status_code == 202
-        assert response.json() == {"status": "accepted", "event": "issue_comment", "recorded": True}
+        assert response.json() == {"status": "accepted", "event": "issue_comment"}
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []
 
     async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        """R41-02 (#357): the adaptive verb takes the SAME durable acceptance
+        as /implement — the inbox row + scheduled ``adaptive_control`` step
+        commit BEFORE the 202, and the step executor routes to the
+        ControlCommandRouter."""
         routed: list[dict] = []
 
         async def fake_route(settings, session_factory, note):
             routed.append(note)
             return {"status": "applied"}
 
-        import forge.gateway.github_webhook as github_module
+        import forge.adaptive.command_router as adaptive_module
 
-        monkeypatch.setattr(github_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", fake_route)
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
         body = self._pause_body()
         response = await client.post("/webhook/github", content=body, headers=signed_headers(body))
@@ -854,17 +887,88 @@ class TestAdaptiveCommandIngress:
         assert response.json() == {
             "status": "accepted",
             "event": "issue_comment",
+            "queued": True,
+            "run_command": True,
             "adaptive_command": True,
         }
-        (note,) = routed
-        assert note["command"] == "adaptive_control"
-        assert note["adaptive_verb"] == "pause"
-        assert note["provider"] == "github"
-        assert note["repo_full_name"] == "acme/acme-widget"
-        assert note["issue_number"] == 42
-        assert note["author_username"] == "alice"
-        assert note["note_id"] == 9010
-        # The mailbox leg never schedules a classic run-command step.
+        # The durable acceptance: ONE inbox row + ONE scheduled step, the
+        # step identity IS the inbox identity — before the 202 returned.
         async with app.state.session_factory() as session:
-            steps = (await session.execute(select(StepRun))).scalars().all()
-        assert steps == []
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1
+        assert inbox[0].payload["command"] == "adaptive_control"
+        assert inbox[0].payload["adaptive_verb"] == "pause"
+        assert inbox[0].payload["provider"] == "github"
+        assert inbox[0].payload["repo_full_name"] == "acme/acme-widget"
+        assert inbox[0].payload["issue_number"] == 42
+        assert inbox[0].payload["author_username"] == "alice"
+        assert steps[0].source_event_id == inbox[0].source_event_id
+        assert steps[0].step_name == "adaptive_control"
+        assert steps[0].status == "scheduled"
+        # The routing itself runs as the step executor, never inline here.
+        assert routed == []
+
+    async def test_the_step_executor_routes_the_persisted_command(self, app, monkeypatch):
+        """The scheduled adaptive step dispatches to the control router via
+        the step runtime's payload dispatch (execute_step_payload) — with a
+        routing failure raised, the step retries instead of succeeding."""
+        import forge.adaptive.command_router as adaptive_module
+        from forge.worker.steps import execute_step_payload
+
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(dict(note))
+            return {"status": "applied"}
+
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", fake_route)
+        payload = {
+            "command": "adaptive_control",
+            "adaptive_verb": "pause",
+            "provider": "github",
+            "project_id": 70010,
+            "repo_full_name": "acme/acme-widget",
+            "issue_number": 42,
+            "note_id": 9010,
+            "note_text": "/pause",
+        }
+        await execute_step_payload(app.state.session_factory, app.state.settings, None, payload)
+        (note,) = routed
+        assert note["adaptive_verb"] == "pause"
+
+        failures: list[str] = []
+
+        async def failing_route(settings, session_factory, note):
+            failures.append("raised")
+            return {"status": "error", "reason": "routing failed"}
+
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", failing_route)
+        with pytest.raises(RuntimeError):
+            await execute_step_payload(app.state.session_factory, app.state.settings, None, payload)
+        assert failures == ["raised"]  # an unrouted command must NOT succeed
+
+    async def test_a_redelivered_adaptive_note_collapses_onto_one_command(
+        self, app, client, monkeypatch
+    ):
+        """Exact replay: ONE logical command, one scheduled step — the
+        deduplicated answer is backed by the committed inbox row."""
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        first = await client.post(
+            "/webhook/github",
+            content=self._pause_body(),
+            headers=signed_headers(self._pause_body()),
+        )
+        replay = await client.post(
+            "/webhook/github",
+            content=self._pause_body(),
+            headers=signed_headers(self._pause_body()),
+        )
+
+        assert first.json()["adaptive_command"] is True
+        assert replay.json()["deduplicated"] is True
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1

@@ -68,6 +68,7 @@ from forge.adaptive.operator_snapshot import (
 
 __all__ = [
     "BINDING_REVISION_UNKNOWN",
+    "BINDING_SLOT_PREFLIGHT_OBSERVABILITY",
     "BINDING_SCHEMA",
     "BINDING_SCHEMA_V1",
     "DISPATCH_PROOF_SCHEMA",
@@ -77,6 +78,7 @@ __all__ = [
     "ProjectCredentialBinding",
     "ProjectCredentialRegistry",
     "DispatchCredential",
+    "binding_slot_preflight",
     "binding_subject_of_run",
     "provider_route_for_driver",
     "resolve_dispatch_credential",
@@ -156,6 +158,61 @@ def binding_subject_of_run(run: Any) -> CanonicalSubject | None:
     different connections/providers NEVER share a binding.
     """
     return subject_of_run(run)
+
+
+#: The observability spelling of the locator-to-env-slot preflight
+#: refusal (R41-10/#365 — the operator-misbound-slot problem #343 found
+#: live: a ref named ``env:FORGE_BROKER_MODEL_TOKEN`` bound for a route
+#: whose slot is ``ANTHROPIC_AUTH_TOKEN`` can only ever end in the
+#: dispatch seam's ``staged_slot_mismatch`` AFTER the lane booted; the
+#: preflight names it at the BIND moment, before any dispatch).
+BINDING_SLOT_PREFLIGHT_OBSERVABILITY = "preflight.binding_slot_mismatch"
+
+
+def binding_slot_preflight(provider: str, credential_ref: str) -> dict[str, Any] | None:
+    """R41-10 (#365): is this credential LOCATOR compatible with the
+    route's env SLOT — checked BEFORE the lane boots.
+
+    The default broker (:class:`~forge.adaptive.credential_broker.EnvBroker`)
+    stages an ``env:<VAR_NAME>`` locator's resolved value under the ref's
+    OWN name, so the ref's name must BE the route's env slot
+    (:data:`PROVIDER_ENV_VARS`) — anything else is refused by the dispatch
+    seam's ``staged_slot_mismatch`` guard only AFTER a dispatch was
+    attempted and a lane booted. This preflight moves that refusal to the
+    bind decision itself: it returns the mismatch document (refs and slot
+    NAMES only, never values) for an ``env:`` locator naming a slot other
+    than the route's, and ``None`` when the pair is compatible (or the
+    locator is not an ``env:`` one — a broker that stages under the
+    binding's own slot, e.g. a vault resolver, has no such invariant).
+
+    :func:`ProjectCredentialRegistry.bind` REFUSES on the mismatch (the
+    earliest an operator can be told); the lane-side twin
+    (:func:`forge.lane_driver.lane_binding_slot_preflight`) re-checks the
+    DISPATCHED ref at lane boot, so a registry document written past the
+    bind seam still fails closed before any redemption call.
+    """
+    env_var = PROVIDER_ENV_VARS.get(str(provider or "").strip(), "")
+    ref = str(credential_ref or "").strip()
+    scheme, sep, name = ref.partition(":")
+    if not env_var or scheme != "env" or not sep:
+        return None
+    locator_slot = name.strip()
+    if not locator_slot or locator_slot == env_var:
+        return None
+    return {
+        "observability": BINDING_SLOT_PREFLIGHT_OBSERVABILITY,
+        "provider": str(provider),
+        "credential_ref": ref,
+        "locator_env_var": locator_slot,
+        "binding_env_var": env_var,
+        "instruction": (
+            "an env: locator stages under its OWN name, so the ref's name must BE "
+            f"the binding's env slot ({env_var} for this route) — rebind with the "
+            f"slot-named ref (env:{env_var}) or stage the value under that slot on "
+            "the consumers; the redemption would otherwise refuse typed "
+            "staged_slot_mismatch with zero emitted values"
+        ),
+    }
 
 
 class CredentialRefusal(Exception):
@@ -370,8 +427,17 @@ class ProjectCredentialRegistry:
         with a NEW timestamp and the NEXT revision — an approved route
         never changes silently, and a receipt can name which revision a
         dispatch resolved.
+
+        R41-10 (#365): the locator-to-env-slot PREFLIGHT runs here — an
+        ``env:`` locator naming a slot other than this route's is refused
+        typed ``binding_slot_mismatch`` at the bind moment (before any
+        dispatch, before any lane boots), never discovered as the
+        endpoint's ``staged_slot_mismatch`` after one did.
         """
         key_subject = _subject_id(subject)
+        mismatch = binding_slot_preflight(provider, credential_ref)
+        if mismatch is not None:
+            raise CredentialRefusal("binding_slot_mismatch", mismatch)
         previous = self.bindings.get((key_subject, provider))
         binding = ProjectCredentialBinding(
             subject=key_subject,

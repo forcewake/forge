@@ -995,6 +995,264 @@ def _check_budget_amendment_applicants(modules: dict[str, _ModuleIndex]) -> list
     return violations
 
 
+# ---------------------------------------------------------------------------
+# Rule 9 — R41-04 (#359): the collaboration-target axis
+# ---------------------------------------------------------------------------
+
+#: The run-id branch-derivation callables (the GitLab original and the
+#: GitHub/Azure twins).
+_FACTORY_BRANCH_DERIVATIONS = frozenset(
+    {"factory_branch", "github_factory_branch", "azure_factory_branch"}
+)
+
+#: The ONLY modules that may evaluate a run-id branch derivation:
+#: - the identity home (the derivation's definition),
+#: - the target contract (``forge.durable.collaboration`` — the ONE live
+#:   admission site and the ONE legacy adapter),
+#: - the provider lanes' own twins and the transport/proposer FALLBACK
+#:   defaults (``stubs`` / ``factory.implementer`` suggest a branch the
+#:   service REBINDS to the target before any effect; ``backends`` /
+#:   ``publisher`` fall back only when no branch was passed).
+#: The publication authority for the GitLab lane — ``forge.runs.service``
+#: — is DELIBERATELY ABSENT: every branch it touches resolves through
+#: the persisted target row, never a re-derivation from the run id (the
+#: #359 debt: prefix-sharing child ids made the derivation the
+#: collaboration identity).
+_FACTORY_BRANCH_DERIVATION_HOMES = frozenset(
+    {
+        "forge.durable.identity",
+        "forge.durable.collaboration",
+        "forge.runs.stubs",
+        "forge.factory.implementer",
+        "forge.runs.backends",
+        "forge.runs.publisher",
+        "forge.integrations.github_flow",
+        "forge.runs.github_service",
+        "forge.runs.azure_service",
+    }
+)
+
+
+def _check_factory_branch_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """`architecture.collaboration_target_axis`: a NEW direct
+    ``factory_branch`` shortcut outside the derivation homes — above all
+    inside ``forge.runs.service`` — is the #359 defect class recurring: a
+    modern round's independent child id re-derives a DIFFERENT branch and
+    forks the collaboration surface. The inverse guard keeps the contract
+    honest: the service must still reach the target resolution seam."""
+    violations: list[str] = []
+    for index in modules.values():
+        if index.module in _FACTORY_BRANCH_DERIVATION_HOMES:
+            continue
+        for node in ast.walk(index.tree):
+            hit = (isinstance(node, ast.Name) and node.id in _FACTORY_BRANCH_DERIVATIONS) or (
+                isinstance(node, ast.Attribute) and node.attr in _FACTORY_BRANCH_DERIVATIONS
+            )
+            if hit:
+                violations.append(
+                    f"{index.module}:{node.lineno} references a run-id branch "
+                    "derivation (factory_branch and twins) — branch identity "
+                    "resolves through the persisted collaboration target "
+                    "(forge.durable.collaboration.target_for_run); a modern "
+                    "round's independent child id must never re-derive its "
+                    "branch (R41-04/#359)"
+                )
+    # The inverse guard: the GitLab service consumes the contract it is
+    # confined to (a drained seam would hollow the rule).
+    service = modules.get("forge.runs.service")
+    if service is None:
+        violations.append(
+            "forge.runs.service was not found under src/forge — the "
+            "collaboration-target axis' confined consumer is gone; update the rule"
+        )
+    else:
+        callees = {callee for _, callee in service.calls()}
+        if not any(
+            callee.endswith(("target_for_run", "target_handle_mismatches", "admission_target"))
+            for callee in callees
+        ):
+            violations.append(
+                "forge.runs.service no longer reaches the collaboration target "
+                "contract (target_for_run / admission_target) — the confinement "
+                "rule is hollow; either the seam renamed or the axis regressed"
+            )
+    # And the contract itself must still derive from the identity home
+    # (the one live derivation site beside the legacy adapter).
+    contract = modules.get("forge.durable.collaboration")
+    if contract is None:
+        violations.append(
+            "forge.durable.collaboration was not found under src/forge — the "
+            "collaboration-target contract's home is gone; update the rule"
+        )
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Rules 15/16 — R41-17 (#372): the gateway dedup decision and the round
+# admission's single owner
+# ---------------------------------------------------------------------------
+
+
+def _check_gateway_dedup_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R41-17 (#372): the duplicate-delivery decision has ONE owner —
+    ``forge.gateway.durable_ingress``. A gateway spelling the probe→confirm
+    sequence itself (``queue.was_delivered(...)`` + its own inbox check) is
+    the residual #357 shape the GitLab router carried until this change;
+    the SET-NX ``is_duplicate`` probe is legal ONLY in the legacy
+    orchestrator event lane, whose answer certifies nothing durable. The
+    inverse guards keep the contract honest: the owner still defines the
+    helpers, and every gateway still answers through them."""
+    probe_homes = set(boundary_registry.DEDUP_CACHE_PROBE_MODULES)
+    legacy_lane = set(boundary_registry.LEGACY_EVENT_DEDUP_CALLERS)
+    violations: list[str] = []
+    for index in modules.values():
+        for call, callee in index.calls():
+            tail = callee.split(".")[-1]
+            if tail == "was_delivered" and index.module not in probe_homes:
+                violations.append(
+                    f"{index.module}:{call.lineno} probes the dedup cache marker "
+                    f"({callee}) outside the owner — the probe→confirm sequence "
+                    "is forge.gateway.durable_ingress.cache_confirms_duplicate, "
+                    "the ONE duplicate-delivery decision shared by all three "
+                    "gateways (R41-02/#357, confined R41-17/#372); answer "
+                    "through the helper, never a re-spelling"
+                )
+            if tail == "is_duplicate" and index.module not in legacy_lane:
+                violations.append(
+                    f"{index.module}:{call.lineno} uses the SET-NX is_duplicate "
+                    "probe outside the legacy orchestrator event lane — the "
+                    "probe claims the marker BEFORE any transaction, so a "
+                    "failed ingest turns redeliveries into successful empty "
+                    "duplicates; durable command ingress answers through "
+                    "durable_ingress.cache_confirms_duplicate (the marker is "
+                    "a post-commit cache, never the authority)"
+                )
+    # Inverse guard 1: the owner still defines the shared decision.
+    owner = modules.get("forge.gateway.durable_ingress")
+    if owner is None:
+        violations.append(
+            "forge.gateway.durable_ingress was not found under src/forge — "
+            "the command-acceptance dedup owner is gone; update the rule"
+        )
+    else:
+        defined = {fn.name for fn in _functions(owner.tree)}
+        for seam in (
+            "cache_confirms_duplicate",
+            "inbox_record_exists",
+            "mark_delivered_best_effort",
+        ):
+            if seam not in defined:
+                violations.append(
+                    f"forge.gateway.durable_ingress no longer defines {seam} — "
+                    "the shared dedup seam renamed; update the rule and the "
+                    "gateways' call sites together"
+                )
+    # Inverse guard 2: every gateway still answers through the helper (a
+    # gateway that stopped calling it has re-spelled the decision inline).
+    for gateway in (
+        "forge.gateway.router",
+        "forge.gateway.github_webhook",
+        "forge.gateway.azure_webhook",
+    ):
+        index = modules.get(gateway)
+        if index is None:  # pragma: no cover — the gateways are the registrants
+            violations.append(
+                f"{gateway} was not found under src/forge — the dedup boundary's "
+                "registered dependent is gone; update the registry"
+            )
+            continue
+        if not any(callee.endswith("cache_confirms_duplicate") for _, callee in index.calls()):
+            violations.append(
+                f"{gateway} no longer calls cache_confirms_duplicate — a "
+                "registered gateway that bypasses the owner has re-spelled "
+                "the duplicate-delivery decision; route through the helper or "
+                "update the boundary registration with a reviewed reason"
+            )
+    return violations
+
+
+#: The round admission service's confined surface (R41-17/#372).
+_ROUND_ADMISSION_SEAM_NAMES = frozenset(
+    {
+        "admit_round_child",
+        "plan_round_child",
+        "RoundAdmissionSeams",
+        "round_slot_integrity_conflict",
+    }
+)
+
+
+def _check_round_admission_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R41-17 (#372): the review-round child admission — the #356
+    child-before-budget transaction and its integrity arbiters — has ONE
+    owner (``forge.runs.round_admission``) consumed by ONE service entry.
+    A third module referencing the seam (above all a provider service
+    admitting rounds beside the owner) is the dual-authority defect this
+    rule exists to catch; the inverse guards keep the registration honest:
+    the service must still admit THROUGH the owner, and the owner must
+    still compose the transaction (the child flush, the budget seam, the
+    round row)."""
+    allowed = set(boundary_registry.ROUND_ADMISSION_CALLERS)
+    violations: list[str] = []
+    for index in modules.values():
+        if index.module in allowed:
+            continue
+        for node in ast.walk(index.tree):
+            hit = (isinstance(node, ast.Name) and node.id in _ROUND_ADMISSION_SEAM_NAMES) or (
+                isinstance(node, ast.Attribute) and node.attr in _ROUND_ADMISSION_SEAM_NAMES
+            )
+            if hit:
+                name = node.id if isinstance(node, ast.Name) else node.attr
+                violations.append(
+                    f"{index.module}:{node.lineno} references {name} — the "
+                    "review-round child admission (the #356 child-before-budget "
+                    "transaction + its integrity arbiters) is owned by "
+                    "forge.runs.round_admission and consumed by the one "
+                    "admitting service; register a reviewed caller in "
+                    "ROUND_ADMISSION_CALLERS or route through the owner"
+                )
+    # Inverse guard 1: the service still admits THROUGH the owner.
+    service = modules.get("forge.runs.service")
+    if service is None:  # pragma: no cover — the service is the registrant
+        violations.append(
+            "forge.runs.service was not found under src/forge — the round "
+            "admission boundary's registered caller is gone; update the rule"
+        )
+    elif not any(callee.endswith("admit_round_child") for _, callee in service.calls()):
+        violations.append(
+            "forge.runs.service no longer calls admit_round_child — the round "
+            "admission registration is stale or the admission was re-spelled "
+            "in the service; the transaction has ONE owner"
+        )
+    # Inverse guard 2: the owner still composes the admission transaction.
+    owner = modules.get("forge.runs.round_admission")
+    if owner is None:
+        violations.append(
+            "forge.runs.round_admission was not found under src/forge — the "
+            "round admission owner is gone; update the rule"
+        )
+    else:
+        callees = {callee for _, callee in owner.calls()}
+        if not any(callee.endswith("open_budget_from_spec") for callee in callees):
+            violations.append(
+                "forge.runs.round_admission no longer reaches "
+                "open_budget_from_spec — the child's own budget opening left "
+                "the admission transaction; the #356 ordering is the owner's "
+                "to compose"
+            )
+        constructed = set()
+        for call, callee in owner.calls():
+            if isinstance(call.func, ast.Name):
+                constructed.add(call.func.id)
+        if "ReviewRound" not in constructed:
+            violations.append(
+                "forge.runs.round_admission no longer constructs the "
+                "ReviewRound admission row — the transaction was hollowed; "
+                "update the rule or restore the composition"
+            )
+    return violations
+
+
 ALL_CHECKS = (
     ("legacy lookup confinement", _check_legacy_lookup_confinement),
     ("resolve_repository monopoly", _check_resolve_repository_monopoly),
@@ -1009,6 +1267,9 @@ ALL_CHECKS = (
     ("redemption grant authority", _check_redemption_grant_authority),
     ("approved-input brief", _check_approved_input_brief),
     ("native locator allocation", _check_native_locator_allocation),
+    ("factory branch confinement", _check_factory_branch_confinement),
+    ("gateway dedup confinement", _check_gateway_dedup_confinement),
+    ("round admission confinement", _check_round_admission_confinement),
 )
 
 
@@ -1024,7 +1285,7 @@ class TestAuthorityBoundaryRules:
         violations = check(_src_modules())
         assert not violations, f"{name} violations:\n" + "\n".join(violations)
 
-    def test_the_registry_seven_boundaries_are_the_declared_set(self) -> None:
+    def test_the_registry_boundaries_are_the_declared_set(self) -> None:
         assert [boundary.name for boundary in boundary_registry.BOUNDARIES] == [
             "repository_identity_checkpoint_lifecycle",
             "continuation_authorization",
@@ -1039,6 +1300,11 @@ class TestAuthorityBoundaryRules:
             # decision and the feedback admission decision.
             "budget_amendment_application",
             "feedback_admission",
+            # R41-17 (#372, ADR-0034's map refreshed): the command-acceptance
+            # dedup decision (#357's one owner) and the review-round child
+            # admission (the #372 extraction).
+            "command_acceptance_dedup",
+            "review_round_admission",
         ]
 
     def test_every_boundary_declares_owners_callers_and_negative_contract(self) -> None:
@@ -1387,6 +1653,129 @@ class TestIntentionalViolationTraps:
         (the documented migration surface) stays legal over the real
         tree — the rule guards the dispatch legs, not the owner."""
         assert not _check_native_locator_allocation(_src_modules())
+
+    # ------------------------------------------------------------------
+    # R41-04 (#359) — the collaboration-target axis traps
+    # ------------------------------------------------------------------
+
+    def test_a_new_factory_branch_shortcut_in_the_service_is_caught(self) -> None:
+        """The #359 defect class recurring: a NEW direct derivation site
+        inside the GitLab publication authority (or any module outside
+        the derivation homes) — a modern round's independent child id
+        would re-derive a different branch and fork the surface."""
+        modules = _synthetic(
+            "forge.runs.service",
+            "async def _legacy_leg(run):\n"
+            "    from forge.runs.stubs import factory_branch\n"
+            "\n"
+            "    return factory_branch(run.issue_iid, run.id)\n",
+        )
+        violations = _check_factory_branch_confinement(modules)
+        assert any("collaboration target" in text for text in violations), violations
+
+    def test_a_new_module_deriving_a_branch_is_caught(self) -> None:
+        modules = _synthetic(
+            "forge.gateway.new_collector",
+            "from forge.durable.identity import factory_branch\n"
+            "\n"
+            "\n"
+            "def collect(issue_iid, run_id: str) -> str:\n"
+            "    return factory_branch(issue_iid, run_id)\n",
+        )
+        violations = _check_factory_branch_confinement(modules)
+        assert any("new_collector" in text for text in violations), violations
+
+    def test_the_real_service_is_not_flagged_by_the_confinement(self) -> None:
+        """The contrast arm: over the REAL tree the rule is quiet — the
+        service resolves through the contract, the homes derive, and the
+        axis is neither regressed nor hollow."""
+        assert not _check_factory_branch_confinement(_src_modules())
+
+    # ------------------------------------------------------------------
+    # R41-17 (#372) — the dedup and round-admission traps
+    # ------------------------------------------------------------------
+
+    def test_a_gateway_respelling_the_dedup_probe_is_caught(self) -> None:
+        """The residual #357 shape the GitLab router carried until #372: a
+        gateway probing the marker itself instead of answering through
+        cache_confirms_duplicate."""
+        modules = _synthetic(
+            "forge.gateway.router",
+            "async def _ingest(queue, keys, session_factory, source_event_id):\n"
+            "    if any([await queue.was_delivered(key) for key in keys]):\n"
+            "        return True\n"
+            "    return False\n",
+        )
+        violations = _check_gateway_dedup_confinement(modules)
+        assert any("was_delivered" in text for text in violations), violations
+
+    def test_the_setnx_probe_in_front_of_a_durable_command_is_caught(self) -> None:
+        """A NEW module using the SET-NX is_duplicate probe (the legacy
+        event lane's shape) — above all in front of a durable command
+        ingest — is the pre-#357 P02 hazard recurring."""
+        modules = _synthetic(
+            "forge.runs.new_ingress",
+            "async def accept(task_queue, fingerprint: str) -> bool:\n"
+            "    return await task_queue.is_duplicate(fingerprint)\n",
+        )
+        violations = _check_gateway_dedup_confinement(modules)
+        assert any("is_duplicate" in text for text in violations), violations
+
+    def test_a_gateway_that_stops_calling_the_owner_helper_is_caught(self) -> None:
+        """The inverse-guard trap: a registered gateway whose ingest no
+        longer answers through the owner has re-spelled the decision —
+        the registration may not survive the bypass."""
+        modules = _synthetic(
+            "forge.gateway.router",
+            "async def _ingest(queue, keys):\n    await queue.submit(keys)\n",
+        )
+        violations = _check_gateway_dedup_confinement(modules)
+        assert any("no longer calls cache_confirms_duplicate" in text for text in violations)
+
+    def test_a_provider_admitting_rounds_beside_the_owner_is_caught(self) -> None:
+        """The dual-authority trap: a second service referencing the
+        admission seam (or importing it) — the review's "same decision
+        made in two places" caught mechanically."""
+        modules = _synthetic(
+            "forge.runs.github_service",
+            "from forge.runs.round_admission import admit_round_child\n"
+            "\n"
+            "\n"
+            "async def admit_round(service, plan):\n"
+            "    return await admit_round_child(service.seams, plan)\n",
+        )
+        violations = _check_round_admission_confinement(modules)
+        assert any("admit_round_child" in text for text in violations), violations
+
+    def test_a_service_that_stops_admitting_through_the_owner_is_caught(self) -> None:
+        """The inverse-guard trap: the registered caller re-spelling the
+        transaction inline (no admit_round_child call) — a drained or
+        bypassed registration is a finding, not silence."""
+        modules = _synthetic(
+            "forge.runs.service",
+            "async def _admit_review_round(self, run_id: str):\n    return run_id\n",
+        )
+        violations = _check_round_admission_confinement(modules)
+        assert any("no longer calls admit_round_child" in text for text in violations)
+
+    def test_an_owner_that_stops_composing_the_transaction_is_caught(self) -> None:
+        """The hollow-owner trap: the admission module losing the budget
+        seam or the round row means the transaction left the owner — the
+        rule may not pass vacuously over a hollowed seam."""
+        hollow = _synthetic(
+            "forge.runs.round_admission",
+            "async def admit_round_child(seams, plan):\n    return plan.child_id\n",
+        )
+        violations = _check_round_admission_confinement(hollow)
+        assert any("open_budget_from_spec" in text for text in violations), violations
+        assert any("ReviewRound" in text for text in violations), violations
+
+    def test_the_real_tree_is_quiet_for_both_new_rules(self) -> None:
+        """The contrast arm: over the REAL tree both #372 rules are quiet
+        — one owner, one caller, the gateways answering through the
+        helper."""
+        assert not _check_gateway_dedup_confinement(_src_modules())
+        assert not _check_round_admission_confinement(_src_modules())
 
 
 # ---------------------------------------------------------------------------

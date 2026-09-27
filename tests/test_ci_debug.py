@@ -247,11 +247,8 @@ class TestWorkflowJobIngress:
         )
 
         assert response.status_code == 202
-        assert response.json() == {
-            "status": "accepted",
-            "event": "workflow_job",
-            "recorded": True,
-        }
+        # R41-02 honesty: the audit-only write trails the response.
+        assert response.json() == {"status": "accepted", "event": "workflow_job"}
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []

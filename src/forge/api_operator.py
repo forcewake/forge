@@ -137,6 +137,8 @@ from forge.adaptive.operator_view import (
     delivery_view,
     explain_blocked,
     export_diagnostics,
+    export_lineage_support,
+    lineage_view,
     recovery_document,
     render,
 )
@@ -738,6 +740,7 @@ async def get_operator_run(
         limit=_occupancy_limit(request),
         as_of=snapshot.computed_at,
         admission=await _admission_accounting_for(request, snapshot),
+        projection_inconsistent=snapshot.projection_inconsistent,
     )
     # The R40-13 five linked facts: CURRENT execution, review round,
     # candidate, verification and acceptance as SEPARATE but LINKED
@@ -748,6 +751,24 @@ async def get_operator_run(
     # limiting axis surface as explicit next-actions here.
     document["delivery"] = delivery_view(
         snapshot.rows, projection=projection, now=snapshot.computed_at
+    )
+    # The R41-12 (#367) ONE lineage snapshot: the delivery history with
+    # the human round reference (``round N of <root>``), the persisted
+    # collaboration target (branch + MR), the current round/attempt, the
+    # candidate's role, the exact checkpoint, the native occupancy word,
+    # the budget axes WITH their amendment history, the command-state
+    # ladder (received / durably accepted / dispatched / applied /
+    # checkpointed — each rung proven by its own durable row), the
+    # unresolved effects, the explicit operator prerequisites and the
+    # ADVISORY actions naming the FULL subject. Unselected sections read
+    # unknown, never empty successes.
+    document["lineage"] = lineage_view(
+        snapshot.rows,
+        projection=projection,
+        now=snapshot.computed_at,
+        coverage=snapshot.source_coverage,
+        occupancy=snapshot.occupancy,
+        projection_inconsistent=snapshot.projection_inconsistent,
     )
     hints = action_hint_block(projection, snapshot_inconsistent=snapshot.projection_inconsistent)
     document["actions"] = hints["actions"]
@@ -810,6 +831,16 @@ async def get_operator_support_bundle(
         coverage=snapshot.source_coverage,
         occupancy=snapshot.occupancy,
         projection=snapshot.projection(),
+        projection_inconsistent=snapshot.projection_inconsistent,
+    )
+    # The R41-12 (#367) CREDENTIAL-FREE lineage support slice: the one
+    # lineage snapshot bounded and allowlisted per section — secrets, raw
+    # reviewer briefs and checkpoint contents omitted by default, with
+    # the redaction count stated (``support_export.redactions``).
+    document["lineage_support"] = export_lineage_support(
+        snapshot.rows,
+        coverage=snapshot.source_coverage,
+        occupancy=snapshot.occupancy,
         projection_inconsistent=snapshot.projection_inconsistent,
     )
     export: dict[str, Any] = {

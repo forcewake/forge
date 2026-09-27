@@ -1,0 +1,1267 @@
+{
+  "created_at": "2026-09-27T02:54:46.970855+00:00",
+  "issue": "forge#365 (R41-10) \u2014 the current pairing, live",
+  "phases": {
+    "expire_arm_a_20s": {
+      "dispatches": [
+        {
+          "branch": "factory/4/102b7766",
+          "job_status": "failed",
+          "job_trace_sha256": "68ee2ee9d714b9d9576f40acfdb3838f4edb71a5b2ba74174407c4ed46e7f0e4",
+          "lane_job_id": 1109,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 763,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/763",
+          "redemption_markers": [
+            "2026-09-27T03:52:15.570274Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:52:30.477332Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:52:30.485202Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:52:32.960113Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+            "2026-09-27T03:52:33.867297Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:52:33.867297Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "endpoint_after_deadline": {
+        "detail": "grant_expired: the attempt's operation grant expired at its absolute deadline 2026-09-27T03:52:30.820565+00:00 \u2014 the deadline was fixed at dispatch authorization and never re-derives",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:52:33.853217+00:00",
+        "value_returned": false
+      },
+      "go_note_id": 1400,
+      "grant": {
+        "attempt_generation": 0,
+        "created_at": "2026-09-27 03:52:10.891813+00",
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "go_at": "2026-09-27T03:52:20.899004+00:00",
+        "grant_id": "104f99b84578478cad633a7c8fe38c65",
+        "provider": "anthropic-gateway",
+        "redemption_deadline": "2026-09-27 03:52:30.820565+00",
+        "status": "active"
+      },
+      "issue": {
+        "iid": 4,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/work_items/4"
+      },
+      "lane_outcome": {
+        "job_status": "failed",
+        "lane_minutes_after_go": 0.6,
+        "markers": [
+          "2026-09-27T03:52:15.570274Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+          "2026-09-27T03:52:30.477332Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+          "2026-09-27T03:52:30.485202Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+          "2026-09-27T03:52:32.960113Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+          "2026-09-27T03:52:33.867297Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+          "2026-09-27T03:52:33.867297Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+        ],
+        "meta_terminal_reason": "credential_redemption_failed",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "recorder_captures": 0
+      },
+      "plan": {
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 1399,
+        "run_id": "102b7766b7ab420492f219ec6d713257"
+      },
+      "run_id": "102b7766b7ab420492f219ec6d713257",
+      "started_at": "2026-09-27T03:51:54.776729+00:00",
+      "updated_at": "2026-09-27T03:52:49.237162+00:00",
+      "window": {
+        "FORGE_CREDENTIAL_GRANT_WINDOW_SECONDS": "20",
+        "at": "2026-09-27T03:51:54.900211+00:00"
+      }
+    },
+    "expire_arm_b_240s": {
+      "endpoint_after_deadline": {
+        "detail": "attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:57:42.296550+00:00",
+        "value_returned": false
+      },
+      "go_note_id": 1404,
+      "grant": {
+        "attempt_generation": 0,
+        "created_at": "2026-09-27 03:53:39.318304+00",
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "go_at": "2026-09-27T03:53:49.203537+00:00",
+        "grant_id": "0886de18654f408bbf68d991eb6b5118",
+        "provider": "anthropic-gateway",
+        "redemption_deadline": "2026-09-27 03:57:39.256147+00",
+        "status": "active"
+      },
+      "health_after": {
+        "at": "2026-09-27T03:53:56.537690+00:00",
+        "version": "0.41.0"
+      },
+      "issue": {
+        "iid": 5,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/work_items/5"
+      },
+      "plan": {
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 1403,
+        "run_id": "705edf3254784fd8abffa89b8b6aaad8"
+      },
+      "refused": {
+        "at": "2026-09-27T03:57:42.299129+00:00",
+        "reason": "the expired grant was not refused typed: {'http_status': 403, 'detail': 'attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window', 'value_returned': False, 'observed_at': '2026-09-27T03:57:42.296550+00:00'}"
+      },
+      "replay_in_window": {
+        "binding_revision": 3,
+        "deadline_preserved": true,
+        "grant_id_prefix": "0886de18654f408b",
+        "http_status": 200,
+        "operation": "credential-redemption",
+        "redemption_id_prefix": "0c03a225dd7d4368",
+        "seconds_to_deadline": 222.6
+      },
+      "restart_receipt": {
+        "at": "2026-09-27T03:53:49.492765+00:00",
+        "command": "podman restart forge-app"
+      },
+      "run_id": "705edf3254784fd8abffa89b8b6aaad8",
+      "started_at": "2026-09-27T03:53:23.268847+00:00",
+      "updated_at": "2026-09-27T03:57:42.299156+00:00",
+      "window": {
+        "FORGE_CREDENTIAL_GRANT_WINDOW_SECONDS": "240",
+        "at": "2026-09-27T03:53:23.381446+00:00"
+      }
+    },
+    "expire_arm_c_20s_restarted_plane": {
+      "arm_c": true,
+      "dispatches": [
+        {
+          "branch": "factory/6/2fc8703b",
+          "job_status": "failed",
+          "job_trace_sha256": "d80f42b67dbd8dce13cdb4e52a8bb298f85d8cad239f2e1afb855724e5b5e3a5",
+          "lane_job_id": 1115,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 769,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/769",
+          "redemption_markers": [
+            "2026-09-27T04:05:18.996259Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T04:05:35.579943Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T04:05:35.587753Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T04:05:38.286660Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+            "2026-09-27T04:05:39.314369Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T04:05:39.314370Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "endpoint_after_deadline": {
+        "detail": "grant_expired: the attempt's operation grant expired at its absolute deadline 2026-09-27T04:05:31.774322+00:00 \u2014 the deadline was fixed at dispatch authorization and never re-derives",
+        "http_status": 403,
+        "observed_at": "2026-09-27T04:05:34.822884+00:00",
+        "value_returned": false
+      },
+      "go_note_id": 1415,
+      "grant": {
+        "attempt_generation": 0,
+        "created_at": "2026-09-27 04:05:11.853333+00",
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "go_at": "2026-09-27T04:05:21.577227+00:00",
+        "grant_id": "8879aed71a8748a3b15bfb3cbaf0eb8c",
+        "provider": "anthropic-gateway",
+        "redemption_deadline": "2026-09-27 04:05:31.774322+00",
+        "status": "active"
+      },
+      "issue": {
+        "iid": 6,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/work_items/6"
+      },
+      "lane_outcome": {
+        "job_status": "failed",
+        "lane_minutes_after_go": 0.7,
+        "markers": [
+          "2026-09-27T04:05:18.996259Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+          "2026-09-27T04:05:35.579943Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+          "2026-09-27T04:05:35.587753Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+          "2026-09-27T04:05:38.286660Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+          "2026-09-27T04:05:39.314369Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+          "2026-09-27T04:05:39.314370Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+        ],
+        "meta_terminal_reason": "credential_redemption_failed",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "recorder_captures": 0
+      },
+      "plan": {
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 1414,
+        "run_id": "2fc8703b0ab5443ea06cf2ac7694b9b4"
+      },
+      "restart_receipt": {
+        "at": "2026-09-27T04:04:55.711608+00:00",
+        "command": "podman restart forge-app (BEFORE the mint \u2014 arm B carries the mid-window restart)",
+        "health_version_after": "0.41.0"
+      },
+      "run_id": "2fc8703b0ab5443ea06cf2ac7694b9b4",
+      "started_at": "2026-09-27T04:03:27.633396+00:00",
+      "updated_at": "2026-09-27T04:05:50.285231+00:00",
+      "window": {
+        "FORGE_CREDENTIAL_GRANT_WINDOW_SECONDS": "20",
+        "at": "2026-09-27T04:04:46.927347+00:00"
+      }
+    },
+    "expire_arm_c_first_attempt": {
+      "note": "the first 90s attempt restarted MID-WINDOW (arm B shape); the restart downtime (~2 min) ate the whole window \u2014 the replay probe landed 120 s past the deadline on a run whose lane had already parked (attempt_terminal precedence). Re-cut as the restart-FIRST shape; the timing finding is recorded here honestly",
+      "refused": {
+        "at": "2026-09-27T03:59:39.961987+00:00",
+        "reason": "the in-window post-restart replay did not redeem: {'http_status': 403, 'deadline_preserved': True, 'detail': 'attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window', 'seconds_to_deadline': -120.7}"
+      },
+      "replay_in_window": {
+        "deadline_preserved": true,
+        "detail": "attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window",
+        "http_status": 403,
+        "seconds_to_deadline": -120.7
+      },
+      "window": {
+        "FORGE_CREDENTIAL_GRANT_WINDOW_SECONDS": "90",
+        "at": "2026-09-27T03:59:30.751367+00:00"
+      }
+    },
+    "expire_arm_c_second_attempt": {
+      "note": "the probe rode the PRIOR pass-B grant (generation 0 \u2014 its attempt terminal, so attempt_terminal fired before grant_expired); the reuse path now waits for the post-/retry generation OWN grant",
+      "refused": {
+        "at": "2026-09-27T04:01:01.726618+00:00",
+        "reason": "the expired grant was not refused typed: {'http_status': 403, 'detail': 'attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window', 'value_returned': False, 'observed_at': '2026-09-27T04:01:01.725438+00:00'}"
+      }
+    },
+    "expire_arm_c_third_attempt": {
+      "note": "the reused-/retry shape parks a warm lane inside ~90 s \u2014 attempt_terminal kept preceding grant_expired; arm C re-cut as restart-first + FRESH issue at window 20 (the probe at deadline+3 s beats the lane boot)",
+      "refused": {
+        "at": "2026-09-27T04:03:27.633396+00:00",
+        "reason": "the expired grant was not refused typed: {'http_status': 403, 'detail': 'attempt_terminal: the run reached a terminal status \u2014 a finished attempt redeems nothing and refreshes no window', 'value_returned': False, 'observed_at': '2026-09-27T04:03:27.631458+00:00'}"
+      }
+    },
+    "preflight": {
+      "bind_time_refusal": {
+        "attempted_ref": "env:FORGE_BROKER_MODEL_TOKEN",
+        "detail": {
+          "binding_env_var": "ANTHROPIC_AUTH_TOKEN",
+          "credential_ref": "env:FORGE_BROKER_MODEL_TOKEN",
+          "instruction": "an env: locator stages under its OWN name, so the ref's name must BE the binding's env slot (ANTHROPIC_AUTH_TOKEN for this route) \u2014 rebind with the slot-named ref (env:ANTHROPIC_AUTH_TOKEN) or stage the value under that slot on the consumers; the redemption would otherwise refuse typed staged_slot_mismatch with zero emitted values",
+          "locator_env_var": "FORGE_BROKER_MODEL_TOKEN",
+          "observability": "preflight.binding_slot_mismatch",
+          "provider": "anthropic-gateway"
+        },
+        "observability": "preflight.binding_slot_mismatch",
+        "reason": "binding_slot_mismatch",
+        "typed": true
+      },
+      "corrective_rebind": {
+        "at": "2026-09-27T03:32:55.809645+00:00",
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "revision": 2
+      },
+      "dispatches": [
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "92a588a706b7a8176a7660369ef82b65cb7409e5076aceb1eb0e7489a573de93",
+          "lane_job_id": 1104,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 758,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/758",
+          "redemption_markers": [
+            "2026-09-27T03:32:20.646553Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:32:35.398256Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:32:35.405698Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:32:37.633694Z 01E lane_driver: credential_redemption_failed (preflight.binding_slot_mismatch: the dispatched credential ref 'env:FORGE_BROKER_MODEL_TOKEN' is an env locator naming slot '",
+            "2026-09-27T03:32:38.530192Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:32:38.530193Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        },
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "69e809ba1805630f0bf0795ad9b51d5aa600385013330191fc55ab82df16c486",
+          "lane_job_id": 1105,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 759,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/759",
+          "redemption_markers": [
+            "2026-09-27T03:33:02.587192Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:33:16.726773Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:33:16.734397Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:33:20.765925Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:33:20.765925Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "misbound_lane": {
+        "endpoint_calls_for_this_work": [],
+        "job_status": "failed",
+        "lane_preflight_marker_lines": [
+          "2026-09-27T03:32:37.633694Z 01E lane_driver: credential_redemption_failed (preflight.binding_slot_mismatch: the dispatched credential ref 'env:FORGE_BROKER_MODEL_TOKEN' is an env locator naming slot 'FORGE_BROKER_MODEL_T"
+        ],
+        "meta_redemption": null,
+        "meta_terminal_reason": "credential_redemption_failed",
+        "observed_at": "2026-09-27T03:32:55.807144+00:00",
+        "recorder_captures": 0
+      },
+      "misbound_registry": {
+        "at": "2026-09-27T03:32:14.459588+00:00",
+        "hand_edited_to": "env:FORGE_BROKER_MODEL_TOKEN",
+        "note": "the persisted document was edited DIRECTLY (the operator-error shape of the #343 incident) \u2014 bind() refuses this ref now, so the hand-edit is the only remaining route; the lane-side preflight is the fence that must catch it",
+        "revision_kept": 1,
+        "subject": "gitlab/-/151"
+      },
+      "misbound_retry_note_id": 1381,
+      "recovery_lane": {
+        "binding_revision": 2,
+        "broker_sentinel_presented": true,
+        "job_status": "failed",
+        "meta_grant_join": true,
+        "meta_terminal_reason": "api_error",
+        "observed_at": "2026-09-27T03:33:36.926705+00:00",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "recorder_captures": 1
+      },
+      "recovery_retry_note_id": 1384,
+      "started_at": "2026-09-27T03:32:14.163356+00:00",
+      "updated_at": "2026-09-27T03:33:36.926764+00:00"
+    },
+    "reach": {
+      "probe": {
+        "job_id": 1090,
+        "job_status": "success",
+        "saw_health_marker": true,
+        "wheel_sha_verified": true
+      },
+      "scratch_project": {
+        "id": 152,
+        "path": "forcewake/forge-pairing-reach-20260927025453"
+      },
+      "started_at": "2026-09-27T02:54:53.363996+00:00",
+      "updated_at": "2026-09-27T02:55:14.612021+00:00"
+    },
+    "reject": {
+      "probe": {
+        "all_ok": true,
+        "installed_version": "0.41.0",
+        "job_id": 1094,
+        "job_status": "success",
+        "job_trace_sha256": "c44cd73f52c21ce98a96cfd1c1f00c7248c0d6affef574686bd29c24bcc4502f",
+        "markers": [
+          "FORGE_REJECT:all:ok",
+          "FORGE_REJECT:correct-document:ok",
+          "FORGE_REJECT:expired:ok",
+          "FORGE_REJECT:lane-preflight-misbound:ok",
+          "FORGE_REJECT:wrong-attempt:ok",
+          "FORGE_REJECT:wrong-binding-revision:ok",
+          "FORGE_REJECT:wrong-operation:ok",
+          "FORGE_REJECT:wrong-ref:ok",
+          "FORGE_REJECT:wrong-route:ok",
+          "FORGE_REJECT:wrong-slot:ok"
+        ]
+      },
+      "scratch_project": {
+        "id": 156,
+        "path": "forcewake/forge-pairing-reject-20260927025712"
+      },
+      "started_at": "2026-09-27T02:55:21.842272+00:00",
+      "updated_at": "2026-09-27T02:57:33.756468+00:00"
+    },
+    "retire": {
+      "dispatches": [
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "66128397e0b93f4a8582bb88193f7f20f854aef421019a287cf415ea1324b56e",
+          "lane_job_id": 1108,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 762,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/762",
+          "redemption_markers": [
+            "2026-09-27T03:50:57.193582Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:51:11.159424Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:51:11.167442Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:51:15.224881Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:51:15.224881Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "lane_outcome": {
+        "captures": 1,
+        "generation": 5,
+        "job_status": "failed",
+        "meta_grant_join": true,
+        "meta_terminal_reason": "api_error",
+        "observed_at": "2026-09-27T03:51:18.296836+00:00",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        }
+      },
+      "new_generation": {
+        "grants": [
+          {
+            "attempt_generation": 0,
+            "created_at": "2026-09-27 03:31:37.938424+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:31:37.931525+00",
+            "status": "active"
+          },
+          {
+            "attempt_generation": 1,
+            "created_at": "2026-09-27 03:32:15.142763+00",
+            "credential_ref": "env:FORGE_BROKER_MODEL_TOKEN",
+            "grant_id": "9b11eb21f7954a68939f89bd72cd48ee",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:32:15.139924+00",
+            "status": "active"
+          },
+          {
+            "attempt_generation": 2,
+            "created_at": "2026-09-27 03:32:56.478966+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "95b29bfb0bab440aa724f867e1d399ac",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:32:56.475975+00",
+            "status": "active"
+          },
+          {
+            "attempt_generation": 3,
+            "created_at": "2026-09-27 03:33:49.620006+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "fbd2acb4b9dd403d8f75481ea10f2422",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:33:49.617568+00",
+            "status": "active"
+          },
+          {
+            "attempt_generation": 4,
+            "created_at": "2026-09-27 03:50:05.571681+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "a6c776d128c74789be149e489a3cc01e",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:50:05.566969+00",
+            "status": "active"
+          },
+          {
+            "attempt_generation": 5,
+            "created_at": "2026-09-27 03:50:52.882183+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "2ace0652a1784e44a3cdb2a7116a1a3a",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:50:52.879033+00",
+            "status": "active"
+          }
+        ],
+        "observed_at": "2026-09-27T03:51:02.895224+00:00"
+      },
+      "old_token_refusal": {
+        "detail": "this credential belongs to a superseded runner generation (4; the work is at generation 5) \u2014 the current attempt must dial in with its own dispatch-issued token",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:51:18.579599+00:00",
+        "refusal_typed": true
+      },
+      "retry_note_id": 1395,
+      "started_at": "2026-09-27T03:50:52.053839+00:00",
+      "updated_at": "2026-09-27T03:51:18.579620+00:00"
+    },
+    "rotate": {
+      "dispatches": [
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "03e31e49f41d467b94692a5e33839d133b903ceadb09472bb6a5df7b16ddc221",
+          "lane_job_id": 1106,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 760,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/760",
+          "redemption_markers": [
+            "2026-09-27T03:33:53.662804Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:34:07.581923Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:34:07.589535Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:34:10.039209Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+            "2026-09-27T03:34:10.932372Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:34:10.932372Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        },
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "e63dba21fa20c8f44d23656d80319ba9cd3db669b81dcbf8edc1cddfdee53670",
+          "lane_job_id": 1107,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 761,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/761",
+          "redemption_markers": [
+            "2026-09-27T03:50:12.375390Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:50:27.842885Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:50:27.850444Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:50:31.935250Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:50:31.935250Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "live_generation": {
+        "at": "2026-09-27T03:33:59.578401+00:00",
+        "generation": 3,
+        "grant": {
+          "attempt_generation": 3,
+          "created_at": "2026-09-27 03:33:49.620006+00",
+          "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "grant_id": "fbd2acb4b9dd403d8f75481ea10f2422",
+          "provider": "anthropic-gateway",
+          "redemption_deadline": "2026-09-27 04:33:49.617568+00",
+          "status": "active"
+        },
+        "minted_under_binding_revision": 2
+      },
+      "old_grant_endpoint_refusal": {
+        "detail": "binding_revision_mismatch: {'observability': 'credential.binding_revision_mismatch', 'subject': 'gitlab/-/151', 'provider': 'anthropic-gateway', 'credential_ref': 'env:ANTHROPIC_AUTH_TOKEN', 'authorized_binding_revision': 2, 'live_binding_revision': 3, 'instruction': 'the binding was re-decided at t",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:33:59.994103+00:00",
+        "typed": true,
+        "value_returned": false
+      },
+      "post_rotation_grant": {
+        "at": "2026-09-27T03:50:15.318540+00:00",
+        "generation": 4,
+        "grant": {
+          "attempt_generation": 4,
+          "created_at": "2026-09-27 03:50:05.571681+00",
+          "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "grant_id": "a6c776d128c74789be149e489a3cc01e",
+          "provider": "anthropic-gateway",
+          "redemption_deadline": "2026-09-27 04:50:05.566969+00",
+          "status": "active"
+        },
+        "minted_under_binding_revision": 3
+      },
+      "recovery_lane": {
+        "binding_revision": 3,
+        "broker_sentinel_presented": true,
+        "job_status": "failed",
+        "meta_grant_join": true,
+        "meta_terminal_reason": "api_error",
+        "observed_at": "2026-09-27T03:50:46.066174+00:00",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "recorder_captures": 1
+      },
+      "recovery_retry_note_id": 1392,
+      "rotation": {
+        "arm": "same-ref rebind, revision N->N+1, between mint and redemption",
+        "minted_grant": {
+          "attempt_generation": 3,
+          "created_at": "2026-09-27 03:33:49.620006+00",
+          "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "grant_id": "fbd2acb4b9dd403d8f75481ea10f2422",
+          "provider": "anthropic-gateway",
+          "redemption_deadline": "2026-09-27 04:33:49.617568+00",
+          "status": "active"
+        },
+        "minted_under_binding_revision": 2,
+        "rotated_at": "2026-09-27T03:33:59.976093+00:00",
+        "rotated_to_revision": 3
+      },
+      "rotation_lane": {
+        "app_log": [
+          "{\"timestamp\": \"2026-09-27T03:34:00.043417+00:00\", \"level\": \"INFO\", \"logger\": \"forge.api_lane_control\", \"message\": \"credential.redemption_latency work=a4d0062b seconds=0.0111 outcome=refused\"}",
+          "{\"timestamp\": \"2026-09-27T03:34:10.029408+00:00\", \"level\": \"WARNING\", \"logger\": \"forge.api_lane_control\", \"message\": \"credential.binding_revision_mismatch reason=binding_revision_mismatch work=a4d0062b the registry refus",
+          "{\"timestamp\": \"2026-09-27T03:34:10.029453+00:00\", \"level\": \"INFO\", \"logger\": \"forge.api_lane_control\", \"message\": \"credential.redemption_latency work=a4d0062b seconds=0.0104 outcome=refused\"}"
+        ],
+        "job_status": "failed",
+        "markers": [
+          "2026-09-27T03:33:53.662804Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+          "2026-09-27T03:34:07.581923Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+          "2026-09-27T03:34:07.589535Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+          "2026-09-27T03:34:10.039209Z 01E lane_driver: credential_redemption_failed (the redemption endpoint refused the attempt (HTTP 403) \u2014 no credential was redeemed and none is substituted)",
+          "2026-09-27T03:34:10.932372Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+          "2026-09-27T03:34:10.932372Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+        ],
+        "meta_redemption": null,
+        "meta_terminal_reason": "credential_redemption_failed",
+        "observed_at": "2026-09-27T03:34:15.439217+00:00",
+        "pairing_marker": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "recorder_captures": 0
+      },
+      "started_at": "2026-09-27T03:33:48.942999+00:00",
+      "updated_at": "2026-09-27T03:50:46.066203+00:00",
+      "wrong_ref": {
+        "detail": "grant_ref_mismatch: the requested credential ref is not the exact ref this attempt's grant authorized (granted route 'anthropic-gateway')",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:33:59.723611+00:00",
+        "value_returned": false
+      },
+      "wrong_route": {
+        "detail": "grant_route_mismatch: the requested provider route 'zai' is not this attempt's authorized route (granted: anthropic-gateway) \u2014 a sibling binding of the same project is not an authorization for THIS operation",
+        "http_status": 403,
+        "observed_at": "2026-09-27T03:33:59.733645+00:00",
+        "value_returned": false
+      }
+    },
+    "setup": {
+      "binding": {
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "env_var": "ANTHROPIC_AUTH_TOKEN",
+        "provider": "anthropic-gateway",
+        "registry_path": "data/credential-bindings.json (gitignored; refs only)",
+        "revision": 1,
+        "subject": "gitlab/-/151"
+      },
+      "bot_member": {
+        "status": 201,
+        "username": "forge"
+      },
+      "ci_yaml_sha256": "4e46d5f3a902c13315d05d960e3605946d40ffeaf69aea962178f7f1ea4ee83d",
+      "config_pipeline": {
+        "http_status": 201,
+        "pipeline_id": 743,
+        "status": "created"
+      },
+      "install_seam": {
+        "override": "before_script install seam only (git+${FORGE_LANE_REF} -> the sha256-verified wheel ladder)",
+        "route": "wheel (the current composition's pinned lane package)",
+        "template_included": ".forge-template/claude-sdk-lane.gitlab-ci.yml (the shipped bytes, committed; the local include carries rules/variables/script/artifacts)",
+        "wheel_name": "forge-0.41.0-py3-none-any.whl",
+        "wheel_sha256": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+        "wheel_url": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+      },
+      "project": {
+        "id": 151,
+        "path": "forcewake/forge-redemption-pairing-2026-09-27"
+      },
+      "seed_commit_sha": "cc1b233a57ea43da67cd9f7e246d0cb8f270e386",
+      "started_at": "2026-09-27T02:54:47.347457+00:00",
+      "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+      "updated_at": "2026-09-27T02:54:49.607616+00:00",
+      "variables": {
+        "ambient_sentinel_sha256": "fbfc005e74a51feb382f90f8ace32ddc0de68ac12be47a703c10ba2b4d84fa1c",
+        "broker_provenance": "carried from the #343 cycle (the consumers' live ANTHROPIC_AUTH_TOKEN)",
+        "broker_sentinel_sha256": "6e3098b52d8991dcb7d0e08a7467f8adefff7ec881f3d1e7137a1f3466142bf0",
+        "keys": [
+          "ANTHROPIC_AUTH_TOKEN",
+          "ANTHROPIC_BASE_URL",
+          "FORGE_LANE_WHEEL",
+          "FORGE_LANE_WHEEL_SHA256",
+          "FORGE_STEERING_ENABLED",
+          "FORGE_BOT_READ_TOKEN"
+        ],
+        "recorder_url": "http://192.168.1.18:8480"
+      },
+      "webhook_url": "https://forge.forcewake.me/webhook"
+    },
+    "teardown": {
+      "deleted_at": "2026-09-27T04:06:16.045980+00:00",
+      "final_state": {
+        "grants": [
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "104f99b84578478cad633a7c8fe38c65",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 03:52:30.820565+00",
+            "status": "active",
+            "work_id": "102b7766b7ab420492f219ec6d713257"
+          },
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "8879aed71a8748a3b15bfb3cbaf0eb8c",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:05:31.774322+00",
+            "status": "active",
+            "work_id": "2fc8703b0ab5443ea06cf2ac7694b9b4"
+          },
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "0886de18654f408bbf68d991eb6b5118",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 03:57:39.256147+00",
+            "status": "active",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 1,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "7f0aa7e3f3084dca840d25f44580fb9b",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:02:32.172354+00",
+            "status": "active",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 2,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "db6ed014fc394341a2ed18dec58db91f",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:03:24.598696+00",
+            "status": "active",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:31:37.931525+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 1,
+            "credential_ref": "env:FORGE_BROKER_MODEL_TOKEN",
+            "grant_id": "9b11eb21f7954a68939f89bd72cd48ee",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:32:15.139924+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 2,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "95b29bfb0bab440aa724f867e1d399ac",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:32:56.475975+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 3,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "fbd2acb4b9dd403d8f75481ea10f2422",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:33:49.617568+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 4,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "a6c776d128c74789be149e489a3cc01e",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:50:05.566969+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 5,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "2ace0652a1784e44a3cdb2a7116a1a3a",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:50:52.879033+00",
+            "status": "active",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "ebc175da7a2d4e589aebc699c8d9fdbf",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:21:10.637322+00",
+            "status": "active",
+            "work_id": "d7303b9c8b6b45f68bcd6fc1ce86651d"
+          },
+          {
+            "attempt_generation": 0,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "f4780ac9df9849bba0e7c1037da65ae9",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 03:57:56.716388+00",
+            "status": "active",
+            "work_id": "f32cdbe0b8fa4049878a9eba26427b95"
+          },
+          {
+            "attempt_generation": 1,
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "a8552e35f9444215a971c2e033122402",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:09:55.948308+00",
+            "status": "active",
+            "work_id": "f32cdbe0b8fa4049878a9eba26427b95"
+          }
+        ],
+        "redemptions": [
+          {
+            "attempt_generation": 0,
+            "binding_revision": 1,
+            "broker_receipt_id": "1849a18ffa494394a280f7fe03185e17",
+            "created_at": "2026-09-27 03:31:59.65815+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:31:37.931525+00",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "bd7f2c70c9ad47e08622f06a2d5d9dab",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 2,
+            "binding_revision": 2,
+            "broker_receipt_id": "3c48d31ae3c345709e817aa7b5f01dde",
+            "created_at": "2026-09-27 03:33:19.106603+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:32:56.475975+00",
+            "grant_id": "95b29bfb0bab440aa724f867e1d399ac",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "069525a4a21346888abb9c007c7030ab",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 4,
+            "binding_revision": 3,
+            "broker_receipt_id": "3eafe42d47de43538a37dc0fec16dabd",
+            "created_at": "2026-09-27 03:50:30.337572+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:50:05.566969+00",
+            "grant_id": "a6c776d128c74789be149e489a3cc01e",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "b07079e32ebc415fad1d51903aabe6c4",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 5,
+            "binding_revision": 3,
+            "broker_receipt_id": "d39321b96195485793dff1df4228ddf1",
+            "created_at": "2026-09-27 03:51:13.587203+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:50:52.879033+00",
+            "grant_id": "2ace0652a1784e44a3cdb2a7116a1a3a",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "dacda3fd4c5944f386acb29e34ab43a8",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          {
+            "attempt_generation": 0,
+            "binding_revision": 3,
+            "broker_receipt_id": "52348f46eecc494d972ce883ba1e7975",
+            "created_at": "2026-09-27 03:53:56.732606+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 03:57:39.256147+00",
+            "grant_id": "0886de18654f408bbf68d991eb6b5118",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "0c03a225dd7d4368a735e08c882efeef",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 0,
+            "binding_revision": 3,
+            "broker_receipt_id": "00527f93adb9445bb34a8ace8fcd26d4",
+            "created_at": "2026-09-27 03:54:03.714339+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 03:57:39.256147+00",
+            "grant_id": "0886de18654f408bbf68d991eb6b5118",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "0862572f5b684a68b84a8a3e7bcbe3ba",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 1,
+            "binding_revision": 3,
+            "broker_receipt_id": "4c9ed758f04642368fdafc2a052161b4",
+            "created_at": "2026-09-27 04:01:25.194446+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:02:32.172354+00",
+            "grant_id": "7f0aa7e3f3084dca840d25f44580fb9b",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "e14be300a3664af5aac6298f0d3bc4f6",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          },
+          {
+            "attempt_generation": 2,
+            "binding_revision": 3,
+            "broker_receipt_id": "7a07ed7f347141f9afd2d28ee28bcc33",
+            "created_at": "2026-09-27 04:02:17.567077+00",
+            "credential_policy": "compat",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "expires_at": "2026-09-27 04:03:24.598696+00",
+            "grant_id": "db6ed014fc394341a2ed18dec58db91f",
+            "outcome": "redeemed",
+            "provider": "anthropic-gateway",
+            "receipt_id": "f2f7158e231a43d3a2c3fd709aacaadb",
+            "resolver": "env",
+            "retry_count": 0,
+            "route": "anthropic-gateway",
+            "subject": "gitlab/-/151",
+            "work_id": "705edf3254784fd8abffa89b8b6aaad8"
+          }
+        ],
+        "runs": [
+          {
+            "cancellation_generation": 1,
+            "created_at": "2026-09-27 02:57:41.233767+00",
+            "id": "f32cdbe0b8fa4049878a9eba26427b95",
+            "status": "blocked"
+          },
+          {
+            "cancellation_generation": 0,
+            "created_at": "2026-09-27 03:20:40.119105+00",
+            "id": "d7303b9c8b6b45f68bcd6fc1ce86651d",
+            "status": "blocked"
+          },
+          {
+            "cancellation_generation": 5,
+            "created_at": "2026-09-27 03:31:22.425532+00",
+            "id": "a4d0062be72843c18c47410d0aa55769",
+            "status": "blocked"
+          },
+          {
+            "cancellation_generation": 0,
+            "created_at": "2026-09-27 03:51:55.594073+00",
+            "id": "102b7766b7ab420492f219ec6d713257",
+            "status": "blocked"
+          },
+          {
+            "cancellation_generation": 2,
+            "created_at": "2026-09-27 03:53:24.082628+00",
+            "id": "705edf3254784fd8abffa89b8b6aaad8",
+            "status": "blocked"
+          },
+          {
+            "cancellation_generation": 0,
+            "created_at": "2026-09-27 04:04:56.394441+00",
+            "id": "2fc8703b0ab5443ea06cf2ac7694b9b4",
+            "status": "blocked"
+          }
+        ]
+      },
+      "started_at": "2026-09-27T04:06:15.611249+00:00",
+      "updated_at": "2026-09-27T04:06:16.046005+00:00"
+    },
+    "trace": {
+      "dispatches": [
+        {
+          "branch": "factory/3/a4d0062b",
+          "job_status": "failed",
+          "job_trace_sha256": "2ed9b9af2c4eb08316deb3425ca22c5a870073ab93a677d3ba1ed8bb38509832",
+          "lane_job_id": 1102,
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "pipeline_id": 756,
+          "pipeline_url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/pipelines/756",
+          "redemption_markers": [
+            "2026-09-27T03:31:42.733888Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:31:57.037481Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:31:57.045354Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:32:01.350910Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:32:01.350910Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "go_note_id": 1379,
+      "grant_before_go": [],
+      "grant_minted": {
+        "dispatch_credential": {
+          "attempt_generation": 0,
+          "attribution": "bound-delivery",
+          "binding_revision": 1,
+          "credential_policy": "compat",
+          "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "dispatch_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "env_var": "ANTHROPIC_AUTH_TOKEN",
+          "expected_identity": {
+            "binding_revision": 1,
+            "env_var": "ANTHROPIC_AUTH_TOKEN",
+            "resolver": "env",
+            "version_kind": "binding-revision"
+          },
+          "grant": {
+            "attempt_generation": "0",
+            "run_id": "a4d0062be72843c18c47410d0aa55769"
+          },
+          "locator_namespace": "",
+          "mode": "runner-redemption",
+          "native_locator": "",
+          "profile": "gitlab",
+          "provider": "anthropic-gateway",
+          "schema": "forge.credential.delivery-plan/1",
+          "subject": "gitlab/-/151",
+          "template_digest": "83571ef429c63939",
+          "template_driver": "",
+          "transport_ref": "/lane/credentials/redeem"
+        },
+        "envelope": {
+          "attempt_generation": 0,
+          "checkpoint_digest": "",
+          "control_url": "https://forge.forcewake.me",
+          "credential_binding_revision": 1,
+          "credential_delivery_mode": "runner-redemption",
+          "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+          "decision_id": "",
+          "digest": "618225894e8998b21bc96e151ca0a6a70b605a87fc14a57e9e0e6565110e77e2",
+          "resume_mode": "fresh",
+          "token_dispatched": true,
+          "variable_keys": [
+            "FORGE_LANE_RESUME_MODE",
+            "FORGE_LANE_RESUME",
+            "FORGE_RESUME_CHECKPOINT",
+            "FORGE_ATTEMPT_GENERATION",
+            "FORGE_CONTINUATION_DECISION_ID",
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
+            "FORGE_CREDENTIAL_REF",
+            "FORGE_CREDENTIAL_REDEEM"
+          ]
+        },
+        "grant_projection": {
+          "0:anthropic-gateway": {
+            "attempt_generation": 0,
+            "binding_revision": 1,
+            "created_at": "2026-09-27T03:31:37.931525+00:00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "delivery_mode": "runner-redemption",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "operation": "credential-redemption",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27T04:31:37.931525+00:00",
+            "schema": "forge.credential.operation-grant/1",
+            "subject": "gitlab/-/151",
+            "work_id": "a4d0062be72843c18c47410d0aa55769"
+          }
+        },
+        "mint_latency_s": 10.7,
+        "observed_at": "2026-09-27T03:31:48.169459+00:00",
+        "rows": [
+          {
+            "attempt_generation": 0,
+            "created_at": "2026-09-27 03:31:37.938424+00",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "provider": "anthropic-gateway",
+            "redemption_deadline": "2026-09-27 04:31:37.931525+00",
+            "status": "active"
+          }
+        ]
+      },
+      "identity_proof": {
+        "ambient_sentinel_presented": false,
+        "broker_sentinel_presented": true,
+        "captures": 1,
+        "distinct_authorization_digests": [
+          "c3cf9d7d2af0a1b456d9d16cdd5601333a5b2eab59a9f9eb2699813b146cc3a7"
+        ],
+        "grant_join": {
+          "authority_row": "28560fdfda064a57",
+          "meta": "28560fdfda064a57"
+        },
+        "verdict": "pass"
+      },
+      "install_miss_run_d7303b9c": {
+        "lane_outcomes": [
+          {
+            "job_status": "failed",
+            "job_trace_sha256": "c6faed5cca6f779cce42f51713d10b564b56b2026a4b86127d2aa9ddc6273fa5",
+            "meta_redemption": null,
+            "meta_terminal_reason": null,
+            "meta_usage": null,
+            "observed_at": "2026-09-27T03:21:36.258456+00:00",
+            "pairing_marker": null,
+            "recorder_captures": [],
+            "redemption_markers": [
+              "2026-09-27T03:21:16.329117Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+              "2026-09-27T03:21:29.613628Z 01E \u001b[0;33mWARNING: .forge/candidate.diff: no matching files. Ensure that the artifact path is relative to the working directory (/builds/forcewake/forge-redemption-pairing",
+              "2026-09-27T03:21:29.613633Z 01E \u001b[0;33mWARNING: .forge/candidate.meta.json: no matching files. Ensure that the artifact path is relative to the working directory (/builds/forcewake/forge-redemption-pa"
+            ]
+          }
+        ],
+        "note": "the SECOND qualifying attempt froze the attempt base with the braces-broken override (a plain-string block shipped literal ${{FORGE_LANE_WHEEL}} escapes \u2014 bash 'bad substitution'); recorded honestly and abandoned like the first",
+        "run_id": "d7303b9c8b6b45f68bcd6fc1ce86651d"
+      },
+      "install_miss_run_f32cdbe0": {
+        "lane_outcomes": [
+          {
+            "job_status": "failed",
+            "job_trace_sha256": "9043641ad6938af39603120fee69501ed57301c6d6eb345478b11e81ee54dba1",
+            "meta_redemption": null,
+            "meta_terminal_reason": null,
+            "meta_usage": null,
+            "observed_at": "2026-09-27T03:10:20.612920+00:00",
+            "pairing_marker": null,
+            "recorder_captures": [],
+            "redemption_markers": [
+              "2026-09-27T03:09:59.528174Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+              "2026-09-27T03:10:12.898479Z 01E \u001b[0;33mWARNING: .forge/candidate.diff: no matching files. Ensure that the artifact path is relative to the working directory (/builds/forcewake/forge-redemption-pairing",
+              "2026-09-27T03:10:12.898484Z 01E \u001b[0;33mWARNING: .forge/candidate.meta.json: no matching files. Ensure that the artifact path is relative to the working directory (/builds/forcewake/forge-redemption-pa"
+            ]
+          }
+        ],
+        "note": "the FIRST qualifying attempt's run froze its attempt base with the pre-fix CI bytes (uv validates the wheel FILENAME \u2014 the downloaded /tmp/forge-lane.whl was refused 'Must have a Python tag'); the factory /retry reuses the recorded attempt base, so the run could not pick up the corrected CI \u2014 recorded honestly and abandoned; the qualifying run below cut a fresh base from the fixed main",
+        "retry_notes": [
+          1369
+        ],
+        "run_id": "f32cdbe0b8fa4049878a9eba26427b95"
+      },
+      "issue": {
+        "iid": 3,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27/-/work_items/3"
+      },
+      "lane_outcomes": [
+        {
+          "job_status": "failed",
+          "job_trace_sha256": "2ed9b9af2c4eb08316deb3425ca22c5a870073ab93a677d3ba1ed8bb38509832",
+          "meta_redemption": {
+            "binding_revision": 1,
+            "binding_revision_known": true,
+            "broker_receipt_id": "1849a18ffa494394a280f7fe03185e17",
+            "consumer_status": "staged-unresolved",
+            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+            "delivery_route": "/lane/credentials/redeem",
+            "env_var": "ANTHROPIC_AUTH_TOKEN",
+            "grant_id": "28560fdfda064a578875dfcfeabe0622",
+            "operation": null,
+            "provider_route": "anthropic-gateway",
+            "redemption_id": "bd7f2c70c9ad47e08622f06a2d5d9dab"
+          },
+          "meta_terminal_reason": "api_error",
+          "meta_usage": {
+            "cache_write_tokens": 0,
+            "cached_input_tokens": 0,
+            "completeness": "aggregate",
+            "driver": "claude-sdk-lane",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "source": "claude-agent-sdk",
+            "total_cost_usd": 0.0
+          },
+          "observed_at": "2026-09-27T03:32:03.659128+00:00",
+          "pairing_marker": {
+            "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+            "version": "0.41.0",
+            "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+          },
+          "recorder_captures": [
+            {
+              "authorization_sha256": "c3cf9d7d2af0a1b456d9d16cdd5601333a5b2eab59a9f9eb2699813b146cc3a7",
+              "body_model": "glm-5.3-flash",
+              "captured_at": "2026-09-27T03:32:00.222427+00:00",
+              "method": "POST",
+              "path": "/v1/messages?beta=true",
+              "user_agent": "claude-cli/2.1.283 (external, sdk-py, agent-sdk/0.2.160)",
+              "x_api_key_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ],
+          "redemption_markers": [
+            "2026-09-27T03:31:42.733888Z 01O Reinitialized existing Git repository in /builds/forcewake/forge-redemption-pairing-2026-09-27/.git/",
+            "2026-09-27T03:31:57.037481Z 01E From https://gitlab.forcewake.duckdns.org/forcewake/forge-redemption-pairing-2026-09-27",
+            "2026-09-27T03:31:57.045354Z 01O \u001b[32;1m$ if [ -n \"${FORGE_CREDENTIAL_REF:-}\" ] && [ \"${FORGE_CREDENTIAL_REDEEM:-}\" != \"1\" ]; then # collapsed multi-line command\u001b[0;m",
+            "2026-09-27T03:32:01.350910Z 01O   \"diff_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27/forge-output/candidate.diff\",",
+            "2026-09-27T03:32:01.350910Z 01O   \"generation_path\": \"/builds/forcewake/forge-redemption-pairing-2026-09-27\","
+          ]
+        }
+      ],
+      "pairing_proof": {
+        "expected_wheel_sha256": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+        "lane_echo": {
+          "sha": "2616d22130f32eb8f8b09a5e0e74d988aa23746efcaecb3640108b4fd85a8fe4",
+          "version": "0.41.0",
+          "wheel": "http://192.168.1.18:8481/forge-0.41.0-py3-none-any.whl"
+        },
+        "verdict": "pass"
+      },
+      "plan": {
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 1378,
+        "run_id": "a4d0062be72843c18c47410d0aa55769"
+      },
+      "preconditions": {
+        "app_version": "0.41.0",
+        "checked_at": "2026-09-27T02:57:40.643456+00:00",
+        "delivery_mode": "runner-redemption",
+        "deployed_schema_head": "032"
+      },
+      "run_id": "a4d0062be72843c18c47410d0aa55769",
+      "started_at": "2026-09-27T02:57:38.418720+00:00",
+      "updated_at": "2026-09-27T03:32:03.774024+00:00"
+    }
+  },
+  "stamp": "forge.redemption.pairing/1"
+}

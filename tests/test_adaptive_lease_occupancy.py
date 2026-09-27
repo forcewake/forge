@@ -44,10 +44,11 @@ from forge.adaptive.admission import (
     release_lease,
     release_lease_with_evidence,
     release_run_leases,
+    saturation_report,
     try_acquire_lease,
 )
 from forge.adaptive.admission import AdmissionPolicy
-from forge.durable import FlowRun
+from forge.durable import ActionLog, FlowRun
 from forge.durable.controller import FlowStatus
 from forge.models.base import Base
 from tests.fixtures.fake_gitlab import FakeGitLab
@@ -794,3 +795,421 @@ async def _run_evidence_pipeline(db, run_id: str) -> str:
     async with db() as session:
         run = await session.get(FlowRun, run_id)
         return str((run.evidence or {}).get("harness", {}).get("pipeline_id"))
+
+
+# ---------------------------------------------------------------------------
+# R41-05 (#360): the branch-search probe correlates with the CURRENT attempt
+# ---------------------------------------------------------------------------
+
+#: One fixed probe clock: every timestamp below is expressed relative to it,
+#: so the intent's dispatch window and the pipelines' created_at stamps
+#: agree no matter when the suite runs.
+_OCC_NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+#: The dispatch window start: the intent was persisted five minutes ago.
+_OCC_INTENT_AT = _OCC_NOW - timedelta(minutes=5)
+_OCC_SKEW_FREE_HISTORY = _OCC_INTENT_AT - timedelta(hours=1)
+_OCC_CAP = AdmissionPolicy(max_active_per_project=3)
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def _occ_pipeline(
+    pid: int,
+    branch: str,
+    status: str,
+    *,
+    sha: str | None = None,
+    created_at: datetime | None = None,
+    source: str | None = None,
+) -> dict:
+    row: dict = {"id": pid, "ref": branch, "status": status, "sha": sha}
+    if created_at is not None:
+        row["created_at"] = _iso(created_at)
+    if source is not None:
+        row["source"] = source
+    return row
+
+
+async def _seed_intent_run(
+    db,
+    *,
+    intent_ref: str,
+    evidence: dict | None = None,
+    base_sha: str = "base-000",
+    policy: AdmissionPolicy | None = None,
+    issue_iid: int = ISSUE_IID,
+) -> str:
+    """One run holding an OPEN lease whose start intent landed five
+    minutes ago (the lost-response shape the branch probe arbitrates)."""
+    run_id = uuid4().hex
+    async with db() as session:
+        session.add(
+            FlowRun(
+                id=run_id,
+                project_id=PROJECT_ID,
+                issue_iid=issue_iid,
+                provider="gitlab",
+                status="validating",
+                evidence=dict(evidence or {}),
+                base_sha=base_sha,
+                created_at=_OCC_INTENT_AT - timedelta(hours=2),
+            )
+        )
+        await session.commit()
+    lease = await try_acquire_lease(
+        policy or _OCC_CAP, PROJECT_ID, db, run_id=run_id, provider="gitlab"
+    )
+    assert lease is not None
+    assert await record_native_start_intent(db, run_id, intent_ref, now=_OCC_INTENT_AT) == 1
+    return run_id
+
+
+async def _journal_success(
+    db, run_id: str, kind: str, result: dict, at: datetime, correlation: str | None = None
+) -> None:
+    async with db() as session:
+        session.add(
+            ActionLog(
+                flow_run_id=run_id,
+                action_kind=kind,
+                status="succeeded",
+                remote_result=result,
+                correlation_id=correlation,
+                created_at=at,
+            )
+        )
+        await session.commit()
+
+
+async def _open_lease_count(db, run_id: str) -> int:
+    from forge.adaptive.admission import ExecutionLease
+
+    async with db() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.run_id == run_id,
+                        ExecutionLease.released_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return len(rows)
+
+
+class TestBranchSearchCorrelation:
+    """R41-05 (#360): occupancy comes from the CURRENT execution, never
+    from any historical pipeline on the branch. The branch children of
+    review rounds share the run-owned ref, so mixed history is the NORMAL
+    listing — the old any-terminal-wins predicate read a historical
+    ``success`` beside a current ``running`` as TERMINAL and freed the
+    slot while the round's pipeline still ran."""
+
+    def _service(self, db):
+        from tests.test_runs_harness_service import make_service
+
+        return make_service(db, FakeGitLab())
+
+    def _intent_key(self, branch: str) -> str:
+        return f"gitlab:pipeline:{PROJECT_ID}@{branch}"
+
+    async def _seed_and_park(self, db, branch: str, **over) -> str:
+        """The lost-response lifecycle state: run locally terminal, lease
+        parked DRAINING, occupancy awaiting the correlated probe."""
+        run_id = await _seed_intent_run(db, intent_ref=self._intent_key(branch), **over)
+        outcome = await release_lease_with_evidence(db, run_id, reason="terminal:verified")
+        assert outcome.released == 0 and outcome.drained == 1
+        return run_id
+
+    async def test_historical_success_plus_current_running_keeps_the_lease(self, db):
+        """THE defect sentence: a previous round's ``success`` beside the
+        current round's ``running`` must read RUNNING (the lease keeps
+        its slot), never TERMINAL."""
+        service = self._service(db)
+        branch = "factory/7/round-mixed"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000", created_at=_OCC_SKEW_FREE_HISTORY),
+            _occ_pipeline(11, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0  # capacity keeps holding
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_old_failure_plus_new_pending_keeps_the_lease(self, db):
+        service = self._service(db)
+        branch = "factory/7/round-fail-retry"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "failed", created_at=_OCC_SKEW_FREE_HISTORY),
+            _occ_pipeline(11, branch, "pending", created_at=_OCC_INTENT_AT + timedelta(seconds=30)),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_multiple_active_current_jobs_keep_the_lease(self, db):
+        service = self._service(db)
+        branch = "factory/7/round-multi"
+        await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", created_at=_OCC_SKEW_FREE_HISTORY),
+            _occ_pipeline(11, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+            _occ_pipeline(12, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=2)),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+
+    async def test_correlated_terminal_releases_without_manual_db_edits(self, db):
+        """Only a CORRELATED terminal execution releases its slot — and
+        when everything relevant is terminal, capacity returns by the
+        reconciler alone."""
+        service = self._service(db)
+        branch = "factory/7/round-done"
+        await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000", created_at=_OCC_SKEW_FREE_HISTORY),
+            _occ_pipeline(11, branch, "success", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await service._reconcile_draining_leases() == 1
+        snapshot = await lease_snapshot(_OCC_CAP, PROJECT_ID, db, provider="gitlab")
+        assert snapshot["held"] == 0
+
+    async def test_history_only_listing_is_not_never_started(self, db):
+        """A listing of pure history (or an empty one) is NOT proof the
+        start never landed — the original start can still be accepted or
+        appear after a delay, so occupancy stays UNKNOWN with the lease
+        draining, age visible."""
+        service = self._service(db)
+        branch = "factory/7/round-history-only"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000", created_at=_OCC_SKEW_FREE_HISTORY)
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_empty_listing_is_not_never_started(self, db):
+        """The empty response (start accepted, response AND first
+        discovery lost — a truncated/paginated miss) must not free the
+        slot the way the old ``return TERMINAL`` did."""
+        service = self._service(db)
+        branch = "factory/7/round-empty"
+        await self._seed_and_park(db, branch)
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+        assert await service._reconcile_draining_leases() == 0
+        report = await occupancy_report(_OCC_CAP, PROJECT_ID, db, provider="gitlab", now=_OCC_NOW)
+        assert report["occupancy_unknown"] == 1
+        assert report["draining_age_seconds"] is not None  # the actionable age
+
+    async def test_unavailable_provider_429_503_leaves_unknown_with_age(self, db):
+        """Provider outage (429/503) is undecidable: the probe raises, the
+        reconciler reads UNKNOWN, the lease keeps draining with its age
+        and count visible in the operator reports."""
+        from forge.gitlab.client import GitLabAPIError
+
+        service = self._service(db)
+        branch = "factory/7/round-outage"
+        run_id = await self._seed_and_park(db, branch)
+
+        async def throttled(project_id, ref=None, status=None, sha=None, per_page=20):
+            raise GitLabAPIError(429, "too many requests")
+
+        service._gitlab.list_pipelines = throttled  # type: ignore[method-assign]
+        probe = service._native_occupancy_probe()
+        with pytest.raises(GitLabAPIError):
+            await probe(self._intent_key(branch))
+        # the reconciler's wrapper converts the raise to UNKNOWN — holds
+        assert await service._reconcile_draining_leases() == 0
+        report = await saturation_report(_OCC_CAP, PROJECT_ID, db, provider="gitlab", now=_OCC_NOW)
+        assert report["native_start.unknown_count"] == 1
+        assert report["native_start.unknown_age"] is not None
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_verification_pipeline_is_not_coding_occupancy(self, db):
+        """A merge-request verification pipeline on the shared ref never
+        holds (or frees) coding capacity: the correlated terminal current
+        still releases."""
+        service = self._service(db)
+        branch = "factory/7/round-verify"
+        await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(11, branch, "success", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+            _occ_pipeline(
+                12,
+                branch,
+                "running",
+                created_at=_OCC_INTENT_AT + timedelta(minutes=2),
+                source="merge_request",
+            ),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await service._reconcile_draining_leases() == 1
+
+    async def test_late_discovered_job_joins_its_existing_start_intent(self, db):
+        """The delayed start lands AFTER first discovery said empty: the
+        job joins the SAME intent's lease — no second reservation, and
+        occupancy flips to RUNNING without any release in between."""
+        service = self._service(db)
+        branch = "factory/7/round-late"
+        run_id = await self._seed_and_park(db, branch)
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+
+        # the accepted start finally appears on the provider
+        service._gitlab.pipelines = [
+            _occ_pipeline(11, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=3))
+        ]
+        # the recovery scan re-drives the dispatch: idempotent per run
+        lease = await try_acquire_lease(_OCC_CAP, PROJECT_ID, db, run_id=run_id, provider="gitlab")
+        assert lease is not None
+        assert await _open_lease_count(db, run_id) == 1  # joined, not duplicated
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+
+    async def test_cap_three_mixed_history_never_oversubscribes(self, db):
+        """At the configured cap of 3, three runs whose branches each
+        carry mixed history all KEEP their slots (no phantom N+1), the
+        fourth dispatch parks, and ONE correlated terminal frees exactly
+        one slot for it."""
+        service = self._service(db)
+        branches = [f"factory/{ISSUE_IID + index}/cap-{index}" for index in range(3)]
+        run_ids = []
+        for index, branch in enumerate(branches):
+            run_ids.append(await self._seed_and_park(db, branch, issue_iid=ISSUE_IID + index))
+            service._gitlab.pipelines.extend(
+                [
+                    _occ_pipeline(
+                        10 + len(run_ids) * 2,
+                        branch,
+                        "success",
+                        sha="base-000",
+                        created_at=_OCC_SKEW_FREE_HISTORY,
+                    ),
+                    _occ_pipeline(
+                        11 + len(run_ids) * 2,
+                        branch,
+                        "running",
+                        created_at=_OCC_INTENT_AT + timedelta(minutes=1),
+                    ),
+                ]
+            )
+        assert await service._reconcile_draining_leases() == 0  # all three hold
+
+        outsider = uuid4().hex
+        async with db() as session:
+            session.add(
+                FlowRun(
+                    id=outsider,
+                    project_id=PROJECT_ID,
+                    issue_iid=ISSUE_IID + 100,
+                    provider="gitlab",
+                    status="waiting_approval",
+                    evidence={},
+                    created_at=_OCC_NOW,
+                )
+            )
+            await session.commit()
+        assert (
+            await try_acquire_lease(_OCC_CAP, PROJECT_ID, db, run_id=outsider, provider="gitlab")
+            is None
+        )
+
+        # one current execution finishes: its slot — and only its — returns
+        first_branch = branches[0]
+        for row in service._gitlab.pipelines:
+            if row["ref"] == first_branch and row["status"] == "running":
+                row["status"] = "success"
+        assert await service._reconcile_draining_leases() == 1
+        assert (
+            await try_acquire_lease(_OCC_CAP, PROJECT_ID, db, run_id=outsider, provider="gitlab")
+            is not None
+        )
+
+    async def test_handle_and_search_probes_agree_for_the_same_execution(self, db):
+        """A verified handle recorded after the intent is PREFERRED: the
+        intent-shaped key answers through the same ``get_pipeline`` read
+        the handle-shaped key takes — identical verdicts either way."""
+        service = self._service(db)
+        branch = "factory/7/round-agree"
+        run_id = await self._seed_and_park(db, branch)
+        await _journal_success(
+            db,
+            run_id,
+            "harness_start",
+            {"pipeline_id": 11},
+            at=_OCC_INTENT_AT + timedelta(minutes=1),
+        )
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000", created_at=_OCC_SKEW_FREE_HISTORY),
+            _occ_pipeline(11, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await probe(f"gitlab:pipeline:{PROJECT_ID}:11") is NativeStatus.RUNNING
+        assert len(service._gitlab.calls_of("get_pipeline")) >= 1  # the handle-shaped read
+
+        for row in service._gitlab.pipelines:
+            if row["id"] == 11:
+                row["status"] = "success"
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await probe(f"gitlab:pipeline:{PROJECT_ID}:11") is NativeStatus.TERMINAL
+
+    async def test_effect_sha_fallback_without_created_at(self, db):
+        """A degraded listing (no created_at, no recorded prior ids) still
+        correlates: the attempt's recorded effect sha is current, the
+        recorded base sha is the predecessor's."""
+        service = self._service(db)
+        branch = "factory/7/round-degraded"
+        run_id = await self._seed_and_park(db, branch)
+        await _journal_success(
+            db,
+            run_id,
+            "commit",
+            {"sha": "cand-111"},
+            at=_OCC_INTENT_AT + timedelta(minutes=2),
+            correlation=branch,
+        )
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000"),
+            _occ_pipeline(11, branch, "success", sha="cand-111"),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await service._reconcile_draining_leases() == 1
+
+    async def test_ambiguous_active_pipeline_retains_occupancy(self, db):
+        """A listing row that is neither provably current nor provably
+        history, but ACTIVE, retains occupancy — the probe never picks a
+        convenient terminal row to free a slot."""
+        service = self._service(db)
+        branch = "factory/7/round-ambiguous"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(5, branch, "running", sha="who-knows")  # no created_at, no priors
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_no_open_lease_for_the_marker_reads_unknown(self, db):
+        """A released (or absent) lease's marker probes UNKNOWN — never a
+        verdict against a lease nobody holds."""
+        service = self._service(db)
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key("factory/7/nobody")) is NativeStatus.UNKNOWN

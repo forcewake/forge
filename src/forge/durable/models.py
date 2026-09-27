@@ -268,6 +268,15 @@ class FlowRun(Base):
     #: Incremental ADR-0008 evidence: plan digest/summary, review verdict+sha,
     #: pipeline id/url/status — written as the run accumulates proof.
     evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+    #: R41-04 (#359): the run's COLLABORATION target — the persisted
+    #: branch/MR surface its whole delivery lineage shares. Root and
+    #: round-child runs link the SAME row; branch identity resolves
+    #: through it (never re-derived from the run id). NULL for runs
+    #: admitted before 032 until the legacy adapter materializes one
+    #: (or records a refusal — also a row, also linked). Deliberately
+    #: a plain indexed column, no FK: the chain's precedent for columns
+    #: added to existing tables (see ``mr_reservations.flow_run_id``).
+    target_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     #: ADR-0004 commit-cycle budget counter: 1 = initial candidate; each
     #: bounded code repair increments it (max = FORGE_MAX_COMMIT_CYCLES).
     commit_cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -1223,6 +1232,114 @@ class ReviewRound(Base):
         DateTime(timezone=True),
         nullable=False,
         default=_utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
+#: R41-04 (#359): the target lifecycle. ``active`` rows carry the
+#: validated collaboration surface; a ``refused`` row is the durable
+#: record that a legacy topology could NOT be resolved — it carries the
+#: typed reason and NEVER a branch (an unresolved topology is recorded,
+#: never inferred).
+_COLLABORATION_TARGET_STATUSES: tuple[str, ...] = ("active", "refused")
+#: R41-04 (#359): the partial-unique predicate making "one active
+#: target per (provider, repository, source branch)" a DB invariant —
+#: two admissions racing the same lineage collapse to one row at the
+#: index (refused rows carry NULL branches and stay outside it).
+_ACTIVE_COLLABORATION_TARGET = text("status = 'active'")
+
+
+class CollaborationTarget(Base):
+    """The canonical collaboration surface of ONE delivery lineage
+    (R41-04, #359).
+
+    The debt this retires: child round ids reused the parent's 8-hex
+    prefix so ``factory_branch`` derivations collided onto one branch —
+    work identity, collaboration identity and display shorthand
+    coupled, short command ids ambiguous within a lineage. From #359
+    the surface is an EXPLICIT record every run of the lineage links
+    (``flow_runs.target_id``): the provider, the repository, the SOURCE
+    branch (the run-owned ref the MR stays open on), the TARGET branch
+    (the MR destination), and the MR identity once one exists.
+
+    - ``source_branch`` is IMMUTABLE once materialized — publication,
+      drift checks, CI collection and the operator surface all resolve
+      through this row, so changing a display label or a round number
+      can never redirect publication;
+    - ``root_run_id`` names delivery 1 of the lineage (the reference
+      anchor for ``round N of <root-short>``);
+    - ``mr_iid`` is the lineage's ONE MR — set when first recorded,
+      never moved (a disagreeing later handle is a typed mismatch
+      refusal, ``collaboration.target_mismatch``, refused BEFORE any
+      write);
+    - a REFUSED row (``status = 'refused'``) records an unresolved
+      legacy topology with its typed reason — never an inferred branch.
+    """
+
+    __tablename__ = "collaboration_targets"
+    __table_args__ = (
+        _status_check("ck_collaboration_targets_status", _COLLABORATION_TARGET_STATUSES),
+        CheckConstraint(
+            "provenance IN ('live', 'legacy')",
+            name="ck_collaboration_targets_provenance",
+        ),
+        CheckConstraint(
+            "(status = 'active' AND source_branch IS NOT NULL AND target_branch IS NOT NULL"
+            " AND refusal_reason IS NULL)"
+            " OR (status = 'refused' AND source_branch IS NULL AND target_branch IS NULL"
+            " AND refusal_reason IS NOT NULL)",
+            name="ck_collaboration_target_shape",
+        ),
+        Index(
+            "uq_collaboration_target_branch",
+            "provider",
+            "project_ref",
+            "source_branch",
+            unique=True,
+            postgresql_where=_ACTIVE_COLLABORATION_TARGET,
+            sqlite_where=_ACTIVE_COLLABORATION_TARGET,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    #: FlowRun.provider values — the repository identity is only unique
+    #: WITHIN a provider.
+    provider: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="gitlab", server_default="gitlab"
+    )
+    #: The provider-scoped repository identity (GitLab project id as a
+    #: string). Two repositories sharing an MR number and a branch
+    #: label key apart here — they never cross.
+    project_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    issue_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Delivery 1 of the lineage (the round-reference anchor).
+    root_run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: The run-owned ref the MR stays open on (immutable once set).
+    source_branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: The MR destination branch.
+    target_branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: The lineage's ONE MR identity (once one exists; never moved).
+    mr_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    refusal_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    #: Where the row came from: ``live`` (the admission that owns the
+    #: work materialized it) or ``legacy`` (the adapter / migration
+    #: derived it ONCE, validated against recorded MR/source info).
+    provenance: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="live", server_default="live"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

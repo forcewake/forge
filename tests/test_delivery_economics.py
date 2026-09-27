@@ -1398,14 +1398,18 @@ def test_committed_live_single_writer_population_is_honest():
 from forge.adaptive.delivery_economics import (  # noqa: E402
     ACCEPTED_COST_COLUMNS,
     ACCEPTED_LEDGER_SCHEMA,
+    ACCEPTED_LEDGER_SCHEMA_V2,
     COST_COLUMN_BILLING,
     COST_COLUMN_PRICE_CARD,
     COST_COLUMN_PROVIDER_REPORTED,
     IDENTITY_CHAIN,
+    LINEAGE_CHAIN,
     TIME_MEASURES,
     AcceptedTaskLedger,
     AcceptedTaskLedgerBuilder,
+    accepted_ledger_v2_document,
     assert_no_unmatched_rates,
+    fold_review_lineage,
 )
 
 COMMITTED_LEDGER = REPO_ROOT / "evaluation" / "economics" / "accepted-task-ledger-v1.json"
@@ -2215,3 +2219,806 @@ def test_committed_accepted_task_ledger_artifact_is_honest():
     assert document["costs"]["programme"]["columns"][COST_COLUMN_PROVIDER_REPORTED][
         "known_lower_bound_usd"
     ] == pytest.approx(0.815235, abs=1e-6)
+
+
+# ----------------------------------------------------------------------
+# R41-13 (#368) — the review-lineage fold: rounds under ONE root task
+# ----------------------------------------------------------------------
+
+COMMITTED_LEDGER_V2 = REPO_ROOT / "evaluation" / "economics" / "accepted-task-ledger-v2.json"
+
+_LROOT = "run-7319478e"
+_LROUND2 = "run-bbd8d0d4"
+_LROUND3 = "run-17645ea9"
+_LROUND4 = "run-2396987b"
+_LPRIOR = "run-fbe62ad5"
+_LFOREIGN = "run-6e0fdf34"
+
+
+def _lineage_records(**overrides):
+    """A root task with two correction rounds, one blocked round, one prior
+    failed attempt and one foreign-lineage child on the programme side.
+
+    Every attempt of the root lineage carries a provider-reported SDK
+    receipt; the foreign child's lane ran but its figure never reached
+    the record (unknown spend — the window-reconciliation bound).
+    """
+
+    def receipt(work_id: str, attempt_id: str, cost: float) -> dict[str, object]:
+        return {
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "receipt_id": f"sdk:{attempt_id}",
+            "source": "claude-agent-sdk",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "total_cost_usd": cost,
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+        }
+
+    records = {
+        "works": [
+            {"work_id": work, "outcome": ""}
+            for work in (
+                _LROOT,
+                _LROUND2,
+                _LROUND3,
+                _LROUND4,
+                _LPRIOR,
+                _LFOREIGN,
+            )
+        ],
+        "attempts": [
+            {"work_id": _LROOT, "attempt_id": "job1157", "outcome": "superseded"},
+            {"work_id": _LROUND2, "attempt_id": "job1162", "outcome": "superseded"},
+            {"work_id": _LROUND3, "attempt_id": "job1166", "outcome": "accepted"},
+            {"work_id": _LROUND4, "attempt_id": "job1169", "outcome": "rejected"},
+            {"work_id": _LPRIOR, "attempt_id": "run-fbe62ad5", "outcome": "rejected"},
+            {"work_id": _LFOREIGN, "attempt_id": "job1154", "outcome": "rejected"},
+        ],
+        "receipts": [
+            receipt(_LROOT, "job1157", 0.2112472),
+            receipt(_LROUND2, "job1162", 0.1980048),
+            receipt(_LROUND3, "job1166", 0.1968864),
+            receipt(_LROUND4, "job1169", 0.2394448),
+            receipt(_LPRIOR, "run-fbe62ad5", 0.2228808),
+            # the foreign child: NO receipt — spend unknown, never zero
+        ],
+        "calls": [],
+        "spans": [],
+    }
+    records.update(overrides)
+    return records
+
+
+def _lineage_links():
+    native_jobs = [
+        {
+            "job_id": f"job{num}",
+            "work_id": work,
+            "attempt_id": f"job{num}",
+            "pipeline_id": str(800 + num),
+            "status": "success",
+        }
+        for num, work in (
+            (1157, _LROOT),
+            (1162, _LROUND2),
+            (1166, _LROUND3),
+            (1169, _LROUND4),
+            (1154, _LFOREIGN),
+        )
+    ]
+    return {
+        "native_jobs": native_jobs,
+        "candidates": [
+            {
+                "candidate_sha": sha,
+                "work_id": work,
+                "attempt_id": attempt,
+                "identity_state": "exact",
+            }
+            for sha, work, attempt in (
+                ("c- delivery1", _LROOT, "job1157"),
+                ("c-round2", _LROUND2, "job1162"),
+                ("c-round3", _LROUND3, "job1166"),
+            )
+        ],
+        "verifications": [
+            {
+                "verification_id": f"oracle-{num}",
+                "work_id": work,
+                "candidate_sha": sha,
+                "producer": "gitlab-pipeline:precommitted-oracle",
+                "status": "success",
+                "tested_oid": sha,
+            }
+            for num, work, sha in (
+                (814, _LROOT, "c- delivery1"),
+                (819, _LROUND2, "c-round2"),
+                (822, _LROUND3, "c-round3"),
+            )
+        ],
+        "human_decisions": [
+            {
+                "work_id": _LROOT,
+                "state": "pending",
+                "channel": "draft-mr-awaiting-human",
+                "note": (
+                    "the reviewer discussions were resolved through the API"
+                    " surface — model/CI decisions, never the human acceptance"
+                ),
+            }
+        ],
+        "budget_events": [],
+        "review_recoveries": [],
+        "time_windows": [
+            {
+                "window_id": "w:wait-r2",
+                "work_id": _LROUND2,
+                "attempt_id": "job1162",
+                "measure": "operator_wait",
+                "population": "review-loop:dispatch→terminal",
+                "seconds": 681.4,
+            },
+            {
+                "window_id": "w:rescue-r3",
+                "work_id": _LROUND3,
+                "attempt_id": "job1166",
+                "measure": "manual_rescue",
+                "population": "review-loop:kill→recovered-ready",
+                "seconds": 283.07,
+            },
+            {
+                "window_id": "w:review-r2",
+                "work_id": _LROUND2,
+                "attempt_id": "job1162",
+                "measure": "reviewer_effort",
+                "population": "review-loop:reviewer-leg",
+                "seconds": None,
+            },
+        ],
+    }
+
+
+def _lineage_runs():
+    return [
+        {
+            "run_id": _LROOT,
+            "relation": "root",
+            "root_run_id": _LROOT,
+            "round_number": 1,
+            "root_join_basis": "the delivery run itself",
+            "round_outcome": "ready_for_human",
+        },
+        {
+            "run_id": _LROUND2,
+            "relation": "round",
+            "root_run_id": _LROOT,
+            "parent_run_id": _LROOT,
+            "round_number": 2,
+            "root_join_basis": "round_rows[r2].root_run_id",
+            "round_outcome": "ready_for_human",
+        },
+        {
+            "run_id": _LROUND3,
+            "relation": "round",
+            "root_run_id": _LROOT,
+            "parent_run_id": _LROUND2,
+            "round_number": 3,
+            "root_join_basis": "round_rows[r3].root_run_id",
+            "round_outcome": "ready_for_human",
+        },
+        {
+            "run_id": _LROUND4,
+            "relation": "round",
+            "root_run_id": _LROOT,
+            "round_number": 4,
+            "root_join_basis": "the lineage branch named in the typed conflict",
+            "round_outcome": "blocked",
+        },
+        {
+            "run_id": _LPRIOR,
+            "relation": "prior_attempt",
+            "root_run_id": _LROOT,
+            "root_join_basis": "the capture's failed-attempt attribution",
+            "round_outcome": "failed",
+        },
+        {
+            "run_id": _LFOREIGN,
+            "relation": "programme_side",
+            "parent_run_id": "run-76a1088a",
+            "root_join_basis": "parent_run_id outside this capture's lineage",
+            "round_outcome": "blocked",
+        },
+    ]
+
+
+def _lineage_budget_inputs():
+    return {
+        "round_budgets": [
+            {
+                "run_id": _LROOT,
+                "round_number": 1,
+                "max_tokens": 600000,
+                "status": "open",
+            },
+            {
+                "run_id": _LROUND2,
+                "round_number": 2,
+                "max_tokens": 600000,
+                "status": "open",
+                "closing_partition_policy": "closing-partition/1",
+                "closing_reserved_calls": 6,
+                "closing_reserved_tokens": 90000,
+            },
+            {
+                "run_id": _LPRIOR,
+                "round_number": 0,
+                "max_tokens": 200000,
+                "status": "exhausted",
+                "consumed_tokens": 196312,
+            },
+        ],
+        "budget_amendments": [
+            {
+                "amendment_id": "amend-standard-tokens-600k",
+                "run_id": _LPRIOR,
+                "scope": "profile:standard",
+                "command_id": "align:FORGE_BUDGET_PROFILES:standard.max_tokens",
+                "axis": "tokens",
+                "amount_tokens": 400000,
+                "status": "applied",
+                "limit_before": {"max_tokens": 200000},
+                "limit_after": {"max_tokens": 600000},
+                "applied_at": "2026-09-27T06:32:47+00:00",
+                "policy_version": "forge.budget-profiles/1@t",
+            }
+        ],
+        "exposure_rows": [
+            {
+                "run_id": _LPRIOR,
+                "axis": "tokens",
+                "consumed": 196312,
+                "limit": 200000,
+                "exhausted": True,
+                "closing_review_stood_down": True,
+            }
+        ],
+        "collaboration_labels": [
+            {
+                "root_run_id": _LROOT,
+                "provider": "gitlab",
+                "issue_iid": 5,
+                "source_branch": "factory/5/7319478e",
+                "mr_iid": 4,
+                "mr_state": "opened",
+                "mr_draft": True,
+            }
+        ],
+        "budget_policy": {
+            "version": "forge.budget-profiles/1@t",
+            "closing_partition": {"version": "closing-partition/1"},
+        },
+        "recorded_totals": {
+            "qualifying_lane_spend_usd": 0.8456,
+            "all_attempt_total_usd": 1.4797,
+        },
+        "cap_usd": 2.5,
+    }
+
+
+def _build_v2(records=None, links=None, lineage=None, budget_inputs=None, **budget_overrides):
+    records = records if records is not None else _lineage_records()
+    links = links if links is not None else _lineage_links()
+    lineage = lineage if lineage is not None else _lineage_runs()
+    budget_inputs = budget_inputs if budget_inputs is not None else _lineage_budget_inputs()
+    budget_inputs = {**budget_inputs, **budget_overrides}
+    measurement = MeasurementLinker().link(**records)
+    report = EconomicsLinker().link(measurement, pilot={"population": "test"})
+    ledger = AcceptedTaskLedgerBuilder().build(
+        report,
+        native_jobs=links["native_jobs"],
+        candidates=links["candidates"],
+        verifications=links["verifications"],
+        human_decisions=links["human_decisions"],
+        budget_events=links["budget_events"],
+        review_recoveries=links["review_recoveries"],
+        time_windows=links["time_windows"],
+        measurement_ledger=measurement,
+    )
+    return accepted_ledger_v2_document(
+        ledger,
+        lineage_runs=lineage,
+        round_budgets=budget_inputs["round_budgets"],
+        budget_amendments=budget_inputs["budget_amendments"],
+        exposure_rows=budget_inputs["exposure_rows"],
+        collaboration_labels=budget_inputs["collaboration_labels"],
+        budget_policy=budget_inputs["budget_policy"],
+        recorded_totals=budget_inputs["recorded_totals"],
+        cap_usd=budget_inputs["cap_usd"],
+        pilot={"population": "test"},
+    )
+
+
+def test_lineage_fold_joins_rounds_under_one_root_task():
+    document = _build_v2()
+    assert document["schema"] == ACCEPTED_LEDGER_SCHEMA_V2
+    assert tuple(document["identity_chain"]) == LINEAGE_CHAIN
+    root = document["lineage"]["root_tasks"][_LROOT]
+    # delivery 1 + rounds 2/3/4 fold under the ONE root, prior attempt kept
+    assert [row["round_number"] for row in root["rounds"]] == [1, 2, 3, 4]
+    assert [row["run_id"] for row in root["prior_failed_attempts"]] == [_LPRIOR]
+    assert root["attempts"] == 5
+    # each round keeps its OWN candidate outcome and incremental cost
+    outcomes = {row["round_number"]: row["round_outcome"] for row in root["rounds"]}
+    assert outcomes == {
+        1: "ready_for_human",
+        2: "ready_for_human",
+        3: "ready_for_human",
+        4: "blocked",
+    }
+    incremental = {
+        row["round_number"]: row["incremental_cost"][COST_COLUMN_PROVIDER_REPORTED]["usd"]
+        for row in root["rounds"]
+    }
+    assert incremental[2] == pytest.approx(0.1980048, abs=1e-6)
+    assert incremental[4] == pytest.approx(0.2394448, abs=1e-6)
+    # the all-attempt total: every member receipt EXACTLY once (no re-sum of
+    # per-round numbers, no dropped failure)
+    all_attempt = root["all_attempt"]["columns"][COST_COLUMN_PROVIDER_REPORTED]
+    expected = 0.2112472 + 0.1980048 + 0.1968864 + 0.2394448 + 0.2228808
+    assert all_attempt["usd"] == pytest.approx(expected)
+    assert all_attempt["exact"] is True
+    assert root["all_attempt"]["coverage"]["receipt_coverage"] == 1.0
+    # the no-double-count proofs ride the fold
+    no_double = root["no_double_count"]
+    assert no_double["receipt_ids"] == {"total": 5, "distinct": 5, "unique": True}
+    assert no_double["native_job_ids"]["unique"] is True
+    assert no_double["delivery_labels_per_lineage"] == 1
+    # the ONE delivery label of the lineage
+    assert root["collaboration_label"]["mr_iid"] == 4
+    # denominators stated
+    assert root["denominators"]["root_task_attempts"] == 5
+    assert root["denominators"]["accepted_items"] == 0
+    # the observability gauges the issue names
+    observability = document["observability"]
+    assert observability["review_round.incremental_cost"][_LROOT]["2"][
+        COST_COLUMN_PROVIDER_REPORTED
+    ]["usd"] == pytest.approx(0.1980048, abs=1e-6)
+    assert observability["accepted_work.total_cost_lower_bound"][_LROOT]["columns"][
+        COST_COLUMN_PROVIDER_REPORTED
+    ] == pytest.approx(expected)
+
+
+def test_lineage_repeat_identity_never_double_counts():
+    """The review's explicit worry: a receipt shared by parent and child."""
+    records = _lineage_records()
+    # the round-2 child re-delivers the ROOT's receipt identity
+    records["receipts"].append(
+        {
+            "work_id": _LROUND2,
+            "attempt_id": "job1162",
+            "receipt_id": "sdk:job1157",
+            "source": "claude-agent-sdk",
+            "provider": "claude-sdk-lane",
+            "model": "glm-5.3-flash",
+            "total_cost_usd": 0.2112472,
+            "cost_basis": "provider-reported",
+            "completeness": "aggregate",
+        }
+    )
+    document = _build_v2(records=records)
+    # the cross-run guard refused the second attribution — the identity is
+    # counted ONCE under its first sorted attribution, never a second copy
+    (cross_join,) = document["economics"]["cross_joins"]
+    assert cross_join["receipt_id"] == "sdk:job1157"
+    assert cross_join["kept_attribution"] == f"{_LROOT}/job1157"
+    root = document["lineage"]["root_tasks"][_LROOT]
+    all_attempt = root["all_attempt"]["columns"][COST_COLUMN_PROVIDER_REPORTED]
+    # the shared identity is counted once (0.2112472 under the root); the
+    # child's colliding attempt scope degrades — its exact total is unknown
+    # and the fold's lower bound keeps only the surviving figures, never a
+    # second copy of the spend
+    expected = 0.2112472 + 0.1968864 + 0.2394448 + 0.2228808
+    assert all_attempt["known_lower_bound_usd"] == pytest.approx(expected, abs=1e-6)
+    assert all_attempt["exact"] is False  # the refused copy degrades exactness
+    # every COUNTED receipt identity in the fold appears exactly once
+    assert root["no_double_count"]["receipt_ids"]["unique"] is True
+
+
+def test_lineage_partial_final_settles_once_no_duplicate_spend():
+    """The #324 durable partial→final contract, extended to the lineage."""
+
+    from forge.adaptive.usage_ingestion import (  # noqa: PLC0415
+        UsageIngestStore,
+        ingest_usage_artifact,
+    )
+
+    partial = {
+        "receipt_id": "sdk:job1162",
+        "driver": "claude-sdk-lane",
+        "model": "glm-5.3-flash",
+        "input_tokens": 19997,
+        "output_tokens": 4169,
+        "total_cost_usd": 0.11,
+        "completeness": "partial",
+    }
+    final = {
+        "receipt_id": "sdk:job1162",
+        "driver": "claude-sdk-lane",
+        "model": "glm-5.3-flash",
+        "input_tokens": 19997,
+        "cached_input_tokens": 173184,
+        "output_tokens": 4169,
+        "total_cost_usd": 0.1980048,
+        "completeness": "aggregate",
+    }
+
+    def build(store):
+        records = ledger_records_from_ingested_usage(
+            store.documents(),
+            works=[{"work_id": work, "outcome": ""} for work in (_LROOT, _LROUND2, _LPRIOR)],
+            attempts=[
+                {"work_id": _LROOT, "attempt_id": "job1157", "outcome": "superseded"},
+                {"work_id": _LROUND2, "attempt_id": "job1162", "outcome": "accepted"},
+                {"work_id": _LPRIOR, "attempt_id": "run-fbe62ad5", "outcome": "rejected"},
+            ],
+        )
+        measurement = MeasurementLinker().link(**records)
+        report = EconomicsLinker().link(measurement)
+        ledger = AcceptedTaskLedgerBuilder().build(
+            report,
+            human_decisions=[{"work_id": _LROOT, "state": "pending"}],
+            measurement_ledger=measurement,
+        )
+        return accepted_ledger_v2_document(
+            ledger,
+            lineage_runs=[
+                {
+                    "run_id": _LROOT,
+                    "relation": "root",
+                    "root_run_id": _LROOT,
+                    "round_number": 1,
+                    "round_outcome": "ready_for_human",
+                },
+                {
+                    "run_id": _LROUND2,
+                    "relation": "round",
+                    "root_run_id": _LROOT,
+                    "round_number": 2,
+                    "round_outcome": "ready_for_human",
+                },
+                {
+                    "run_id": _LPRIOR,
+                    "relation": "prior_attempt",
+                    "root_run_id": _LROOT,
+                    "round_outcome": "failed",
+                },
+            ],
+        )
+
+    streamed_store = UsageIngestStore()
+    ingest_usage_artifact(
+        streamed_store,
+        partial,
+        work_id=_LROUND2,
+        attempt_id="job1162",
+        source="claude-agent-sdk",
+        final=False,
+    )
+    streamed = build(streamed_store)
+    streamed_columns = streamed["lineage"]["root_tasks"][_LROOT]["all_attempt"]["columns"][
+        COST_COLUMN_PROVIDER_REPORTED
+    ]
+    # the streamed partial is a LOWER BOUND only, and the round's own
+    # incremental cost never claims the full figure
+    assert streamed_columns["exact"] is False
+    assert streamed_columns["known_lower_bound_usd"] == pytest.approx(0.11, abs=1e-9)
+    round2_streamed = streamed["lineage"]["root_tasks"][_LROOT]["rounds"][1]["incremental_cost"][
+        COST_COLUMN_PROVIDER_REPORTED
+    ]
+    assert round2_streamed["known_lower_bound_usd"] == pytest.approx(0.11, abs=1e-9)
+
+    settled_store = UsageIngestStore()
+    ingest_usage_artifact(
+        settled_store,
+        partial,
+        work_id=_LROUND2,
+        attempt_id="job1162",
+        source="claude-agent-sdk",
+        final=False,
+    )
+    ingest_usage_artifact(
+        settled_store,
+        final,
+        work_id=_LROUND2,
+        attempt_id="job1162",
+        source="claude-agent-sdk",
+    )
+    settled = build(settled_store)
+    settled_columns = settled["lineage"]["root_tasks"][_LROOT]["all_attempt"]["columns"][
+        COST_COLUMN_PROVIDER_REPORTED
+    ]
+    # settled ONCE with the final figure — never partial + final summed
+    assert settled_columns["known_lower_bound_usd"] == pytest.approx(0.1980048, abs=1e-6)
+    entries = [
+        entry
+        for chain in settled["chains"]
+        if chain["work_id"] == _LROUND2
+        for attempt in chain["attempts"]
+        for entry in attempt["model_call_receipt_ids"]
+    ]
+    assert entries == ["sdk:job1162"]  # ONE receipt identity, one figure
+
+
+def test_lineage_unknown_spend_stays_bounded_never_zero():
+    document = _build_v2()
+    # the foreign child: lane ran, no SDK figure reached the record
+    side = document["lineage"]["programme_side"][_LFOREIGN]
+    assert side["coverage"]["receipts_received"] == 0
+    assert side["incremental_cost"][COST_COLUMN_PROVIDER_REPORTED]["usd"] is None
+    assert (
+        side["incremental_cost"][COST_COLUMN_PROVIDER_REPORTED]["known_lower_bound_usd"] is None
+    )  # empty column: null, never a readable 0.0
+    # the window reconciliation: recorded vs folded, residual BOUNDED
+    reconciliation = document["lineage"]["window_reconciliation"]
+    assert reconciliation["recorded_totals"]["all_attempt_total_usd"] == 1.4797
+    assert reconciliation["unreceipted_residual_usd"] == pytest.approx(0.411236, abs=1e-6)
+    assert reconciliation["attributed_to_runs"] == [_LFOREIGN]
+    # the residual never healed a column: the programme stays a lower bound
+    programme = document["costs"]["programme"]["columns"][COST_COLUMN_PROVIDER_REPORTED]
+    assert programme["exact"] is False
+    assert programme["known_lower_bound_usd"] == pytest.approx(1.068464, abs=1e-9)
+    assert "never added to a cost column" in reconciliation["note"]
+
+
+def test_lineage_human_acceptance_pending_despite_model_ci_decisions():
+    document = _build_v2()
+    root = document["lineage"]["root_tasks"][_LROOT]
+    # the reviewer resolutions are model/CI decisions — the HUMAN
+    # acceptance of the lineage stays pending, named
+    assert root["human_decision"]["state"] == "pending"
+    assert "never the human acceptance" in root["human_decision"]["note"]
+    # the work never enters the accepted population — per-accepted
+    # economics undefined, denominators stated, never zero
+    assert document["costs"]["accepted_items"]["works"] == 0
+    assert root["denominators"]["accepted_items"] == 0
+    assert any(
+        "never zero" in note
+        for note in document["notes"]
+        if "human decision" in note or "accepted measures" in note
+    )
+    assert (
+        document["observability"]["accepted_work.total_cost_lower_bound"][_LROOT]["decision_state"]
+        == "pending"
+    )
+
+
+def test_lineage_budget_window_carries_amendments_exposure_and_policy_version():
+    document = _build_v2()
+    window = document["lineage"]["root_tasks"][_LROOT]["budget_window"]
+    # each round's OWN finite budget rides the window (rounds sorted)
+    budgets = {row["round_number"]: row for row in window["round_budgets"]}
+    assert budgets[2]["closing_partition_policy"] == "closing-partition/1"
+    assert budgets[2]["closing_reserved_tokens"] == 90000
+    assert budgets[0]["status"] == "exhausted"  # the prior attempt's fence
+    # the #340 amendment with its limit_before/after history
+    (amendment,) = window["amendments"]
+    assert amendment["axis"] == "tokens"
+    assert amendment["limit_before"]["max_tokens"] == 200000
+    assert amendment["limit_after"]["max_tokens"] == 600000
+    assert amendment["status"] == "applied"
+    # bound to the EXPLICIT versioned policy — history never rewritten
+    assert amendment["policy_version"] == window["policy"]["version"]
+    # the #339 exposure quantities ride the root
+    (axis,) = window["exposure"]["axes"]
+    assert axis["consumed"] == 196312
+    assert axis["limit"] == 200000
+    assert axis["exhausted"] is True
+    assert axis["closing_review_stood_down"] is True
+    closing = window["exposure"]["closing_budget"]
+    # the root's closing fold covers the ROOT's receipts only — the
+    # unreceipted foreign child stays programme-side, outside this fold
+    assert closing["settled_usd"] == pytest.approx(1.068464, abs=1e-9)
+    assert closing["unknown_intervals"] == 0
+
+
+def test_manual_rescue_is_its_own_window_and_review_and_rescue_stays_honest():
+    document = _build_v2()
+    measures = document["time_measures"]
+    assert "manual_rescue" in TIME_MEASURES
+    # the kill-recovery window is its OWN measure — never a reviewer minute
+    assert measures["manual_rescue"]["stage_total_seconds"] == pytest.approx(283.07)
+    assert measures["operator_wait"]["stage_total_seconds"] == pytest.approx(681.4)
+    assert measures["reviewer_effort"]["stage_lower_bound_seconds"] == 0.0
+    assert measures["reviewer_effort"]["stage_total_seconds"] is None
+    # the combined gauge stays null while reviewer effort is unknown —
+    # never a partial presented as a total; the components stay visible
+    gauge = document["observability"]["human.review_and_rescue_minutes"]
+    assert gauge["minutes"] is None
+    assert gauge["reviewer_effort_minutes"] is None
+    assert gauge["manual_rescue_minutes"] == pytest.approx(283.07 / 60.0)
+    # the model/tool/queue windows have no recorded instances — named gaps
+    for measure in ("model_time", "tool_time", "ci_queue"):
+        assert measures[measure]["measured"] is False
+    assert document["throughput"]["rows"] == []
+
+
+def test_lineage_reordering_changes_no_byte():
+    document = _build_v2()
+    rng = random.Random(368)
+    records = _lineage_records()
+    links = _lineage_links()
+    lineage = _lineage_runs()
+    budget_inputs = _lineage_budget_inputs()
+    for rows in (
+        records["works"],
+        records["attempts"],
+        records["receipts"],
+        links["native_jobs"],
+        links["candidates"],
+        links["verifications"],
+        links["time_windows"],
+        lineage,
+        budget_inputs["round_budgets"],
+        budget_inputs["exposure_rows"],
+    ):
+        rng.shuffle(rows)
+    shuffled = _build_v2(records=records, links=links, lineage=lineage, budget_inputs=budget_inputs)
+    assert json.dumps(shuffled, sort_keys=True) == json.dumps(document, sort_keys=True)
+
+
+def test_lineage_identity_gaps_surface_never_drop():
+    lineage = _lineage_runs()
+    lineage.append(
+        {
+            "run_id": "run-ghost",
+            "relation": "round",
+            "root_run_id": _LROOT,
+            "round_number": 5,
+            "root_join_basis": "a round row the ledger never saw",
+            "round_outcome": "unknown",
+        }
+    )
+    document = _build_v2(lineage=lineage)
+    gaps = {row["identity"] for row in document["lineage"]["identity_gaps"]}
+    assert "lineage_run:run-ghost" in gaps
+    assert document["observability"]["identity.gaps"] == len(document["lineage"]["identity_gaps"])
+    # the gap changed no aggregate — the ghost carries no spend
+    root = document["lineage"]["root_tasks"][_LROOT]
+    assert root["all_attempt"]["columns"][COST_COLUMN_PROVIDER_REPORTED]["usd"] == (
+        pytest.approx(1.068464, abs=1e-9)
+    )
+
+
+def test_committed_accepted_task_ledger_v2_artifact_is_honest():
+    if not COMMITTED_LEDGER_V2.exists():
+        pytest.skip("the executed v2 lineage ledger has not been committed yet")
+    document = json.loads(COMMITTED_LEDGER_V2.read_text())
+    assert document["schema"] == ACCEPTED_LEDGER_SCHEMA_V2
+    assert tuple(document["identity_chain"]) == LINEAGE_CHAIN
+    # the v1 artifact still stands, never overwritten
+    assert COMMITTED_LEDGER.exists()
+    v1 = json.loads(COMMITTED_LEDGER.read_text())
+    assert v1["schema"] == ACCEPTED_LEDGER_SCHEMA
+    # the lineage: 7 attempts under ONE root (3 prior failed + 4 rounds)
+    root = document["lineage"]["root_tasks"]["7319478e10b74f3c90d0e0ea43a9dc3f"]
+    assert root["attempts"] == 7
+    assert len(root["prior_failed_attempts"]) == 3
+    assert [row["round_number"] for row in root["rounds"]] == [1, 2, 3, 4]
+    outcomes = {row["round_number"]: row["round_outcome"] for row in root["rounds"]}
+    assert outcomes == {
+        1: "ready_for_human",
+        2: "ready_for_human",
+        3: "ready_for_human",
+        4: "blocked",
+    }
+    # independent candidates: delivery/round2/round3 exact, round 4 none
+    shas = {row["round_number"]: row["candidate_sha"] for row in root["rounds"]}
+    assert shas[1] == "6e973202f1e6de4268d9363db2dbeb3c7c500e6c"
+    assert shas[4] is None
+    # the root task's all-attempt cost: every attempt SDK-receipted, EXACT
+    all_attempt = root["all_attempt"]["columns"][COST_COLUMN_PROVIDER_REPORTED]
+    assert all_attempt["usd"] == pytest.approx(1.256064, abs=1e-6)
+    assert all_attempt["exact"] is True
+    assert root["all_attempt"]["coverage"]["receipt_coverage"] == 1.0
+    # the programme: 8 attempts, 7 receipted — the unreceipted foreign
+    # child keeps the programme a lower bound, never exact, never zero
+    programme = document["costs"]["programme"]
+    assert programme["coverage"]["receipt_coverage"] == pytest.approx(0.875)
+    assert programme["columns"][COST_COLUMN_PROVIDER_REPORTED][
+        "known_lower_bound_usd"
+    ] == pytest.approx(1.256064, abs=1e-6)
+    # the window reconciliation: recorded 1.4797 vs folded 1.256064, the
+    # residual attributed and bounded — never a column entry
+    reconciliation = document["lineage"]["window_reconciliation"]
+    assert reconciliation["recorded_totals"]["all_attempt_total_usd"] == 1.4797
+    assert reconciliation["unreceipted_residual_usd"] == pytest.approx(0.223636, abs=1e-6)
+    assert reconciliation["attributed_to_runs"] == ["6e0fdf3448ee4860b2bc34822db9489f"]
+    assert reconciliation["qualifying_rounds_folded_usd"][
+        "7319478e10b74f3c90d0e0ea43a9dc3f"
+    ] == pytest.approx(0.845583, abs=1e-6)
+    # the no-double-count proofs on the REAL capture
+    no_double = root["no_double_count"]
+    assert no_double["receipt_ids"] == {"total": 7, "distinct": 7, "unique": True}
+    assert no_double["native_job_ids"]["unique"] is True
+    assert no_double["delivery_labels_per_lineage"] == 1
+    # the HUMAN acceptance stays pending — the reviewer resolutions in the
+    # trace are model/CI decisions, named as such
+    assert root["human_decision"]["state"] == "pending"
+    assert document["costs"]["accepted_items"]["works"] == 0
+    # the budget window: each round's OWN budget, the amendment history,
+    # the exposure quantities, the versioned policy
+    window = root["budget_window"]
+    assert window["policy"]["version"] == "forge.budget-profiles/1@2026-09-27-align"
+    (amendment,) = window["amendments"]
+    assert amendment["limit_before"]["max_tokens"] == 200000
+    assert amendment["limit_after"]["max_tokens"] == 600000
+    round_budgets = {row["round_number"]: row for row in window["round_budgets"]}
+    assert round_budgets[2]["closing_partition_policy"] == "closing-partition/1"
+    assert round_budgets[2]["closing_reserved_tokens"] == 90000
+    # time: real windows for native runtime / human wait / manual rescue /
+    # setup; model, tool and CI-queue named as gaps; throughput null
+    measures = document["time_measures"]
+    assert measures["ci_runtime"]["stage_lower_bound_seconds"] == pytest.approx(492.905, abs=1e-3)
+    assert measures["ci_runtime"]["stage_total_seconds"] is None  # unknown windows kept
+    assert measures["operator_wait"]["stage_total_seconds"] == pytest.approx(1364.814941, abs=1e-3)
+    assert measures["manual_rescue"]["stage_total_seconds"] == pytest.approx(283.071942, abs=1e-3)
+    assert measures["setup_effort"]["stage_lower_bound_seconds"] == pytest.approx(
+        55.620681, abs=1e-3
+    )
+    for measure in ("model_time", "tool_time", "ci_queue"):
+        assert measures[measure]["measured"] is False
+    gauge = document["observability"]["human.review_and_rescue_minutes"]
+    assert gauge["minutes"] is None
+    assert gauge["manual_rescue_minutes"] == pytest.approx(4.717866, abs=1e-6)
+    assert document["throughput"]["rows"] == []
+    assert_no_unmatched_rates(document)
+    # the observability gauges the issue names ride the real capture
+    assert (
+        document["observability"]["usage.coverage_by_source"]["claude-agent-sdk"]["receipts"] == 7
+    )
+    assert document["observability"]["usage.coverage_by_source"]["unreceipted_attempts"] == 1
+    assert document["observability"]["review_round.incremental_cost"][
+        "7319478e10b74f3c90d0e0ea43a9dc3f"
+    ]["4"][COST_COLUMN_PROVIDER_REPORTED]["usd"] == pytest.approx(0.2394448)
+
+
+def test_committed_v2_replays_and_refolds_byte_identically():
+    """Replay determinism on the REAL capture: the stored document is the
+    store — parsing it back and re-folding the lineage reproduces every
+    aggregate with no second truth to drift from."""
+    if not COMMITTED_LEDGER_V2.exists():
+        pytest.skip("the executed v2 lineage ledger has not been committed yet")
+    document = json.loads(COMMITTED_LEDGER_V2.read_text())
+    ledger = AcceptedTaskLedger.from_document(document)
+    lineage_runs: list[dict[str, object]] = []
+    round_budgets: list[dict[str, object]] = []
+    amendments: list[dict[str, object]] = []
+    exposures: list[dict[str, object]] = []
+    labels: list[dict[str, object]] = []
+    for root_task in document["lineage"]["root_tasks"].values():
+        for row in [*root_task["rounds"], *root_task["prior_failed_attempts"]]:
+            lineage_runs.append(row)
+        round_budgets.extend(root_task["budget_window"]["round_budgets"])
+        amendments.extend(root_task["budget_window"]["amendments"])
+        exposures.extend(root_task["budget_window"]["exposure"]["axes"])
+        if root_task["collaboration_label"]:
+            labels.append(root_task["collaboration_label"])
+    lineage_runs.extend(document["lineage"]["programme_side"].values())
+    a_root = next(iter(document["lineage"]["root_tasks"].values()))
+    replayed = fold_review_lineage(
+        ledger,
+        lineage_runs=lineage_runs,
+        round_budgets=round_budgets,
+        budget_amendments=amendments,
+        exposure_rows=exposures,
+        collaboration_labels=labels,
+        budget_policy=a_root["budget_window"]["policy"],
+        recorded_totals=document["lineage"]["window_reconciliation"]["recorded_totals"],
+        cap_usd=a_root["budget_window"]["cap_usd"],
+    )
+    assert json.dumps(replayed, sort_keys=True) == json.dumps(document["lineage"], sort_keys=True)

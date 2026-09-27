@@ -1162,8 +1162,15 @@ def test_the_committed_traces_back_the_preflight_record_honestly() -> None:
     SCRIPTED (real protocol code, authored responses) — and hold its
     real-provider-e2e claim; the refusal trace never upgrades anything."""
     traces = load_trace_records(ROOT)
-    assert len(traces) == 3
-    assert {trace.provenance for trace in traces} == {"scripted", "scripted", "refused"}
+    # 4 since the #364 window: the review-loop LIVE trace joined (the first
+    # committed live provenance — it upgrades only its own record).
+    assert len(traces) == 4
+    assert {trace.provenance for trace in traces} == {
+        "scripted",
+        "scripted",
+        "refused",
+        "live",
+    }
     record = next(
         r for r in load_profile_records(ROOT) if r.record_id == "gitlab-ce-v1@0.37.0-preflight"
     )
@@ -1364,15 +1371,18 @@ def test_the_committed_store_manifest_is_honest() -> None:
     # proved live (four since v0.39.0); with no committed live TraceRecord
     # the derived tier stays 'none' for each — the join stays owed.
     # the per-release record claims every capability the qualifying traces
-    # proved live (five since v0.40.0 — operation-grant-redemption joined);
-    # with no committed live TraceRecord the derived tier stays 'none' per
-    # capability — the trace join stays owed.
+    # proved live (six since the #364 window — review-rounds-correction-loop
+    # joined); the AGGREGATE record's derived tier stays 'none' per
+    # capability — each executed trace joins ITS OWN record
+    # (review-loop-2026-09-27.json binds gitlab-ce-v1-Q4109-review-loop-…,
+    # the operation-grant-redemption pattern), never the aggregate.
     assert {tier.capability: tier.tier for tier in gitlab.tiers} == {
         "real-provider-e2e": "none",
         "useful-wip-cross-runner-resume": "none",
         "approved-revision-rebind": "none",
         "closing-review-within-reserve": "none",
         "operation-grant-redemption": "none",
+        "review-rounds-correction-loop": "none",
     }
 
 

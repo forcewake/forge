@@ -29,14 +29,46 @@ the whole lineage). Supersession is a relationship between deliveries —
 the earlier verdict, verification and candidate list are never edited;
 they stay visible as historical evidence.
 
-Branch continuity is by construction: the child run id SHARES the
-parent's 8-hex prefix, so every branch-deriving leg (implementer,
-publisher, CI polling, drift checks) lands on the SAME factory branch
-and the SAME Draft MR — the MR stays the collaboration surface. Within
-a lineage only one run is ever non-terminal at a time; command short
-forms (`/go`, `/cancel`) that resolve by 8-hex prefix are therefore
-ambiguous across the lineage — use the full run id (rounds are
-machine-driven and never sit at the `/go` gate).
+Branch continuity is the PERSISTED collaboration target (R41-04,
+#359): the `collaboration_targets` row a lineage's root admission
+mints (repository, the immutable SOURCE branch, the target branch, the
+lineage's ONE MR identity) and every delivery of the lineage links
+(`flow_runs.target_id` — root and round children the SAME row). The
+child run id is INDEPENDENT of the parent's; every branch-consuming
+leg (implementer rebind, publisher, CI polling, drift checks, harness
+dispatch, operator surface) resolves through the target row — never a
+re-derivation from the run id (the pre-#359 prefix reuse coupled work
+identity, collaboration identity and display shorthand, and made short
+command ids ambiguous within a lineage; the architecture boundary test
+catches any new `factory_branch` shortcut). Two repositories sharing an
+MR number and a branch label never cross: the target keys on
+(provider, repository, source branch).
+
+### Round references (display, never authority)
+
+`round N of <root-short>` — e.g. `round 2 of a1b2c3d4` — is the
+concise human reference for one round (round 1 is the original
+delivery; N ≥ 2 the recorded round row's child). `/status` accepts it:
+
+- `@forge /status round 2 of a1b2c3d4` — the read-only snapshot of
+  that round's child. The reference resolves the LINEAGE by the root
+  prefix (every prefix match must agree on one lineage root — legacy
+  lineages whose children share the root's 8-hex prefix collapse to
+  the same root, two distinct lineages colliding on a prefix refuse)
+  and then the recorded round row.
+- The reference is NOT an authorization token: `/cancel` and `/retry`
+  still require the full 32-hex run id, exactly as forge prints it in
+  the round-admitted reply (`/cancel <full child id>`). A display
+  label or a round number can never redirect publication — publication
+  keys on the target's recorded source branch and the run ids, never
+  on a label.
+- Commands printed by forge resolve to the intended round: the
+  round-admitted reply carries the reference for reads and the FULL
+  child id for the destructive command. With legacy shared 8-hex
+  prefixes a bare `/status <prefix>` / `/cancel <prefix>` deterministically
+  refuses (matches more than one run — nothing is adopted); with
+  modern independent ids the 8-char prefixes are unique again and
+  resolve directly.
 
 ## The eligibility ladder (every rung refuses with a reply and ZERO commits)
 
@@ -58,12 +90,18 @@ silently funds a round.
 
 ## The admission (one transaction, or nothing)
 
-1. the round row (`admitted`) and the child run, walked over the legal
-   graph to `proposing` (no paid call — the round's plan is derived, not
-   re-planned);
+1. the round row (`admitted`) and the child run — an INDEPENDENT run id
+   linked to the lineage's `collaboration_targets` row — walked over
+   the legal graph to `proposing` (no paid call — the round's plan is
+   derived, not re-planned). Before any write, the pre-write handle
+   guard compares every recorded handle (run MR, round MR, the provider
+   MR document's source branch, the repository identity) against the
+   target row; a disagreement is the `collaboration.target_mismatch`
+   outbox event and a refusal with ZERO writes;
 2. the parent's frozen RunSpec copied VERBATIM (same document, same
    digest — the child's digest checks recompute over the same bytes);
-3. a confirmed `mr_reservations` row for the child on the SAME branch;
+3. a confirmed `mr_reservations` row for the child on the TARGET's
+   recorded source branch;
 4. the child's own budget opened from that spec;
 5. the child's evidence seeded with the round's ACTIVE-plan document and
    its own copy of the request (so the child's readiness gate holds the
@@ -141,5 +179,9 @@ One bounded scan per tick over the OPEN round rows:
 | reviewer asks for a fix after readiness | `/fix <edit> \`<path>\`` on the Draft MR (an approver; scope must be provable — otherwise it records as a material proposal) |
 | head moved between the request and the round | nothing to clean: the branch keeps the human commit; re-raise the `/fix` against the new head |
 | round must be stopped | `@forge /cancel <full child run id>` — delivery 1 and the MR stay untouched; the pass closes the round row as `ended` |
+| follow a round's progress | `@forge /status round N of <root-short>` (the reference printed in the round-admitted reply; read-only, never an authorization token) |
+| pre-#359 lineage: the 8-char prefix matches several runs | use the full run id, or the round reference for reads — a shared prefix deterministically refuses, it never adopts one match |
+| recorded branch/MR handles disagree (target mismatch) | the round is refused with zero writes and a `collaboration.target_mismatch` outbox event; an operator reconciles the recorded topology — forge never picks one handle |
+| legacy topology unresolvable | the adapter records a REFUSED target row with the typed reason (never an inferred branch); resolve the recorded evidence, then re-raise |
 | more rounds needed than the policy allows | raise `FORGE_MAX_REVIEW_ROUNDS` explicitly (bounded at 10); the exhaustion reply names the current bound |
 | MR merged/closed with feedback outstanding | expected: `mr_closed`, zero commits — the audit keeps the request; raise a new `/implement` for follow-up work |

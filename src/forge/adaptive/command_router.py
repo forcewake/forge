@@ -65,6 +65,7 @@ __all__ = [
     "ADAPTIVE_NOTE_COMMANDS",
     "ADAPTIVE_RUN_COMMAND",
     "ADAPTIVE_VERBS",
+    "AdaptiveCommandRoutingError",
     "ControlCommandRouter",
     "FORGE_ADAPTIVE_COMMANDS_ENV",
     "ParsedAdaptiveCommand",
@@ -73,6 +74,7 @@ __all__ = [
     "adaptive_commands_enabled",
     "adaptive_command_set",
     "control_timeline",
+    "execute_adaptive_command_step",
     "parse_adaptive_command",
     "reset_shared_control_service",
     "route_adaptive_command_note",
@@ -899,15 +901,19 @@ async def route_adaptive_command_note(
     session_factory: Any,
     note: dict[str, Any],
 ) -> dict[str, Any]:
-    """The gateways' background dispatch target for one adaptive note.
+    """The adaptive command routing pipeline for one note.
 
     Builds the provider reply channel and the router, then runs the
-    authorize → scope → record → answer pipeline. The gateways answer the
-    webhook ``202`` BEFORE this runs (a Starlette background task), so a
-    failure here is logged and reported in the result — never an unhandled
-    exception after the response. Durability is the mailbox record plus the
-    A11-journaled reply; a lost task is recovered by the provider's webhook
-    redelivery, which re-enters here idempotently.
+    authorize → scope → record → answer pipeline. R41-02 (#357) moved the
+    CALLER of this function from an after-response Starlette BackgroundTask
+    to the durable step runtime: the gateway commits the inbox row + a
+    scheduled ``adaptive_control`` step BEFORE its ``202``, and the step
+    executor (:func:`execute_adaptive_command_step`) drives this pipeline
+    under the claim/lease/fence protocol — a lost process between ack and
+    routing is recovered by a fresh worker, never by hoping the provider
+    redelivers. Idempotency here is unchanged: the mailbox keys on the
+    note identity and the reply journal keys on the note id (A11), so a
+    re-executed or redelivered command adds nothing.
     """
     if session_factory is None:
         logger.warning("Adaptive command without a database — dropped")
@@ -927,3 +933,37 @@ async def route_adaptive_command_note(
     except Exception:
         logger.exception("Adaptive command routing failed for note %s", note.get("note_id"))
         return {"status": "error", "reason": "routing failed"}
+
+
+class AdaptiveCommandRoutingError(RuntimeError):
+    """The durable step's typed failure for an adaptive command.
+
+    Raised by :func:`execute_adaptive_command_step` when routing errored or
+    dropped the command: the step runtime then records the recoverable
+    retry (backoff, reaper, dead-letter after ``max_attempts``) instead of
+    silently succeeding over a command that was never routed — an
+    acknowledged command without a route must be VISIBLE, not green.
+    """
+
+
+async def execute_adaptive_command_step(
+    session_factory: Any,
+    settings: Any,
+    run_command: dict[str, Any],
+) -> None:
+    """R41-02 (#357): the durable step executor for ``adaptive_control``.
+
+    The scheduled step the gateway committed before its ``202`` lands here
+    (via :func:`forge.worker.steps.execute_claimed_step`): routing runs
+    inside the step runtime's claim/lease/fence envelope, so crashes and
+    lease losses take the standard recoverable-retry path. An error or
+    dropped routing RAISES — the step must not succeed over an unrouted
+    command; every legitimate terminal outcome (applied, refused, ignored,
+    deduplicated) completes the step.
+    """
+    result = await route_adaptive_command_note(settings, session_factory, run_command)
+    status = str(result.get("status") or "")
+    if status in ("error", "dropped"):
+        raise AdaptiveCommandRoutingError(
+            f"{status}: {result.get('reason') or 'adaptive command was not routed'}"
+        )

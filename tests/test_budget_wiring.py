@@ -421,7 +421,11 @@ class TestHarnessGates:
         fake_gitlab.set_pipeline_jobs(
             pipeline_id, [{"id": 555, "name": "forge-agent", "status": "success"}]
         )
-        provider_calls = len(fake_gitlab.calls)
+        # R41-05 (#360): the occupancy pass may append its ONE get_pipeline
+        # handle read for the draining lease — the fake gained the method,
+        # so the probe reaches it now instead of failing vacuously. It is
+        # not the candidate poll; only WORK reads count here.
+        work_calls = [call for call in fake_gitlab.calls if call[0] != "get_pipeline"]
         await rewind_budget_created_at(db, run_id, seconds=7200)
 
         await service.evaluate_waiting_harness()
@@ -429,8 +433,8 @@ class TestHarnessGates:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("budget_exhausted")
-        # No provider call was made (and nothing was adopted).
-        assert len(fake_gitlab.calls) == provider_calls
+        # No provider WORK call was made (and nothing was adopted).
+        assert [call for call in fake_gitlab.calls if call[0] != "get_pipeline"] == work_calls
         assert fake_gitlab.merge_requests == {}
         assert run.candidate_shas in (None, [])
         # The gate durably exhausted the budget — the stop is visible.

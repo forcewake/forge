@@ -86,6 +86,7 @@ __all__ = [
     "OPS_LIMITS_READ_MODEL_SCHEMA",
     "OPS_MEASURE_NAMES",
     "OPS_MEASURES_SCHEMA",
+    "PROJECTION_STALE_OR_INCONSISTENT",
     "QUEUE_AGE",
     "RECOVERY_DURATION",
     "RECOVERY_ROUNDS",
@@ -100,6 +101,7 @@ __all__ = [
     "command_application_latency",
     "customer_state",
     "delivery_round_block",
+    "lineage_limits_fold",
     "manual_intervention_minutes",
     "native_occupancy_measure",
     "ops_limits_read_model",
@@ -140,6 +142,13 @@ TIME_TO_SAFE_ACTION: Final = "operator.time_to_safe_action"
 #: population's own ages (admitted-not-executing runs — the #334 separate
 #: population, never a slots claim).
 QUEUE_AGE: Final = "operator.queue_age"
+#: R41-12 (#367) — the lineage observability record: whether the
+#: projection this read-model folded was STALE (computed from older rows
+#: than exist now) or INCONSISTENT (the source fence moved mid-assembly).
+#: A flag, not a duration — it renders as its own record and never joins
+#: the four measures (a blended "confidence" field is exactly what
+#: :func:`assert_measures_separate` refuses).
+PROJECTION_STALE_OR_INCONSISTENT: Final = "projection.stale_or_inconsistent"
 
 OPS_MEASURE_NAMES: Final[tuple[str, ...]] = (
     COMMAND_APPLICATION_LATENCY,
@@ -1203,6 +1212,76 @@ def delivery_round_block(
     }
 
 
+def lineage_limits_fold(
+    rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | Mapping[str, Any],
+    as_of: str = "",
+    projection_inconsistent: bool = False,
+) -> dict[str, Any]:
+    """The R41-12 (#367) lineage fold for the read-model: the ONE lineage
+    subject (the human round reference ``round N of <root>`` over the
+    machine ref), the command-state COUNTS (the #357 ladder's rungs an
+    operator scans), and the ``projection.stale_or_inconsistent``
+    observability record — a flag, never a blended measure.
+
+    Pure over the same rows the read-model already read: the reference
+    derives from the rounds section and the projection's ``round_ref``;
+    the command-state counts fold
+    :func:`forge.adaptive.operator_view.command_state_rows`; the flag
+    ORs the projection's stale state with the caller's inconsistency
+    fence observation."""
+    from forge.adaptive.operator_view import (
+        COMMAND_STATES,
+        command_state_rows,
+        lineage_reference,
+    )
+
+    rounds = rows.get("rounds") or []
+    root_run_id = ""
+    newest_number = 0
+    for row in rounds:
+        root_run_id = root_run_id or str((row or {}).get("root_run_id") or "")
+        try:
+            newest_number = max(newest_number, int((row or {}).get("round_number") or 0))
+        except (TypeError, ValueError):
+            continue
+    if not root_run_id:
+        root_run_id = str(
+            getattr(projection, "run_id", "") or (rows.get("run") or {}).get("id") or ""
+        )
+    reference = (
+        lineage_reference(newest_number, root_run_id)
+        if newest_number >= 2
+        else lineage_reference(1, root_run_id)
+    )
+    states = command_state_rows(rows)
+    counts = {state: 0 for state in COMMAND_STATES}
+    for entry in states:
+        word = str(entry.get("command_state") or "unknown")
+        counts[word] = counts.get(word, 0) + 1
+    state_word = str(getattr(projection, "state", "") or "")
+    stale = bool(projection_inconsistent or state_word == "stale")
+    return {
+        "reference": reference,
+        "round_ref": str(getattr(projection, "round_ref", "") or ""),
+        "root_run_id": root_run_id,
+        "rounds_recorded": len(rounds),
+        "command_state_counts": counts,
+        PROJECTION_STALE_OR_INCONSISTENT: {
+            "stale_or_inconsistent": stale,
+            "basis": (
+                "the projection's state derived 'stale', or the source fence moved "
+                "while the snapshot was assembled — the facts above may describe a "
+                "moved world; re-read before acting"
+                if stale
+                else "the projection was computed from the rows as they stood at "
+                "assembly time and the fence held"
+            ),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # The six-quantity read-model
 # ---------------------------------------------------------------------------
@@ -1281,6 +1360,7 @@ def ops_limits_read_model(
     limit: int | None = None,
     as_of: str = "",
     admission: Mapping[str, Any] | None = None,
+    projection_inconsistent: bool = False,
 ) -> dict[str, Any]:
     """The ONE operator read-model: the six quantities, the customer
     state, the four measures and the review-budget distinction.
@@ -1397,6 +1477,15 @@ def ops_limits_read_model(
         UNRESOLVED_EFFECT_AGE: unresolved_effect_age_measure(rows, as_of=as_of),
         TIME_TO_SAFE_ACTION: time_to_safe_action_measure(projection, as_of=as_of),
         QUEUE_AGE: queue_age_measure(rows, as_of=as_of),
+        # R41-12 (#367): the lineage fold — the ONE lineage subject with
+        # the human round reference, the command-state counts and the
+        # projection.stale_or_inconsistent observability record.
+        "lineage": lineage_limits_fold(
+            rows,
+            projection=projection,
+            as_of=as_of,
+            projection_inconsistent=projection_inconsistent,
+        ),
         "history_separation": (
             "every current field derives from the LATEST row of its section; every "
             "historical sample inside a measure carries its own from/to moments — "

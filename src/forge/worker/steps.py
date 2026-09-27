@@ -726,6 +726,28 @@ async def _superseded_evidence(
     }
 
 
+async def execute_step_payload(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Any,
+    forge_config: Any,
+    payload: dict[str, Any],
+) -> None:
+    """Dispatch one claimed step's payload to its executor.
+
+    R41-02 (#357): ``adaptive_control`` commands (the /pause /steer
+    /answer /approve-revision surface) execute through the adaptive
+    control router — the same claim/lease/fence envelope as every other
+    durable step, which is what makes the gateway's 202-for-adaptive a
+    DURABLE acceptance. Everything else takes the run-command dispatch.
+    """
+    if payload.get("command") == "adaptive_control":
+        from forge.adaptive.command_router import execute_adaptive_command_step
+
+        await execute_adaptive_command_step(session_factory, settings, payload)
+        return
+    await execute_run_command(settings, forge_config, session_factory, payload)
+
+
 async def execute_claimed_step(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Any,
@@ -796,7 +818,7 @@ async def execute_claimed_step(
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         with bind_claim(execution_claim(claimed)):
-            await execute_run_command(settings, forge_config, session_factory, claimed.payload)
+            await execute_step_payload(session_factory, settings, forge_config, claimed.payload)
     except asyncio.CancelledError:
         if lease_lost:
             # Lease loss, not shutdown: fail the step (recoverable retry) and

@@ -1302,15 +1302,27 @@ class TestFeedbackGatewayParsing:
 
 
 class _SetNXQueue:
-    """The Redis TaskQueue's dedup semantics (SET-NX, 5-minute window) with
-    the submit swallowed — the production shape where the queue is only a
-    wake-up accelerator and the wake-up is LOST (the worker died)."""
+    """The Redis TaskQueue's R41-02 dedup semantics — a READ-ONLY probe plus
+    a POST-COMMIT marker write, with the submit swallowed: the production
+    shape where the queue is only a wake-up accelerator / positive cache and
+    the wake-up is LOST (the worker died). The marker never precedes the
+    durable record, so it can never suppress an unsaved command."""
 
     def __init__(self) -> None:
         self._seen: set[str] = set()
         self.submitted: list[dict] = []
+        self.probes: list[str] = []
+
+    async def was_delivered(self, fingerprint: str) -> bool:
+        self.probes.append(fingerprint)
+        return fingerprint in self._seen
+
+    async def mark_delivered(self, fingerprint: str, ttl: int = 300) -> None:
+        self._seen.add(fingerprint)
 
     async def is_duplicate(self, fingerprint: str, ttl: int = 300) -> bool:
+        """Legacy SET-NX shape — present so a regression back to the
+        pre-commit marker would find the old seam and get caught."""
         if fingerprint in self._seen:
             return True
         self._seen.add(fingerprint)
@@ -1454,3 +1466,79 @@ class TestFeedbackIngressDurability:
         assert "run_command" not in response.json()
         inbox, steps = await self._rows(app)
         assert inbox == [] and steps == []
+
+    async def test_an_orphaned_marker_never_suppresses_the_command(self, app, client):
+        """The P02 core: a dedup marker whose record never landed (the old
+        pre-commit SET-NX behind a failed transaction) must NOT earn a
+        successful empty duplicate — the authoritative lookup misses, the
+        delivery proceeds as a FIRST delivery and lands durably."""
+        queue = app.state.task_queue
+        await queue.mark_delivered("run:" + str(PROJECT_ID) + ":500")
+        await queue.mark_delivered("delivery:d-orphan")
+
+        response = await self._post(client, "/fix rename `src/app.py`", uuid="d-orphan")
+
+        assert response.status_code == 202
+        assert response.json()["run_command"] is True  # NOT deduplicated
+        inbox, steps = await self._rows(app)
+        assert len(inbox) == 1 and len(steps) == 1  # the command IS saved
+        assert steps[0].status == "scheduled"
+
+    async def test_a_failed_transaction_refuses_and_the_retry_lands_exactly_once(
+        self, app, client, monkeypatch
+    ):
+        """The full P02 schedule: the ingress transaction fails AFTER any
+        cache state — the gateway must answer a retryable 5xx (never a
+        successful acceptance), and the redeliveries (same AND different
+        transport uuid) must produce ONE durable command, not an empty
+        duplicate."""
+        import forge.worker.steps as steps_module
+
+        original = steps_module.schedule_command_step
+
+        async def failing(session, run_command, **kwargs):
+            await original(session, run_command, **kwargs)
+            raise RuntimeError("simulated commit-time failure")
+
+        monkeypatch.setattr(steps_module, "schedule_command_step", failing)
+
+        first = await self._post(client, "/fix rename `src/app.py`", uuid="d-p02a")
+        assert first.status_code == 503  # honest refusal, no acceptance claim
+        assert (
+            "retry" in first.json()["detail"].lower()
+            or "not acknowledged" in first.json()["detail"].lower()
+        )
+
+        monkeypatch.setattr(steps_module, "schedule_command_step", original)
+        # the retry within the TTL — SAME transport uuid, then a DIFFERENT one
+        retry = await self._post(client, "/fix rename `src/app.py`", uuid="d-p02a")
+        assert retry.status_code == 202
+        assert retry.json()["run_command"] is True
+        manual = await self._post(client, "/fix rename `src/app.py`", uuid="d-p02b")
+        assert manual.status_code == 202
+        assert manual.json()["deduplicated"] is True
+
+        inbox, steps = await self._rows(app)
+        assert len(inbox) == 1 and len(steps) == 1  # ONE durable command
+        assert steps[0].status == "scheduled"
+
+    async def test_no_database_refuses_instead_of_acknowledging(self, monkeypatch):
+        """Honesty: with no durable store behind the gateway there is nothing
+        to accept against — the actionable command is REFUSED (503), never
+        acknowledged into the void."""
+        from forge.main import create_app
+
+        monkeypatch.setenv("FORGE_REVIEW_FEEDBACK_ENABLED", "1")
+        application = create_app(settings=make_settings())
+        # No lifespan: create_app leaves session_factory None — the no-DB
+        # gateway shape. The queue, had Redis been configured, is only a
+        # cache and cannot certify acceptance.
+        application.state.task_queue = _SetNXQueue()
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as bare:
+            response = await self._post(bare, "/fix rename `src/app.py`", uuid="d-nodb")
+        assert response.status_code == 503
+        assert "deduplicated" not in response.json()
+        assert application.state.task_queue.submitted == []  # nothing was queued either

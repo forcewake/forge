@@ -138,7 +138,7 @@ class TestBasicAuth:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -204,7 +204,8 @@ class TestBasicAuth:
         body = load_payload("push_normal.json")
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
         assert response.status_code == 202
-        assert response.json()["recorded"] is True  # git.push is inbox-only
+        # R41-02 honesty: the audit-only write trails the response.
+        assert response.json() == {"status": "accepted", "event": "git.push"}
 
     async def test_unit_rejects_edge_shapes(self):
         from forge.gateway.azure_webhook import verify_azure_basic_auth
@@ -224,7 +225,7 @@ class TestWorkitemCommands:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -348,11 +349,8 @@ class TestWorkitemCommands:
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
 
         assert response.status_code == 202
-        assert response.json() == {
-            "status": "accepted",
-            "event": "workitem.commented",
-            "recorded": True,
-        }
+        # R41-02 honesty: the audit-only write trails the response.
+        assert response.json() == {"status": "accepted", "event": "workitem.commented"}
         async with app.state.session_factory() as session:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
             steps = (await session.execute(select(StepRun))).scalars().all()
@@ -361,6 +359,10 @@ class TestWorkitemCommands:
         assert steps == []
 
     async def test_redelivered_command_is_deduplicated(self, app, client: AsyncClient):
+        """R41-02 (#357): the deduplicated answer is backed by the COMMITTED
+        inbox row (the Redis marker is only a post-commit cache hint) — the
+        first delivery lands durably, the replay deduplicates, and exactly
+        ONE wake-up was submitted."""
         first, inbox, steps = await self.post(client, app, "workitem_commented_implement.json")
         body = load_payload("workitem_commented_implement.json")
         second = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
@@ -372,10 +374,53 @@ class TestWorkitemCommands:
             "deduplicated": True,
         }
         assert len(inbox) == 1
+        assert app.state.task_queue.submit.await_count == 1  # one wake-up only
         # The re-delivery created no second step row.
         async with app.state.session_factory() as session:
             all_steps = (await session.execute(select(StepRun))).scalars().all()
         assert len(all_steps) == 1
+
+    async def test_command_without_a_database_is_refused(self, tmp_path):
+        """R41-02: without the durable store there is NOTHING to accept
+        against — the honest answer is the retryable 503, never a 202 that
+        certifies a command no worker can find."""
+        reset_engine()
+        application = create_app(settings=azure_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
+                application.state.session_factory = None  # the DB is gone
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = load_payload("workitem_commented_implement.json")
+                    response = await ac.post(
+                        "/webhook/azure_devops", content=body, headers=auth_headers()
+                    )
+            assert response.status_code == 503
+        finally:
+            reset_engine()
+
+    async def test_adaptive_command_without_a_database_is_refused(self, tmp_path, monkeypatch):
+        """The adaptive leg refuses identically (the pre-parity code answered
+        ``adaptive_command: False`` 202 — an unsaved /pause)."""
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        reset_engine()
+        application = create_app(settings=azure_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.was_delivered = AsyncMock(return_value=False)
+                application.state.session_factory = None  # the DB is gone
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = TestAdaptiveCommandIngress._workitem_body("/pause")
+                    response = await ac.post(
+                        "/webhook/azure_devops", content=body, headers=auth_headers()
+                    )
+            assert response.status_code == 503
+        finally:
+            reset_engine()
 
     async def test_publisher_id_instability_does_not_change_routing(self, app, client: AsyncClient):
         """publisherId is unstable (tfs AND azure-devops both documented) —
@@ -398,7 +443,7 @@ class TestWorkitemUpdated:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -537,7 +582,7 @@ class TestPRCommentCommands:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -576,7 +621,6 @@ class TestPRCommentCommands:
         assert response.json() == {
             "status": "accepted",
             "event": "ms.vss-code.git-pullrequest-comment-event",
-            "recorded": True,
         }
         async with app.state.session_factory() as session:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
@@ -598,7 +642,7 @@ class TestPRReviewEvents:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -670,7 +714,7 @@ class TestPRReviewEvents:
         body = json.dumps(payload).encode()
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
 
-        assert response.json()["recorded"] is True
+        assert response.json() == {"status": "accepted", "event": "git.pullrequest.created"}
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []
@@ -690,7 +734,7 @@ class TestBuildComplete:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -734,7 +778,10 @@ class TestBuildComplete:
                     response = await ac.post(
                         "/webhook/azure_devops", content=body, headers=auth_headers()
                     )
-                    assert response.json()["recorded"] is True
+                    assert response.json() == {
+                        "status": "accepted",
+                        "event": "build.complete",
+                    }
                     async with application.state.session_factory() as session:
                         steps = (await session.execute(select(StepRun))).scalars().all()
                     assert steps == []
@@ -745,11 +792,7 @@ class TestBuildComplete:
         body = load_payload("build_complete_succeeded.json")
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
 
-        assert response.json() == {
-            "status": "accepted",
-            "event": "build.complete",
-            "recorded": True,
-        }
+        assert response.json() == {"status": "accepted", "event": "build.complete"}
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []
@@ -762,7 +805,7 @@ class TestInboxOnlyAndDedupe:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -939,7 +982,7 @@ class TestPayloadCapture:
         )
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             application.state.capture_dir = capture_dir
             yield application
         reset_engine()
@@ -999,7 +1042,7 @@ class TestAdaptiveCommandIngress:
         application = create_app(settings=azure_settings(tmp_path))
         async with application.router.lifespan_context(application):
             application.state.task_queue = AsyncMock()
-            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.task_queue.was_delivered = AsyncMock(return_value=False)
             yield application
         reset_engine()
 
@@ -1021,25 +1064,26 @@ class TestAdaptiveCommandIngress:
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
 
         assert response.status_code == 202
-        assert response.json() == {
-            "status": "accepted",
-            "event": "workitem.commented",
-            "recorded": True,
-        }
+        # R41-02 honesty: the audit-only write trails the response.
+        assert response.json() == {"status": "accepted", "event": "workitem.commented"}
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []
 
     async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        """R41-02 (#357): the adaptive verb takes the SAME durable acceptance
+        as /implement — the inbox row + scheduled ``adaptive_control`` step
+        commit BEFORE the 202, and the step executor routes to the
+        ControlCommandRouter."""
         routed: list[dict] = []
 
         async def fake_route(settings, session_factory, note):
             routed.append(note)
             return {"status": "applied"}
 
-        import forge.gateway.azure_webhook as azure_module
+        import forge.adaptive.command_router as adaptive_module
 
-        monkeypatch.setattr(azure_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setattr(adaptive_module, "route_adaptive_command_note", fake_route)
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
         body = self._workitem_body(f"@forge /pause {RUN_ID}")
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
@@ -1048,31 +1092,32 @@ class TestAdaptiveCommandIngress:
         assert response.json() == {
             "status": "accepted",
             "event": "workitem.commented",
+            "queued": True,
+            "run_command": True,
             "adaptive_command": True,
         }
-        (note,) = routed
-        assert note["command"] == "adaptive_control"
-        assert note["adaptive_verb"] == "pause"
-        assert note["provider"] == "azure_devops"
-        assert note["project"] == PROJECT
-        assert note["issue_number"] == WORK_ITEM
-        assert note["author_username"] == "dev@fabrikam.example"
-        assert note["note_id"] == f"workitem:{WORK_ITEM}:comment:10"
-        # The mailbox leg never schedules a classic run-command step.
+        # The durable acceptance: ONE inbox row + ONE scheduled step, the
+        # step identity IS the inbox identity — before the 202 returned.
         async with app.state.session_factory() as session:
-            steps = (await session.execute(select(StepRun))).scalars().all()
-        assert steps == []
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1
+        assert inbox[0].payload["command"] == "adaptive_control"
+        assert inbox[0].payload["adaptive_verb"] == "pause"
+        assert inbox[0].payload["provider"] == "azure_devops"
+        assert inbox[0].payload["project"] == PROJECT
+        assert inbox[0].payload["issue_number"] == WORK_ITEM
+        assert inbox[0].payload["author_username"] == "dev@fabrikam.example"
+        assert inbox[0].payload["note_id"] == f"workitem:{WORK_ITEM}:comment:10"
+        assert steps[0].source_event_id == inbox[0].source_event_id
+        assert steps[0].step_name == "adaptive_control"
+        assert steps[0].status == "scheduled"
+        # The routing itself runs as the step executor, never inline here.
+        assert routed == []
 
     async def test_pr_comment_routes_the_same_way(self, app, client, monkeypatch):
-        routed: list[dict] = []
-
-        async def fake_route(settings, session_factory, note):
-            routed.append(note)
-            return {"status": "applied"}
-
-        import forge.gateway.azure_webhook as azure_module
-
-        monkeypatch.setattr(azure_module, "route_adaptive_command_note", fake_route)
+        """The PR-comment surface takes the SAME durable acceptance — the
+        inbox row + scheduled adaptive step, routed only by the executor."""
         monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
         payload = load_json("pr_commented_on_implement.json")
         payload["resource"]["comment"]["content"] = "/steer use the existing helper"
@@ -1080,6 +1125,27 @@ class TestAdaptiveCommandIngress:
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
 
         assert response.json()["adaptive_command"] is True
-        (note,) = routed
-        assert note["adaptive_verb"] == "steer"
-        assert note["issue_is_pr"] is True
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1
+        assert inbox[0].payload["adaptive_verb"] == "steer"
+        assert inbox[0].payload["issue_is_pr"] is True
+        assert steps[0].step_name == "adaptive_control"
+
+    async def test_a_redelivered_adaptive_note_collapses_onto_one_command(
+        self, app, client, monkeypatch
+    ):
+        """Exact replay: ONE logical command, one scheduled step — the
+        deduplicated answer is backed by the committed inbox row."""
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        body = self._workitem_body("/pause")
+        first = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+        replay = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert first.json()["adaptive_command"] is True
+        assert replay.json()["deduplicated"] is True
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 1 and len(steps) == 1

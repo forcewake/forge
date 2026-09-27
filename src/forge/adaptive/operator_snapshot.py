@@ -181,6 +181,11 @@ COVERAGE_UNKNOWN: str = "unknown"
 #: durable authority (the control plane holds open questions in the
 #: mailbox payloads, not a queryable table), so it is ``unknown`` by
 #: construction — an honest "not observed", never an invented empty set.
+#: R41-12 (#367) adds the lineage sections: ``target`` (the #359
+#: collaboration target), ``budget`` / ``amendments`` (the run's ledger
+#: with its #340 amendment history) and ``inbox`` (the #357 durable
+#: webhook inbox rows for the run's project — the RECEIVED rung of the
+#: command-state ladder).
 COVERAGE_SECTIONS: tuple[str, ...] = (
     "run",
     "attempts",
@@ -193,6 +198,10 @@ COVERAGE_SECTIONS: tuple[str, ...] = (
     "questions",
     "occupancy",
     "rounds",
+    "target",
+    "budget",
+    "amendments",
+    "inbox",
 )
 
 #: ActionLog statuses → the operator attempt vocabulary. A revival
@@ -467,7 +476,11 @@ _COMMAND_SETTLED: frozenset[str] = frozenset({"applied", "checkpointed", "reject
 #: The sections a snapshot may read (the ``?sections=`` selection
 #: vocabulary). ``run`` is always read (a projection without a run is
 #: nothing); ``questions`` has no durable authority and is never
-#: selectable — it reads ``unknown`` by construction.
+#: selectable — it reads ``unknown`` by construction. R41-12 (#367)
+#: adds the lineage sections: ``target`` (the #359 collaboration
+#: target), ``budget`` / ``amendments`` (the run's ledger with its
+#: amendment history) and ``inbox`` (the #357 durable webhook inbox —
+#: the RECEIVED rung of the command-state ladder).
 SELECTABLE_SECTIONS: tuple[str, ...] = (
     "run",
     "attempts",
@@ -479,6 +492,10 @@ SELECTABLE_SECTIONS: tuple[str, ...] = (
     "approvals",
     "occupancy",
     "rounds",
+    "target",
+    "budget",
+    "amendments",
+    "inbox",
 )
 
 #: The sections whose reads are windowed by a bounded ``section_limit``
@@ -900,7 +917,7 @@ class OperatorSnapshotReader:
         """
         from forge.adaptive.mailbox_db import ControlCommandDeliveryRow, ControlCommandRow
         from forge.adaptive.pause_fence import PauseFenceRow
-        from forge.durable.models import ActionLog, GateApproval, PublicationIntent
+        from forge.durable.models import ActionLog, EventInbox, GateApproval, PublicationIntent
 
         fence_start = await self._source_version(session, run_id)
 
@@ -1067,20 +1084,44 @@ class OperatorSnapshotReader:
                 coverage["verifications"] = COVERAGE_MISSING
 
         # -- review rounds: the linked follow-up corrections (R40-02/#338) --
-        # The rows naming THIS run on either side of the supersession
-        # relation (parent — the run's delivery is corrected; child — the
-        # run IS a round's work unit). The lineage identity (root_run_id)
-        # rides each row, so the view can bound the lineage without a
-        # second query.
+        # R41-12 (#367) widens the read to the WHOLE LINEAGE: the rows
+        # naming THIS run on either side of the supersession relation PLUS
+        # every row of the lineage root it resolves to (each row carries
+        # ``root_run_id``, so the root's own view sees rounds 2..N, not
+        # just the first one naming it as parent). The root resolves from
+        # the run's own rows — its linked #359 target, else a round
+        # naming this run, else the run itself — never a cross-subject
+        # guess (the scope decision upstream already authorized this run).
         if "rounds" in selected:
-            from forge.durable.models import ReviewRound
+            from forge.durable.models import CollaborationTarget, ReviewRound
             from sqlalchemy import or_
 
             try:
+                lineage_root: str | None = None
+                linked_root = await session.scalar(
+                    select(CollaborationTarget.root_run_id).where(
+                        CollaborationTarget.id == str(getattr(run, "target_id", "") or "")
+                    )
+                )
+                if linked_root:
+                    lineage_root = str(linked_root)
+                else:
+                    naming = await session.scalar(
+                        select(ReviewRound.root_run_id)
+                        .where(
+                            or_(
+                                ReviewRound.parent_run_id == run_id,
+                                ReviewRound.child_run_id == run_id,
+                            )
+                        )
+                        .limit(1)
+                    )
+                    lineage_root = str(naming) if naming else run_id
                 rounds, total = await self._tail(
                     session,
                     select(ReviewRound).where(
                         or_(
+                            ReviewRound.root_run_id == (lineage_root or run_id),
                             ReviewRound.parent_run_id == run_id,
                             ReviewRound.child_run_id == run_id,
                         )
@@ -1097,6 +1138,103 @@ class OperatorSnapshotReader:
                 coverage["rounds"] = COVERAGE_PRESENT if rounds else COVERAGE_MISSING
                 totals["rounds"] = total
                 truncated["rounds"] = section_limit is not None and total > len(rounds)
+
+        # -- the collaboration target (R41-04/#359, read for R41-12) -----
+        # The PERSISTED lineage surface — the run's own target_id link,
+        # else the target whose root IS this run (the legacy root
+        # admission shape). One row, never windowed; a REFUSED row
+        # renders its typed reason, never an inferred branch.
+        if "target" in selected:
+            from forge.durable.models import CollaborationTarget
+
+            try:
+                target_row = await session.scalar(
+                    select(CollaborationTarget)
+                    .where(
+                        or_(
+                            CollaborationTarget.id == str(getattr(run, "target_id", "") or ""),
+                            CollaborationTarget.root_run_id == run_id,
+                        )
+                    )
+                    .order_by(CollaborationTarget.created_at.desc())
+                    .limit(1)
+                )
+            except SQLAlchemyError:
+                logger.warning(
+                    "collaboration target for run %s unreadable — coverage unknown", run_id
+                )
+                target_row = None
+                coverage["target"] = COVERAGE_UNKNOWN
+            else:
+                if target_row is not None:
+                    rows["target"] = self._target_row(target_row)
+                    coverage["target"] = COVERAGE_PRESENT
+                else:
+                    coverage["target"] = COVERAGE_MISSING
+
+        # -- the run budget + its amendment history (R41-12) -------------
+        if "budget" in selected:
+            from forge.durable.models import RunBudget
+
+            try:
+                budget_row = await session.scalar(
+                    select(RunBudget).where(RunBudget.run_id == run_id)
+                )
+            except SQLAlchemyError:
+                logger.warning("run budget for run %s unreadable — coverage unknown", run_id)
+                budget_row = None
+                coverage["budget"] = COVERAGE_UNKNOWN
+            else:
+                if budget_row is not None:
+                    rows["budget"] = self._budget_row(budget_row)
+                    coverage["budget"] = COVERAGE_PRESENT
+                else:
+                    coverage["budget"] = COVERAGE_MISSING
+        if "amendments" in selected:
+            from forge.durable.models import BudgetAmendment
+
+            try:
+                amendments, total = await self._tail(
+                    session,
+                    select(BudgetAmendment).where(BudgetAmendment.run_id == run_id),
+                    journal_order=(BudgetAmendment.applied_at.asc(), BudgetAmendment.id.asc()),
+                    window_order=(BudgetAmendment.applied_at.desc(), BudgetAmendment.id.desc()),
+                    limit=section_limit,
+                )
+            except SQLAlchemyError:
+                logger.warning("budget amendments for run %s unreadable — coverage unknown", run_id)
+                amendments = None
+            if amendments is not None:
+                rows["amendments"] = [self._amendment_row(row) for row in amendments]
+                coverage["amendments"] = COVERAGE_PRESENT if amendments else COVERAGE_MISSING
+                totals["amendments"] = total
+                truncated["amendments"] = section_limit is not None and total > len(amendments)
+
+        # -- the durable webhook inbox (R41-02/#357, read for R41-12) -----
+        # The RECEIVED rung of the command-state ladder: the run-command
+        # inbox rows for the run's PROJECT (the inbox is project-scoped —
+        # a command binds its run only at execution). Identity fields
+        # only: the payload's command/note ids ride, the note TEXT never.
+        if "inbox" in selected:
+            try:
+                inbox_rows, total = await self._tail(
+                    session,
+                    select(EventInbox).where(
+                        EventInbox.project_id == run.project_id,
+                        EventInbox.event_type == "run_command",
+                    ),
+                    journal_order=(EventInbox.received_at.asc(), EventInbox.id.asc()),
+                    window_order=(EventInbox.received_at.desc(), EventInbox.id.desc()),
+                    limit=section_limit,
+                )
+            except SQLAlchemyError:
+                logger.warning("event-inbox rows for run %s unreadable — coverage unknown", run_id)
+                inbox_rows = None
+            if inbox_rows is not None:
+                rows["inbox"] = [self._inbox_row(row) for row in inbox_rows]
+                coverage["inbox"] = COVERAGE_PRESENT if inbox_rows else COVERAGE_MISSING
+                totals["inbox"] = total
+                truncated["inbox"] = section_limit is not None and total > len(inbox_rows)
 
         fence_end = await self._source_version(session, run_id)
         rows["_source_version"] = fence_end
@@ -1190,10 +1328,14 @@ class OperatorSnapshotReader:
         from forge.adaptive.pause_fence import PauseFenceRow
         from forge.durable.models import (
             ActionLog,
+            BudgetAmendment,
+            CollaborationTarget,
+            EventInbox,
             FlowRun,
             GateApproval,
             PublicationIntent,
             ReviewRound,
+            RunBudget,
         )
         from sqlalchemy import or_
 
@@ -1233,6 +1375,35 @@ class OperatorSnapshotReader:
                 func.max(ReviewRound.updated_at),
                 func.count(ReviewRound.id),
             ).where(or_(ReviewRound.parent_run_id == run_id, ReviewRound.child_run_id == run_id)),
+            # R41-12 (#367): the lineage authorities fence with the rest —
+            # the collaboration target, the run budget, its amendments and
+            # the project's run-command inbox (the received rung).
+            select(
+                func.max(CollaborationTarget.updated_at),
+                func.count(CollaborationTarget.id),
+            ).where(
+                or_(
+                    CollaborationTarget.root_run_id == run_id,
+                    CollaborationTarget.id
+                    == select(FlowRun.target_id).where(FlowRun.id == run_id).scalar_subquery(),
+                )
+            ),
+            select(
+                func.max(RunBudget.updated_at),
+                func.count(RunBudget.id),
+            ).where(RunBudget.run_id == run_id),
+            select(
+                func.max(BudgetAmendment.applied_at),
+                func.count(BudgetAmendment.id),
+            ).where(BudgetAmendment.run_id == run_id),
+            select(
+                func.max(EventInbox.received_at),
+                func.count(EventInbox.id),
+            ).where(
+                EventInbox.project_id
+                == select(FlowRun.project_id).where(FlowRun.id == run_id).scalar_subquery(),
+                EventInbox.event_type == "run_command",
+            ),
         ):
             row = (await session.execute(statement)).one_or_none()
             parts.append("|".join("" if value is None else str(value) for value in row or ()))
@@ -1463,6 +1634,93 @@ class OperatorSnapshotReader:
             "status_reason": str(row.status_reason or ""),
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
+        }
+
+    @staticmethod
+    def _target_row(row: Any) -> dict[str, Any]:
+        """One CollaborationTarget row → the view shape (R41-04/#359, read
+        for R41-12): the PERSISTED lineage surface — provider, repository,
+        the immutable source branch, the target branch and the lineage's
+        ONE MR. A refused row carries its typed reason and no branch,
+        exactly as the CHECK constraint enforces."""
+        return {
+            "id": str(row.id or ""),
+            "provider": str(row.provider or ""),
+            "project_ref": str(row.project_ref or ""),
+            "issue_iid": row.issue_iid,
+            "root_run_id": str(row.root_run_id or ""),
+            "source_branch": str(row.source_branch or ""),
+            "target_branch": str(row.target_branch or ""),
+            "mr_iid": row.mr_iid,
+            "status": str(row.status or ""),
+            "refusal_reason": str(row.refusal_reason or ""),
+            "provenance": str(row.provenance or ""),
+            "created_at": _iso(row.created_at),
+            "updated_at": _iso(row.updated_at),
+        }
+
+    @staticmethod
+    def _budget_row(row: Any) -> dict[str, Any]:
+        """One RunBudget row → the view shape (R41-12): the numeric axes'
+        limits and counters plus the #340 closing partition. Counters only
+        — never a spec document, never a token payload."""
+        return {
+            "budget_id": str(row.id or ""),
+            "status": str(row.status or ""),
+            "max_calls": row.max_calls,
+            "max_tokens": row.max_tokens,
+            "wallclock_s": row.wallclock_s,
+            "reserved_calls": int(row.reserved_calls or 0),
+            "reserved_tokens": int(row.reserved_tokens or 0),
+            "consumed_calls": int(row.consumed_calls or 0),
+            "consumed_tokens": int(row.consumed_tokens or 0),
+            "unresolved_calls": int(row.unresolved_calls or 0),
+            "unresolved_tokens": int(row.unresolved_tokens or 0),
+            "closing_partition_policy": row.closing_partition_policy,
+            "closing_reserved_calls": row.closing_reserved_calls,
+            "closing_reserved_tokens": row.closing_reserved_tokens,
+        }
+
+    @staticmethod
+    def _amendment_row(row: Any) -> dict[str, Any]:
+        """One BudgetAmendment row → the view shape (R41-12 over #340):
+        the originating command identity, the ONE axis, the amount, the
+        applied/refused status with the typed refusal reason and the
+        before/after limits. The operator's free-text ``reason`` never
+        rides (value-free by construction; the typed fields carry the
+        audit)."""
+        return {
+            "command_id": str(row.command_id or ""),
+            "axis": str(row.axis or ""),
+            "amount_usd": row.amount_usd,
+            "amount_calls": row.amount_calls,
+            "amount_tokens": row.amount_tokens,
+            "amount_wallclock_s": row.amount_wallclock_s,
+            "status": str(row.status or ""),
+            "refusal_reason": str(row.refusal_reason or ""),
+            "limit_before": row.limit_before,
+            "limit_after": row.limit_after,
+            "applied_at": _iso(row.applied_at),
+        }
+
+    @staticmethod
+    def _inbox_row(row: Any) -> dict[str, Any]:
+        """One EventInbox row → the view shape (R41-02/#357, read for
+        R41-12): the RECEIVED rung of the command-state ladder. Identity
+        fields only — the delivery identity, the command/note ids the
+        payload carries and the processing stamps; the note TEXT and any
+        raw payload content never ride."""
+        payload = getattr(row, "payload", None)
+        document = payload if isinstance(payload, Mapping) else {}
+        return {
+            "source_event_id": str(row.source_event_id or ""),
+            "event_type": str(row.event_type or ""),
+            "command": str(document.get("command") or ""),
+            "note_id": str(document.get("note_id") or ""),
+            "command_ref": str(document.get("command_id") or ""),
+            "status": str(row.status or ""),
+            "received_at": _iso(row.received_at),
+            "processed_at": _iso(row.processed_at),
         }
 
     @staticmethod

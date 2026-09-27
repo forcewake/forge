@@ -5,7 +5,9 @@ maintainer's support approval + one external code owner's recorded
 acceptance, per `qualification/profile-approvals.json` and the pilot record).
 This document defines what will be declared, so the declaration is a decision
 about facts, not a discovery process. Basis: external review `b521e1a` §9,
-the R40-18 acceptance criteria, and the qualification state at v0.40.0.
+the R40-18 acceptance criteria, and the qualification state at the v0.41.0
+release candidate (the wording corrected by R41-08/#363: no arrow is claimed
+beyond its evidence kind or composition).
 
 ## 1. What Forge does
 
@@ -23,20 +25,33 @@ native issue → researched plan → human approval (immutable ApprovedInput)
 → human merge decision (recorded, never performed by the bot)
 ```
 
-Every arrow above is proven live on the supported profile — the trace record
-(`qualification/records/`, the composition + redemption records) names the
-run, the pipelines, the spend and the honest unknowns.
+**Which arrows are actually proven, and where (the honest map — no arrow is
+claimed above its evidence).** The correction-loop arrow ran the CURRENT
+tree; the other live traces stand on their recorded (historical or
+predecessor) compositions; the evidence kinds are never blended:
+
+| Arrows | Evidence kind | Status |
+| --- | --- | --- |
+| native issue → plan → approval → execution → Draft MR → independent verification → closing review → `ready_for_human` | model-task execution (live trace) | live-proven on the **historical** composition the v0.39.0 release promoted byte-identical (`gitlab-ce-v1@0.39.0`…`@0.40.0` records, trace `supported-composition-v2-2026-09-25`) — **not** yet re-run on the v0.41.0 candidate build |
+| cross-runner exact-WIP resume; approved material revision consumed by the resumed executor | model-task execution (live trace) | same historical composition as above (`useful-wip-cross-runner-resume`, `approved-revision-rebind`) |
+| the credential lane: dispatch-minted operation grant → lane redemption → the model consumer presenting the broker-selected credential | model-task execution (live trace) | live-proven on the redemption lab alignment (`ddcb9137…`, schema 031, 2026-09-26) — the nearest predecessor composition; the current-composition grant pairing is this cycle's #365 live trace |
+| `/fix` on the MR → bounded review round from the current head → new candidate → re-verification → ready again | model-task execution (live trace) | **LIVE-PROVEN on the current-tree composition** (2026-09-27, the #364 review-loop record): delivery 1 → a nonconflicting human edit → the native `/fix` → the budgeted child round from the exact current head → the new candidate on the SAME MR → the oracle on the exact new candidate → the reviewer's obligation digest verified → replay idempotence → a second correction with the #358 worker-failure recovery (exactly one provider commit per effect) → the conflicting-head typed conflict with the human commit preserved. The model legs ran under the **gitlab-protected-variable** credential route (the broker token stays expired — 401, typed evidence); the composition carries the one live-found publisher patch (`223d0f25…`/`f6ff6308…`, the suite green at the 9016/75 baseline) |
+| source review (required CI checks on the tagged sha) / release canary (fresh + seeded-upgrade stages) / human support approval / external acceptance (the pilot record) | source review · release canary · human decision · external acceptance | each a SEPARATE evidence kind (§8) — one never substitutes for another, and none of them is a live-arrow claim |
+
+The trace records (`qualification/records/`, the composition + redemption
+records) name the run, the pipelines, the spend and the honest unknowns for
+every live row above — including which composition each trace executed.
 
 ## 2. Supported profile identities
 
-| Axis | Identity (v0.40.0) |
+| Axis | Identity (the v0.41.0 release candidate — freeze digest `ab08a317…`, pre-release window) |
 | --- | --- |
-| Control plane / worker image | the promoted GHCR digest (release promotion record) |
-| Lane wheel | the promoted wheel, sha256-pinned (byte-identical to the qualification freeze) |
-| CI template | the frozen supported profile manifest (`qualification/profiles/supported-gitlab-ce-v1.json`) |
-| Schema | alembic head at the release (with the guarded-downgrade policy) |
-| Provider | GitLab CE 19.3.x (behavior-fingerprinted in the record) |
-| Credential route | native/protected-variable AND runner-redemption (each separately qualified) |
+| Control plane / worker image | the promoted GHCR digest **v0.40.0** (`sha256:45de67f5…` — the latest promotion; the v0.41.0 promotion runs against this tag and re-binds on the follow-up) + the executed-lab bind `localhost/forge:dev` @ `sha256:ddcb9137…` (the build that RAN the recorded traces; two bound identities, never merged) |
+| Lane wheel | `forge-0.41.0-py3-none-any.whl` @ sha256 `bb8f18a8…` — the CURRENT tree's `uv build` (the qualification composition; promotion pending, never assumed) |
+| CI template | the frozen supported profile manifest (`qualification/profiles/supported-gitlab-ce-v1.json` @ `3d74be37…`) |
+| Schema | alembic head **032** (predecessor 031) with the guarded-downgrade policy (a downgrade that would destroy round/grant linkage evidence refuses typed) |
+| Provider | GitLab CE 19.3.2 (behavior-fingerprinted in the record) |
+| Credential route | native/protected-variable (LIVE on the current-tree composition 2026-09-27 — the #364 review-loop model legs) AND runner-redemption (transport identity live on the predecessor composition; its MODEL legs wait on the broker rotation) |
 | Harness | claude-sdk-lane (claude-code 2.1.273 pinned) |
 
 Upgrade range: one minor back (the N-1 → head migration with seeded-data
@@ -99,7 +114,9 @@ explicit typed refusals, never silent best-effort.
 3. Human intervention preserves WIP: pause, exact resume, approved revision
    (live-proven traces).
 4. Review is not a dead end: corrections after `ready_for_human` run as
-   bounded rounds (#338, live-proven) without rewriting history.
+   bounded rounds (#338) without rewriting history — machine-proven and
+   drill-proven; the LIVE correction round is the pending #364 trace (see
+   §1's honest map — it is not yet a live-proven arrow).
 5. Budget decisions are executable: amendments change the enforcing guard,
    the closing reserve is partitioned before coding (#340, mutation-gated).
 6. At least one external code owner records an acceptance decision
