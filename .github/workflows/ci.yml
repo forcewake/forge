@@ -182,6 +182,10 @@ jobs:
       # for non-container jobs), not via the service label hostnames.
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
+      # R41-07 (#362): the durable-ingress matrix spawns a REAL redis-server
+      # process (the service container is network redis, not the binary).
+      - name: Install redis-server (the ingress kill-matrix prerequisite)
+        run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
       - uses: actions/checkout@v4
 
       - name: Set up uv
