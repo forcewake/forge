@@ -11,26 +11,26 @@
     {
       "capability": "release-artifact-canary",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: the v0.40.0 canary stands (fresh + seed-real-data + the chained 029->031 migrate with data preservation); the v0.41.0 canary runs in release.yml against this tag's digest and the follow-up release commit re-binds this record to it",
-      "executed_at": "2026-09-26T18:07:51Z",
+      "covers": "fresh stage: migrate (031->032 on the promoted image), boot gate, /health, /mcp 401, doctor",
+      "executed_at": "2026-09-27T17:05:36Z",
       "outcome": "pass"
     },
     {
       "capability": "release-canary/previous-release-upgrade",
       "class": "binary-smoke",
-      "covers": "PRE-RELEASE WINDOW: v0.40.0's seeded 029->031 upgrade stands; the v0.41.0 canary is expected to exercise the real 031->032 transition (the promoted v0.40.0 image carries head 031, v0.41.0 carries 032 — migration 032 collaboration_targets with the guarded downgrade) — matching cold_install_check's 031->032 receipt already executed at this freeze (five seeded tables preserved)",
-      "executed_at": "2026-09-26T18:07:51Z",
+      "covers": "seed-real-data + migrate: seeded at 031; upgrade 031->032 preserved counts + digests (migration 032 collaboration_targets)",
+      "executed_at": "2026-09-27T17:05:36Z",
       "outcome": "pass"
     }
   ],
   "evidence_refs": [
-    "docs/releases/evidence/v0.40.0/promotion.json"
+    "docs/releases/evidence/v0.41.0/promotion.json"
   ],
   "harness_binary": "ghcr.io/forcewake/forge",
   "harness_version": "0.40.0",
-  "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
+  "image_digest": "sha256:f1316aafe12d0301ff29c79270b389729a98aa40bd715d273b3693382bbd6bac",
   "legacy": false,
-  "note": "Pre-release window record for the v0.41.0 tag: canary capabilities cite the promoted v0.40.0 evidence until release.yml records the v0.41.0 stages; the follow-up release commit re-binds every field to the new promotion record. Upgrade expectation: the real 031->032 schema transition (migration 032: collaboration_targets, the guarded-downgrade linkage evidence) with seeded-data preservation. Fields follow the strict schema (ISO executed_at; the digest identity lives in image_digest/wheel_sha256).",
+  "note": "BOUND to the promoted v0.41.0 artifacts: the canary exercised the real 031->032 transition with seeded-data preservation.",
   "profile": "release-artifact-canary",
   "provider": "*",
   "provider_behavior_fingerprint": "",
@@ -42,7 +42,7 @@
   "stamp": "forge.profile.qualification/1",
   "template_defaults_digest": "",
   "upgrade": {
-    "evidence_ref": "docs/releases/evidence/v0.40.0/promotion.json",
+    "evidence_ref": "docs/releases/evidence/v0.41.0/promotion.json",
     "preservation_checks": [
       "per-table row counts identical after upgrade",
       "sha256 fingerprints over ordered row identity identical after upgrade"
@@ -58,5 +58,5 @@
     "target_schema": "032"
   },
   "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
-  "wheel_sha256": "bb8f18a8490612954827c848479a0d609d620054cba25613d3d319534117f95b"
+  "wheel_sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e"
 }

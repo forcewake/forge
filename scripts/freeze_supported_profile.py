@@ -94,7 +94,7 @@ ARCHIVED_MANIFEST_PATH = (
 )
 
 #: Every receipt the freeze binds, by role (repo-relative).
-PROMOTION_RECEIPT = "docs/releases/evidence/v0.40.0/promotion.json"
+PROMOTION_RECEIPT = "docs/releases/evidence/v0.41.0/promotion.json"
 #: The v2 receipts (Q39-07/#326 — the executed-lab trace on the NEW
 #: composition): the alignment + live bundle + record live in the v2
 #: evaluation directory; the inventory is the post-alignment v2 snapshot.
@@ -107,7 +107,7 @@ INVENTORY_RECEIPT = "qualification/inventory-2026-09-25-v2.json"
 #: exact composition the trace executed (the promoted lane wheel is
 #: byte-identical to the qualification wheel — 78711c28…) — the
 #: moving-tree gap the v0.38.0 record named is CLOSED by this promotion.
-LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.40.0/promotion.json"
+LATEST_PROMOTION_RECEIPT = "docs/releases/evidence/v0.41.0/promotion.json"
 #: The uv build of the working tree — the QUALIFICATION composition's
 #: wheel (the fresh cold-install target). Built by ``uv build`` from the
 #: exact tree the alignment image carried; the freeze binds its sha256
@@ -134,7 +134,7 @@ CLOSURE_RECEIPT_CANDIDATES = (
     "dist/lane-closure/closure-manifest.json",
     "qualification/profiles/receipts/lane-closure-v0.37.0.json",
 )
-PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.40.0.json"
+PROFILE_RECORD_RECEIPT = "qualification/records/gitlab-ce-v1@0.41.0.json"
 PROFILE_DOC_RECEIPT = "qualification/profiles/gitlab-ce-v1.md"
 #: The lab gateway's model-route receipt (env-referenced keys only — no
 #: secrets; the working-tree file is gitignored, so the COMMITTED copy is
@@ -903,9 +903,9 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
             },
             "release_canary": {
                 "status": (
-                    "pass (v0.40.0) — fresh-install canary + seeded previous-head "
-                    "upgrade 029->031 WITH data preservation (migrations 030 "
-                    "budget_amendments + 031 review_rounds chained through the "
+                    "pass (v0.41.0) — fresh-install canary + seeded previous-head "
+                    "upgrade 031->032 WITH data preservation (migration 032 "
+                    "collaboration_targets with seeded tables preserved, chained through the "
                     "real canary); the data-bearing N-1->head edge is proven by "
                     "the promotion canary itself, cross-checked by "
                     "cold_install_check --mode upgrade"

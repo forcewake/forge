@@ -17,7 +17,7 @@
           "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
           "name": "forge-0.41.0-py3-none-any.whl",
           "path": "dist/forge-0.41.0-py3-none-any.whl",
-          "sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
+          "sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
           "source": "local-uv-build"
         }
       },
@@ -29,23 +29,23 @@
       "rollback_tag": "pre-r4109-20260927T063317Z"
     },
     "latest_promotion": {
-      "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
-      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
-      "release_version": "0.40.0",
-      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
+      "image_digest": "sha256:f1316aafe12d0301ff29c79270b389729a98aa40bd715d273b3693382bbd6bac",
+      "receipt": "docs/releases/evidence/v0.41.0/promotion.json",
+      "release_version": "0.41.0",
+      "source_sha": "536905c49991fe9969d2fd5cad99a6ce5a6e6a19",
       "status": "promoted FROM the qualified composition — v0.40.0 is built from the exact tree the traces executed and the promoted lane wheel is byte-identical to the qualification wheel (150bf797…); the byte-identity held at v0.39.0 and holds again here",
-      "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
-      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl"
+      "wheel_sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
+      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.41.0/forge-0.41.0-py3-none-any.whl"
     },
     "promoted": {
-      "image_digest": "sha256:45de67f57c0058c0a5b54f2ab9bde8855138e629adf48a5757d10171917ac5a0",
+      "image_digest": "sha256:f1316aafe12d0301ff29c79270b389729a98aa40bd715d273b3693382bbd6bac",
       "image_ref": "ghcr.io/forcewake/forge",
-      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
-      "release_version": "0.40.0",
-      "sdist_sha256": "a61a23fecb7b279acafee2ebd7bba7fca8d5113d3de18a7c09e99cec3648f891",
-      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
-      "wheel_sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
-      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl"
+      "receipt": "docs/releases/evidence/v0.41.0/promotion.json",
+      "release_version": "0.41.0",
+      "sdist_sha256": "e53f9a025168c864d66ba67f3f846b3d9ae0a20621d74bed1b4295fe449e8e8e",
+      "source_sha": "536905c49991fe9969d2fd5cad99a6ce5a6e6a19",
+      "wheel_sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
+      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.41.0/forge-0.41.0-py3-none-any.whl"
     },
     "schema_revision": {
       "head": "032",
@@ -73,12 +73,12 @@
       "status": "green live — outcome reviewed-ready: the useful-WIP checkpoint (all three file shapes, verified digests) restored exactly on a second runner whose resumed dispatch carried the APPROVED revision-2 text (no rescue steer), the final candidate verified by the precommitted oracle on the exact sha, AND the closing review completed within the #325 closing reserve (reserve 0.5 usd visible) — the run ended ready_for_human; Draft MR left for human review; spend 0.4032 usd of the 2.0 usd lane cap"
     },
     "release_canary": {
-      "receipt": "docs/releases/evidence/v0.40.0/promotion.json#canary",
-      "status": "pass (v0.40.0) — fresh-install canary + seeded previous-head upgrade 029->031 WITH data preservation (migrations 030 budget_amendments + 031 review_rounds chained through the real canary); the data-bearing N-1->head edge is proven by the promotion canary itself, cross-checked by cold_install_check --mode upgrade"
+      "receipt": "docs/releases/evidence/v0.41.0/promotion.json#canary",
+      "status": "pass (v0.41.0) — fresh-install canary + seeded previous-head upgrade 031->032 WITH data preservation (migration 032 collaboration_targets with seeded tables preserved, chained through the real canary); the data-bearing N-1->head edge is proven by the promotion canary itself, cross-checked by cold_install_check --mode upgrade"
     },
     "source_review": {
-      "receipt": "docs/releases/evidence/v0.40.0/promotion.json#decision.checks + #required_checks",
-      "source_sha": "68f22b814d5438ca186806439176f1f18c931628",
+      "receipt": "docs/releases/evidence/v0.41.0/promotion.json#decision.checks + #required_checks",
+      "source_sha": "536905c49991fe9969d2fd5cad99a6ce5a6e6a19",
       "status": "conditional — lint/typecheck passed; test(3.13)/test(3.14)/integration passed on retry after a cancelled run; every earlier failed/cancelled attempt stays on record, never silently green"
     }
   },
@@ -102,10 +102,10 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-27T07:05:37+00:00",
+  "frozen_at": "2026-09-27T17:12:58+00:00",
   "harness": {
     "binary": "claude-code",
-    "receipt": "qualification/records/gitlab-ce-v1@0.40.0.json",
+    "receipt": "qualification/records/gitlab-ce-v1@0.41.0.json",
     "version": "2.1.273"
   },
   "lane": {
@@ -129,23 +129,23 @@
     },
     "install_route": "working-tree-wheel",
     "promoted_wheel": {
-      "receipt": "docs/releases/evidence/v0.40.0/promotion.json",
-      "sha256": "150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff",
+      "receipt": "docs/releases/evidence/v0.41.0/promotion.json",
+      "sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
       "status": "the promoted v0.40.0 wheel — BYTE-IDENTICAL to the qualification wheel (150bf797…): the released install pin and the qualified composition are the same bytes",
-      "url": "https://github.com/forcewake/forge/releases/download/v0.40.0/forge-0.40.0-py3-none-any.whl",
-      "version": "0.40.0"
+      "url": "https://github.com/forcewake/forge/releases/download/v0.41.0/forge-0.41.0-py3-none-any.whl",
+      "version": "0.41.0"
     },
     "wheel": {
       "name": "forge-0.41.0-py3-none-any.whl",
       "path": "dist/forge-0.41.0-py3-none-any.whl",
       "promotion_pending": "the fresh cold install installs THIS working-tree build by sha256 (the qualification composition); the promoted-wheel section names what is released and stays behind it",
       "receipt": "uv build of the working tree + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
-      "sha256": "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2",
+      "sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
       "source": "local-uv-build",
       "version": "0.41.0"
     }
   },
-  "manifest_digest": "3fcab8bc8699d0dc15e07b7e0ae8437f575afe312c33ed98950640ba209049b9",
+  "manifest_digest": "a365b101e0e90ca32724af1deb1cf6d3f97c4d32be5bb229682ff66f1d3c001a",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",
@@ -153,7 +153,7 @@
     "receipts": [
       "litellm-config.yaml",
       "qualification/profiles/receipts/litellm-config-lab-v1.yaml",
-      "qualification/records/gitlab-ce-v1@0.40.0.json"
+      "qualification/records/gitlab-ce-v1@0.41.0.json"
     ],
     "upstream": "openai/glm-5.3-flash"
   },
@@ -204,7 +204,7 @@
     "oracle_tampering": [],
     "receipts": [
       "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json",
-      "qualification/records/gitlab-ce-v1@0.40.0.json",
+      "qualification/records/gitlab-ce-v1@0.41.0.json",
       "qualification/profiles/gitlab-ce-v1.md"
     ],
     "required_jobs": [
