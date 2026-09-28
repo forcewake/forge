@@ -1,0 +1,62 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "release-artifact-canary",
+    "release-canary/previous-release-upgrade"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "none — disposable Postgres, LiteLLM reachability via in-image stub",
+  "evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "class": "binary-smoke",
+      "covers": "fresh stage: migrate, boot gate, /health, /mcp 401, doctor",
+      "executed_at": "2026-09-28T09:45:57Z",
+      "outcome": "pass"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "class": "binary-smoke",
+      "covers": "seed-real-data + migrate: seeded at 031; upgrade 031->032 preserved counts + digests",
+      "executed_at": "2026-09-28T09:45:57Z",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.42.0/promotion.json"
+  ],
+  "harness_binary": "ghcr.io/forcewake/forge",
+  "harness_version": "0.42.0",
+  "image_digest": "sha256:c172ae07405978b415ef1ad9428e45f8fa261467b7f0c61fd953462b450599a8",
+  "legacy": false,
+  "note": "BOUND to the promoted v0.42.0 artifacts; the wheel byte-identical to the qualified candidate (build-once — the guard ran in the release pipeline).",
+  "profile": "release-artifact-canary",
+  "provider": "*",
+  "provider_behavior_fingerprint": "",
+  "provider_version": "",
+  "record_id": "release-artifact-canary@0.42.0",
+  "release_version": "0.42.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "container image (Containerfile; python-3.13, disposable Postgres)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": {
+    "evidence_ref": "docs/releases/evidence/v0.42.0/promotion.json",
+    "preservation_checks": [
+      "per-table row counts identical after upgrade",
+      "sha256 fingerprints over ordered row identity identical after upgrade"
+    ],
+    "seeded_records": [
+      "flow_runs: 1",
+      "run_specs: 1",
+      "step_runs: bounded set",
+      "control_commands: 1",
+      "publication_intents: 1"
+    ],
+    "source_schema": "031",
+    "target_schema": "032"
+  },
+  "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
+  "wheel_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a"
+}
