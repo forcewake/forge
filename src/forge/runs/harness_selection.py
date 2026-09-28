@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BUDGET_CLASSES",
     "BudgetCeilings",
+    "DEFAULT_BUDGET_CLASS_REASON",
     "DEFAULT_DRIVER",
     "DRIVER_CREDENTIAL_VARS",
     "SHIPPED_DRIVERS",
@@ -85,6 +86,13 @@ DEFAULT_DRIVER = "claude-code"
 #: Planner budget classes (ADR-0023 Decision 1): anything else degrades to
 #: the compiler's ``default_budget_class``.
 BUDGET_CLASSES: frozenset[str] = frozenset({"trivial", "standard", "heavy"})
+
+#: R42-06 (#379): the default budget-class selection reason — no planner
+#: assessment was present (the stub planner, or a plan JSON without the
+#: optional field). The malformed spelling names the rejected value; the
+#: valid spelling names the class the planner requested. All three are
+#: bounded cases recorded on the frozen selection, never exceptions.
+DEFAULT_BUDGET_CLASS_REASON = "default: no assessment"
 
 #: Per-driver credential variable NAMES (never values — ADR-0015 §4): what
 #: ``forge doctor`` checks per preference entry (brief §8) and what a lane
@@ -147,6 +155,10 @@ DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
 #: letters, digits, dot, underscore, dash — never shell metacharacters.
 _ENTRY_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+#: Sentinel: the planner proposal carried no ``budget_class`` key at all
+#: (the honest ABSENT case — distinct from a present-but-malformed value).
+_NO_ASSESSMENT = object()
+
 
 @dataclass(frozen=True)
 class BudgetCeilings:
@@ -176,6 +188,16 @@ class HarnessSelection:
     records the numeric ceilings ``budget_class`` resolved to at freeze time
     (R13 profiles); ``None`` — nothing configured, the run is unlimited and
     the evidence carries no ceiling block.
+
+    ``budget_class_reason`` (R42-06 / #379) records WHY the budget class was
+    selected — the ``budget.profile_selection_reason`` observable: the
+    planner's valid assessment (``planner assessment: heavy``), the absent
+    assessment (``default: no assessment`` — the stub planner, a plan JSON
+    without the field) or the MALFORMED assessment (``default: malformed
+    assessment …``) are three DISTINCT bounded cases, never an exception
+    path. The class is a REQUEST either way: the numeric profile resolution
+    (:func:`forge.durable.budgets.resolve_budget_profile`) stays outside
+    model authority.
     """
 
     harness: str
@@ -183,6 +205,7 @@ class HarnessSelection:
     budget_class: str
     reason: str
     budget_ceilings: BudgetCeilings | None = None
+    budget_class_reason: str = DEFAULT_BUDGET_CLASS_REASON
 
     def as_document(self) -> dict:
         """The ``backend_config`` fragment frozen into the RunSpec."""
@@ -191,6 +214,7 @@ class HarnessSelection:
             "harness_fallbacks": list(self.fallbacks),
             "budget_class": self.budget_class,
             "selection_reason": self.reason,
+            "budget_class_reason": self.budget_class_reason,
         }
         if self.budget_ceilings is not None:
             document["budget_ceilings"] = {
@@ -406,20 +430,39 @@ def compile_harness_selection(
 
     budget_class = default_budget_class if default_budget_class in BUDGET_CLASSES else "standard"
     reason = "default"
+    budget_class_reason = DEFAULT_BUDGET_CLASS_REASON
     selected = chain[0]
 
     # Rule 4: the proposal is honored iff its harness is in preference ∩
     # available (i.e. an actual member of the compiled chain); its budget
     # class is validated independently; the reason defaults when absent.
+    # R42-06 (#379): the budget-class arm records THREE distinct bounded
+    # cases on the selection — the planner's valid assessment, no assessment
+    # at all, and a malformed one (unknown class, wrong type) that degrades
+    # to the configured default WITHOUT ever raising (the task-class →
+    # profile mapping stays total: every plan, well-formed or not, resolves
+    # exactly one class).
     proposal = planner_proposal if isinstance(planner_proposal, dict) else None
+    raw_budget_assessment: object = _NO_ASSESSMENT
+    assessment_valid = False
     if proposal is not None:
         proposed_harness = str(proposal.get("harness") or "").strip()
         if proposed_harness in chain:
             selected = proposed_harness
             reason = str(proposal.get("reason") or "").strip() or "planner selection"
-        proposed_budget = str(proposal.get("budget_class") or "").strip()
-        if proposed_budget in BUDGET_CLASSES:
-            budget_class = proposed_budget
+        if "budget_class" in proposal:
+            raw_budget_assessment = proposal.get("budget_class")
+            proposed_budget = str(raw_budget_assessment or "").strip()
+            if proposed_budget in BUDGET_CLASSES:
+                assessment_valid = True
+                budget_class = proposed_budget
+                budget_class_reason = f"planner assessment: {proposed_budget}"
+    if raw_budget_assessment is not _NO_ASSESSMENT and not assessment_valid:
+        budget_class_reason = (
+            "default: malformed assessment "
+            f"(budget_class={str(raw_budget_assessment)[:32]!r} not in "
+            "trivial|standard|heavy)"
+        )
 
     # Rule 5: the frozen tail after the selected harness (∩ available) —
     # always recorded, even when the fallback switch is OFF.
@@ -429,6 +472,7 @@ def compile_harness_selection(
         fallbacks=fallbacks,
         budget_class=budget_class,
         reason=reason,
+        budget_class_reason=budget_class_reason,
     )
 
 
@@ -463,6 +507,9 @@ def selection_from_spec_document(document: dict | None) -> HarnessSelection | No
         budget_class=str(backend_config.get("budget_class") or "standard"),
         reason=str(backend_config.get("selection_reason") or "default"),
         budget_ceilings=ceilings,
+        budget_class_reason=str(
+            backend_config.get("budget_class_reason") or DEFAULT_BUDGET_CLASS_REASON
+        ),
     )
 
 

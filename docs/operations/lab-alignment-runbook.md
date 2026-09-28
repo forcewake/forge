@@ -128,7 +128,18 @@ Notes an operator must know:
   cannot raise its own ceilings mid-run, and retries do not reset them.
 - The budget classes are a closed set: `trivial`, `standard`, `heavy`
   (`forge.runs.harness_selection.BUDGET_CLASSES`); an unknown class name
-  falls back to `standard`.
+  falls back to `standard` — a BOUNDED fallback whose reason is recorded
+  on the frozen selection (`budget_class_reason`, R42-06/#379), and the
+  planner's optional `budget_class` assessment is a REQUEST the compiler
+  re-validates, never a self-granted ceiling
+  (docs/operations/budget-calibration.md).
+- The values above are the DEFAULT posture. The live lab's receipted
+  variant `forge.budget-profiles/1@2026-09-27-align` raised
+  `standard.max_tokens` 200000→600000 after ONE measured exhaustion
+  (run `fbe62ad5`: 196,312/200,000 with the closing review stood down) —
+  a RECORDED PROFILE with its origin, not a universal requirement;
+  re-size from your own measured workloads
+  (docs/operations/budget-calibration.md §1/§7).
 - The qualification driver refuses its PAID flow stage outright without
   caps (`scripts/qualify_gitlab_ce.py --stage flow` needs these env caps
   or `--max-budget-json`).

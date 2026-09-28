@@ -146,6 +146,36 @@ native spelling without a command identity is refused typed
 aliases onto the usd axis with the legacy derived key as its command
 identity, preserving its replay semantics at the table.
 
+## Calibration — sizing the reserve from measured workloads (R42-06)
+
+The reserve fraction (0.15, PROVISIONAL) and the numeric profile caps
+are calibrated the same way: MEASURED from the recorded traces BEFORE
+any default changes, never re-sized from a single live anecdote. The
+full method, the measured numbers and the profile-selection seams live
+in [budget-calibration.md](budget-calibration.md); the parts that bind
+the closing reserve:
+
+- **The trigger** — a run fenced at a numeric axis with the closing
+  review stood down is the calibration signal, recorded with its
+  decomposition (the #364 `fbe62ad5` event: the SDK receipt's 194,789
+  tokens plus 1,523 gateway tokens exhausted `standard@200k` on an
+  UNPARTITIONED window). The verification test in
+  `tests/test_budget_calibration.py` proves the same receipt shape
+  under `closing-partition/1` fences the CODER at the share boundary
+  while the review still completes in its reserve.
+- **The amendment** — measured insufficiency on a LIVE run is resolved
+  by the #340 amendment above (one axis, the originating command
+  identity, `limit_before`/`limit_after` history, prior allowance/spend/
+  incomplete liabilities preserved); measured insufficiency on the
+  DEFAULT posture is a receipted, versioned profile change
+  (`forge.budget-profiles/…`) — already-approved runs keep their frozen
+  ceilings either way.
+- **The 600k honesty** — the deployment's 600k standard cap is a
+  RECORDED PROFILE with its origin named (the live experiment's
+  exhaustion event), never a universal requirement and never a
+  model-granted ceiling: the planner may REQUEST a class, the operator's
+  configured profiles supply every number.
+
 ## Observability
 
 - `budget.closing_reserve` — the held allowance, on every decision;

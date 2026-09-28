@@ -1,0 +1,485 @@
+{
+  "conclusion": "measured BEFORE changing defaults: 9 SDK lane receipts across the #364/#377 captures show every attempt serving a majority-cached ~190k-token context regardless of task size, so the token axis measures context, not task weight. The 200k standard profile exhausted once (fbe62ad5) with the closing review stood down; the 600k standard profile is the RECORDED amended posture of that deployment (finite, enforced), not a universal requirement. Calibration moves through the structured assessment (budget_class) + the recorded profile-selection reason + the operator amendment \u2014 never a model-granted ceiling",
+  "dimensions": {
+    "note": "provider-specific inclusive/disjoint conventions preserved (#339/#368): the two shapes never mix into one fold \u2014 normalize_counters decides the shape per receipt and the inclusive input is computed under the receipt's OWN convention",
+    "routes": [
+      {
+        "dimensions_reported": [
+          "input_tokens",
+          "cached_input_tokens",
+          "cache_write_tokens",
+          "output_tokens",
+          "per-model usage (costUSD, contextWindow)",
+          "calls (per attempt: 1 lane dispatch)",
+          "cost_usd (the SDK's own meter)"
+        ],
+        "measured_on_these_traces": true,
+        "route": "claude-sdk-lane",
+        "time_dimension": "lane job wall window from the recorded trace (lower bound); FORGE_LANE_BUDGET_SECONDS enforces the lane's own clock",
+        "token_convention": "anthropic-shaped DISJOINT \u2014 input excludes the cache; spend total = input + cache_read + cache_write + output (cache added exactly once)"
+      },
+      {
+        "dimensions_reported": [
+          "calls",
+          "tokens (inclusive exposure)",
+          "wallclock_s (anchored deadline)"
+        ],
+        "measured_on_these_traces": true,
+        "route": "gateway (planner/reviewer, litellm)",
+        "time_dimension": "the run budget's anchored wall clock",
+        "token_convention": "the durable run_budgets counters are INCLUSIVE exposure (consumed + reserved + unresolved); the gateway turns ride the SAME run budget as the lane receipts (1523 tokens on the exhausted window)"
+      },
+      {
+        "dimensions_reported": [
+          "input_tokens",
+          "cached_input_tokens",
+          "cache_write_tokens",
+          "output_tokens",
+          "cost_usd"
+        ],
+        "measured_on_these_traces": false,
+        "note": "the #289 single-writer capture measured this route (36125 in / 136768 cached / 2305 out, $0.2180); not re-measured here \u2014 the conventions table is the stable part",
+        "route": "claude-code (batch)",
+        "time_dimension": "harness episode wall clock",
+        "token_convention": "anthropic-shaped DISJOINT (same tells: the driver always talks to an Anthropic-compatible endpoint)"
+      },
+      {
+        "dimensions_reported": [
+          "input_tokens (inclusive)",
+          "cached_tokens (breakdown)",
+          "output_tokens",
+          "reasoning/thinking tokens (output breakdown)"
+        ],
+        "measured_on_these_traces": false,
+        "route": "grok-build / opencode / copilot (batch, OpenAI-compatible)",
+        "time_dimension": "harness episode wall clock",
+        "token_convention": "OpenAI-shaped INCLUSIVE \u2014 the cache rides INSIDE input_tokens; a cached column is a breakdown, NEVER added on top (the double-count guard)"
+      }
+    ]
+  },
+  "exhaustion_event": {
+    "consumed_tokens": 196312,
+    "gateway_turn_tokens": 1523,
+    "note": "the SDK receipt (input 33061 + cached 158784 + output 2944 = 194789, cache added exactly once under the disjoint convention) plus 1523 gateway planner/reviewer tokens; the window carried NO closing partition, so the coder consumed the whole axis and the closing review stood down with zero reviewer spend \u2014 the designed fence, and the recorded basis for the 600k amendment",
+    "profile": "standard@200000",
+    "resolution_amendment": "forge.budget-profiles/1@2026-09-27-align",
+    "run_id": "fbe62ad5ecf946eb8f12caac95692904",
+    "sdk_receipt_tokens": 194789
+  },
+  "inputs": {
+    "build_once_capture": {
+      "path": "docs/evaluation/2026-09-28-r4204-build-once",
+      "sha256": "c007cbb6ff3bbc67d54562fc8174878cfab1bc063166560c94642fe9d617d930"
+    },
+    "ledger_v2": {
+      "path": "evaluation/economics/accepted-task-ledger-v2.json",
+      "sha256": "5ea751cb85eb11f316ad836c6e85c9cdb4e419e1dd51e9939f442cb67379325d"
+    },
+    "review_loop_capture": {
+      "path": "docs/evaluation/2026-09-27-review-loop",
+      "sha256": "b89d45bbc17ec5e35e919c093a7c1728a99611809f6695b5aef27650974d2914"
+    }
+  },
+  "measured": {
+    "accepted_task_all_attempt_cost": {
+      "attempts": 7,
+      "basis": "the ledger v2's accepted_work.total_cost_lower_bound fold",
+      "human_decision": "pending (draft MR !4)",
+      "provider_reported_usd_exact": 1.256064,
+      "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f"
+    },
+    "closing_reserve_window": [
+      {
+        "closing_reserved_calls": null,
+        "closing_reserved_tokens": null,
+        "max_tokens": 200000,
+        "note": "unpartitioned (the pre-#340 posture on this window)",
+        "partition_policy": null,
+        "round": 0,
+        "run_id": "fbe62ad5ecf946eb8f12caac95692904",
+        "status": "exhausted"
+      },
+      {
+        "closing_reserved_calls": null,
+        "closing_reserved_tokens": null,
+        "max_tokens": 600000,
+        "note": "unpartitioned (the pre-#340 posture on this window)",
+        "partition_policy": null,
+        "round": 1,
+        "run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "status": "open"
+      },
+      {
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_tokens": 600000,
+        "note": "the recorded capture carries limits/status only \u2014 no in-window consumption figure, so the reserve_remaining is the FROZEN share, never a measured remainder",
+        "partition_policy": "closing-partition/1",
+        "round": 2,
+        "run_id": "bbd8d0d4885341fe858dafb3908207ed",
+        "status": "open"
+      },
+      {
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_tokens": 600000,
+        "note": "the recorded capture carries limits/status only \u2014 no in-window consumption figure, so the reserve_remaining is the FROZEN share, never a measured remainder",
+        "partition_policy": "closing-partition/1",
+        "round": 3,
+        "run_id": "17645ea9c6a247ef9b456ed614eb5c2a",
+        "status": "open"
+      }
+    ],
+    "context_expansion": {
+      "note": "every SDK receipt re-served the majority of its context from cache (the restored conversation) \u2014 the harness fills a ~200k-token context regardless of task size; the token axis therefore measures CONTEXT, not task weight, and a class mapping that ignores it starves the closing review (the fbe62ad5 fence)",
+      "redundant_read_fraction_max": 0.900299,
+      "redundant_read_fraction_min": 0.756044,
+      "redundant_read_fraction_overall": 0.846517
+    },
+    "failed_attempts_and_repairs": [
+      {
+        "capture": "2026-09-27-review-loop",
+        "cost_basis": "zero model calls \u2014 recorded, never inferred",
+        "cost_usd": 0.0,
+        "human_repair": "operator re-provisioned the carrier variable masked (the alignment receipt names the axis)",
+        "kind": "failed_attempt",
+        "outcome": "blocked harness_infrastructure (protected-variable bootstrap fence)",
+        "run_id": "165dd1edab724b20b42c916991c53069"
+      },
+      {
+        "capture": "2026-09-27-review-loop",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.222881,
+        "human_repair": "the receipted amendment forge.budget-profiles/1@2026-09-27-align (standard.max_tokens 200000\u2192600000) + a fresh run",
+        "kind": "failed_attempt",
+        "outcome": "budget_exhausted 196312/200000 tokens; the closing review stood down (zero reviewer spend) \u2014 the designed fence",
+        "run_id": "fbe62ad5ecf946eb8f12caac95692904"
+      },
+      {
+        "capture": "2026-09-27-review-loop",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.1876,
+        "human_repair": "seed .forge.yml implement.paths (the repo-side scope declaration) + a fresh run",
+        "kind": "failed_attempt",
+        "outcome": "ready_for_human but the first /fix classified material_change (empty allowed_paths \u2014 the fail-closed scope classification)",
+        "run_id": "8be14a80312d47a8b274efaa4d6a0a73"
+      },
+      {
+        "capture": "2026-09-27-review-loop",
+        "cost_basis": "unreceipted \u2014 its SDK figure never reached the record",
+        "cost_usd": null,
+        "human_repair": "the live-found defect was patched in-tree (publish_candidate branch threading); the spend stays a bounded residual",
+        "kind": "failed_attempt",
+        "outcome": "blocked external_change (the #361 wrong-branch publisher defect)",
+        "run_id": "6e0fdf3448ee4860b2bc34822db9489f"
+      },
+      {
+        "capture": "2026-09-27-review-loop",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.239445,
+        "human_repair": "none \u2014 the model honestly produced zero changes; recorded",
+        "kind": "failed_attempt",
+        "outcome": "harness_no_changes \u2014 the round-4 /fix premise had expired (the candidate already carried the asked change); zero candidate commits",
+        "run_id": "2396987be7b64895b7b73af273211c91"
+      },
+      {
+        "capture": "2026-09-28-r4204-build-once",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.198261,
+        "human_repair": "none \u2014 the typed drift fence held; recorded",
+        "kind": "failed_attempt",
+        "outcome": "candidate_rejected: branch_drift \u2014 a conflicting human commit landed mid-lane; the child parked blocked, the human head preserved",
+        "run_id": "fed57de4"
+      }
+    ],
+    "human_corrections": [
+      {
+        "basis": "the ledger v2 review_round.incremental_cost fold",
+        "capture": "2026-09-27-review-loop",
+        "incremental_cost_usd": 0.198005,
+        "kind": "human_correction",
+        "outcome": "oracle green on the corrected candidate; the closing reviewer resolved",
+        "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "round": 2
+      },
+      {
+        "basis": "the ledger v2 review_round.incremental_cost fold",
+        "capture": "2026-09-27-review-loop",
+        "incremental_cost_usd": 0.196886,
+        "kind": "human_correction",
+        "outcome": "worker killed mid-round; the #358 recovery adopted the round's own effect",
+        "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "round": 3
+      },
+      {
+        "basis": "the ledger v2 review_round.incremental_cost fold",
+        "capture": "2026-09-27-review-loop",
+        "incremental_cost_usd": 0.239445,
+        "kind": "human_correction",
+        "outcome": "BLOCKED harness_no_changes \u2014 the /fix premise had expired (the honest negative)",
+        "root_run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "round": 4
+      },
+      {
+        "basis": "the build-once capture's round2 SDK receipt",
+        "capture": "2026-09-28-r4204-build-once",
+        "incremental_cost_usd": 0.140366,
+        "kind": "human_correction",
+        "outcome": "oracle green on the new candidate; ready_for_human",
+        "root_run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "round": 2
+      },
+      {
+        "basis": "the build-once capture's round3 SDK receipt",
+        "capture": "2026-09-28-r4204-build-once",
+        "incremental_cost_usd": 0.188016,
+        "kind": "human_correction",
+        "outcome": "worker killed mid-round, #358 recovery adopted the round's own effect",
+        "root_run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "round": 3
+      }
+    ],
+    "receipt_count": 9,
+    "receipts": [
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 155136,
+        "capture": "2026-09-27-review-loop",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.211247,
+        "input_tokens": 32995,
+        "input_tokens_inclusive": 188131,
+        "job_id": 1157,
+        "lane_job_wall_seconds": 91.113,
+        "model": "glm-5.3-flash",
+        "output_tokens": 2412,
+        "phase": "delivery",
+        "redundant_read_fraction": 0.824617,
+        "route": "claude-sdk-lane",
+        "run_id": "7319478e10b74f3c90d0e0ea43a9dc3f",
+        "total_known_tokens": 190543
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 173184,
+        "capture": "2026-09-27-review-loop",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.198005,
+        "input_tokens": 19997,
+        "input_tokens_inclusive": 193181,
+        "job_id": 1162,
+        "lane_job_wall_seconds": 130.579,
+        "model": "glm-5.3-flash",
+        "output_tokens": 4169,
+        "phase": "round2",
+        "redundant_read_fraction": 0.896486,
+        "route": "claude-sdk-lane",
+        "run_id": "",
+        "total_known_tokens": 197350
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 134912,
+        "capture": "2026-09-27-review-loop",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.196886,
+        "input_tokens": 32476,
+        "input_tokens_inclusive": 167388,
+        "job_id": 1166,
+        "lane_job_wall_seconds": 79.797,
+        "model": "glm-5.3-flash",
+        "output_tokens": 2000,
+        "phase": "round3",
+        "redundant_read_fraction": 0.805984,
+        "route": "claude-sdk-lane",
+        "run_id": "",
+        "total_known_tokens": 169388
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 183744,
+        "capture": "2026-09-27-review-loop",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.239445,
+        "input_tokens": 35144,
+        "input_tokens_inclusive": 218888,
+        "job_id": 1169,
+        "lane_job_wall_seconds": 113.268,
+        "model": "glm-5.3-flash",
+        "output_tokens": 3106,
+        "phase": "negative",
+        "redundant_read_fraction": 0.839443,
+        "route": "claude-sdk-lane",
+        "run_id": "",
+        "total_known_tokens": 221994
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": null,
+        "cached_input_tokens": 158784,
+        "capture": "2026-09-27-review-loop",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.222881,
+        "input_tokens": 33061,
+        "input_tokens_inclusive": 191845,
+        "job_id": null,
+        "lane_job_wall_seconds": null,
+        "model": "",
+        "output_tokens": 2944,
+        "phase": "delivery_attempts_failed[1]",
+        "redundant_read_fraction": 0.827668,
+        "route": "claude-sdk-lane",
+        "run_id": "fbe62ad5ecf946eb8f12caac95692904",
+        "total_known_tokens": 194789
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 176000,
+        "capture": "2026-09-28-r4204-build-once",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.218012,
+        "input_tokens": 33388,
+        "input_tokens_inclusive": 209388,
+        "job_id": 1190,
+        "lane_job_wall_seconds": 115.112,
+        "model": "glm-5.3-flash",
+        "output_tokens": 2463,
+        "phase": "delivery",
+        "redundant_read_fraction": 0.840545,
+        "route": "claude-sdk-lane",
+        "run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "total_known_tokens": 211851
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 149888,
+        "capture": "2026-09-28-r4204-build-once",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.140366,
+        "input_tokens": 17762,
+        "input_tokens_inclusive": 167650,
+        "job_id": 1196,
+        "lane_job_wall_seconds": 100.743,
+        "model": "glm-5.3-flash",
+        "output_tokens": 1967,
+        "phase": "round2",
+        "redundant_read_fraction": 0.894053,
+        "route": "claude-sdk-lane",
+        "run_id": "",
+        "total_known_tokens": 169617
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 101440,
+        "capture": "2026-09-28-r4204-build-once",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.188016,
+        "input_tokens": 32732,
+        "input_tokens_inclusive": 134172,
+        "job_id": 1199,
+        "lane_job_wall_seconds": 94.8,
+        "model": "glm-5.3-flash",
+        "output_tokens": 1840,
+        "phase": "round3",
+        "redundant_read_fraction": 0.756044,
+        "route": "claude-sdk-lane",
+        "run_id": "",
+        "total_known_tokens": 136012
+      },
+      {
+        "anthropic_shaped": true,
+        "cache_write_tokens": 0,
+        "cached_input_tokens": 198144,
+        "capture": "2026-09-28-r4204-build-once",
+        "completeness": "aggregate",
+        "cost_basis": "sdk-total_cost_usd",
+        "cost_usd": 0.198261,
+        "input_tokens": 21943,
+        "input_tokens_inclusive": 220087,
+        "job_id": 1212,
+        "lane_job_wall_seconds": 165.673,
+        "model": "glm-5.3-flash",
+        "output_tokens": 3543,
+        "phase": "conflict_negative",
+        "redundant_read_fraction": 0.900299,
+        "route": "claude-sdk-lane",
+        "run_id": "fed57de498874f0ea93911f66c8792fb",
+        "total_known_tokens": 223630
+      }
+    ],
+    "route": "claude-sdk-lane@glm-5.3-flash (Anthropic-shaped DISJOINT counters)",
+    "totals": {
+      "cached_input_tokens": 1431232,
+      "cost_usd": 1.813119,
+      "input_tokens": 259498,
+      "input_tokens_inclusive": 1690730,
+      "lane_job_wall_seconds_lower_bound": 891.085,
+      "lane_job_wall_seconds_mean": 111.385625,
+      "output_tokens": 24444
+    },
+    "usage_coverage": {
+      "attempts": 8,
+      "coverage": 0.875,
+      "note": "coverage and the bounded residual come from the ledger v2 fold (the same honesty the #368 artifact pins): a figure the SDK never reported is a bound, never a cost column",
+      "receipts": 7,
+      "unresolved_liability_attributed_to": [
+        "6e0fdf3448ee4860b2bc34822db9489f"
+      ],
+      "unresolved_liability_usd": 0.223636
+    }
+  },
+  "recorded_profiles": {
+    "forge.budget-profiles/1@2026-09-27-align": {
+      "heavy": {
+        "max_calls": 120,
+        "max_tokens": 600000,
+        "wallclock_s": 10800
+      },
+      "origin": "the #364 live window's receipted amendment: run fbe62ad5 exhausted standard@200k (196312/200000 consumed) with the closing review stood down; the operator raised the deployment's standard profile to 600k \u2014 STILL finite, numerical, enforced. One observed task shape, not a universal requirement; the runbook default keeps standard@200k.",
+      "standard": {
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "wallclock_s": 3600
+      },
+      "trivial": {
+        "max_calls": 8,
+        "max_tokens": 40000,
+        "wallclock_s": 900
+      }
+    },
+    "runbook-default@forge-0.42.0": {
+      "heavy": {
+        "max_calls": 120,
+        "max_tokens": 600000,
+        "wallclock_s": 10800
+      },
+      "origin": "docs/operations/lab-alignment-runbook.md \u2014 the shipped default posture (the 600k token axis exists only on the heavy class)",
+      "standard": {
+        "max_calls": 40,
+        "max_tokens": 200000,
+        "wallclock_s": 3600
+      },
+      "trivial": {
+        "max_calls": 8,
+        "max_tokens": 40000,
+        "wallclock_s": 900
+      }
+    }
+  },
+  "schema": "forge.budget.calibration/1"
+}

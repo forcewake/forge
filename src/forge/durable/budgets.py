@@ -236,6 +236,124 @@ def resolve_budget_limits(
     return limits
 
 
+@dataclass(frozen=True)
+class BudgetProfileResolution:
+    """R42-06 (#379): ONE numeric profile resolved before execution, with the
+    selection REASON recorded — the ``budget.profile_selection_reason``
+    observable's value.
+
+    ``budget_class`` is the class the selection froze; ``profile_name`` the
+    configured profile the class actually resolved to (they differ only on
+    the bounded fallback); ``limits`` the numeric ceilings (``None`` — the
+    run is unlimited, no budget row is opened); ``reason`` names the exact
+    mapping case, one of:
+
+    - ``"configured profile: <name>"`` — the class named a configured
+      profile with at least one limited axis;
+    - ``"class <c> unconfigured -> standard profile (bounded fallback)"`` —
+      the class is unknown/absent from the profiles, the DEFAULT class's
+      profile applies (the task-class → profile mapping stays total);
+    - ``"no budget profiles configured (unlimited)"`` — nothing is
+      configured; honestly unlimited, never a silent fabricated ceiling;
+    - ``"profile <name> carries no limited axis (unlimited)"`` — the
+      profile exists but every axis is unset.
+    """
+
+    budget_class: str
+    profile_name: str | None
+    limits: BudgetLimits | None
+    reason: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "budget_class": self.budget_class,
+            "profile_name": self.profile_name,
+            "limits": (
+                {
+                    "max_calls": self.limits.max_calls,
+                    "max_tokens": self.limits.max_tokens,
+                    "wallclock_s": self.limits.wallclock_s,
+                }
+                if self.limits is not None
+                else None
+            ),
+            "profile_selection_reason": self.reason,
+        }
+
+
+def resolve_budget_profile(
+    profiles: dict[str, dict[str, Any]], budget_class: str
+) -> BudgetProfileResolution:
+    """Resolve ONE numeric profile for *budget_class* and RECORD why.
+
+    The task-class → profile mapping is TOTAL (R42-06 / #379): an unknown or
+    unconfigured class, an empty configuration and an all-unset profile are
+    four distinct BOUNDED cases named in ``reason`` — never exceptions, never
+    a silent guess. The resolution happens BEFORE execution and the caller
+    freezes the result into the RunSpec, so a changed default can never move
+    an already-approved run (that takes a recorded amendment, #340).
+
+    One deliberate divergence from the legacy :func:`resolve_budget_limits`:
+    a class whose configured profile EXISTS but limits no axis reads here as
+    the operator's own "unlimited on every axis" declaration (the documented
+    omit/null semantics), while the legacy truthiness fallback would borrow
+    the default class's numbers in that corner. The bounded case is NAMED
+    either way; limits themselves agree everywhere else.
+    """
+    if not profiles:
+        return BudgetProfileResolution(
+            budget_class=budget_class,
+            profile_name=None,
+            limits=None,
+            reason="no budget profiles configured (unlimited)",
+        )
+    profile = profiles.get(budget_class)
+    if not isinstance(profile, dict):
+        # The bounded fallback (the R13 rule, now RECORDED): an unknown or
+        # unconfigured class maps to the DEFAULT class's profile — the
+        # mapping stays total and the fallback is named, never silent.
+        fallback = profiles.get(DEFAULT_BUDGET_CLASS)
+        fallback_reason = (
+            f"class {budget_class!r} unconfigured -> standard profile (bounded fallback)"
+        )
+        if not isinstance(fallback, dict):
+            return BudgetProfileResolution(
+                budget_class=budget_class,
+                profile_name=None,
+                limits=None,
+                reason=fallback_reason,
+            )
+        fallback_limits = BudgetLimits(
+            wallclock_s=_limit_or_none(fallback.get("wallclock_s")),
+            max_calls=_limit_or_none(fallback.get("max_calls")),
+            max_tokens=_limit_or_none(fallback.get("max_tokens")),
+        )
+        return BudgetProfileResolution(
+            budget_class=budget_class,
+            profile_name=DEFAULT_BUDGET_CLASS,
+            limits=None if fallback_limits == BudgetLimits() else fallback_limits,
+            reason=fallback_reason,
+        )
+    limits = BudgetLimits(
+        wallclock_s=_limit_or_none(profile.get("wallclock_s")),
+        max_calls=_limit_or_none(profile.get("max_calls")),
+        max_tokens=_limit_or_none(profile.get("max_tokens")),
+    )
+    if limits == BudgetLimits():
+        return BudgetProfileResolution(
+            budget_class=budget_class,
+            profile_name=budget_class,
+            limits=None,
+            reason=f"profile {budget_class!r} carries no limited axis (unlimited)",
+        )
+    return BudgetProfileResolution(
+        budget_class=budget_class,
+        profile_name=budget_class,
+        limits=limits,
+        reason=f"configured profile: {budget_class}",
+    )
+
+
 def wallclock_deadline(budget: RunBudget) -> datetime | None:
     """The budget's absolute wall-clock deadline, or ``None`` when unlimited.
 

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the 9e8d6c6 review, R42-06: budget calibration without weakened verification (#379)
+
+The recorded basis: the #364 live window raised the standard token cap
+200k→600k after run `fbe62ad5` exhausted the 200k window with the
+closing review stood down — one observed task shape, never proof every
+task needs 600k. The calibration lands measurement-first:
+
+- **The measurement (scope 5)**:
+  `scripts/build_budget_calibration.py` →
+  `evaluation/economics/budget-calibration-v1.json` (byte-deterministic
+  rebuild pinned by test) — nine SDK lane receipts across the #364/#377
+  captures with context expansion and redundant reads (the cache
+  re-read fraction runs 0.756–0.900, overall 0.847 — the token axis
+  measures CONTEXT, not task weight), usage coverage 0.875 with the
+  $0.223636 unreceipted residual bounded (never a cost column), failed
+  attempts and human corrections named with their own spend, and the
+  exhaustion event decomposed (the SDK receipt's 194,789 tokens plus
+  1,523 gateway tokens = the recorded 196,312). Docs:
+  `docs/operations/budget-calibration.md`.
+- **The structured assessment (scope 2)**: the planner output schema
+  now asks for `budget_class` (`trivial|standard|heavy`) + a
+  one-sentence `budget_reason` — the NORMAL planning composition
+  produces it, no test-injected field. The assessment is a REQUEST the
+  compiler re-validates; policy ceilings stay outside model authority
+  (the enforced row opens BEFORE the first paid call and an assessment
+  never moves it).
+- **One profile, reason recorded (scope 3)**:
+  `compile_harness_selection` records `budget_class_reason` on the
+  frozen selection (valid / absent / malformed are three DISTINCT
+  bounded cases, never an exception path), and the new
+  `forge.durable.budgets.resolve_budget_profile` resolves the numeric
+  profile with the selection reason (`budget.profile_selection_reason`)
+  — unknown classes degrade to the default profile, never to unlimited.
+- **The closing reserve verified (scope 4)**:
+  `tests/test_budget_calibration.py` replays the measured receipt shape
+  against the REAL guard — unpartitioned, the reviewer's hold is
+  refused (the recorded fence); under `closing-partition/1` the coder
+  is fenced at the share boundary and the reviewer completes within
+  its reserve on both axes.
+- **The 600k honesty (scope 7)**: the 600k standard cap stays a
+  RECORDED PROFILE with its origin named
+  (`forge.budget-profiles/1@2026-09-27-align`); the runbook default
+  keeps standard@200k, and a changed default never alters an approved
+  run without a recorded amendment (pinned by test).
+- **The amendment workflow documented (scope 6)**: the operator flow
+  for measured insufficiency (live-run amendment vs receipted profile
+  change) in `docs/operations/budget-calibration.md` §6 and the
+  calibration section of `docs/operations/closing-budget.md`.
+
 ### Added — the 9e8d6c6 review, R42-04: the build-once candidate qualification (#377)
 
 The disclosed gap closed by process: the v0.41.0 live loop ran wheel

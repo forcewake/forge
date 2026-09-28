@@ -28,14 +28,29 @@ PLANNER_MAX_INPUT_CHARS = 12000
 #: How much of the plan markdown is kept as the evidence summary.
 PLAN_SUMMARY_CHARS = 1500
 
+#: The budget classes the planner may REQUEST (R42-06 / #379): the same
+#: closed triple :data:`forge.runs.harness_selection.BUDGET_CLASSES` freezes.
+#: The assessment is a REQUEST, never a grant — the numeric ceilings live in
+#: the operator's configured profiles (FORGE_BUDGET_PROFILES) and the
+#: compiler re-validates the class against the closed set (rule 4, ADR-0023).
+PLANNER_BUDGET_CLASSES: tuple[str, ...] = ("trivial", "standard", "heavy")
+
 _SYSTEM_PROMPT = (
     "You are the planning agent of a code-writing bot for GitLab projects.\n"
     "Given an issue, produce a short, concrete implementation plan.\n"
     "Respond with ONLY a JSON object with exactly these keys:\n"
     '{"summary": "<1-3 sentences>", "steps": ["<step>", ...], '
-    '"risks": ["<risk>", ...], "files_hint": ["<path or extension>", ...]}\n'
+    '"risks": ["<risk>", ...], "files_hint": ["<path or extension>", ...], '
+    '"budget_class": "<trivial|standard|heavy>", '
+    '"budget_reason": "<one short sentence>"}\n'
     "Rules: steps and risks must be strings; files_hint lists paths or "
     'extensions (e.g. "src/app.py", ".py") likely to need changes; '
+    "budget_class is your ASSESSMENT of the task's size — trivial for a "
+    "one-file docs/typo fix, standard for a normal feature or bugfix, "
+    "heavy for multi-file or risky changes; you may narrow or escalate "
+    "the class but you never grant yourself more budget — the configured "
+    "profiles and their ceilings stay the operator's authority; "
+    "budget_reason explains the class in one sentence; "
     "never propose changes to CI config, dependency lockfiles or forge's "
     "own configuration; do not invent file contents."
 )
@@ -114,6 +129,22 @@ class LLMPlanner:
             return []
         return [str(h) for h in (self.last_plan.get("files_hint") or []) if str(h).strip()]
 
+    def budget_assessment(self) -> str:
+        """The planner's REQUESTED budget class (R42-06 / #379), or ``""``.
+
+        A lenient read of the optional structured assessment: whatever the
+        model answered for ``budget_class``, cleaned to a string. An absent,
+        non-string or unknown value returns ``""`` — the assessment is a
+        REQUEST the selection compiler re-validates against the closed
+        :data:`PLANNER_BUDGET_CLASSES` triple (the model may narrow or
+        escalate the class; it never grants itself a ceiling — the numeric
+        profiles stay the operator's configured authority).
+        """
+        if not self.last_plan:
+            return ""
+        value = str(self.last_plan.get("budget_class") or "").strip()
+        return value if value in PLANNER_BUDGET_CLASSES else ""
+
 
 def _as_lines(value: Any) -> str:
     """Render a JSON list (or string) as markdown bullet lines."""
@@ -129,6 +160,7 @@ def _as_lines(value: Any) -> str:
 
 
 __all__ = [
+    "PLANNER_BUDGET_CLASSES",
     "PLANNER_MAX_INPUT_CHARS",
     "PLANNER_TIER",
     "PLAN_SUMMARY_CHARS",
