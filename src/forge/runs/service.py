@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from uuid import uuid4
 
 import httpx
@@ -103,6 +103,8 @@ from forge.adaptive.revisions import (
     REQUEST_DISPATCHED,
     REQUEST_MATERIALIZED,
     REQUEST_MR_CLOSED,
+    REQUEST_MR_FORBIDDEN,
+    REQUEST_MR_MISSING,
     REQUEST_RECORDED,
     REQUEST_REFUSED_UNAUTHORIZED,
     REQUEST_ROUND_ADMITTED,
@@ -115,7 +117,9 @@ from forge.adaptive.revisions import (
     RevisionRebindRefused,
     ReviewFeedbackRefused,
     ReviewFeedbackRequest,
+    ReviewObservationRetryable,
     classify_review_feedback,
+    delivery_identity,
     executor_digest_document,
     head_binding_guard,
     mark_review_feedback_request,
@@ -198,6 +202,7 @@ from forge.durable.budgets import (
     usd_amendment_total,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition, StaleClaimError
+from forge.durable.claims import current_claim
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
@@ -362,8 +367,59 @@ _OCCUPANCY_INTENT_SKEW = timedelta(seconds=300)
 #: occupancy. A merge-request verification pipeline runs for the REVIEW
 #: surface (merged-result/detached contexts), not for the dispatched
 #: harness — charging it as coding capacity is the out-of-scope policy
-#: the issue names, so it classifies as history.
-_OCCUPANCY_NON_CODING_SOURCES = frozenset({"merge_request"})
+#: the issue names, so it classifies as history. R42-02 (#375): GitLab
+#: emits ``merge_request_event`` (the canonical spelling in the 15-value
+#: ``CI_PIPELINE_SOURCE`` inventory — docs/research/2026-09-27-gitlab-
+#: pipeline-sources/); the pre-#375 constant matched ``merge_request``,
+#: a value GitLab never emits for this purpose, so the exclusion NEVER
+#: matched. The value is compared after the adapter-boundary
+#: normalization (:func:`forge.gitlab.schemas.normalize_pipeline_source`)
+#: folds the legacy spelling onto the canonical one — service code never
+#: sees a presentation label.
+_OCCUPANCY_NON_CODING_SOURCES = frozenset({"merge_request_event"})
+
+#: R42-02 (#375): the correlation STRENGTH of one branch-listing row —
+#: how strongly the durable identity surfaces bind the row to the CURRENT
+#: execution attempt. Strongest first:
+#:
+#: - ``exact_native_handle`` — the row IS the attempt's verified live
+#:   handle (the journal's post-intent ``harness_start`` answer); the
+#:   exact-handle probe reads it directly, the classifier only confirms
+#:   the agreement;
+#: - ``dispatch_operation`` — the row runs a sha THIS attempt's dispatch
+#:   committed (a journal commit / intent effect inside the window): the
+#:   dispatch operation's own product;
+#: - ``corroborated_start`` — corroborated timestamp-ref-source:
+#:   ``created_at`` inside the intent's dispatch window (skew-tolerant)
+#:   with a CODING source on the run-owned branch — or, when the
+#:   timestamp is degraded, a fresh id strictly above every id an
+#:   earlier attempt recorded;
+#: - ``ambiguous`` — neither side provable (a possibly-current row that
+#:   cannot be sworn either way: it RETAINS when active, never releases);
+#: - ``historical`` — an earlier attempt's, the predecessor's, or a
+#:   non-coding (verification) pipeline.
+_OCCUPANCY_EVIDENCE_HANDLE = "exact_native_handle"
+_OCCUPANCY_EVIDENCE_DISPATCH = "dispatch_operation"
+_OCCUPANCY_EVIDENCE_CORROBORATED = "corroborated_start"
+_OCCUPANCY_EVIDENCE_AMBIGUOUS = "ambiguous"
+_OCCUPANCY_EVIDENCE_HISTORY = "historical"
+#: The strengths that bind a row to the CURRENT attempt — the rows whose
+#: terminal completion is the ONLY branch evidence that releases a slot.
+_OCCUPANCY_CURRENT_STRENGTHS = frozenset(
+    {_OCCUPANCY_EVIDENCE_HANDLE, _OCCUPANCY_EVIDENCE_DISPATCH, _OCCUPANCY_EVIDENCE_CORROBORATED}
+)
+#: Weakest-to-strongest order, for the operator-facing evidence_strength
+#: of an unresolved verdict (``none`` — an empty listing — is weaker than
+#: any observed row).
+_OCCUPANCY_EVIDENCE_NONE = "none"
+_OCCUPANCY_EVIDENCE_ORDER = (
+    _OCCUPANCY_EVIDENCE_NONE,
+    _OCCUPANCY_EVIDENCE_HISTORY,
+    _OCCUPANCY_EVIDENCE_AMBIGUOUS,
+    _OCCUPANCY_EVIDENCE_CORROBORATED,
+    _OCCUPANCY_EVIDENCE_DISPATCH,
+    _OCCUPANCY_EVIDENCE_HANDLE,
+)
 
 
 @dataclass(frozen=True)
@@ -387,7 +443,11 @@ class _OccupancyCorrelation:
       monotone, so anything at or below the newest of these is history;
     - ``base_shas`` — the identities this attempt builds ON (the run's
       recorded base, the round's approved head, the intents' expected
-      parents): a pipeline running one of them is the predecessor's;
+      parents): NOT proof of history by themselves (R42-02, #375 — a
+      newly dispatched coding pipeline STARTS at its input revision, the
+      base SHA, before any agent commit exists); they only step a row
+      down when the dispatch window or the monotone-id bound already
+      contradicts currency;
     - ``effect_shas`` — the candidate/effect identities THIS attempt
       recorded (journal commit shas and intent effects inside the window):
       a pipeline running one of them is the current attempt's.
@@ -400,6 +460,24 @@ class _OccupancyCorrelation:
     prior_pipeline_ids: frozenset[int] = frozenset()
     base_shas: frozenset[str] = frozenset()
     effect_shas: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _BranchSearchVerdict:
+    """The R42-02 (#375) occupancy verdict over one correlated listing.
+
+    ``status`` is the probe's answer; ``evidence_strength`` is the
+    STRONGEST correlation strength any row showed (``none`` for an empty
+    listing) — the operator-facing signal of how close a genuinely
+    unresolved start came to decidability; ``rows`` counts the listing by
+    strength, so an unresolved lease's surfacing can say what was
+    actually observed (``3 historical, 1 ambiguous, 0 current``) instead
+    of just "unresolved".
+    """
+
+    status: NativeStatus
+    evidence_strength: str
+    rows: dict[str, int]
 
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
@@ -542,6 +620,59 @@ _REVIEW_FEEDBACK_REPLY_KIND = "review_feedback_note"
 #: Q39-13 (#332): the journaled kind of the held-candidate summary note
 #: (one per run + candidate sha).
 _REVIEW_FEEDBACK_SUMMARY_KIND = "review_feedback_summary"
+
+#: R42-01 (#374): the step-level outcome stream of a feedback command —
+#: one outbox row per CHANGED ``(outcome, reason)`` per note
+#: (``feedback.outcome = completed|refused|pending|exhausted``).
+#: ``completed``/``refused`` accompany the request's own durable
+#: lifecycle; ``pending``/``exhausted`` are the retryable-observation
+#: states no request row can express.
+FEEDBACK_OUTCOME_EVENT = "feedback.outcome"
+
+#: R42-01 (#374): one row per RETRYABLE deferral of a required provider
+#: observation — counting rows per ``reason`` is
+#: ``provider_observation.retry_count{reason}``; ``observed: false`` is
+#: the head-never-observed FACT (the binding that lands later is
+#: provably the first successful observation).
+PROVIDER_OBSERVATION_RETRY_EVENT = "provider_observation.retry"
+
+#: The request statuses whose outcome class is ``refused`` (everything
+#: else a request can settle into is a ``completed`` outcome).
+_FEEDBACK_REFUSED_STATUSES = frozenset(
+    {
+        REQUEST_REFUSED_UNAUTHORIZED,
+        REQUEST_DELETED_DISCUSSION,
+        REQUEST_CONFLICTING,
+        REQUEST_WINDOW_CLOSED,
+        REQUEST_MR_CLOSED,
+        REQUEST_ROUND_LIMIT,
+        REQUEST_TARGET_REFUSED,
+        REQUEST_STALE_HEAD,
+        REQUEST_MR_FORBIDDEN,
+        REQUEST_MR_MISSING,
+    }
+)
+
+
+def _outcome_of_status(status: str) -> str:
+    """The ``feedback.outcome`` class of one request lifecycle status."""
+    return "refused" if status in _FEEDBACK_REFUSED_STATUSES else "completed"
+
+
+def _retry_after_hint(exc: Exception) -> float | None:
+    """The provider's declared re-read hint, when the failing response
+    carried one (R42-01 / #374) — clamped to the step backoff cap so a
+    hostile ``Retry-After`` can never pin a step indefinitely."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    raw = getattr(response, "headers", {}).get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return min(max(float(raw), 0.0), 300.0)
+    except (TypeError, ValueError):
+        return None
 
 
 def _automated_footer() -> str:
@@ -2698,21 +2829,61 @@ class RunService:
                 "Review feedback from @%s who is not in FORGE_APPROVERS — refusing",
                 author_username,
             )
+            await self._journal_feedback_outcome(
+                run_id, note_id, "refused", REQUEST_REFUSED_UNAUTHORIZED
+            )
             await self._reply_review_feedback(
                 project_id, mr_iid, run_id, note_id, self._rf_unauthorized_body(author_username)
             )
             return
 
+        # R42-01 (#374): the head read is a REQUIRED observation — a
+        # transient failure must leave the step RETRYABLE, never
+        # completed. The command's identity is already durable (the
+        # gateway's inbox + StepRun transaction), so the step runtime's
+        # bounded-backoff retry owns the re-delivery; the old plain
+        # return recorded success with no request outcome and the
+        # processing obligation died with it. A 403/404 surface read is
+        # PERMANENT instead — recorded typed, no retry storm.
         try:
             head = await self._read_mr_head(project_id, mr_iid, issue_iid, run_id)
-        except GitLabAPIError:
-            logger.info("MR head read failed for MR !%s — the redelivery re-enters here", mr_iid)
+        except GitLabAPIError as exc:
+            if exc.status_code in self._PERMANENT_READ_STATUSES:
+                await self._refuse_feedback_surface_read(
+                    run_id,
+                    note_id,
+                    actor=author_username,
+                    discussion_id=discussion_id,
+                    mr_iid=mr_iid,
+                    text=body,
+                    exc=exc,
+                    existing=existing,
+                )
+                return
+            await self._defer_review_observation(run_id, note_id, "mr_head", exc)
+            return  # pragma: no cover — the defer raises; the mutation arm lands here
+        except CollaborationTargetError as exc:
+            # An unresolved legacy topology is a PERMANENT refusal (the
+            # round route's own typed answer — a branch is never inferred).
+            await self._refuse_feedback_target(
+                run_id, note_id, author_username, discussion_id, mr_iid, body, exc, existing
+            )
+            await self._reply_review_feedback(
+                project_id, mr_iid, run_id, note_id, self._rf_target_refused_body(run_id, exc)
+            )
             return
         # The originating discussion: the typed deleted-discussion check
         # runs when the discussions surface is readable.
         resolved_discussion = discussion_id
         diff_context = ""
-        discussions = await self._discussions_or_none(project_id, mr_iid)
+        try:
+            discussions = await self._discussions_or_none(project_id, mr_iid)
+        except GitLabAPIError as exc:
+            # R42-01 (#374): a non-404 discussions read is TRANSIENT —
+            # defer to the step retry, never a silent guess (the 404
+            # degradation is decided inside the helper).
+            await self._defer_review_observation(run_id, note_id, "mr_discussions", exc)
+            return  # pragma: no cover — the defer raises
         if discussions is not None and discussion_id:
             match = next((d for d in discussions if d.id == discussion_id), None)
             if match is None:
@@ -2734,6 +2905,9 @@ class RunService:
                     "Review feedback note %s references deleted discussion %s — refusing",
                     note_id,
                     discussion_id,
+                )
+                await self._journal_feedback_outcome(
+                    run_id, note_id, "refused", REQUEST_DELETED_DISCUSSION
                 )
                 await self._reply_review_feedback(
                     project_id,
@@ -2759,6 +2933,7 @@ class RunService:
             logger.info(
                 "Review feedback on run %s without a resolvable spec — ignoring", run_id[:8]
             )
+            await self._journal_feedback_outcome(run_id, note_id, "refused", "spec_unreadable")
             return
         classification = classify_review_feedback(kind, body, allowed_paths)
         request = ReviewFeedbackRequest(
@@ -2774,11 +2949,27 @@ class RunService:
             diff_context=diff_context,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        try:
-            recorded = await record_review_feedback_request(self._session_factory, run_id, request)
-        except ReviewFeedbackRefused as exc:
-            logger.info("Review feedback note %s refused [%s]", note_id, exc.code)
-            return
+        # R42-01 (#374): a RETRY of this command re-enters here with the
+        # SAME payload but LIVE observations that may have moved (the
+        # head above all). The durable record IS the note's identity and
+        # its head binding: the recorded request answers, and every
+        # downstream fence compares ITS binding against the live head
+        # (the existing ``stale_head`` decision) — never a silent
+        # re-binding, and never a ``note_id_conflict`` that would kill
+        # the obligation the retry exists to discharge.
+        prior = existing.get(note_id)
+        if prior is not None and delivery_identity(prior) == delivery_identity(request):
+            request = prior
+            recorded = prior
+        else:
+            try:
+                recorded = await record_review_feedback_request(
+                    self._session_factory, run_id, request
+                )
+            except ReviewFeedbackRefused as exc:
+                logger.info("Review feedback note %s refused [%s]", note_id, exc.code)
+                await self._journal_feedback_outcome(run_id, note_id, "refused", exc.code)
+                return
 
         if recorded.status != REQUEST_RECORDED:
             # A redelivery after the request already took its first
@@ -2789,21 +2980,20 @@ class RunService:
             replay_body = self._rf_replay_body(recorded, allowed_paths)
             if replay_body:
                 await self._reply_review_feedback(project_id, mr_iid, run_id, note_id, replay_body)
+            await self._journal_feedback_outcome(
+                run_id, note_id, _outcome_of_status(recorded.status), recorded.status
+            )
             return
 
         if classification == CLARIFICATION_CLASS:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, note_id, REQUEST_CLARIFICATION_OPEN
-            )
+            await self._mark_feedback_request(run_id, note_id, REQUEST_CLARIFICATION_OPEN)
             await self._reply_review_feedback(
                 project_id, mr_iid, run_id, note_id, self._rf_clarification_body(run_id, body)
             )
             return
 
         if classification == MATERIAL_CHANGE_CLASS:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, note_id, REQUEST_MATERIALIZED
-            )
+            await self._mark_feedback_request(run_id, note_id, REQUEST_MATERIALIZED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -2826,9 +3016,7 @@ class RunService:
             if run_status == FlowStatus.READY_FOR_HUMAN.value:
                 await self._admit_review_round(project_id, mr_iid, run_id, issue_iid, request)
                 return
-            await mark_review_feedback_request(
-                self._session_factory, run_id, note_id, REQUEST_WINDOW_CLOSED
-            )
+            await self._mark_feedback_request(run_id, note_id, REQUEST_WINDOW_CLOSED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -2845,8 +3033,7 @@ class RunService:
             if other.status == REQUEST_STAGED and other.note_id != note_id
         ]
         if pending:
-            await mark_review_feedback_request(
-                self._session_factory,
+            await self._mark_feedback_request(
                 run_id,
                 note_id,
                 REQUEST_CONFLICTING,
@@ -2869,16 +3056,18 @@ class RunService:
                 exc.code,
                 exc.detail,
             )
+            await self._journal_feedback_outcome(run_id, note_id, "refused", exc.code)
             await self._reply_review_feedback(
                 project_id, mr_iid, run_id, note_id, self._rf_refused_body(run_id, exc)
             )
             return
+        await self._journal_feedback_outcome(run_id, note_id, "completed", REQUEST_STAGED)
         await self._reply_review_feedback(
             project_id,
             mr_iid,
             run_id,
             note_id,
-            self._rf_staged_body(run_id, decision_id, head, request),
+            self._rf_staged_body(run_id, decision_id, request.head_sha, request),
         )
 
     async def evaluate_review_corrections(self) -> None:
@@ -2940,9 +3129,7 @@ class RunService:
                 )
             except ReviewFeedbackRefused as exc:
                 if exc.code == "stale_head":
-                    await mark_review_feedback_request(
-                        self._session_factory, run_id, request.note_id, REQUEST_STALE_HEAD
-                    )
+                    await self._mark_feedback_request(run_id, request.note_id, REQUEST_STALE_HEAD)
                     await self._reply_review_feedback(
                         project_id,
                         mr_iid,
@@ -2997,9 +3184,7 @@ class RunService:
         # advance legs run, so a crash mid-dispatch resumes through the
         # proposing status (the repair leg's own crash-resume discipline)
         # instead of dispatching twice.
-        await mark_review_feedback_request(
-            self._session_factory, run_id, request.note_id, REQUEST_DISPATCHED
-        )
+        await self._mark_feedback_request(run_id, request.note_id, REQUEST_DISPATCHED)
         logger.info(
             "Run %s enters review correction cycle %d (head %s) — re-dispatching",
             run_id[:8],
@@ -3171,20 +3356,28 @@ class RunService:
         if mr_iid is None:
             logger.info("Review round for run %s without an MR — ignoring", run_id[:8])
             return
+        # R42-01 (#374): the MR-state read is a REQUIRED observation, and
+        # it runs AFTER the request is recorded — a transient failure
+        # defers to the step retry (the recorded request IS the durable
+        # obligation the retry resumes; the old plain return completed
+        # the step and stranded it in ``recorded`` forever), while a
+        # 403/404 is the PERMANENT typed surface refusal — no retry
+        # storm, no reply attempt.
         try:
             mr = await self._gitlab.get_merge_request(project_id, mr_iid)
-        except GitLabAPIError:
-            logger.info(
-                "MR !%s state read failed for run %s — the redelivery re-enters here",
-                mr_iid,
-                run_id[:8],
-            )
-            return
+        except GitLabAPIError as exc:
+            if exc.status_code in self._PERMANENT_READ_STATUSES:
+                await self._mark_feedback_request(
+                    run_id,
+                    request.note_id,
+                    REQUEST_MR_FORBIDDEN if exc.status_code == 403 else REQUEST_MR_MISSING,
+                )
+                return
+            await self._defer_review_observation(run_id, request.note_id, "mr_state", exc)
+            return  # pragma: no cover — the defer raises; the mutation arm lands here
         mr_state = (getattr(mr, "state", "") or "").strip().lower()
         if mr_state in ("merged", "closed"):
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_MR_CLOSED
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_MR_CLOSED)
             await self._reply_review_feedback(
                 project_id, mr_iid, run_id, request.note_id, self._rf_mr_closed_body(mr_state)
             )
@@ -3199,8 +3392,7 @@ class RunService:
         # depends on which round's candidate landed last.
         open_rounds = [row for row in rounds if row.status in self._ROUND_OPEN_STATUSES]
         if open_rounds:
-            await mark_review_feedback_request(
-                self._session_factory,
+            await self._mark_feedback_request(
                 run_id,
                 request.note_id,
                 REQUEST_CONFLICTING,
@@ -3217,13 +3409,34 @@ class RunService:
         # The head fence DURING approval: the request bound the MR head at
         # note time; a head that moved since is a human edit this
         # authorization never saw — preserve it, refuse stale.
-        head = await self._read_mr_head(project_id, mr_iid, issue_iid, run_id)
+        # R42-01 (#374): this read is REQUIRED too — the same
+        # defer-or-refuse decision as the MR-state read above.
+        try:
+            head = await self._read_mr_head(project_id, mr_iid, issue_iid, run_id)
+        except GitLabAPIError as exc:
+            if exc.status_code in self._PERMANENT_READ_STATUSES:
+                await self._mark_feedback_request(
+                    run_id,
+                    request.note_id,
+                    REQUEST_MR_FORBIDDEN if exc.status_code == 403 else REQUEST_MR_MISSING,
+                )
+                return
+            await self._defer_review_observation(run_id, request.note_id, "mr_head", exc)
+            return  # pragma: no cover — the defer raises; the mutation arm lands here
+        except CollaborationTargetError as exc:
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_TARGET_REFUSED)
+            await self._reply_review_feedback(
+                project_id,
+                mr_iid,
+                run_id,
+                request.note_id,
+                self._rf_target_refused_body(run_id, exc),
+            )
+            return
         try:
             head_binding_guard(request.head_sha, head)
         except ReviewFeedbackRefused:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_STALE_HEAD
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_STALE_HEAD)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -3235,9 +3448,7 @@ class RunService:
             return
         bound = max_review_rounds()
         if bound <= 0 or len(rounds) >= bound:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_ROUND_LIMIT
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_ROUND_LIMIT)
             await self._reply_review_feedback(
                 project_id, mr_iid, run_id, request.note_id, self._rf_round_limit_body(bound)
             )
@@ -3254,9 +3465,7 @@ class RunService:
         try:
             target = await self._resolve_collaboration_target(run_id)
         except CollaborationTargetError as exc:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_TARGET_REFUSED
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_TARGET_REFUSED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -3273,9 +3482,7 @@ class RunService:
         try:
             spec = await self._load_executable_spec(run_id)
         except SpecInvalid as exc:
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_WINDOW_CLOSED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -3313,9 +3520,7 @@ class RunService:
         )
         if mismatches:
             await self._record_target_mismatch(run_id, target, mismatches)
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_TARGET_REFUSED
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_TARGET_REFUSED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -3344,9 +3549,7 @@ class RunService:
         except ReviewFeedbackRefused as exc:
             if exc.code != "content_unreadable":
                 raise
-            await mark_review_feedback_request(
-                self._session_factory, run_id, request.note_id, REQUEST_WINDOW_CLOSED
-            )
+            await self._mark_feedback_request(run_id, request.note_id, REQUEST_WINDOW_CLOSED)
             await self._reply_review_feedback(
                 project_id,
                 mr_iid,
@@ -3395,8 +3598,7 @@ class RunService:
             winner = next(
                 (row for row in rounds_now if row.status in self._ROUND_OPEN_STATUSES), None
             )
-            await mark_review_feedback_request(
-                self._session_factory,
+            await self._mark_feedback_request(
                 run_id,
                 request.note_id,
                 REQUEST_CONFLICTING,
@@ -3414,13 +3616,13 @@ class RunService:
             logger.info(
                 "Review round for run %s refused [%s] — %s", run_id[:8], exc.code, exc.detail
             )
+            await self._journal_feedback_outcome(run_id, request.note_id, "refused", exc.code)
             return
 
         # Durable-first: the parent's request carries the linkage BEFORE
         # the dispatch legs run (a crash mid-dispatch resumes through the
         # admitted round + the reconciler pass below).
-        await mark_review_feedback_request(
-            self._session_factory,
+        await self._mark_feedback_request(
             run_id,
             request.note_id,
             REQUEST_ROUND_ADMITTED,
@@ -3951,9 +4153,7 @@ class RunService:
             )
             return
         await self._release_execution_lease(row.child_run_id, "review_round:foreign_head")
-        await mark_review_feedback_request(
-            self._session_factory, row.parent_run_id, row.note_id, REQUEST_STALE_HEAD
-        )
+        await self._mark_feedback_request(row.parent_run_id, row.note_id, REQUEST_STALE_HEAD)
         await self._reply_review_feedback(
             child.project_id,
             row.mr_iid,
@@ -4219,6 +4419,230 @@ class RunService:
                 .first()
             )
         return row is not None
+
+    #: R42-01 (#374): the surface-read statuses that never heal by
+    #: re-reading — a permanent typed refusal, never a retry.
+    _PERMANENT_READ_STATUSES = (403, 404)
+
+    async def _journal_feedback_outcome(
+        self, run_id: str, note_id: str, outcome: str, reason: str = ""
+    ) -> None:
+        """R42-01 (#374): one ``feedback.outcome`` row per CHANGED outcome.
+
+        The step-level stream of a feedback command's processing —
+        ``completed|refused|pending|exhausted`` with the request status
+        (or the observation reason) as the dimension. One row per
+        CHANGED ``(note, outcome, reason)``: a repeat (a replay, a
+        second deferral of the same observation) is already visible as
+        the newest event — the ``review_round.effect_resolution``
+        discipline.
+        """
+        async with self._session_factory() as session:
+            last = (
+                (
+                    await session.execute(
+                        select(Outbox.payload)
+                        .where(
+                            Outbox.flow_run_id == run_id,
+                            Outbox.event_type == FEEDBACK_OUTCOME_EVENT,
+                        )
+                        .order_by(Outbox.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if (
+                isinstance(last, dict)
+                and last.get("note_id") == note_id
+                and last.get("outcome") == outcome
+                and last.get("reason") == reason
+            ):
+                return
+            session.add(
+                Outbox(
+                    flow_run_id=run_id,
+                    event_type=FEEDBACK_OUTCOME_EVENT,
+                    payload={
+                        "run_id": run_id,
+                        "note_id": note_id,
+                        "outcome": outcome,
+                        "reason": reason,
+                    },
+                )
+            )
+            await session.commit()
+
+    async def _mark_feedback_request(
+        self, run_id: str, note_id: str, status: str, **updates: Any
+    ) -> ReviewFeedbackRequest | None:
+        """One lifecycle mark + the matching ``feedback.outcome`` row.
+
+        Every terminal mark IS a processing outcome (R42-01 / #374): the
+        journal row keeps the step-level stream in agreement with the
+        request-level ``review_feedback.request`` stream without a
+        second bookkeeping discipline at every call site.
+        """
+        updated = await mark_review_feedback_request(
+            self._session_factory, run_id, note_id, status, **updates
+        )
+        if updated is not None:
+            await self._journal_feedback_outcome(
+                run_id, note_id, _outcome_of_status(status), status
+            )
+        return updated
+
+    async def _defer_review_observation(
+        self, run_id: str, note_id: str, reason: str, exc: Exception
+    ) -> NoReturn:
+        """Journal one retryable-observation deferral, then RAISE the typed retry.
+
+        R42-01 (#374): the command's identity is already durable (the
+        inbox row + StepRun the gateway committed BEFORE this handler
+        ran), so a transient observation failure re-enters through the
+        step runtime's retry machinery — bounded jittered backoff, the
+        ``deadline_at`` budget, the visible ``dead`` exhaustion. The
+        raised :class:`ReviewObservationRetryable` fails the step; a
+        plain return instead would record success and the command's
+        processing obligation would die with it.
+
+        Journals ``provider_observation.retry`` (one row per deferral —
+        the ``retry_count{reason}`` dimension; ``observed: false`` is
+        the head-never-observed fact) and ``feedback.outcome`` =
+        ``exhausted`` when the failing attempt is the claim's LAST (the
+        same arithmetic ``fail_step`` applies — the step parks ``dead``
+        and the operator repair query lists it), ``pending`` otherwise.
+        """
+        claim = current_claim()
+        exhausted = False
+        if claim is not None:
+            async with self._session_factory() as session:
+                row = await session.get(StepRun, claim.step_id)
+                exhausted = row is not None and int(row.attempt) + 1 >= int(row.max_attempts)
+        async with self._session_factory() as session:
+            session.add(
+                Outbox(
+                    flow_run_id=run_id,
+                    event_type=PROVIDER_OBSERVATION_RETRY_EVENT,
+                    payload={
+                        "run_id": run_id,
+                        "note_id": note_id,
+                        "reason": reason,
+                        "status_code": getattr(exc, "status_code", None),
+                        "observed": False,
+                        "detail": str(exc)[:400],
+                    },
+                )
+            )
+            await session.commit()
+        await self._journal_feedback_outcome(
+            run_id, note_id, "exhausted" if exhausted else "pending", reason
+        )
+        logger.warning(
+            "Review observation %r for note %s (run %s) deferred — %s",
+            reason,
+            note_id,
+            run_id[:8],
+            exc,
+        )
+        raise ReviewObservationRetryable(
+            reason,
+            str(exc),
+            retry_after=_retry_after_hint(exc),
+            status_code=getattr(exc, "status_code", None),
+        )
+
+    async def _refuse_feedback_surface_read(
+        self,
+        run_id: str,
+        note_id: str,
+        *,
+        actor: str,
+        discussion_id: str,
+        mr_iid: int,
+        text: str,
+        exc: GitLabAPIError,
+        existing: Mapping[str, ReviewFeedbackRequest],
+    ) -> None:
+        """R42-01 (#374): a PERMANENT surface-read refusal (403/404), recorded.
+
+        The request document keeps the audit — the note was accepted,
+        its collaboration surface read was refused — with the typed
+        status (``mr_forbidden`` / ``mr_missing``). NO retry (these
+        statuses never heal; a retry storm against a deleted MR is
+        noise), no model calls, and no reply attempt (the write surface
+        is as gone or forbidden as the read). A re-delivery finds the
+        record and stays silent.
+        """
+        status = REQUEST_MR_FORBIDDEN if exc.status_code == 403 else REQUEST_MR_MISSING
+        if note_id not in existing:
+            await record_review_feedback_request(
+                self._session_factory,
+                run_id,
+                ReviewFeedbackRequest(
+                    note_id=note_id,
+                    run_id=run_id,
+                    discussion_id=discussion_id,
+                    mr_iid=mr_iid,
+                    actor=actor,
+                    head_sha="",
+                    classification=CLARIFICATION_CLASS,
+                    text=text,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    status=status,
+                ),
+            )
+        logger.info(
+            "Review feedback note %s surface read refused (%s) for MR !%s — permanent",
+            note_id,
+            status,
+            mr_iid,
+        )
+        await self._journal_feedback_outcome(run_id, note_id, "refused", status)
+
+    async def _refuse_feedback_target(
+        self,
+        run_id: str,
+        note_id: str,
+        actor: str,
+        discussion_id: str,
+        mr_iid: int,
+        text: str,
+        exc: CollaborationTargetError,
+        existing: Mapping[str, ReviewFeedbackRequest],
+    ) -> None:
+        """The head read's unresolved-topology refusal, recorded (R42-01 / #374).
+
+        The head read resolves through the persisted collaboration
+        target; an unresolved legacy topology is the round route's own
+        typed PERMANENT refusal — recorded before any binding exists
+        (the caller posts the operator reply; the MR itself is
+        readable, only the target row is unresolvable).
+        """
+        if note_id not in existing:
+            await record_review_feedback_request(
+                self._session_factory,
+                run_id,
+                ReviewFeedbackRequest(
+                    note_id=note_id,
+                    run_id=run_id,
+                    discussion_id=discussion_id,
+                    mr_iid=mr_iid,
+                    actor=actor,
+                    head_sha="",
+                    classification=CLARIFICATION_CLASS,
+                    text=text,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    status=REQUEST_TARGET_REFUSED,
+                ),
+            )
+        logger.info(
+            "Review feedback note %s head read target-refused [%s] — permanent",
+            note_id,
+            exc.code,
+        )
+        await self._journal_feedback_outcome(run_id, note_id, "refused", REQUEST_TARGET_REFUSED)
 
     async def _read_mr_head(
         self, project_id: int, mr_iid: int, issue_iid: int | None, run_id: str
@@ -10182,91 +10606,137 @@ class RunService:
     def _classify_branch_pipeline(pipeline: Pipeline, corr: _OccupancyCorrelation) -> str:
         """Correlate ONE branch-listing row with the current attempt (pure).
 
-        Returns ``current`` (this attempt's execution), ``history`` (an
-        earlier attempt's or an unrelated pipeline — never charges or frees
-        the slot) or ``ambiguous`` (neither side provable). The checks run
-        strongest-evidence first; identity and monotone-id bounds dominate
-        timestamps so a degraded ``created_at`` cannot misattribute a
-        recorded row:
+        Returns the row's CORRELATION STRENGTH (R42-02, #375 — the
+        vocabulary at :data:`_OCCUPANCY_EVIDENCE_HANDLE` .. historical).
+        The checks run strongest-evidence first; identity and monotone-id
+        bounds dominate timestamps so a degraded ``created_at`` cannot
+        misattribute a recorded row:
 
-        - an id an earlier attempt recorded → ``history`` (ids are
+        - an id an earlier attempt recorded → ``historical`` (ids are
           per-project monotone);
-        - a sha this attempt builds ON (recorded base/round head/expected
-          parent) → ``history`` — the predecessor's verification;
-        - a merge-request verification source → ``history`` (never coding
-          occupancy — the issue's policy line);
-        - ``created_at`` inside the intent's dispatch window (skew-tolerant)
-          → ``current``; before it → ``history``;
-        - no usable ``created_at``: a sha this attempt recorded as its own
-          effect → ``current`` when the id also clears the prior-id bound;
-          otherwise an id strictly above every recorded prior → ``current``
-          (a fresh pipeline on the run-owned branch); anything else →
-          ``ambiguous``.
+        - a merge-request verification source (``merge_request_event``,
+          canonicalized at the adapter boundary) → ``historical`` — never
+          coding occupancy, and never independent proof of a coding
+          termination (the pre-#375 constant matched a value GitLab
+          never emits, so the exclusion silently never matched);
+        - ``created_at`` BEFORE the intent's dispatch window
+          (skew-tolerant) → ``historical`` — the window, never the sha,
+          decides anteriority: the pre-#375 code returned history for a
+          matching base SHA UNCONDITIONALLY, discarding live evidence
+          (a newly dispatched coding pipeline STARTS at its input
+          revision — the base SHA — before any agent commit exists);
+        - ``created_at`` inside the window → CURRENT: a ``dispatch``
+          strength when the row runs one of the attempt's recorded effect
+          shas (the dispatch operation's own product), otherwise
+          ``corroborated`` (timestamp + run-owned ref + coding source)
+          — INCLUDING a row at the base SHA;
+        - no usable ``created_at`` (degraded): an id at/below every
+          recorded prior → ``historical``; an effect sha →
+          ``dispatch``; a BASE sha → ``ambiguous`` (possibly the current
+          coding start at its input revision, possibly the
+          predecessor's — no timestamp separates them: it retains when
+          active, never releases); an id strictly above every recorded
+          prior → ``corroborated`` (a fresh start this attempt must
+          own); anything else → ``ambiguous``.
         """
+        if corr.live_pipeline_id and pipeline.id == corr.live_pipeline_id:
+            return _OCCUPANCY_EVIDENCE_HANDLE
         if pipeline.id in corr.prior_pipeline_ids:
-            return "history"
+            return _OCCUPANCY_EVIDENCE_HISTORY
+        if (pipeline.source or "").strip().lower() in _OCCUPANCY_NON_CODING_SOURCES:
+            return _OCCUPANCY_EVIDENCE_HISTORY
         sha = (pipeline.sha or "").strip()
-        if sha and sha in corr.base_shas:
-            return "history"
-        if (pipeline.source or "").lower() in _OCCUPANCY_NON_CODING_SOURCES:
-            return "history"
         created = RunService._parse_pipeline_created_at(pipeline.created_at)
         if created is not None:
             if corr.intent_at is not None:
                 window_start = as_aware_utc(corr.intent_at) - _OCCUPANCY_INTENT_SKEW
                 if created < window_start:
-                    return "history"
-            return "current"
+                    return _OCCUPANCY_EVIDENCE_HISTORY
+            if sha and sha in corr.effect_shas:
+                return _OCCUPANCY_EVIDENCE_DISPATCH
+            return _OCCUPANCY_EVIDENCE_CORROBORATED
         newest_prior = max(corr.prior_pipeline_ids, default=0)
         if pipeline.id <= newest_prior:
-            return "history"
+            return _OCCUPANCY_EVIDENCE_HISTORY
         if sha and sha in corr.effect_shas:
-            return "current"
+            return _OCCUPANCY_EVIDENCE_DISPATCH
+        if sha and sha in corr.base_shas:
+            # The current attempt's coding start runs the base SHA until
+            # the agent commits; without a timestamp that is
+            # indistinguishable from the predecessor's run of it.
+            return _OCCUPANCY_EVIDENCE_AMBIGUOUS
         if corr.prior_pipeline_ids:
             # Above every recorded earlier execution, on the run-owned
             # branch: a fresh start this attempt must own.
-            return "current"
-        return "ambiguous"
+            return _OCCUPANCY_EVIDENCE_CORROBORATED
+        return _OCCUPANCY_EVIDENCE_AMBIGUOUS
 
     @classmethod
-    def _branch_search_occupancy(
+    def _branch_search_verdict(
         cls, pipelines: list[Pipeline], corr: _OccupancyCorrelation
-    ) -> NativeStatus:
+    ) -> _BranchSearchVerdict:
         """The occupancy verdict over one correlated branch listing (pure).
 
-        The R41-05 decision table — the current execution decides, never a
-        convenient terminal row from a previous round:
+        The R42-02 (#375) decision table — SAFETY first, liveness only on
+        full identification, and row ORDER never matters (every rule is an
+        order-independent aggregate over the classified set):
 
-        - any ``current`` pipeline ACTIVE → RUNNING (the lease keeps its
-          slot: the capacity is genuinely occupied — the mixed-history
-          shape a historical ``success`` plus a current ``running`` used
-          to misread as TERMINAL);
-        - ``current`` pipelines exist and every one is terminal → TERMINAL
-          (a CORRELATED terminal execution — the only branch evidence that
-          releases a slot);
-        - else, any ACTIVE ``ambiguous`` pipeline → RUNNING (an active job
-          on the run-owned branch that may be this attempt's: occupancy is
-          retained, never picked conveniently);
-        - otherwise (empty listing, or history/verification only) →
-          UNKNOWN: an empty response is NOT proof of never-started while
-          the original start can still be accepted or appear after a
-          delay — the lease keeps draining with its age visible, the
-          settlement/reconciliation protocol the occupancy machinery
-          already runs.
+        1. ANY current-strength row ACTIVE → RUNNING (the lease keeps its
+           slot — the capacity is genuinely occupied);
+        2. else ANY ``ambiguous`` row ACTIVE → RUNNING — the
+           possibly-current check PRECEDES any all-terminal verdict, the
+           pre-#375 reducer order answered TERMINAL for one correlated
+           success beside one ambiguous running row without ever
+           consulting the active row;
+        3. else current-strength rows exist and every one is terminal →
+           TERMINAL (a CORRELATED terminal execution — the only branch
+           evidence that releases a slot; the reconciler's CAS makes the
+           release exactly-once);
+        4. else (empty listing, history/verification only, or ambiguous
+           rows that are all terminal) → UNKNOWN: an empty or
+           history-only response is NOT proof of never-started while the
+           original start can still be accepted or appear after a delay —
+           the lease keeps draining with its age and evidence visible
+           (:data:`_BranchSearchVerdict.evidence_strength`), the bounded
+           operator reconciliation the occupancy machinery already runs.
         """
 
         def _active(pipeline: Pipeline) -> bool:
             return (pipeline.status or "").lower() in _CI_ACTIVE_STATUSES
 
-        current = [p for p in pipelines if cls._classify_branch_pipeline(p, corr) == "current"]
+        rows = {strength: 0 for strength in _OCCUPANCY_EVIDENCE_ORDER}
+        classified: list[tuple[Pipeline, str]] = []
+        for pipeline in pipelines:
+            strength = cls._classify_branch_pipeline(pipeline, corr)
+            rows[strength] = rows.get(strength, 0) + 1
+            classified.append((pipeline, strength))
+        current = [p for p, strength in classified if strength in _OCCUPANCY_CURRENT_STRENGTHS]
+        ambiguous = [p for p, strength in classified if strength == _OCCUPANCY_EVIDENCE_AMBIGUOUS]
         if any(_active(p) for p in current):
-            return NativeStatus.RUNNING
-        if current:
-            return NativeStatus.TERMINAL
-        ambiguous = [p for p in pipelines if cls._classify_branch_pipeline(p, corr) == "ambiguous"]
-        if any(_active(p) for p in ambiguous):
-            return NativeStatus.RUNNING
-        return NativeStatus.UNKNOWN
+            status = NativeStatus.RUNNING
+        elif any(_active(p) for p in ambiguous):
+            # Every POSSIBLY-current active observation is evaluated
+            # BEFORE terminal evidence permits release (rule 2 before 3).
+            status = NativeStatus.RUNNING
+        elif current:
+            status = NativeStatus.TERMINAL
+        else:
+            status = NativeStatus.UNKNOWN
+        observed = [strength for strength in _OCCUPANCY_EVIDENCE_ORDER[1:] if rows.get(strength)]
+        evidence = max(
+            observed, key=_OCCUPANCY_EVIDENCE_ORDER.index, default=_OCCUPANCY_EVIDENCE_NONE
+        )
+        return _BranchSearchVerdict(status=status, evidence_strength=evidence, rows=rows)
+
+    @classmethod
+    def _branch_search_occupancy(
+        cls, pipelines: list[Pipeline], corr: _OccupancyCorrelation
+    ) -> NativeStatus:
+        """The verdict's status alone — the seam the exact-handle path,
+        pagination completeness and mutation arms speak (:meth:`_branch_search_verdict`
+        carries the full R42-02 decision table and evidence).
+        """
+        return cls._branch_search_verdict(pipelines, corr).status
 
     @staticmethod
     def _gitlab_intent_ref_shape(ref: str | None) -> tuple[int, str] | None:
@@ -10539,20 +11009,36 @@ class RunService:
                 # listing read: the reconciler reads UNKNOWN and the lease
                 # keeps draining with its age visible.
                 pipelines = await self._gitlab.list_pipelines(project_id, ref=branch)
+                # The seam the mutation arms patch (the pre-#360 and
+                # pre-#375 predicates): the STATUS always flows through
+                # :meth:`_branch_search_occupancy`; the evidence detail
+                # below only enriches the unresolved surfacing.
                 verdict = self._branch_search_occupancy(pipelines, correlation)
                 if verdict is NativeStatus.UNKNOWN:
+                    detail = self._branch_search_verdict(pipelines, correlation)
                     age = ""
                     if correlation.intent_at is not None:
                         age = f" ({int((datetime.now(timezone.utc) - correlation.intent_at).total_seconds())}s after the intent)"
+                    observed = (
+                        ", ".join(
+                            f"{detail.rows.get(strength, 0)} {strength}"
+                            for strength in _OCCUPANCY_EVIDENCE_ORDER[1:]
+                            if detail.rows.get(strength)
+                        )
+                        or "0 rows"
+                    )
                     logger.warning(
                         "Branch-search occupancy for run %s on %s unresolved%s — "
-                        "no current-attempt pipeline observed (%d listing row(s), "
-                        "all history/verification or empty); the lease keeps "
+                        "native_occupancy.classification=unknown "
+                        "evidence_strength=%s (%d listing row(s): %s — all "
+                        "history/verification/ambiguous or empty); the lease keeps "
                         "draining: the original start can still land",
                         correlation.run_id[:8],
                         branch,
                         age,
+                        detail.evidence_strength,
                         len(pipelines),
+                        observed,
                     )
                 return verdict
             project_raw, _, pipeline_raw = body.partition(":")
@@ -10830,3 +11316,94 @@ def _review_mr_comment(verdict: str, summary: str, findings: list[dict]) -> str:
     lines.append("")
     lines.append("*This is an automated message.*")
     return "\n".join(lines)
+
+
+async def feedback_steps_without_outcome(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[dict[str, Any]]:
+    """R42-01 (#374): the operator repair query — ``feedback.accepted_without_outcome``.
+
+    Every TERMINAL ``review_feedback`` step (``succeeded`` — the
+    historical damage the pre-#374 plain-return caused, or ``dead`` —
+    the visible exhaustion of a retryable observation) whose command
+    resolved a run but never produced a request outcome: no request
+    row, or one stranded in ``recorded`` (accepted, durable, no
+    outcome). One row per step — the finding an operator can act on:
+
+    - ``outcome: "succeeded_without_outcome"`` — the step recorded
+      success while the obligation went nowhere (the #374 defect
+      shape; repair is a human decision, never an automatic replay of
+      historical commands);
+    - ``outcome: "exhausted"`` — the step parked ``dead`` after its
+      bounded retry budget; the observability trail
+      (``provider_observation.retry``, ``feedback.outcome`` rows on the
+      run) explains why.
+
+    ``age_seconds`` measures from the step's ``finished_at``; the
+    listing's length is the ``feedback.accepted_without_outcome`` count.
+    Steps that never resolved a run (a foreign-project note, a note on
+    an MR without a run) carried no obligation and never appear.
+    """
+    now = datetime.now(timezone.utc)
+    findings: list[dict[str, Any]] = []
+    async with session_factory() as session:
+        steps = (
+            (
+                await session.execute(
+                    select(StepRun)
+                    .where(
+                        StepRun.step_name == "review_feedback",
+                        StepRun.status.in_(("succeeded", "dead")),
+                    )
+                    .order_by(StepRun.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for step in steps:
+            payload = dict(step.payload or {})
+            note_id = str(payload.get("note_id") or "")
+            project_id = payload.get("project_id")
+            mr_iid = payload.get("mr_iid")
+            if not note_id or project_id is None or mr_iid is None:
+                continue  # an unresolvable command identity carries no obligation
+            run = (
+                await session.execute(
+                    select(FlowRun.id, FlowRun.evidence)
+                    .where(
+                        FlowRun.provider == "gitlab",
+                        FlowRun.project_id == int(project_id),
+                        FlowRun.mr_iid == int(mr_iid),
+                    )
+                    .order_by(FlowRun.created_at.desc(), FlowRun.id.desc())
+                    .limit(1)
+                )
+            ).first()
+            if run is None:
+                continue  # no run resolved — the ingress-level no-obligation cases
+            request = review_feedback_requests_of(run.evidence or {}).get(note_id)
+            if request is not None and request.status != REQUEST_RECORDED:
+                continue  # the outcome exists
+            finished = as_aware_utc(step.finished_at) if step.finished_at is not None else None
+            findings.append(
+                {
+                    "feedback.accepted_without_outcome": {
+                        "step_id": int(step.id),
+                        "note_id": note_id,
+                        "run_id": str(run.id),
+                        "project_id": int(project_id),
+                        "mr_iid": int(mr_iid),
+                        "step_status": str(step.status),
+                        "outcome": "exhausted"
+                        if step.status == "dead"
+                        else ("succeeded_without_outcome"),
+                        "request_status": request.status if request is not None else None,
+                        "finished_at": finished.isoformat() if finished is not None else None,
+                        "age_seconds": round((now - finished).total_seconds(), 1)
+                        if finished is not None
+                        else None,
+                    }
+                }
+            )
+    return findings

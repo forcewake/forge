@@ -368,6 +368,12 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             # never reads rows around the authorized snapshot reader.
             "forge.adaptive.credential_broker",
             "forge.adaptive.project_credentials",
+            # R42-03 (#376): the delivery PREFLIGHT composes the same
+            # CanonicalSubject type the broker substrate keys bindings
+            # by — the diagnostic resolver names the subject a dispatch
+            # would resolve under; it reads no durable rows and asserts
+            # no operator state (the doctor report is refs/metadata).
+            "forge.adaptive.credential_preflight",
             # R40-13 (#349): the runs service's /status note appends the
             # owner's stable status-comment identity marker (a pure
             # digest over the snapshot facts it already rendered) — the
@@ -506,6 +512,12 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             # The checked ingress unions the verb set into its accepted
             # command vocabulary per delivery (zero routing when off).
             "forge.gateway.router",
+            # R42-03 (#376): doctor READS the capability flag to decide
+            # whether the correction-scope preflight is owed — it never
+            # parses the verbs and admits nothing (the onboarding
+            # surface renders the implement.paths debt; zero routing
+            # either way).
+            "forge.doctor",
             # The durable admission: note parse → request staging →
             # round admission (the child run's own budget opens through
             # open_budget_from_spec + closing-partition/1, never an

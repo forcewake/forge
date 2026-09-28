@@ -33,6 +33,7 @@ import asyncio
 import json
 import sys
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import httpx
 
@@ -215,9 +216,29 @@ async def check_project(settings: Settings, project_id: int) -> list[CheckResult
                 )
             )
 
+            # R42-03 (#376): the credential-delivery preflight — ONE shared
+            # resolver (the credential_broker plan seam the dispatch legs
+            # call), per-mode prerequisites over REDACTED metadata (names,
+            # protected/masked flags, ref class — never values), and the
+            # review-feedback scope check. The #364 lessons, checked BEFORE
+            # readiness instead of after it.
+            from forge.adaptive.credential_preflight import CarrierMetadata
+
+            carrier_metadata = {
+                str(row.get("key")): CarrierMetadata.from_variable_document(row)
+                for row in variables
+                if isinstance(row, dict)
+            }
+            ref_class = await _project_ref_class(gitlab, project_id)
+            delivery_results, delivery_report = await check_credential_delivery(
+                settings, project_id, carrier_metadata=carrier_metadata, ref_class=ref_class
+            )
+            results.extend(delivery_results)
+            results.extend(await check_review_feedback_scope(gitlab, project_id))
             # ADR-0023 §8: per-driver lane checks over the project's
-            # preference (variable names only), additive to the JSON output.
-            results.extend(check_harness_lanes(settings, names))
+            # preference (variable names only), additive to the JSON output —
+            # now delivery-aware (the substituted ambient name, R42-03).
+            results.extend(check_harness_lanes(settings, names, delivery=delivery_report))
     except GitLabAPIError as exc:
         results.append(_result("project", False, "", _short(exc)))
     except Exception as exc:  # noqa: BLE001
@@ -225,7 +246,38 @@ async def check_project(settings: Settings, project_id: int) -> list[CheckResult
     return results
 
 
-def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[CheckResult]:
+def _harness_executor(settings: Settings) -> str:
+    """The executor the delivery preflight resolves for: the preference
+    list's first entry (the chain head), falling back to the backend
+    driver — ``""`` when the preference itself is contradictory (the
+    lane check already FAILS on that; the delivery checks then honestly
+    name no route)."""
+    from forge.config import ForgeConfig
+    from forge.runs.backends import is_harness_backend
+    from forge.runs.harness_selection import (
+        current_driver,
+        resolve_preference,
+        validate_preference,
+    )
+
+    backend = str(getattr(settings, "FORGE_IMPLEMENTER_BACKEND", "") or "").strip()
+    try:
+        preference = resolve_preference(ForgeConfig(), settings)
+        validate_preference(
+            preference, current_driver(backend) if is_harness_backend(backend) else None
+        )
+    except ValueError:
+        return ""
+    if preference:
+        return preference[0].split("@")[0]
+    return current_driver(backend)
+
+
+def check_harness_lanes(
+    settings: Settings,
+    variable_names: set[str],
+    delivery: Any | None = None,
+) -> list[CheckResult]:
     """ADR-0023 §8: per-driver lane checks over the project's preference.
 
     Reports, for every preference entry, whether its required harness
@@ -235,7 +287,18 @@ def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[Ch
     a lane without creds fails infrastructure at dispatch, which with the
     fallback switch OFF blocks the run visibly) — a hard failure only when
     the configured backend dispatches a harness and NOTHING is compilable.
+
+    R42-03 (#376): *delivery* is the credential-delivery preflight report
+    — when the selected delivery mode SUBSTITUTEs the provider's ambient
+    slot (a native carrier that passed its prerequisite, or the
+    redemption route), that one name is no longer required of the
+    project's ambient variables. THE #364 RULE: never require the ambient
+    name when it is not the consumer route; never waive it on an unproven
+    carrier (an unknown/failed prerequisite keeps the ambient
+    requirement). Exactly the substituted slot is dropped — nothing
+    wider, ever.
     """
+    from forge.adaptive.credential_preflight import substituted_ambient_var
     from forge.config import ForgeConfig
     from forge.runs.backends import is_harness_backend
     from forge.runs.harness_selection import (
@@ -261,11 +324,13 @@ def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[Ch
     if not preference:
         preference = [current_driver(backend)]
 
+    substituted = substituted_ambient_var(delivery)
     results: list[CheckResult] = []
     chain: list[str] = []
     for driver in preference:
         required = DRIVER_CREDENTIAL_VARS.get(driver, ())
-        missing = [name for name in required if name not in variable_names]
+        effective = tuple(name for name in required if name != substituted)
+        missing = [name for name in effective if name not in variable_names]
         if missing:
             results.append(
                 _result(
@@ -278,9 +343,19 @@ def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[Ch
             )
             continue
         chain.append(driver)
-        present = (
-            f"credentials present: {', '.join(required)}" if required else "no credentials needed"
-        )
+        if effective != required:
+            present = (
+                f"delivered credential substitutes the ambient {substituted} "
+                f"({', '.join(effective)} still ambient)"
+                if effective
+                else f"credential delivered non-ambient (ambient {substituted} not required)"
+            )
+        else:
+            present = (
+                f"credentials present: {', '.join(required)}"
+                if required
+                else "no credentials needed"
+            )
         results.append(_result(f"project.harness.{driver}", True, present, ""))
 
     if chain:
@@ -307,6 +382,198 @@ def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[Ch
             )
         )
     return results
+
+
+#: The exemplar factory ref the protected-branch coverage heuristic matches
+#: against (``factory/<issue>/<run>`` refs are minted per run — only a
+#: wildcard-protected entry like ``factory/*`` covers the FUTURE refs a
+#: dispatch will create; an exact name protects one past ref only).
+_FACTORY_REF_EXEMPLAR = "factory/0/00000000"
+
+
+async def _project_ref_class(gitlab: GitLabClient, project_id: int) -> str:
+    """The dispatch target ref class: ``protected`` when the project's
+    protected-branch set covers the factory refs, ``unprotected``
+    otherwise, ``unknown`` when the listing could not be read (never a
+    success-shaped guess). Names only — no ref content is fetched."""
+    from fnmatch import fnmatchcase
+
+    from forge.adaptive.credential_preflight import (
+        REF_CLASS_PROTECTED,
+        REF_CLASS_UNPROTECTED,
+        REF_CLASS_UNKNOWN,
+    )
+
+    try:
+        entries = (await gitlab._get(f"/projects/{project_id}/protected_branches")).json()
+        patterns = [
+            str(entry.get("name") or "")
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        ]
+    except Exception:  # noqa: BLE001 — an unreadable axis is unknown, not unprotected
+        return REF_CLASS_UNKNOWN
+    if any(fnmatchcase(_FACTORY_REF_EXEMPLAR, pattern) for pattern in patterns):
+        return REF_CLASS_PROTECTED
+    return REF_CLASS_UNPROTECTED
+
+
+async def check_credential_delivery(
+    settings: Settings,
+    project_id: int,
+    *,
+    carrier_metadata: dict[str, Any],
+    ref_class: str,
+) -> tuple[list[CheckResult], Any]:
+    """R42-03 (#376): the credential-delivery preflight for one target
+    project — ONE shared plan resolver, per-mode prerequisites, the
+    consumer-mapping match. Returns the check results and the report
+    (the lane check consumes the report's ambient substitution).
+
+    Metadata/references only: the resolution reads the binding registry,
+    the declared route env and the shipped template — it never redeems a
+    value; the prerequisites read flags and ref classes. Every failure
+    is mode-specific (delivery-route configuration), distinct from
+    credential-expiry and provider-availability spellings."""
+    from forge.adaptive.credential_preflight import (
+        OUTCOME_FAIL,
+        OUTCOME_PASS,
+        OUTCOME_UNKNOWN,
+        OUTCOME_WARN,
+        credential_delivery_preflight,
+        project_subject_for_diagnostics,
+    )
+    from forge.adaptive.project_credentials import (
+        provider_route_for_driver,
+        registry_from_env,
+    )
+
+    executor = _harness_executor(settings)
+    registry = registry_from_env()
+    subject = project_subject_for_diagnostics(
+        registry, project_id, provider_route_for_driver(executor)
+    )
+    try:
+        report = await credential_delivery_preflight(
+            executor=executor,
+            profile="gitlab",
+            subject=subject,
+            carrier_metadata=carrier_metadata,
+            ref_class=ref_class,
+            registry=registry,
+        )
+    except Exception as exc:  # noqa: BLE001 — a broken preflight is a finding, never a crash
+        return (
+            [_result("credential.delivery_mode", False, "", _short(exc))],
+            None,
+        )
+
+    summary = report.summary()
+    if report.plan is not None:
+        mode_ok: bool | None = True
+        mode_detail = summary
+    elif report.refusal_code:
+        mode_ok = False
+        mode_detail = summary
+    else:
+        mode_ok = None  # the labeled ambient-legacy posture
+        mode_detail = f"{summary} — {report.prerequisite.detail}"
+    results = [_result("credential.delivery_mode", mode_ok, mode_detail, mode_detail)]
+
+    prerequisite = report.prerequisite
+    outcome_map = {
+        OUTCOME_PASS: True,
+        OUTCOME_WARN: None,
+        OUTCOME_FAIL: False,
+        OUTCOME_UNKNOWN: None,
+    }
+    detail = f"[{prerequisite.code}] {prerequisite.detail}".strip()
+    results.append(
+        _result(
+            "credential.prerequisite_outcome",
+            outcome_map.get(prerequisite.outcome),
+            f"{summary} {detail}",
+            detail,
+        )
+    )
+
+    if report.consumer_match:
+        match_ok: bool | None = True
+        match_detail = (
+            f"credential.route_consumer_match: the executor {report.executor} consumes "
+            f"{report.env_var or 'no provider slot'} — aligned with the resolved route"
+        )
+    elif report.consumer_match_code == "consumer_route_unnamed":
+        match_ok = None
+        match_detail = (
+            "credential.route_consumer_match: the executor names no provider route — "
+            "no consumer mapping to validate"
+        )
+    else:
+        match_ok = False
+        match_detail = (
+            "credential.route_consumer_match: the executor's provider slot and the "
+            f"resolved plan's consumer slot disagree ({report.consumer_match_code}) — "
+            "the consumer mapping is disconnected; fix the driver/route selection"
+        )
+    results.append(_result("credential.route_consumer_match", match_ok, match_detail, match_detail))
+    return results, report
+
+
+async def check_review_feedback_scope(gitlab: GitLabClient, project_id: int) -> list[CheckResult]:
+    """R42-03 (#376): the review-feedback SCOPE preflight — a
+    correction-enabled project missing ``implement.paths`` gets the
+    onboarding action HERE, not a misleading ready-for-corrections
+    message after readiness (the #364 record: every /fix classified
+    material, learned too late). The SAME status function the
+    feedback-feature validation uses; the scope never widens
+    permissions — the classifier stays fail-closed either way."""
+    from forge.adaptive.credential_preflight import (
+        OUTCOME_FAIL,
+        OUTCOME_PASS,
+        OUTCOME_UNKNOWN,
+        OUTCOME_WARN,
+        validate_review_feedback_feature,
+    )
+    from forge.gateway.feedback import review_feedback_commands_enabled
+    from forge.orchestrator.project_config import read_project_config
+
+    enabled = review_feedback_commands_enabled()
+    paths: list[str] | None = None
+    try:
+        read = await read_project_config(gitlab, project_id)
+        config_status = str(read.status)
+        if read.config is not None:
+            paths = [str(entry) for entry in read.config.implement_paths]
+        elif config_status == "confirmed_absent":
+            paths = []  # provably nothing declared — the missing-scope debt
+    except Exception:  # noqa: BLE001 — an unreadable scope is unknown, never absent
+        config_status = "unreadable"
+        paths = None
+    status = await validate_review_feedback_feature(
+        feedback_enabled=enabled, config_status=config_status, implement_paths=paths
+    )
+    detail = f"[{status.code}] {status.detail}".strip()
+    if status.action:
+        detail = f"{detail} — ONBOARDING: {status.action}"
+    if status.code == "scope_declared":
+        detail = f"{detail} (onboarding.manual_workarounds: 0)"
+    elif status.code == "scope_missing":
+        detail = f"{detail} (onboarding.manual_workarounds: 1 — the duplicate-route workaround)"
+    status_map = {
+        OUTCOME_PASS: True,
+        OUTCOME_WARN: None,
+        OUTCOME_FAIL: False,
+        OUTCOME_UNKNOWN: None,
+    }
+    return [
+        _result(
+            "onboarding.review_scope",
+            status_map.get(status.status),
+            detail,
+            detail,
+        )
+    ]
 
 
 async def check_azure_devops(settings: Settings) -> list[CheckResult]:

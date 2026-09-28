@@ -53,6 +53,7 @@ be re-read; never install from a table.
 | Harness | **claude-code 2.1.273** (the lane's pinned harness binary) | manifest `harness` |
 | Model route | litellm `fast` → `openai/glm-5.3-flash` (lane model `glm-5.3-flash` via the z.ai Anthropic-compatible gateway) — **never contacted by any machine step in §3** | manifest `model_route` |
 | Credential mode | `gitlab-protected-variable` + `runner-redemption` (both declared delivery modes; §5's live legs are where they are exercised) | manifest `credential_route` |
+| Delivery preflight | `forge doctor --project <id>` validates the SELECTED mode through the same resolver the dispatch uses (per-mode carrier/grant/scope rules — see docs/operations/supported-profile-runbook.md §8b); the #364 duplicate-ambient workaround is retired from the recipe (machine-proven by tests; the runner-bound live re-verification is #377's window) | doctor checks `credential.*` + `onboarding.review_scope` |
 | Verification policy | the verification is INDEPENDENT, PRECOMMITTED and CANDIDATE-BOUND: the target project's own `smoke` job (six exact slugify cases + app rewired + legacy deleted) is committed BEFORE any run and must be green on the CURRENT candidate sha; the candidate may not touch `.gitlab-ci.yml` or `tests/`; the merge decision stays human (the bot never merges); and every §3 machine step here spends ZERO model calls — a cold install proves delivery surfaces, never model turns | manifest `verification_contract` + §6 |
 
 **The evidence kinds this kit separates (never blended).** The record
@@ -326,6 +327,22 @@ work around a refusal by editing source or YAML.
 | The lane job ran in a cold install | `the lane job must not run in a cold install` | `$FORGE_RUN_ID` must be absent in a cold install; investigate who set it — no model spend is allowed here |
 | The disposable Postgres will not start | `the disposable postgres did not start` | install/start podman; the shared lab DB is never a fallback |
 | A rollback refused while round/grant linkage rows exist | `is never dropped by a downgrade` | that is the honest-downgrade guard working (§8a): archive the counted rows explicitly — accepting the named loss — then retry the declared edge; never force past it |
+
+**Credential-delivery preflight failures (R42-03 — prose, not tool
+output).** `forge doctor --project <id>` (an onboarding command, not one
+of §3's machine steps) additionally validates the selected delivery
+mode and names its own remedies: a missing native carrier
+(`native_carrier_absent` — provision the `FORGE_MODEL_*` CI/CD variable
+once; an unrelated ambient variable does not satisfy the route), a
+protected-only carrier on unprotected factory refs
+(`carrier_ref_incompatible` — MR pipelines cannot see protected
+variables; mask-not-protect the carrier or protect the refs), and a
+correction-enabled target without `implement.paths` (`scope_missing` —
+declare the scope BEFORE readiness, or every `/fix` needs the
+material-revision route). These never require the ambient
+`ANTHROPIC_AUTH_TOKEN` duplicate the #364 run provisioned just to keep
+doctor green; see docs/operations/supported-profile-runbook.md §8b for
+the full rule table and the honest bounds of the retirement.
 
 ## 7. The observation report (fill with OBSERVED values)
 

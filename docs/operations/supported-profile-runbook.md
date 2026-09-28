@@ -327,6 +327,65 @@ uv run python scripts/align_lab.py --apply \
   corrective rebind → new grant → lane recovers) is its own runbook:
   [credential-rotation.md](credential-rotation.md).
 
+## 8b. The delivery-mode preflight (R42-03 / #376)
+
+`forge doctor --project <id>` now validates the SELECTED credential
+delivery mode BEFORE any dispatch, through the SAME plan resolver the
+dispatch legs use (`forge.adaptive.credential_preflight` resolves via
+`credential_broker.delivery_plan` — one resolver, two consumers; a
+disconnected consumer mapping fails the tests in
+`tests/test_credential_preflight.py`). The doctor emits, per target
+project:
+
+- `credential.delivery_mode` — the resolved mode (or the typed refusal
+  from the shared seam: `delivery_route_unsupported`,
+  `delivery_route_ambiguous`, `delivery_template_unavailable`, … —
+  delivery-route configuration problems, never credential-expiry or
+  provider-availability spellings);
+- `credential.prerequisite_outcome` — the per-mode rule
+  (`doctor.prerequisite_outcome{delivery_mode}`): native mode → the
+  selected `FORGE_MODEL_*` carrier exists AND the masked/protected/ref
+  compatibility holds; runner-redemption → the grant window and the
+  endpoint TTL parse (a reference never proves a usable provider key);
+  legacy → the explicitly chosen policy is named;
+- `credential.route_consumer_match` — the executor's provider slot
+  against the resolved plan's consumer slot;
+- `onboarding.review_scope` — a correction-enabled project
+  (`FORGE_REVIEW_FEEDBACK_ENABLED=1`) without an explicit
+  `implement.paths` gets the ONBOARDING action at doctor time (every
+  `/fix` would classify as a material change — the #364 surprise,
+  previously learned only after readiness). The empty or malformed scope
+  never widens permissions: the classifier stays fail-closed.
+
+**The protected-carrier compatibility rule (the #364 lesson, encoded).**
+MR pipelines do not have access to protected variables
+([docs/research/2026-09-27-gitlab-pipeline-sources/README.md]
+(../research/2026-09-27-gitlab-pipeline-sources/README.md)): a
+PROTECTED-only carrier cannot serve pipelines on UNPROTECTED factory
+refs — doctor reports `carrier_ref_incompatible` BEFORE any model call,
+with the two remedies: provision the carrier masked-but-not-protected
+(the lab posture), or protect the dispatch refs
+(`factory/*` as a protected-branch wildcard). An unobservable axis
+(the variable listing or the protected-branch set unreadable) reports
+UNKNOWN, never success.
+
+**The duplicate-ambient workaround is RETIRED from the recipe.** The
+#364 live run had to provision a DUPLICATE ambient secret
+(`ANTHROPIC_AUTH_TOKEN` as a plain CI variable) only to keep
+`check_harness_lanes` green while the lane actually consumed the native
+carrier. Doctor no longer requires the ambient name when the delivery
+mode is the consumer route: a proven carrier (or the redemption route)
+substitutes exactly the provider's ambient slot — nothing wider. The
+carrier check itself is machine-proven by
+`tests/test_credential_preflight.py` + the doctor arms in
+`tests/test_doctor.py` (the native-carrier-only arm passes WITHOUT the
+ambient duplicate); the runner-bound live re-verification on the lab is
+#377's window — until it lands, treat the retired workaround as
+"no longer required by doctor", not as "removed from the lab by
+re-test". Cross-link: [credential-rotation.md](credential-rotation.md)
+§0 keeps the bind-time and lane-boot preflights; this section owns the
+doctor-time one.
+
 ## 9. Re-freezing (when the composition legitimately moves)
 
 1. Land the new promotion record under `docs/releases/evidence/` and

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from itertools import permutations
 from pathlib import Path
 from uuid import uuid4
 
@@ -718,6 +719,82 @@ class TestGitLabLeg:
         snapshot = await lease_snapshot(AdmissionPolicy(1), PROJECT_ID, db, provider="gitlab")
         assert snapshot["held"] == 1
 
+    async def test_lost_response_at_the_cap_never_starts_a_second_native_job(self, db, monkeypatch):
+        """R42-02 (#375): the AT-CAP observable under a lost-response
+        schedule, asserted on the ACTUAL native starts the provider
+        recorded — not on reducer output. The first dispatch's start was
+        ACCEPTED (the pipeline exists natively, carrying the shape the
+        real API answers with: source ``api``, a created_at stamp) but
+        its response was lost: the slot stays occupied through the
+        correlated branch probe, the second /go parks
+        blocked(execution_capacity) BEFORE any provider call, and
+        exactly ONE native pipeline exists from start to release."""
+        import httpx
+
+        from forge.adaptive.admission import AdmissionPolicy
+        from tests.test_runs_harness_service import make_service
+
+        fake = FakeGitLab()
+        fake.seed_issue(ISSUE_IID, "title", "description")
+        fake.seed_issue(ISSUE_IID + 1, "second task", "second body")
+        fake.seed_commit("main", "base-sha-1", "initial")
+        real_create = fake.create_pipeline
+
+        async def accepted_then_lost(project_id: int, ref: str, variables=None) -> dict:
+            # The provider ACCEPTED — the row exists — and the reply is
+            # lost mid-flight.
+            await real_create(project_id, ref, variables)
+            fake.pipelines[-1].update(
+                {
+                    "source": "api",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            raise httpx.ReadTimeout("response lost after acceptance")
+
+        monkeypatch.setattr(fake, "create_pipeline", accepted_then_lost)
+        service = make_service(db, fake)
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "1")
+
+        first = await service.start_run(PROJECT_ID, ISSUE_IID, "title", "description", "alice")
+        second = await service.start_run(
+            PROJECT_ID, ISSUE_IID + 1, "second task", "second body", "alice"
+        )
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {first}", "alice", ISSUE_IID, author_user_id=11
+        )
+        # the start was accepted natively; the worker only learned "failed"
+        assert len(fake.calls_of("create_pipeline")) == 1  # ACTUAL native starts: 1
+        assert len(fake.pipelines) == 1
+        row = await _run_lease(db, first)
+        assert row.released_at is None and row.draining_at is not None
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {second}", "alice", ISSUE_IID + 1, author_user_id=11
+        )
+        async with db() as session:
+            parked = await session.get(FlowRun, second)
+        assert parked is not None
+        assert parked.status == "blocked"
+        assert "execution_capacity" in (parked.status_reason or "")
+        # the parked dispatch never reached the provider — still ONE job
+        assert len(fake.calls_of("create_pipeline")) == 1
+        assert len(fake.pipelines) == 1
+
+        # the correlated branch probe sees the accepted start as LIVE
+        assert await service._reconcile_draining_leases() == 0
+        snapshot = await lease_snapshot(AdmissionPolicy(1), PROJECT_ID, db, provider="gitlab")
+        assert snapshot["held"] == 1
+
+        # the native execution finishes: capacity returns EXACTLY once
+        # and no second native job ever started
+        fake.set_pipeline_status(fake.pipelines[0]["id"], "success")
+        assert await service._reconcile_draining_leases() == 1
+        assert await service._reconcile_draining_leases() == 0
+        assert len(fake.calls_of("create_pipeline")) == 1
+        assert len(fake.pipelines) == 1
+
 
 class TestGitHubLeg:
     async def test_dispatch_records_intent_and_handle(self, db):
@@ -1042,7 +1119,9 @@ class TestBranchSearchCorrelation:
     async def test_verification_pipeline_is_not_coding_occupancy(self, db):
         """A merge-request verification pipeline on the shared ref never
         holds (or frees) coding capacity: the correlated terminal current
-        still releases."""
+        still releases. R42-02: the seed carries the source GitLab
+        actually emits — ``merge_request_event`` — which the adapter
+        boundary canonicalizes before the classifier ever sees it."""
         service = self._service(db)
         branch = "factory/7/round-verify"
         await self._seed_and_park(db, branch)
@@ -1053,7 +1132,7 @@ class TestBranchSearchCorrelation:
                 branch,
                 "running",
                 created_at=_OCC_INTENT_AT + timedelta(minutes=2),
-                source="merge_request",
+                source="merge_request_event",
             ),
         ]
         probe = service._native_occupancy_probe()
@@ -1213,3 +1292,325 @@ class TestBranchSearchCorrelation:
         service = self._service(db)
         probe = service._native_occupancy_probe()
         assert await probe(self._intent_key("factory/7/nobody")) is NativeStatus.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# R42-02 (#375): conservative occupancy across ALL correlated observations
+# ---------------------------------------------------------------------------
+
+
+class TestCorrelationStrengthOrder:
+    """The three verified defects, pinned as behavior: the reducer ORDER
+    (terminal verdicts must clear every possibly-current ACTIVE row
+    first), the base-SHA-as-history assumption (a coding dispatch STARTS
+    at its input revision), and the wrong source constant (GitLab emits
+    ``merge_request_event``; the exclusion never matched)."""
+
+    def _service(self, db):
+        from tests.test_runs_harness_service import make_service
+
+        return make_service(db, FakeGitLab())
+
+    def _intent_key(self, branch: str) -> str:
+        return f"gitlab:pipeline:{PROJECT_ID}@{branch}"
+
+    async def _seed_and_park(self, db, branch: str, **over) -> str:
+        run_id = await _seed_intent_run(db, intent_ref=self._intent_key(branch), **over)
+        outcome = await release_lease_with_evidence(db, run_id, reason="terminal:verified")
+        assert outcome.released == 0 and outcome.drained == 1
+        return run_id
+
+    async def test_correlated_terminal_plus_ambiguous_running_never_releases(self, db):
+        """THE P02 shape (defect 1): one CORRELATED terminal success beside
+        one AMBIGUOUS running row. The pre-#375 reducer order answered
+        TERMINAL without ever consulting the ambiguous active row — the
+        slot freed while a possibly-current job ran. The possibly-current
+        ACTIVE check now precedes any all-terminal verdict."""
+        service = self._service(db)
+        branch = "factory/7/p02-mixed"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(11, branch, "success", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+            _occ_pipeline(12, branch, "running", sha="who-knows"),  # no created_at, no sha bound
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0  # NEVER releases
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_current_api_pipeline_at_the_approved_base_sha_is_not_history(self, db):
+        """Defect 2: a newly dispatched coding pipeline runs its INPUT
+        revision — the approved base SHA — until the agent commits. The
+        pre-#375 classifier returned history for the matching sha
+        unconditionally, discarding the live evidence: the ACTIVE row
+        read UNKNOWN instead of RUNNING, and its terminal completion
+        could never release the slot."""
+        service = self._service(db)
+        branch = "factory/7/base-live"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            # API-triggered (forge's dispatch shape), at the base SHA,
+            # inside the dispatch window.
+            _occ_pipeline(
+                11,
+                branch,
+                "running",
+                sha="base-000",
+                created_at=_OCC_INTENT_AT + timedelta(seconds=30),
+                source="api",
+            )
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+        # its terminal completion is a CORRELATED terminal execution now
+        service._gitlab.pipelines[0]["status"] = "success"
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await service._reconcile_draining_leases() == 1
+
+    async def test_base_sha_row_before_the_window_is_still_history(self, db):
+        """The base-SHA assumption is removed, not inverted: OUTSIDE the
+        dispatch window the predecessor's base-SHA pipeline is still
+        history — the window, never the sha, decides anteriority."""
+        service = self._service(db)
+        branch = "factory/7/base-old"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(
+                10,
+                branch,
+                "success",
+                sha="base-000",
+                created_at=_OCC_SKEW_FREE_HISTORY,
+                source="api",
+            )
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_degraded_base_sha_active_row_is_ambiguous_not_history(self, db):
+        """Without a timestamp a base-SHA row is genuinely two-sided —
+        the current coding start at its input revision, or the
+        predecessor's run of it: AMBIGUOUS, so an ACTIVE row retains and
+        a terminal one never releases."""
+        service = self._service(db)
+        branch = "factory/7/base-degraded"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(11, branch, "running", sha="base-000", source="api")
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_verification_pipelines_alone_cannot_prove_coding_termination(self, db):
+        """Defect 3's liveness side: a listing of ONLY merge-request
+        verification pipelines — even terminal ones, even inside the
+        window — is not evidence the coding execution finished: UNKNOWN,
+        the lease keeps draining. The pre-#375 constant matched a value
+        GitLab never emits (``merge_request``), so this exclusion never
+        ran at all."""
+        service = self._service(db)
+        branch = "factory/7/verify-only"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(
+                11,
+                branch,
+                "success",
+                created_at=_OCC_INTENT_AT + timedelta(minutes=1),
+                source="merge_request_event",
+            ),
+            _occ_pipeline(
+                12,
+                branch,
+                "success",
+                created_at=_OCC_INTENT_AT + timedelta(minutes=2),
+                source="merge_request_event",
+            ),
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_legacy_verification_spelling_folds_at_the_adapter_boundary(self, db):
+        """A very old instance presenting the legacy ``merge_request``
+        spelling folds onto ``merge_request_event`` at the parse
+        boundary — the same verification exclusion applies without the
+        service ever seeing a presentation label."""
+        service = self._service(db)
+        branch = "factory/7/verify-legacy"
+        run_id = await self._seed_and_park(db, branch)
+        service._gitlab.pipelines = [
+            _occ_pipeline(
+                11,
+                branch,
+                "success",
+                created_at=_OCC_INTENT_AT + timedelta(minutes=1),
+                source="merge_request",
+            )
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.UNKNOWN
+        assert await service._reconcile_draining_leases() == 0
+        assert await _open_lease_count(db, run_id) == 1
+
+    async def test_fully_identified_terminal_execution_releases_exactly_once(self, db):
+        """A terminal execution bound to the dispatch operation (its
+        recorded effect sha) releases EXACTLY once: the first reconciler
+        tick frees the slot, every later tick is a no-op, and the
+        capacity snapshot agrees."""
+        service = self._service(db)
+        branch = "factory/7/identified-once"
+        run_id = await self._seed_and_park(db, branch)
+        await _journal_success(
+            db,
+            run_id,
+            "commit",
+            {"sha": "cand-375"},
+            at=_OCC_INTENT_AT + timedelta(minutes=2),
+            correlation=branch,
+        )
+        service._gitlab.pipelines = [
+            _occ_pipeline(10, branch, "success", sha="base-000"),  # degraded base: ambiguous
+            _occ_pipeline(11, branch, "success", sha="cand-375"),  # the dispatch's own effect
+        ]
+        probe = service._native_occupancy_probe()
+        assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL
+        assert await service._reconcile_draining_leases() == 1
+        assert await service._reconcile_draining_leases() == 0  # exactly once
+        snapshot = await lease_snapshot(_OCC_CAP, PROJECT_ID, db, provider="gitlab")
+        assert snapshot["held"] == 0
+
+    async def test_row_permutation_never_alters_the_verdict(self, db):
+        """Every decision rule is an order-independent aggregate: all 24
+        orderings of the P02 mixed listing answer RUNNING, and all
+        orderings of the releasable listing answer TERMINAL."""
+        service = self._service(db)
+        branch = "factory/7/permuted"
+        await self._seed_and_park(db, branch)
+        running = _occ_pipeline(
+            11, branch, "running", created_at=_OCC_INTENT_AT + timedelta(minutes=1)
+        )
+        terminal = _occ_pipeline(
+            12, branch, "success", created_at=_OCC_INTENT_AT + timedelta(minutes=2)
+        )
+        ambiguous = _occ_pipeline(13, branch, "running", sha="who-knows")
+        historical = _occ_pipeline(
+            14, branch, "success", sha="base-000", created_at=_OCC_SKEW_FREE_HISTORY
+        )
+        probe = service._native_occupancy_probe()
+        mixed = [running, terminal, ambiguous, historical]
+        for order in permutations(mixed):
+            service._gitlab.pipelines = list(order)
+            assert await probe(self._intent_key(branch)) is NativeStatus.RUNNING, order
+        for order in permutations([terminal, historical]):
+            service._gitlab.pipelines = list(order)
+            assert await probe(self._intent_key(branch)) is NativeStatus.TERMINAL, order
+
+
+class TestPipelineSourceNormalization:
+    """The adapter boundary is the ONLY place a source spelling is
+    canonicalized — asserted against captured payload dicts, never
+    presentation labels."""
+
+    def test_captured_payloads_parse_to_the_canonical_source(self):
+        from forge.gitlab.schemas import Pipeline
+
+        cases = {
+            "merge_request_event": "merge_request_event",
+            "merge_request": "merge_request_event",  # the legacy spelling
+            " Merge_Request_Event ": "merge_request_event",  # case/space noise
+            "API": "api",
+            " push ": "push",
+            "some_future_value": "some_future_value",  # unknown passes through
+        }
+        for raw, canonical in cases.items():
+            pipeline = Pipeline.model_validate({"id": 1, "status": "running", "source": raw})
+            assert pipeline.source == canonical, raw
+        absent = Pipeline.model_validate({"id": 2, "status": "running"})
+        assert absent.source is None
+
+    def test_the_fifteen_documented_values_survive_verbatim(self):
+        from forge.gitlab.schemas import Pipeline
+
+        documented = [
+            "push",
+            "merge_request_event",
+            "api",
+            "chat",
+            "external",
+            "external_pull_request_event",
+            "ondemand_dast_scan",
+            "ondemand_dast_validation",
+            "parent_pipeline",
+            "pipeline",
+            "schedule",
+            "security_orchestration_policy",
+            "trigger",
+            "web",
+            "webide",
+        ]
+        for source in documented:
+            pipeline = Pipeline.model_validate({"id": 3, "status": "running", "source": source})
+            assert pipeline.source == source
+
+
+class TestReducerOrderMutationArm:
+    """MX proof: restoring the pre-#375 reducer ORDER (the all-terminal
+    verdict ahead of the ambiguous-ACTIVE check, on top of the CURRENT
+    classifier) makes the P02 mixed listing answer TERMINAL — the green
+    arm above is load-bearing against exactly this regression."""
+
+    async def test_old_order_answers_terminal_on_the_p02_shape(self, db, monkeypatch):
+        from forge.runs.service import (
+            _CI_ACTIVE_STATUSES,
+            _OCCUPANCY_CURRENT_STRENGTHS,
+            _OCCUPANCY_EVIDENCE_AMBIGUOUS,
+            RunService,
+        )
+
+        def old_order(pipelines, corr):  # noqa: ANN001
+            current = [
+                p
+                for p in pipelines
+                if RunService._classify_branch_pipeline(p, corr) in _OCCUPANCY_CURRENT_STRENGTHS
+            ]
+            if any((p.status or "").lower() in _CI_ACTIVE_STATUSES for p in current):
+                return NativeStatus.RUNNING
+            if current:
+                return NativeStatus.TERMINAL  # ← the old order released HERE
+            ambiguous = [
+                p
+                for p in pipelines
+                if RunService._classify_branch_pipeline(p, corr) == _OCCUPANCY_EVIDENCE_AMBIGUOUS
+            ]
+            if any((p.status or "").lower() in _CI_ACTIVE_STATUSES for p in ambiguous):
+                return NativeStatus.RUNNING
+            return NativeStatus.UNKNOWN
+
+        monkeypatch.setattr(RunService, "_branch_search_occupancy", staticmethod(old_order))
+
+        service = self._service(db)
+        branch = "factory/7/p02-mutant"
+        await _seed_intent_run(db, intent_ref=f"gitlab:pipeline:{PROJECT_ID}@{branch}")
+        service._gitlab.pipelines = [
+            _occ_pipeline(11, branch, "success", created_at=_OCC_INTENT_AT + timedelta(minutes=1)),
+            _occ_pipeline(12, branch, "running", sha="who-knows"),
+        ]
+        probe = service._native_occupancy_probe()
+        # the mutant reproduces the defect — the ambiguous active row is
+        # never consulted — which is precisely what the green arm pins
+        # against (it asserts RUNNING for this very listing).
+        assert await probe(f"gitlab:pipeline:{PROJECT_ID}@{branch}") is NativeStatus.TERMINAL
+
+    def _service(self, db):
+        from tests.test_runs_harness_service import make_service
+
+        return make_service(db, FakeGitLab())

@@ -1,8 +1,40 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from forge.gitlab.events import UserInfo
+
+
+#: R42-02 (#375): GitLab documents exactly 15 canonical ``Pipeline.source``
+#: values (the REST field and ``CI_PIPELINE_SOURCE``; see
+#: docs/research/2026-09-27-gitlab-pipeline-sources/): push,
+#: merge_request_event, api, chat, external,
+#: external_pull_request_event, ondemand_dast_scan,
+#: ondemand_dast_validation, parent_pipeline, pipeline, schedule,
+#: security_orchestration_policy, trigger, web, webide. The MR
+#: verification pipelines carry ``merge_request_event`` — there is no
+#: ``merge_request`` source value. Very old instances presented the
+#: legacy ``merge_request`` spelling for the same event, so the adapter
+#: folds it onto the canonical value; unknown values pass through
+#: unchanged (a new GitLab spelling must surface, not vanish).
+_PIPELINE_SOURCE_ALIASES = {"merge_request": "merge_request_event"}
+
+
+def normalize_pipeline_source(raw: str | None) -> str | None:
+    """Canonicalize one provider pipeline ``source`` (R42-02, #375).
+
+    The ADAPTER BOUNDARY normalization — stripped, lowercased, alias-folded
+    onto the canonical spelling — so everything downstream compares
+    canonical constants, never presentation labels. ``None``/blank stay
+    ``None`` (an absent source degrades correlation, it never invents
+    one).
+    """
+    if raw is None:
+        return None
+    text = raw.strip().lower()
+    if not text:
+        return None
+    return _PIPELINE_SOURCE_ALIASES.get(text, text)
 
 
 class DiffRefs(BaseModel):
@@ -108,6 +140,15 @@ class Pipeline(BaseModel):
     #: attempt's dispatch window. Optional because listings from older
     #: fakes/tests may omit it; absence degrades correlation, never breaks it.
     created_at: str | None = None
+
+    #: R42-02 (#375): the source arrives canonicalized (see
+    #: :func:`normalize_pipeline_source`) — the parse boundary is the ONLY
+    #: place a presentation spelling is folded onto the canonical value, so
+    #: occupancy policy compares what GitLab actually emits.
+    @field_validator("source", mode="before")
+    @classmethod
+    def _canonical_source(cls, value: str | None) -> str | None:
+        return normalize_pipeline_source(value)
 
 
 class Job(BaseModel):

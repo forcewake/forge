@@ -58,6 +58,19 @@ print(binding_slot_preflight("anthropic-gateway", "env:ANTHROPIC_AUTH_TOKEN"))
 PY
 ```
 
+**The doctor-time preflight (R42-03 / #376) is the third moment.**
+`forge doctor --project <id>` resolves the delivery plan through the
+SAME seam the dispatch uses
+(`forge.adaptive.credential_preflight` → `credential_broker.delivery_plan`)
+and runs the per-mode prerequisite rules — the native carrier's
+existence and its masked/protected/ref compatibility (a protected-only
+carrier on unprotected factory refs is reported BEFORE any model call),
+the redemption grant/endpoint configuration, and the correction scope
+(`implement.paths`). None of it redeems a value, and its failure codes
+stay configuration-shaped — rotation/expiry refusals (the typed
+matrix below) remain this runbook's own vocabulary. The full rule
+table: [supported-profile-runbook.md](supported-profile-runbook.md) §8b.
+
 ## 1. Rotate (the new decision)
 
 Rotate = re-bind the SAME subject + route with the new value staged at

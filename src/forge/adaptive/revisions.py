@@ -2717,6 +2717,17 @@ REQUEST_ROUND_LIMIT = "round_limit"
 #: disagree (run MR vs round MR vs provider MR vs the target row).
 #: The round is refused with ZERO writes; no branch is ever inferred.
 REQUEST_TARGET_REFUSED = "collaboration_target_unresolved"
+#: R42-01 (#374): the MR surface is unreadable for a PERMISSION reason —
+#: the token was refused (HTTP 403) on the read a feedback command's
+#: outcome depends on. PERMANENT: no retry (a 403 never heals by
+#: re-reading), zero model calls, and no reply attempt (the write
+#: surface is as forbidden as the read).
+REQUEST_MR_FORBIDDEN = "mr_forbidden"
+#: R42-01 (#374): the collaboration surface is GONE — the MR was deleted
+#: (HTTP 404) on the read a feedback command's outcome depends on.
+#: PERMANENT: no retry, zero model calls; the record keeps the audit and
+#: the refusal states the fact.
+REQUEST_MR_MISSING = "mr_missing"
 
 
 class ReviewFeedbackRefused(ValueError):
@@ -2733,6 +2744,70 @@ class ReviewFeedbackRefused(ValueError):
         super().__init__(f"review feedback refused [{code}] {detail}")
         self.code = code
         self.detail = detail
+
+
+class ReviewObservationRetryable(Exception):
+    """A REQUIRED provider observation failed transiently (R42-01 / #374).
+
+    The review-feedback and review-round legs raise this when an
+    observation the command's outcome DEPENDS ON (the MR head, the MR
+    state, the discussions surface) could not be read: 5xx/429-exhausted,
+    network faults — everything that heals by trying again LATER. The
+    command's identity is already durable by then (the gateway committed
+    the inbox row + StepRun BEFORE this handler ran), so the correct move
+    is to FAIL the step, not to return: the step runtime's own retry
+    machinery (bounded jittered backoff, ``deadline_at``, the visible
+    ``dead`` exhaustion) owns the re-delivery. A handler that merely
+    RETURNS records the step as succeeded — the command's data survives
+    but its processing obligation dies (the #374 defect: no round, no
+    pending request, nothing for the reconciler).
+
+    ``reason`` is the stable observation name (the
+    ``provider_observation.retry_count{reason}`` dimension);
+    ``retry_after`` is the provider's declared re-read hint (parsed from
+    the failing response's ``Retry-After`` when present) — an advisory
+    FLOOR on the step's next due time, never a bypass of the bounded
+    backoff; ``status_code`` is the underlying HTTP status when known.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        retry_after: float | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(f"review observation retryable [{reason}] {detail}")
+        self.reason = reason
+        self.detail = detail
+        self.retry_after = retry_after
+        self.status_code = status_code
+
+
+def delivery_identity(request: "ReviewFeedbackRequest") -> tuple:
+    """The identity a RETRIED delivery re-derives from its durable inputs.
+
+    Everything the (byte-identical) step payload plus the frozen spec
+    fix — everything EXCEPT the live provider observations (``head_sha``,
+    ``diff_context``), which a retry legitimately re-reads. A recorded
+    request whose delivery identity matches the re-derived one is the
+    SAME command re-entering: the durable record answers (its head
+    binding is the original — a head that moved since is the EXISTING
+    ``stale_head`` decision at the fences, never a re-binding and never a
+    ``note_id_conflict``). A mismatch is the provider anomaly the
+    ``note_id_conflict`` refusal owns (R42-01 / #374).
+    """
+    return (
+        request.note_id,
+        request.run_id,
+        request.discussion_id,
+        request.mr_iid,
+        request.actor,
+        request.classification,
+        request.text,
+        request.referenced_paths,
+    )
 
 
 #: ``/fix <bounded description>`` — the correction request (a named edit).

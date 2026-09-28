@@ -55,6 +55,7 @@ from forge.adaptive.revisions import (
     REVISION_CONTENT_KEY,
     ReviewFeedbackRefused,
     ReviewFeedbackRequest,
+    ReviewObservationRetryable,
     activate_pending_revision,
     classify_review_feedback,
     correction_decision_id,
@@ -749,7 +750,7 @@ class TestIngressClassificationAndIdempotency:
         mr_iid = (await _get_run(review_db, run_id)).mr_iid
         fake.seed_discussion(mr_iid, "d-flaky", note_id=9102, body="/fix rename `forge-demo/x.md`")
 
-        with pytest.raises(GitLabAPIError):
+        with pytest.raises(ReviewObservationRetryable) as deferred:
             await service.run_command(
                 _feedback_command(
                     mr_iid,
@@ -758,10 +759,27 @@ class TestIngressClassificationAndIdempotency:
                     discussion_id="d-flaky",
                 )
             )
+        # R42-01 (#374): the typed retryable observation (never a bare
+        # provider error, never a plain return the step would record as
+        # success) — the step runtime's bounded retry owns the re-entry.
+        assert deferred.value.reason == "mr_discussions"
         # nothing recorded — a transient failure is retried, never guessed
         run = await _get_run(review_db, run_id)
         assert review_feedback_requests_of(run.evidence or {}) == {}
         assert fake.mr_notes == []
+        # the observability trail: the deferral + the pending outcome
+        from sqlalchemy import select
+
+        from forge.durable import Outbox
+        from forge.runs.service import (
+            FEEDBACK_OUTCOME_EVENT,
+            PROVIDER_OBSERVATION_RETRY_EVENT,
+        )
+
+        async with review_db() as session:
+            events = [row.event_type for row in (await session.execute(select(Outbox))).scalars()]
+        assert PROVIDER_OBSERVATION_RETRY_EVENT in events
+        assert FEEDBACK_OUTCOME_EVENT in events
 
         # the recovery: the SAME delivery re-enters once the surface is back
         fake.failing = False

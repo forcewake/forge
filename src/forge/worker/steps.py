@@ -393,14 +393,19 @@ async def fail_step(
     session_factory: async_sessionmaker[AsyncSession],
     claimed: ClaimedStep,
     error: str,
+    *,
+    retry_after: float | None = None,
 ) -> str:
     """Fenced failure: reschedule with jittered backoff, or park as dead.
 
-    Returns ``"retry"``, ``"dead"`` or ``"fenced"``. Rows keep the last error
-    in ``output`` on BOTH outcomes — the poison pill is an incident record,
-    never deleted (ADR-0017 §4), and a row that dies later to the reaper
-    (exhausted lease retries, passed deadline) carries its worker's error
-    with it instead of a bare reap note.
+    *retry_after* (R42-01 / #374) is the failing handler's declared
+    re-read hint — an advisory FLOOR on the next due time (the jittered
+    backoff still applies above it), never a bypass of the bounded
+    schedule. Returns ``"retry"``, ``"dead"`` or ``"fenced"``. Rows keep
+    the last error in ``output`` on BOTH outcomes — the poison pill is
+    an incident record, never deleted (ADR-0017 §4), and a row that dies
+    later to the reaper (exhausted lease retries, passed deadline)
+    carries its worker's error with it instead of a bare reap note.
     """
     now = _utcnow()
     ownership = (
@@ -435,13 +440,16 @@ async def fail_step(
                     )
                 )
                 return "dead"
+            delay = _backoff_delay(new_attempt)
+            if retry_after is not None:
+                delay = max(delay, max(float(retry_after), 0.0))
             await session.execute(
                 update(StepRun)
                 .where(*ownership)
                 .values(
                     status=STEP_SCHEDULED,
                     attempt=new_attempt,
-                    due_at=now + timedelta(seconds=_backoff_delay(new_attempt)),
+                    due_at=now + timedelta(seconds=delay),
                     lease_owner=None,
                     lease_expires_at=None,
                     output={"error": error[:2000]},
@@ -871,7 +879,16 @@ async def execute_claimed_step(
             raise LeaseLostError(lease_lost[0]) from None
         raise
     except Exception as exc:
-        outcome = await fail_step(session_factory, claimed, str(exc))
+        # R42-01 (#374): a handler that declares a re-read hint (the
+        # retryable-observation exception carries ``retry_after``) gets
+        # it as a floor on the next due time — duck-typed so the worker
+        # stays decoupled from the raising domain.
+        outcome = await fail_step(
+            session_factory,
+            claimed,
+            str(exc),
+            retry_after=getattr(exc, "retry_after", None),
+        )
         logger.warning(
             "Step %d (%s) attempt %d/%d failed (%s): %s",
             claimed.id,
