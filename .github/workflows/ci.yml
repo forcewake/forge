@@ -42,6 +42,18 @@ jobs:
       - name: Public-artifact gate (no database archives in tracked files)
         run: uv run python scripts/gate_public_artifacts.py
 
+      # R42-04 (#377) — the BUILD-ONCE guard (AC-8), tree-side: in the
+      # pre-release window the pending version must have a strict
+      # qualification record binding its candidate wheel, and every
+      # artifact naming it (the committed wheel receipt when CI has no
+      # dist/, the frozen supported-profile manifest) must bind the SAME
+      # digest; post-release, every strict record for the promoted version
+      # must pin exactly the promoted wheel. A changed candidate FAILS
+      # this check until re-qualified — a version bump without its
+      # qualification record cannot ride CI green.
+      - name: Exact-composition gate (build once — promote THOSE bytes)
+        run: uv run python scripts/generate_template_pins.py --exact-composition
+
       # R38-16 (#317) + #323 (Q39-04) + #327 (Q39-08): the native template,
       # secret-consumer and consumer-contract conformance gate, on EVERY
       # push (the PG profiles stay on the integration job). Five checks,

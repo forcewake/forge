@@ -1,0 +1,186 @@
+{
+  "blocked_on_lab": [
+    {
+      "id": "smoke-gitlab",
+      "observable": "exit 0; the smoke pipeline is green on exactly one job (smoke) and the lane job never ran",
+      "reason": "needs the shared lab's GitLab CE + runner id 4 (siblings #364/#365 own the lab's live traces this window); a second engineer runs it against THEIR GitLab with THEIR token"
+    },
+    {
+      "id": "verify-installed",
+      "observable": "exit 0 \u2014 every identity axis matches one of the manifest's two bound image identities, schema head 032, caps numerical, shared mount present",
+      "reason": "reads the shared lab containers forge-app/forge-worker (read-only, but the lab's live traces are siblings #364/#365's window); the maintainer runs it after the freeze window"
+    },
+    {
+      "id": "wip-continuation",
+      "observable": "the useful-wip-resume record ends reviewed-ready with the candidate verified on the exact sha and zero automatic merges (see docs/operations/supported-profile-runbook.md \u00a710)",
+      "reason": "needs the shared lab app ingress (localhost:8420 = forge-app), the lab runner id 4, and PAID lane model calls \u2014 the #326 playbook cannot run disposable-only; the recorded v2 trace (docs/evaluation/2026-09-25-supported-composition-v2/) is the shape the second engineer repeats under the maintainer's supervision"
+    }
+  ],
+  "counts": {
+    "human": 4,
+    "lab": 3,
+    "machine": 9
+  },
+  "evidence_dir": "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp",
+  "finished_at": "2026-09-28T02:02:54+00:00",
+  "human_steps": [
+    {
+      "id": "second-engineer-install",
+      "observable": "a second engineer completes \u00a72+\u00a73 on a clean host without editing source or hand-fixing YAML; their \u00a77 report exists with observed timings"
+    },
+    {
+      "id": "token-provisioning",
+      "observable": "a token with api scope exists and answers 200 \u2014 curl -s -o /dev/null -w '%{http_code}' -H \"PRIVATE-TOKEN: $GITLAB_TOKEN\" \"$GITLAB_URL/api/v4/user\""
+    },
+    {
+      "id": "observation-report",
+      "observable": "the \u00a77 report is filled with observed setup time, deviations and manual-fix count (aim: 0) \u2014 not estimates"
+    },
+    {
+      "id": "support-decision",
+      "observable": "qualification/profile-approvals.json carries the maintainer's bounded decision for gitlab-ce-v1 naming exclusions (until then the manifest honestly holds human_support_approval pending)"
+    }
+  ],
+  "mode": "from-runbook",
+  "qualification.artifact_identity": {
+    "executed_lab_image_digest": "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed",
+    "harness": "claude-code 2.1.273",
+    "lane_wheel_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+    "manifest_digest": "3bdb67906841b1d513947ac9aee9b1104db4ed0627d15fa1e5bc36057e2309c2",
+    "model_route": "fast -> openai/glm-5.3-flash",
+    "promoted_image_digest": "sha256:f1316aafe12d0301ff29c79270b389729a98aa40bd715d273b3693382bbd6bac",
+    "promoted_release": "0.41.0",
+    "promoted_wheel_sha256": "00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e",
+    "runner": "id 4 unraid (docker)",
+    "schema_head": "032",
+    "schema_predecessor": "031",
+    "target_template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b"
+  },
+  "runbook": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/onboarding/cold-install-runbook.md",
+  "started_at": "2026-09-28T02:01:54+00:00",
+  "steps": [
+    {
+      "commands": [
+        {
+          "command": "export FORGE_COLD_EVIDENCE=\"${FORGE_COLD_EVIDENCE:-$(mktemp -d)}\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": ""
+        },
+        {
+          "command": "echo \"$FORGE_COLD_EVIDENCE\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp"
+        }
+      ],
+      "expects": "the directory exists and is writable; every later receipt lands in it",
+      "id": "evidence-dir",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/freeze_supported_profile.py --check",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "freeze_supported_profile: manifest verified: /Users/Pavel_Nasovich/Projects/personal/codeward/forge/qualification/profiles/supported-gitlab-ce-v1.json\n  manifest_digest: 3bdb67906841b1d513947ac9aee9b1104db4ed0627d15fa1e5bc36057e2309c2\n  frozen template: 3d74be378bc70120\u2026"
+        }
+      ],
+      "expects": "exit 0 and the line \"manifest verified\" with digest 3bdb6790\u2026",
+      "id": "manifest-selfcheck",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "shasum -a 256 dist/*.whl",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "11c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de  dist/forge-0.39.0-py3-none-any.whl\n150bf797a74969555a41e4cbbce680afffa52acb2f976a6807825afe135c72ff  dist/forge-0.40.0-py3-none-any.whl\n00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e  dist/forge-0.41.0-py3-none-any.whl\ne7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33  dist/forge-0.42.0-py3-none-any.whl"
+        }
+      ],
+      "expects": "the pinned sha256 e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33 appears for dist/forge-0.42.0-py3-none-any.whl",
+      "id": "wheel-identity",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_check.py --mode fresh --skip-gitlab --receipt-out \"$FORGE_COLD_EVIDENCE/fresh.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "  \"mode\": \"fresh\",\n    \"started_at\": \"2026-09-28T02:01:54+00:00\",\n    \"wheel\": {\n      \"actual_sha256\": \"e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33\",\n      \"path_or_url\": \"dist/forge-0.42.0-py3-none-any.whl\",\n      \"source\": \"local-uv-build\"\n    }\n  }\ncold_install_check: receipt written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/fresh.json"
+        }
+      ],
+      "expects": "exit 0; receipt fresh.json shows the observed wheel sha equals the pin and doctor_capabilities_exit 0",
+      "id": "fresh-disposable",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_check.py --mode oracle-replay --receipt-out \"$FORGE_COLD_EVIDENCE/oracle-replay.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "ed\"\n    },\n    \"started_at\": \"2026-09-28T02:02:15+00:00\",\n    \"wheel\": {\n      \"actual_sha256\": \"e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33\",\n      \"path_or_url\": \"dist/forge-0.42.0-py3-none-any.whl\",\n      \"source\": \"local-uv-build\"\n    }\n  }\ncold_install_check: receipt written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/oracle-replay.json"
+        }
+      ],
+      "expects": "exit 0; receipt oracle-replay.json shows oracle exit 0 and \"slugify oracle: 6/6 OK\"",
+      "id": "delivery-oracle",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_check.py --mode upgrade --receipt-out \"$FORGE_COLD_EVIDENCE/upgrade.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "publication_intents 1 50c527e66c0b4ffa1e8554d9f065e0c9bdce8e0e7329a1b609bcb07150d9389c\"\n    ],\n    \"finished_at\": \"2026-09-28T02:02:41+00:00\",\n    \"mode\": \"upgrade\",\n    \"schema_after\": \"032\",\n    \"seeded_at_head\": \"031\",\n    \"started_at\": \"2026-09-28T02:02:36+00:00\"\n  }\ncold_install_check: receipt written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/upgrade.json"
+        }
+      ],
+      "expects": "exit 0; receipt upgrade.json shows seeded_at_head 031 and schema_after 032",
+      "id": "upgrade-disposable",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_check.py --mode upgrade --rollback-rehearsal --receipt-out \"$FORGE_COLD_EVIDENCE/rollback-recovery.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "d is never dropped by a downgrade; archive the rows explicitly (and accept independent child ids re-deriving different branches) before downgrading\"\n    },\n    \"schema_after\": \"032\",\n    \"seeded_at_head\": \"031\",\n    \"started_at\": \"2026-09-28T02:02:41+00:00\"\n  }\ncold_install_check: receipt written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/rollback-recovery.json"
+        }
+      ],
+      "expects": "exit 0; receipt rollback-recovery.json shows the rollback_guard typed refusal + archived rows, rollback_edge \"032 -> 031\", forward_edge \"031 -> 032\", fingerprints seed == recovered",
+      "id": "rollback-recovery",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_check.py --mode negative-arms --receipt-out \"$FORGE_COLD_EVIDENCE/negative-arms.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "\": \"each arm must produce its TYPED refusal BEFORE the unsafe or paid action (a counting probe proves no pip install / alembic migration / dispatch ran)\",\n    \"schema_arm_container\": \"forge-cold-negative-pg-nvr92r\",\n    \"started_at\": \"2026-09-28T02:02:50+00:00\"\n  }\ncold_install_check: receipt written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/negative-arms.json"
+        }
+      ],
+      "expects": "exit 0; receipt negative-arms.json shows all four arms refusal_fired=true with zero pip installs past the wheel gate and the N-2 database never migrated",
+      "id": "negative-arms",
+      "kind": "machine"
+    },
+    {
+      "commands": [
+        {
+          "command": "uv run python scripts/cold_install_restore_rehearsal.py --report \"$FORGE_COLD_EVIDENCE/restore-rehearsal.json\"",
+          "exit_code": 0,
+          "stderr_tail": "",
+          "stdout_tail": "))\n   [ok] a restore that dropped the review_rounds rows was REFUSED at the consistency gate with ZERO model turns (findings: ['review_rounds: 1 source row(s) restored as 0'])\n   deployment_workflow_restore: pass\ncold_install_restore_rehearsal: report written to /var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-cold-runbook-3p4euqwp/restore-rehearsal.json\nsummary: 3/3 drills passed (0 failed)"
+        }
+      ],
+      "expects": "exit 0; report restore-rehearsal.json shows both drills pass and model_turns_before_refusals 0",
+      "id": "restore-rehearsal",
+      "kind": "machine"
+    }
+  ]
+}

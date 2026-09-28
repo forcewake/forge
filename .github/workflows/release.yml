@@ -94,6 +94,20 @@ jobs:
           path: dist
           if-no-files-found: error
 
+      # R42-04 (#377) — the BUILD-ONCE guard (AC-8): the wheel this release
+      # just built must BE the wheel a strict qualification record bound for
+      # this version (digest equality). A rebuild whose bytes drifted — or a
+      # version nobody qualified — FAILS HERE: the promotion below never
+      # runs, and the release stays blocked until a qualification record
+      # binds the new bytes (re-qualified). The v0.41.0 gap (promoted wheel
+      # != the live trace's wheel) is exactly what this step makes
+      # impossible to repeat silently.
+      - name: Exact-composition gate (build once — promote THOSE bytes)
+        run: >-
+          python3 scripts/generate_template_pins.py --exact-composition
+          --expect-version "${GITHUB_REF_NAME#v}"
+          --expect-wheel-sha256 "${{ steps.dist.outputs.wheel_sha256 }}"
+
       - name: Log in to GHCR
         run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 

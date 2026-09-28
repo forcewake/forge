@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the 9e8d6c6 review, R42-04: the build-once candidate qualification (#377)
+
+The disclosed gap closed by process: the v0.41.0 live loop ran wheel
+`223d0f25`/image `f6ff6308` while the release promoted wheel `00919993`
+built from the later tree. From v0.42.0 on, ONE candidate is built
+(wheel + alignment image from the same tree), its digests are recorded
+BEFORE qualification (`docs/evaluation/2026-09-28-r4204-build-once/
+candidate-manifest.json`), the #364 review-loop driver qualifies THOSE
+bytes, and the promotion is gated on digest equality with the
+qualification record.
+
+- **The build-once guard (AC-8)**: `scripts/generate_template_pins.py
+  --exact-composition` — at release time (wired into the release
+  workflow right after `uv build`) the just-built wheel must EQUAL the
+  newest strict qualification record's wheel for that version or the
+  promotion FAILS; in CI's lint job the pending version must have a
+  bound candidate and every artifact naming it (dist/ or the committed
+  wheel receipt; the frozen manifest) must BE it; post-release, strict
+  records for the promoted version must pin exactly the promoted wheel.
+  A changed candidate fails the check until re-qualified. Focused
+  tests: `tests/test_exact_composition_guard.py`.
+- **The live trace on the exact candidate** (the existing
+  `run_review_loop_qualification.py` driver, re-pinned — no replacement
+  loop): delivery → ready, the human edit + native `/fix` → ready again
+  (the obligation digest verified, the readiness gate held until the
+  reviewer resolved), replay idempotence, the worker-kill recovery with
+  exactly one provider commit, the conflicting-head typed negative, and
+  the NEW required-resume negative arm — a corrupted checkpoint halts
+  the lane `wip_restore_failed` BEFORE any model session (zero vendor
+  turns, the candidate wheel's pairing marker in the halted trace).
+- **The #376 doctor preflight proven live**: the doctor green with ONLY
+  the `FORGE_MODEL_ENV_*` carrier provisioned — no ambient duplicate.
+- The freeze re-bound at the candidate (manifest `3bdb6790…`), the
+  inventory + ops drills (6/6) + cold-install kit re-run dated, the
+  supported-contract arrows map and the cold-install identity card
+  re-pinned from the same evidence facts.
+
 ## [0.41.0] - 2026-09-27
 
 ### Added — the 68f22b8 review: 13/18 items implemented (#356-#373)

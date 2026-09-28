@@ -102,6 +102,193 @@ class _Record:
     wheel_sha256: str = ""
 
 
+#: R42-04 (#377) — the BUILD-ONCE guard's inputs (stdlib-only reads):
+#: the typed qualification-record store, the committed wheel receipt (the
+#: closure pattern — CI has no dist/) and the frozen supported-profile
+#: manifest. The guard refuses a promotion whose bytes are not the
+#: qualified candidate's bytes (AC-8: a changed candidate FAILS the
+#: exact-composition check until re-qualified).
+QUALIFICATION_STAMP = "forge.profile.qualification/1"
+QUALIFICATION_RECORDS_DIR = "qualification/records"
+WORKING_TREE_WHEEL_RECEIPT = "qualification/profiles/receipts/working-tree-wheel-v2.json"
+SUPPORTED_PROFILE_MANIFEST = "qualification/profiles/supported-gitlab-ce-v1.json"
+
+
+def qualification_wheel_records(root: Path) -> list[tuple[Path, dict]]:
+    """Every STRICT (``legacy: false``) qualification record pinning a wheel.
+
+    Legacy records are history (the store's rule — never silently
+    trusted); the build-once guard binds strict records only.
+    """
+    base = root / QUALIFICATION_RECORDS_DIR
+    if not base.is_dir():
+        return []
+    out: list[tuple[Path, dict]] = []
+    for path in sorted(base.glob("*.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        if not isinstance(document, dict) or document.get("stamp") != QUALIFICATION_STAMP:
+            continue
+        if document.get("legacy") is not False:
+            continue
+        if str(document.get("wheel_sha256") or ""):
+            out.append((path, document))
+    return out
+
+
+def newest_qualification_record(root: Path, version: str) -> tuple[Path, dict] | None:
+    """The newest strict record qualifying *version*'s wheel, by executed_at."""
+    best: tuple[Path, dict] | None = None
+    for path, document in qualification_wheel_records(root):
+        if str(document.get("release_version") or "") != version:
+            continue
+        if best is None or str(document.get("executed_at") or "") > str(
+            best[1].get("executed_at") or ""
+        ):
+            best = (path, document)
+    return best
+
+
+def exact_composition_findings(
+    root: Path,
+    *,
+    expect_version: str | None = None,
+    expect_wheel_sha256: str | None = None,
+) -> list[str]:
+    """R42-04 (#377) AC-8 — build once, qualify, promote THOSE bytes.
+
+    Two windows, one rule — the artifacts a release promotes must BE the
+    artifacts the qualification record bound:
+
+    - **release time** (``expect_version`` + ``expect_wheel_sha256``,
+      driven by the release workflow right after ``uv build``): the
+      just-built wheel must EQUAL the newest strict qualification
+      record's wheel for that version. A mismatch is a CHANGED candidate
+      — the finding names both digests and the release FAILS until a
+      qualification record binds the new bytes (re-qualified).
+    - **tree time** (no expect-*): when the tree's version is NEWER than
+      the latest promotion (the pre-release window), the PENDING version
+      must have a bound candidate and every local artifact that names it
+      must BE it — the ``dist/`` wheel when present, else the committed
+      wheel receipt (CI has no dist/), and the frozen supported-profile
+      manifest when it binds this version's composition. Post-release
+      (the tree IS the promoted version), every strict record for the
+      promoted version must pin exactly the promoted wheel.
+
+    Returns the findings (empty = the exact-composition contract holds).
+    """
+    findings: list[str] = []
+    record, _path = latest_record(root)
+    if expect_version and expect_wheel_sha256:
+        candidate = newest_qualification_record(root, expect_version)
+        if candidate is None:
+            findings.append(
+                f"exact-composition REFUSED: no strict qualification record pins a wheel "
+                f"for v{expect_version} — build once, qualify the candidate, then promote "
+                "(R42-04/#377 AC-8)"
+            )
+        elif str(candidate[1]["wheel_sha256"]) != expect_wheel_sha256:
+            findings.append(
+                f"exact-composition REFUSED: the built wheel {expect_wheel_sha256[:16]}… "
+                f"is a CHANGED candidate — {candidate[0].name} qualified "
+                f"{str(candidate[1]['wheel_sha256'])[:16]}… for v{expect_version}; "
+                "re-qualify before promoting these bytes (R42-04/#377 AC-8)"
+            )
+        return findings
+
+    tree_version = current_version(root)
+    target = tree_version or record.version
+    wheel_name = f"forge-{target}-py3-none-any.whl"
+    if _version_key(target) > _version_key(record.version):
+        # pre-release window: the pending version's candidate must be
+        # bound, and every artifact naming it must BE it
+        candidate = newest_qualification_record(root, target)
+        if candidate is None:
+            findings.append(
+                f"exact-composition REFUSED: the pending v{target} has no strict "
+                "qualification record pinning its wheel — a candidate that was never "
+                "qualified cannot be promoted (R42-04/#377 AC-8)"
+            )
+            return findings
+        pinned = str(candidate[1]["wheel_sha256"])
+        local = root / "dist" / wheel_name
+        if local.is_file():
+            import hashlib
+
+            actual = hashlib.sha256(local.read_bytes()).hexdigest()
+            if actual != pinned:
+                findings.append(
+                    f"exact-composition REFUSED: dist/{wheel_name} hashes "
+                    f"{actual[:16]}… but the qualified candidate ({candidate[0].name}) "
+                    f"pins {pinned[:16]}… — rebuild-once or re-qualify (R42-04/#377 AC-8)"
+                )
+        else:
+            receipt = root / WORKING_TREE_WHEEL_RECEIPT
+            if not receipt.is_file():
+                findings.append(
+                    f"exact-composition REFUSED: no dist/{wheel_name} and no committed "
+                    f"wheel receipt ({WORKING_TREE_WHEEL_RECEIPT}) — the candidate bytes "
+                    "cannot be verified (R42-04/#377 AC-8)"
+                )
+            else:
+                try:
+                    document = json.loads(receipt.read_text(encoding="utf-8"))
+                except ValueError:
+                    document = {}
+                if str(document.get("name") or "") != wheel_name:
+                    findings.append(
+                        f"exact-composition REFUSED: {WORKING_TREE_WHEEL_RECEIPT} pins "
+                        f"{document.get('name')!r}, not the pending {wheel_name!r} "
+                        "(R42-04/#377 AC-8)"
+                    )
+                elif str(document.get("sha256") or "") != pinned:
+                    findings.append(
+                        f"exact-composition REFUSED: {WORKING_TREE_WHEEL_RECEIPT} binds "
+                        f"{str(document.get('sha256'))[:16]}… but the qualified candidate "
+                        f"({candidate[0].name}) pins {pinned[:16]}… (R42-04/#377 AC-8)"
+                    )
+        manifest_path = root / SUPPORTED_PROFILE_MANIFEST
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except ValueError:
+                manifest = {}
+            bound = (
+                (manifest.get("control_plane") or {})
+                .get("executed_lab", {})
+                .get("qualification_composition", {})
+                .get("wheel", {})
+            )
+            if (
+                isinstance(bound, dict)
+                and str(bound.get("name") or "") == wheel_name
+                and str(bound.get("sha256") or "") not in ("", pinned)
+            ):
+                findings.append(
+                    f"exact-composition REFUSED: the frozen supported-profile manifest "
+                    f"binds {wheel_name} @ {str(bound.get('sha256'))[:16]}… but the "
+                    f"qualified candidate ({candidate[0].name}) pins {pinned[:16]}… "
+                    "(re-freeze at the qualified composition — R42-04/#377 AC-8)"
+                )
+    else:
+        # post-release: every strict record FOR THE PROMOTED version must
+        # pin exactly the promoted wheel (the v0.41.0 gap, made mechanical)
+        for path, document in qualification_wheel_records(root):
+            if str(document.get("release_version") or "") != record.version:
+                continue
+            pinned = str(document["wheel_sha256"])
+            if record.wheel_sha256 and pinned != record.wheel_sha256:
+                findings.append(
+                    f"exact-composition REFUSED: {path.name} qualified "
+                    f"{pinned[:16]}… for v{record.version} but the promotion shipped "
+                    f"{record.wheel_sha256[:16]}… — a changed candidate FAILS the "
+                    "exact-composition check until re-qualified (R42-04/#377 AC-8)"
+                )
+    return findings
+
+
 def _lane_wheel_identity(document: dict) -> tuple[str, str]:
     """(url, sha256) of the promoted lane wheel; ("", "") when not built.
 
@@ -518,6 +705,22 @@ def main(argv: list[str] | None = None) -> int:
         "the README pins and the templates together",
     )
     parser.add_argument(
+        "--exact-composition",
+        action="store_true",
+        help=(
+            "the R42-04/#377 build-once guard: verify the promoted/pending artifacts "
+            "EQUAL the qualified candidate's digests — a changed candidate FAILS the "
+            "check until re-qualified (AC-8). With --expect-version/--expect-wheel-sha256 "
+            "(the release workflow, right after uv build) the JUST-BUILT wheel is "
+            "compared against the qualification record for that version and a mismatch "
+            "refuses the promotion"
+        ),
+    )
+    parser.add_argument("--expect-version", default=None, help="the version being released")
+    parser.add_argument(
+        "--expect-wheel-sha256", default=None, help="the sha256 of the wheel just built"
+    )
+    parser.add_argument(
         "--capabilities",
         action="store_true",
         help=(
@@ -541,6 +744,28 @@ def main(argv: list[str] | None = None) -> int:
             f"{wheel_url} (release.tested_sha {wheel_sha256}) — matches a qualified "
             "profile, so install instructions may pin it"
         )
+        return 0
+
+    if args.exact_composition:
+        try:
+            findings = exact_composition_findings(
+                args.root,
+                expect_version=args.expect_version,
+                expect_wheel_sha256=args.expect_wheel_sha256,
+            )
+        except PinsError as exc:
+            print(f"generate-template-pins --exact-composition: REFUSED: {exc}", file=sys.stderr)
+            return 2
+        for finding in findings:
+            print(f"exact-composition: {finding}", file=sys.stderr)
+        if findings:
+            return 1
+        window = (
+            f"v{args.expect_version} just-built bytes == the qualified candidate"
+            if args.expect_version
+            else "the pending candidate is bound and every artifact naming it IS it"
+        )
+        print(f"generate-template-pins: exact-composition GREEN ({window})")
         return 0
 
     record, record_path = latest_record(args.root)
@@ -575,7 +800,18 @@ def main(argv: list[str] | None = None) -> int:
             path.write_text(new, encoding="utf-8")
             print(f"generate-template-pins: rewrote {relpath} (v{record.version})")
 
+    # R42-04/#377: the build-once guard rides the verification modes —
+    # ``--check`` fails on composition drift exactly as it fails on pin
+    # drift; a plain render still PRINTS the findings (visible, never
+    # silent) but does not half-refuse a write run. The dedicated
+    # ``--exact-composition`` step in CI and the release workflow is the
+    # enforcing form.
+    composition_findings = exact_composition_findings(args.root)
+    for finding in composition_findings:
+        print(f"exact-composition: {finding}", file=sys.stderr)
     if args.check and drifted:
+        return 1
+    if composition_findings and (args.check or args.exact_composition):
         return 1
     window = (
         f" — pre-release window: quick-start pulls v{pending_version} (digest pending promotion)"

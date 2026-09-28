@@ -1,71 +1,73 @@
-"""R41-09 (#364) — the COMPLETE review-and-correction loop, live on ONE real profile.
+"""R42-04 (#377) — the COMPLETE review-and-correction loop, BUILD-ONCE.
 
-The 0.40.0 record's BLOCKED live /fix round (the expired broker
-credential) left the correction loop's LIVE leg pending. This driver
-closes it: the full native arc on the CURRENT composition (#365's lab —
-image 11c4bb30, schema 032, v0.41.0, the wheel 2616d221 lane pairing)
-under the **gitlab-protected-variable** credential route — the v0.39.0
-trace's route, re-probed ALIVE this window (the runner-redemption route
-still delivers the expired broker token: 401 ``token expired or
-incorrect``, typed evidence recorded, zero model spend on it).
+The v0.41.0 window closed the loop but on a PRE-RELEASE composition: the
+live trace ran wheel ``223d0f25``/image ``f6ff6308`` while the release
+promoted wheel ``00919993`` built from the later tree — honestly
+documented, but a passed HISTORICAL trace cannot serve as an exact
+release qualification. This run is the process fix (issue #377): ONE
+candidate (the current tree at v0.42.0 — wheel + alignment image built
+ONCE, digests recorded BEFORE qualification), the SAME driver, and the
+record binds THOSE bytes. The M0 fixes (#374 retryable observations,
+#375 conservative occupancy, #376 the credential-mode doctor preflight)
+ride the candidate; the doctor passes WITHOUT the ambient duplicate the
+previous window needed, and the #374 retryable seam exercises naturally
+if any transient observation occurs.
 
-The trace (issue #364's acceptance):
+The trace (issue #377's acceptance, on the EXACT candidate bytes):
 
 1. ``probe`` — BOTH credential routes probed at the real model gateway
    (one 8-token call each): the protected-variable key ALIVE (200), the
-   broker token DEAD (401, typed). The loop runs under (b) — an equally
-   qualified route the record names.
-2. ``align`` — the MINIMAL lab re-alignment: both consumers recreated
-   from the SAME image (11c4bb30, never rebuilt) with exactly three env
-   pins added — ``FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable``,
-   ``FORGE_REVIEW_FEEDBACK_ENABLED=1``, ``FORGE_MAX_REVIEW_ROUNDS=3`` —
-   then ``align_lab.py --apply`` re-runs as a VERIFY-ONLY receipt
-   (already-aligned: no mutation steps). The wheelhost (:8481) serves
-   the pinned wheel again.
+   broker token DEAD (401, typed). The loop runs under (b).
+2. ``align`` — the lab alignment BUILD of the candidate image
+   (``align_lab.py --apply``, receipts every step) with the window's env
+   pins; the wheelhost (:8481) serves the pinned candidate wheel.
 3. ``setup`` — the disposable project: the shipped SDK lane template
    VERBATIM (committed, included BY local include) + the ONE install
-   seam override (the sha256-verified wheel ladder, #365's pairing) +
-   the precommitted INDEPENDENT oracle (the slugify six-case pattern as
-   a pytest suite committed BEFORE any run) + the CI variable
-   ``FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN`` (protected + masked — the
-   native carrier the shipped template's resolution step reads) + the
-   credential binding through the shipped registry's ``bind()``.
+   seam override (the sha256-verified candidate wheel ladder) + the
+   precommitted INDEPENDENT oracle + the CI carrier variable
+   ``FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN`` (masked; NO ambient
+   duplicate — #376's doctor sees the carrier) + the credential binding
+   through the shipped registry's ``bind()``.
 4. ``delivery`` — issue → ``/implement`` → ``/go`` → the real-model SDK
-   lane → the candidate → the Draft MR → the green oracle → the closing
-   review within reserve → ``ready_for_human``. The parent is the
-   ORDINARY classic run: NO manual PlanRevision is ever staged (asserted
-   — the classic adapter path).
+   lane on the candidate wheel → the candidate → the Draft MR → the
+   green oracle → the closing review within reserve → ``ready_for_human``.
 5. ``round2`` — a NONCONFLICTING human edit lands on the MR branch (the
    round-2 contract test file — red until corrected), then the NATIVE
    ``/fix`` note on the MR → the budgeted CHILD round from the exact
-   current head (human edit included) → the new candidate on the SAME MR
-   → the oracle green on the exact new candidate → the closing reviewer
-   briefed from the SAME approved-input join as the executor (the
-   obligation digest recomputed by the driver and compared) → the
-   readiness gate holds until the REVIEWER resolves the discussion →
-   ``ready_for_human``.
+   current head → the new candidate on the SAME MR → the oracle green on
+   the exact new candidate → the closing reviewer's obligation digest
+   recomputed and compared → ``ready_for_human``.
 6. ``replay`` — the SAME note redelivered (a fresh delivery uuid, the
    same note id — exactly GitLab's retry shape): NO new request, NO new
    child round, NO new pipeline, NO new commit.
-7. ``round3`` — a DISTINCT second correction → round 3 admitted and
-   dispatched; at its publication (the provider commit landing on the
-   branch) the WORKER is killed (``podman stop -t 0``) post-commit,
+7. ``round3`` — a DISTINCT second correction; at its publication the
+   WORKER is killed (``podman stop -t 0``) post-commit,
    pre-bookkeeping, then restarted: the #358 recovery adopts the round's
-   OWN effect — exactly ONE provider commit for the round across the
-   whole trace — and completes the bookkeeping to ``ready_for_human``.
+   OWN effect — exactly ONE provider commit — and completes.
 8. ``negative`` — a third /fix (round 4) admitted and dispatched; a
-   CONFLICTING human commit lands on the MR branch mid-lane: the typed
-   conflict (``branch_drift`` / the foreign-head settle) parks the child
-   with ZERO candidate commits, the human commit stays the branch head,
-   nothing is reverted, and the lineage's outstanding-round slot frees.
-9. ``collect`` — the record ``qualification/records/review-loop-2026-09-27.json``
-   (schema ``forge.profile.qualification/1``) + the evidence bundle
-   under ``docs/evaluation/2026-09-27-review-loop/`` (receipts WITHOUT
-   values — digests only). ``teardown`` deletes the disposable project
-   after capture.
+   CONFLICTING human commit lands mid-lane: the typed conflict
+   (``branch_drift``) parks the child with ZERO candidate commits, the
+   human commit stays the head, nothing is reverted.
+9. ``resume_negative`` — the required-resume negative arm (R42-04's
+   acceptance): a checkpoint uploaded for the delivery work through the
+   app's OWN channel API, its stored blob CORRUPTED (the integrity
+   premise — durable bytes rot), then a lane job dispatched with
+   ``FORGE_LANE_RESUME=1`` on the candidate wheel: the strict restore
+   gate fails the digest verification and halts ``wip_restore_failed``
+   BEFORE any credential redemption or vendor session — zero model
+   turns, the candidate's own pairing marker in the halted trace.
+10. ``collect`` — the record ``qualification/records/review-loop-2026-09-28.json``
+    (schema ``forge.profile.qualification/1``) + the evidence bundle
+    under ``docs/evaluation/2026-09-28-r4204-build-once/`` (receipts
+    WITHOUT values — digests only). ``teardown`` deletes the disposable
+    project after capture.
 
-Spend bound: $2.50 total (the reference delivery ran $0.40; the
-correction rounds are lighter). Honest stops everywhere: a refusal is
+The corrected publication path + the concurrent-MR trace already execute
+on the candidate through the #378 composed suite
+(``tests/production_entry/test_composed_faults.py`` — cited, not rerun
+here; the full-suite gate re-executes them with every run).
+
+Spend bound: $2.50 total. Honest stops everywhere: a refusal is
 recorded, never retried into a green. The bot never merges, never
 resolves discussions, never deploys — the reviewer's resolve is a HUMAN
 action the driver performs as the reviewer.
@@ -88,15 +90,23 @@ from typing import Any, Callable, Mapping, Sequence
 import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EVAL_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-27-review-loop"
+EVAL_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-28-r4204-build-once"
 EVIDENCE_PATH = EVAL_DIR / "live-run-evidence.json"
 ALIGNMENT_RECEIPTS = EVAL_DIR / "alignment-receipts.json"
+#: The BUILD receipts (align_lab --apply executed by the operator BEFORE
+#: the driver ran — preserved verbatim; the driver's verify-only re-run
+#: writes its own receipt beside them, never over the build record).
+ALIGNMENT_BUILD_RECEIPTS = EVAL_DIR / "alignment-build-receipts.json"
 NOTES_DIR = EVAL_DIR / "notes"
 TRACES_DIR = EVAL_DIR / "traces"
 #: The qualification record's home (the typed store: the stamp is
 #: ``forge.profile.qualification/1`` exactly as ``load_profile_records``
 #: demands — the same store the @0.41.0 record lives in).
-RECORD_PATH = REPO_ROOT / "qualification" / "records" / "review-loop-2026-09-27.json"
+RECORD_PATH = REPO_ROOT / "qualification" / "records" / "review-loop-2026-09-28.json"
+#: The BUILD-ONCE candidate manifest — the digests recorded BEFORE any
+#: qualification phase ran (R42-04/#377); the record must bind these
+#: exact digests and the collect phase asserts it.
+CANDIDATE_MANIFEST = EVAL_DIR / "candidate-manifest.json"
 APP_API = "http://localhost:8420"
 STATE_PATH = REPO_ROOT / "data" / "review-loop-qualification" / "state.json"
 
@@ -104,15 +114,17 @@ STATE_PATH = REPO_ROOT / "data" / "review-loop-qualification" / "state.json"
 #: project and included BY local include (the #365 pairing pattern).
 TEMPLATE_SOURCE = REPO_ROOT / "ci" / "templates" / "claude-sdk-lane.gitlab-ci.yml"
 
-#: The CURRENT composition's lane wheel (the #363/#365 freeze — the same
-#: pinned bytes the redemption-pairing trace sha-verified in-job).
-LANE_WHEEL_NAME = "forge-0.41.0-py3-none-any.whl"
+#: The BUILD-ONCE candidate's lane wheel (R42-04/#377): ONE `uv build` of
+#: the v0.42.0 tree (0f0dc8c + the version bump), digest recorded in the
+#: candidate manifest BEFORE qualification; the lane installs EXACTLY
+#: these bytes and the release must promote them.
+LANE_WHEEL_NAME = "forge-0.42.0-py3-none-any.whl"
 LANE_WHEEL_PATH = REPO_ROOT / "dist" / LANE_WHEEL_NAME
-#: The CURRENT pairing's wheel pin — the #365 lineage continues: the
-#: re-built wheel (223d0f25…) carries EXACTLY the live-found publisher
-#: patch beyond the 2616d221 freeze (the src delta is that one patch,
-#: reported prominently; the suite stayed green at the 9016/75 baseline).
-LANE_WHEEL_SHA256 = "223d0f259895793945a7c7414879dfade04fe075ef4bde96fe87c2c24cbfdcb2"
+LANE_WHEEL_SHA256 = "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33"
+#: The BUILD-ONCE candidate's alignment image (the same tree; the
+#: alignment receipts bind the build). Read back at collect time from
+#: the observed containers — never hand-copied.
+CANDIDATE_IMAGE_DIGEST = "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed"
 LANE_WHEEL_DIR = REPO_ROOT / "data" / "lane-wheel"
 WHEEL_HOST_PORT = 8481
 LAB_HOST_LAN_IP = "192.168.1.18"
@@ -149,7 +161,7 @@ ALIGNMENT_PINS: tuple[tuple[str, str], ...] = (
     ("FORGE_BUDGET_PROFILES", BUDGET_PROFILES_600K),
 )
 
-#: The spend bound (issue #364: <= $2.50 total).
+#: The spend bound (issue #377: <= $2.50 total).
 SPEND_CAP_USD = 2.5
 
 #: The precommitted independent oracle — the slugify six-case pattern
@@ -463,7 +475,7 @@ def round2_contract_file() -> str:
     cases = "\n".join(f'    ("{text}", {expected!r}),' for text, expected in PARTS_CASES)
     return (
         '"""The round-2 correction contract, added by the human reviewer\n'
-        "BEFORE the authorized /fix (R41-09/#364): red until slugify_parts\n"
+        "BEFORE the authorized /fix (R42-04/#377): red until slugify_parts\n"
         'lands; the correction must turn this suite green without touching it."""\n'
         "import sys\n"
         "from pathlib import Path\n\n"
@@ -548,8 +560,8 @@ def seed_legacy_py() -> str:
 #: GitHub template's documented FORGE_LANE_WHEEL ladder, #365's pairing).
 #: NOTE an f-string — shell ``${VAR}`` spellings are brace-escaped.
 _WHEEL_INSTALL_STEPS = (
-    f"    # R41-09 (#364) — the CURRENT pairing's lane package: the pinned\n"
-    f"    # wheel of the qualified composition, sha256-verified BEFORE install\n"
+    f"    # R42-04 (#377) — the BUILD-ONCE candidate's lane package: the\n"
+    f"    # pinned wheel of the qualified composition, sha256-verified BEFORE install\n"
     f"    # (the ONLY deviation from the shipped template: its git+$FORGE_LANE_REF\n"
     f"    # install line is swapped for the wheel ladder the GitHub template\n"
     f"    # documents; every other before_script step below is the template\n"
@@ -585,7 +597,7 @@ def ci_yaml() -> str:
     if overridden == before:
         raise Refused("the install-seam swap matched nothing — template drift")
     return (
-        "# Generated by scripts/run_review_loop_qualification.py (R41-09/#364):\n"
+        "# Generated by scripts/run_review_loop_qualification.py (R42-04/#377):\n"
         "# the SHIPPED SDK lane template VERBATIM (committed under\n"
         "# .forge-template/ and included BY local include) + the ONE override:\n"
         "# the lane job's before_script install seam carries the pinned wheel\n"
@@ -596,7 +608,7 @@ def ci_yaml() -> str:
         "stages: [test, harness]\n\n"
         "forge-agent-claude-sdk:\n"
         "  before_script:" + overridden.rstrip("\n") + "\n\n"
-        "# The INDEPENDENT verification contract (R41-09): the precommitted\n"
+        "# The INDEPENDENT verification contract (R42-04): the precommitted\n"
         "# six-case slugify oracle + the three shapes; the round-2 contract\n"
         "# (the human reviewer's file) runs in the SAME job. Runs on every\n"
         "# push pipeline (never the dispatch pipelines).\n"
@@ -618,7 +630,7 @@ def ci_yaml() -> str:
 #: classification is fail-closed without it (LIVE-FOUND on attempt 3,
 #: run 8be14a80: an EMPTY scope makes every /fix a material proposal).
 REPO_CONFIG_YML = (
-    "# The repo-side run scoping (R41-09/#364): the /implement write surface.\n"
+    "# The repo-side run scoping (R42-04/#377): the /implement write surface.\n"
     "implement:\n"
     "  paths:\n"
     "    - src/utils/text.py\n"
@@ -630,7 +642,7 @@ REPO_CONFIG_YML = (
 def seed_files(name: str) -> dict[str, str]:
     return {
         "README.md": (
-            f"# {name}\n\nThe R41-09 (#364) complete review-and-correction loop\n"
+            f"# {name}\n\nThe R42-04 (#377) build-once review-and-correction loop\n"
             "qualification disposable project — deleted after capture. The\n"
             "precommitted independent oracle (tests/, run by the smoke CI job)\n"
             "asserts the six exact slugify cases and the three file shapes on\n"
@@ -802,10 +814,11 @@ def phase_align(bundle: Bundle) -> int:
         "stamp": "forge.lab.alignment/1",
         "generated_at": _now(),
         "purpose": (
-            "the R41-09 credential-mode switch + the receipted budget-profile policy "
-            "adjustment: both consumers recreated from the SAME image (never rebuilt — "
-            "the composition identity 11c4bb30 stands) with exactly the pins below; "
-            "align_lab.py then re-runs as a verify-only receipt"
+            "the R42-04 build-once alignment: the candidate image was BUILT from the "
+            "tree by align_lab.py --apply (its receipts live in this document — the "
+            "same file this phase appends the verify receipt to) and both consumers "
+            "run it with exactly the pins below; this phase re-verifies the pins and "
+            "re-runs align_lab.py as a verify-only receipt"
         ),
         "pins": {key: value for key, value in ALIGNMENT_PINS},
         "steps": [],
@@ -912,7 +925,7 @@ def phase_align(bundle: Bundle) -> int:
         "scripts/align_lab.py",
         "--apply",
         *[f"--extra-env={key}={value}" for key, value in ALIGNMENT_PINS],
-        f"--receipts={ALIGNMENT_RECEIPTS}",
+        f"--receipts={EVAL_DIR / 'alignment-verify-receipts.json'}",
     ]
     completed = subprocess.run(
         align_argv, cwd=REPO_ROOT, capture_output=True, text=True, timeout=900, check=False
@@ -995,7 +1008,7 @@ def phase_setup(bundle: Bundle, name: str) -> int:
                     "branch": "main",
                     "commit_message": (
                         "seed: the shipped SDK lane template verbatim + the wheel-override CI "
-                        "+ the precommitted independent oracle (committed before any run) — R41-09/#364"
+                        "+ the precommitted independent oracle (committed before any run) — R42-04/#377"
                     ),
                     "actions": [
                         {"action": "create", "file_path": path, "content": content}
@@ -1024,28 +1037,24 @@ def phase_setup(bundle: Bundle, name: str) -> int:
         if not pv_token or not base_url:
             raise Refused("the source CI variables are empty — refusing to provision")
         desired: list[tuple[str, str, dict[str, Any]]] = [
-            # LIVE-FOUND (attempt 1, run 165dd1ed, job 1135): a PROTECTED
-            # CI variable is only exposed to pipelines on PROTECTED refs —
-            # the factory branches are not protected, so the lane failed
-            # CLOSED at its bootstrap fence (typed FORGE_BOOTSTRAP_FAILED,
-            # zero model calls). The carrier is therefore masked but NOT
-            # protected on this lab; the shipped template's guidance names
-            # the protected posture for deployments that dispatch on
-            # protected refs. Recorded prominently in the evaluation README.
+            # LIVE-FOUND (the #364 window, run 165dd1ed, job 1135): a
+            # PROTECTED CI variable is only exposed to pipelines on
+            # PROTECTED refs — the factory branches are not protected, so
+            # the lane failed CLOSED at its bootstrap fence (typed
+            # FORGE_BOOTSTRAP_FAILED, zero model calls). The carrier is
+            # therefore masked but NOT protected on this lab; the shipped
+            # template's guidance names the protected posture for
+            # deployments that dispatch on protected refs.
             (MODEL_VARIABLE_NAME, pv_token, {"protected": False, "masked": True}),
-            # LIVE-FOUND (recorded prominently): the doctor's per-driver
-            # lane check (check_harness_lanes) matches DRIVER_CREDENTIAL_VARS
-            # NAMES only — it is not delivery-mode aware, so under the
-            # NATIVE gitlab-protected-variable route it does not see the
-            # FORGE_MODEL_<SEGMENT> carrier and fails project.harness_chain.
-            # The SAME value is additionally provisioned under the ambient
-            # name (masked) SOLELY so the app's own doctor stays green; the
-            # lane consumes the CARRIER (the template's native step exports
-            # it over any ambient value), and the consumption receipt names
-            # the native route. Root cause + minimal patch proposal in the
-            # record; NOT patched this window (the composition identity —
-            # image 11c4bb30 — stays frozen).
-            (ENV_SLOT, pv_token, {"protected": True, "masked": True}),
+            # R42-03 (#376) — NO AMBIENT DUPLICATE this window: the
+            # doctor's per-driver lane check is now delivery-mode aware
+            # (check_harness_lanes drops exactly the substituted ambient
+            # slot when the selected carrier passed its prerequisite), so
+            # the app's own doctor must pass WITHOUT the ambient
+            # ANTHROPIC_AUTH_TOKEN mirror the #364 window needed. The
+            # preflight phase asserts the doctor green with only the
+            # carrier provisioned — the #376 fix proven live on the
+            # candidate image.
             ("ANTHROPIC_BASE_URL", base_url, {"protected": False, "masked": False}),
             ("FORGE_LANE_WHEEL", WHEEL_URL, {}),
             ("FORGE_LANE_WHEEL_SHA256", wheel_sha, {}),
@@ -1091,20 +1100,16 @@ def phase_setup(bundle: Bundle, name: str) -> int:
                         "fence (typed FORGE_BOOTSTRAP_FAILED, zero model spend)"
                     ),
                 },
-                "ambient_duplicate_for_doctor": {
-                    "name": ENV_SLOT,
-                    "same_value": True,
-                    "reason": (
-                        "check_harness_lanes matches DRIVER_CREDENTIAL_VARS names only "
-                        "(not delivery-mode aware) — the ambient duplicate keeps the app's "
-                        "own doctor green; the lane consumes the NATIVE carrier (the "
-                        "template exports it over the ambient value)"
-                    ),
-                },
+                "ambient_duplicate_for_doctor": None,
+                "no_ambient_duplicate_note": (
+                    "#376 fix on the candidate: the doctor is delivery-mode aware and "
+                    "substitutes the carrier for the ambient slot — no ambient "
+                    "ANTHROPIC_AUTH_TOKEN variable is provisioned this window"
+                ),
                 "model_route": base_url,
             },
         )
-        print(f"setup: variables {set_keys} (carrier protected+masked)")
+        print(f"setup: variables {set_keys} (carrier masked; NO ambient duplicate — #376)")
 
     if not record.get("webhook"):
         lab_hooks = gl.get("/projects/68/hooks")
@@ -1163,7 +1168,7 @@ def phase_setup(bundle: Bundle, name: str) -> int:
                     "branch": "main",
                     "commit_message": (
                         "seed: declare the implement write scope (.forge.yml) — the "
-                        "review-feedback classification is fail-closed without it (R41-09/#364)"
+                        "review-feedback classification is fail-closed without it (R42-04/#377)"
                     ),
                     "actions": [
                         {"action": "create", "file_path": ".forge.yml", "content": REPO_CONFIG_YML}
@@ -1193,7 +1198,7 @@ def phase_setup(bundle: Bundle, name: str) -> int:
             subject,
             PROVIDER_ROUTE,
             BROKER_REF,
-            bound_by="pavel (R41-09 #364 operator action)",
+            bound_by="pavel (R42-04 #377 operator action)",
             project_id=project_id,
         )
         bundle.record(
@@ -2429,6 +2434,537 @@ def phase_negative(bundle: Bundle) -> int:
 
 
 # ---------------------------------------------------------------------------
+# phase: conflict_negative — the conflicting-head DRIFT arm on a fresh lineage
+# ---------------------------------------------------------------------------
+
+
+#: The fresh lineage's task (LIVE-FOUND this window: the reused round-4
+#: note's premise had EXPIRED — the round-2 candidate already carried the
+#: module-level compiled regex the note asked to introduce — so the model
+#: honestly produced NO changes, the run blocked typed
+#: ``harness_no_changes`` and the drift fence never fired: preserved and
+#: recorded in the ``negative`` phase; THIS arm exercises the drift fence
+#: with a request that is unsatisfiable at its base).
+CONFLICT_TASK_TITLE = "Add slugify_len(text: str) -> int to src/utils/text.py (len of the slug)"
+CONFLICT_TASK_BODY = """\
+## Task (one change, exactly)
+
+1. **MODIFY `src/utils/text.py`** — add:
+
+```python
+def slugify_len(text: str) -> int
+```
+
+returning `len(slugify(text))` — the length of the slugified form. Keep
+`slugify` and `slugify_parts` and their behavior unchanged.
+
+### Bounds
+
+- Only `src/utils/text.py` may change.
+- Do NOT modify `.gitlab-ci.yml`, `tests/`, `README.md` or any other file.
+- Do not commit or push; leave changes in the working tree.
+"""
+CONFLICT_FIX_NOTE = (
+    "/fix Review correction: rename slugify_len to slug_length in "
+    "src/utils/text.py (same behavior, the new name reads better at the "
+    "call sites); keep everything else unchanged (the tests/ suite must "
+    "stay green as-is). `src/utils/text.py`"
+)
+
+
+def phase_conflict_negative(bundle: Bundle) -> int:
+    """The conflicting-head typed conflict on a REAL publication attempt.
+
+    A second disposable lineage (its own issue, run, factory branch and
+    Draft MR) reaches ``ready_for_human``; a NATIVE ``/fix`` round is
+    admitted and dispatched; while the child's lane is RUNNING a
+    CONFLICTING human commit lands on the same branch — the child's
+    publication must hit the typed ``branch_drift`` conflict (the head
+    it approved moved), park with ZERO candidate commits, and the human
+    commit stays the head, never reverted.
+    """
+    phase = "conflict_negative"
+    record = bundle.phase(phase)
+    record["paid"] = True
+    bundle.save()
+    gl = GitLab()
+    project_id = int(bundle.document["phases"]["setup"]["project"]["id"])
+
+    # 1. the fresh lineage's delivery (its own issue/run/branch/MR)
+    if not record.get("plan"):
+        created = gl.post(
+            f"/projects/{project_id}/issues",
+            json={"title": CONFLICT_TASK_TITLE, "description": CONFLICT_TASK_BODY},
+        )
+        if created.status_code not in (201, 200):
+            raise Refused(f"issue creation failed: {created.text[:200]}")
+        issue = created.json()
+        bundle.record(phase, "issue", {"iid": issue["iid"], "url": issue["web_url"]})
+        note = gl.post(
+            f"/projects/{project_id}/issues/{issue['iid']}/notes",
+            json={"body": f"@{BOT_USERNAME} /implement"},
+        )
+        if note.status_code not in (201, 200):
+            raise Refused(f"/implement note failed: {note.text[:200]}")
+
+        def plan_note() -> Any:
+            for entry in reversed(gl.get(f"/projects/{project_id}/issues/{issue['iid']}/notes")):
+                body = str(entry.get("body", ""))
+                if entry.get("author", {}).get("username") == BOT_USERNAME and "/go " in body:
+                    return entry
+            return None
+
+        plan = poll(plan_note, "the second lineage's plan comment", timeout=900, interval=15)
+        body = str(plan.get("body", ""))
+        match = RUN_ID_RE.search(body)
+        if match is None:
+            raise Refused(f"plan note carries no run id:\n{body[-600:]}")
+        go = gl.post(
+            f"/projects/{project_id}/issues/{issue['iid']}/notes",
+            json={"body": f"@{BOT_USERNAME} /go {match.group(1)}"},
+        )
+        if go.status_code not in (201, 200):
+            raise Refused(f"/go note failed: {go.text[:200]}")
+        bundle.record(phase, "plan", {"note_id": plan.get("id"), "run_id": match.group(1)})
+    run_id = str(bundle.document["phases"][phase]["plan"]["run_id"])
+    record["run_id"] = run_id
+    bundle.save()
+
+    run = wait_status(
+        run_id,
+        ("ready_for_human", "blocked", "failed"),
+        timeout=1800,
+        what="the conflict lineage's delivery reaching a terminal state",
+    )
+    if run.get("status") != "ready_for_human":
+        raise Refused(f"the conflict lineage ended {run.get('status')}: {run.get('status_reason')}")
+    row = poll(
+        lambda: (lambda d: d if d and d.get("mr_iid") else None)(
+            psql_json(
+                "SELECT json_build_object('mr_iid', mr_iid, 'candidate_shas', candidate_shas) "
+                f"FROM flow_runs WHERE id = '{run_id}'"
+            )
+        ),
+        "the conflict lineage's MR binding",
+        timeout=120,
+        interval=5,
+    )
+    mr_iid = int(row["mr_iid"])
+    branch = str(gl.get(f"/projects/{project_id}/merge_requests/{mr_iid}")["source_branch"])
+    bundle.record(
+        phase,
+        "delivery",
+        {
+            "run_id": run_id,
+            "mr_iid": mr_iid,
+            "branch": branch,
+            "candidate_sha": str((row.get("candidate_shas") or [""])[-1]),
+            "head_at_ready": mr_head(gl, project_id, mr_iid),
+        },
+    )
+
+    # 2. the authorized /fix round (a request UNSATISFIABLE at this base)
+    if not record.get("fix_note"):
+        head_before = mr_head(gl, project_id, mr_iid)
+        note = post_fix_note(gl, project_id, mr_iid, CONFLICT_FIX_NOTE)
+        bundle.record(phase, "fix_note", {**note, "head_at_note": head_before})
+        print(f"{phase}: /fix note {note['note_id']} posted on the fresh lineage")
+    note_id = int(bundle.document["phases"][phase]["fix_note"]["note_id"])
+    if not record.get("child"):
+        child = wait_round_child(gl, project_id, mr_iid, run_id, note_id, 2)
+        bundle.record(phase, "child", child)
+    child_id = str(bundle.document["phases"][phase]["child"]["run_id"])
+
+    # 3. the conflicting human commit MID-LANE (the model turn must be
+    #    running: wait the dispatch pipeline, let the checkout finish)
+    if not record.get("conflicting_commit"):
+
+        def running_lane() -> Any:
+            for pipeline in gl.get(f"/projects/{project_id}/pipelines", params={"ref": branch}):
+                if pipeline.get("source") == "api" and pipeline.get("status") == "running":
+                    return pipeline
+            return None
+
+        poll(
+            running_lane,
+            "the conflict lineage's dispatch pipeline running",
+            timeout=600,
+            interval=5,
+        )
+        time.sleep(20)
+        current_text = gl.get_text(
+            f"/projects/{project_id}/repository/files/src%2Futils%2Ftext.py/raw",
+            params={"ref": branch},
+        )
+        commit = gl.post(
+            f"/projects/{project_id}/repository/commits",
+            json={
+                "branch": branch,
+                "commit_message": "human edit (conflicting): touch src/utils/text.py mid-round",
+                "actions": [
+                    {
+                        "action": "update",
+                        "file_path": "src/utils/text.py",
+                        "content": current_text + "\n# human note — the conflicting human edit\n",
+                    }
+                ],
+            },
+        )
+        if commit.status_code not in (201, 200):
+            raise Refused(
+                f"the conflicting human commit failed: {commit.status_code} {commit.text[:200]}"
+            )
+        bundle.record(
+            phase,
+            "conflicting_commit",
+            {
+                "commit_sha": commit.json().get("id"),
+                "path": "src/utils/text.py",
+                "head_after": mr_head(gl, project_id, mr_iid),
+            },
+        )
+        print(f"{phase}: conflicting human commit landed — head {commit.json().get('id', '')[:12]}")
+    human_sha = str(bundle.document["phases"][phase]["conflicting_commit"]["commit_sha"])
+
+    # 4. the typed drift conflict: the child's publication must refuse the
+    #    moved head, park blocked, and PRESERVE the human commit.
+    def settled() -> dict[str, Any] | None:
+        run = app_run(child_id)
+        row = next((r for r in round_rows(run_id) if r.get("child_run_id") == child_id), None)
+        if run.get("status") in ("blocked", "failed") or (
+            row and row.get("status") in ("stale", "ended", "completed")
+        ):
+            return {
+                "run_status": run.get("status"),
+                "status_reason": run.get("status_reason"),
+                "round_status": (row or {}).get("status"),
+                "round_status_reason": (row or {}).get("status_reason"),
+            }
+        return None
+
+    outcome = poll(settled, "the conflict lineage's typed branch_drift", timeout=1500, interval=10)
+    bundle.record(phase, "typed_conflict", outcome)
+    reason = str(outcome.get("status_reason") or "") + str(outcome.get("round_status_reason") or "")
+    if "branch_drift" not in reason:
+        raise Refused(f"the conflict lineage settled without branch_drift: {outcome}")
+    time.sleep(20)
+    head_now = mr_head(gl, project_id, mr_iid)
+    bundle.record(
+        phase,
+        "preservation",
+        {
+            "head_after_dust": head_now,
+            "human_commit_sha": human_sha,
+            "human_commit_is_head": head_now == human_sha,
+            "bot_commits_after_human": bot_commit_count(
+                [c for c in branch_commits(gl, project_id, branch)][:5]
+            ),
+        },
+    )
+    if head_now != human_sha:
+        raise Refused(
+            f"the human commit is NOT the head after the conflict ({head_now[:12]} != "
+            f"{human_sha[:12]}) — the negative arm must preserve it, never revert"
+        )
+    lane = latest_dispatch_lane(gl, project_id, branch)
+    if lane:
+        bundle.record(phase, "lane", lane)
+        bundle.record(
+            phase,
+            "lane_meta_spend",
+            spend_from_meta(candidate_meta(gl, project_id, int(lane["job_id"]))),
+        )
+        trace_receipt = capture_trace(gl, project_id, int(lane["job_id"]), "conflict-negative")
+        if trace_receipt:
+            bundle.record(phase, "lane_trace_receipt", trace_receipt)
+    print(
+        f"{phase}: typed branch_drift observed ({outcome['status_reason'][:60]}…), "
+        "human commit preserved as head"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# phase: resume_negative — the required-resume halt BEFORE any model session
+# ---------------------------------------------------------------------------
+
+
+def phase_resume_negative(bundle: Bundle) -> int:
+    """R42-04's required-resume negative arm, live on the candidate.
+
+    The premise: a required-resume dispatch whose held checkpoint's
+    stored bytes ROT between upload and restore. The arm builds the
+    premise through the app's OWN surfaces — a small, verified checkpoint
+    uploaded for the delivery work through the REAL channel API (a work
+    token minted by the app's own HMAC derivation inside forge-app, never
+    a hand-seeded index row), then the manifest blob's bytes corrupted in
+    the content-addressed store (the operator-side bit-rot premise) — and
+    dispatches a REAL lane job on the candidate wheel with
+    ``FORGE_LANE_RESUME=1``: the strict restore gate must fail the digest
+    verification and halt ``wip_restore_failed`` BEFORE any credential
+    redemption or vendor session exists — ZERO model turns (the meta
+    artifact's usage is null and the pairing marker proves the candidate
+    wheel even in the halted trace).
+    """
+    phase = "resume_negative"
+    record = bundle.phase(phase)
+    record["paid"] = False  # zero model spend by construction; asserted below
+    bundle.save()
+    gl = GitLab()
+    project_id = int(bundle.document["phases"]["setup"]["project"]["id"])
+    delivery = bundle.document["phases"]["delivery"]
+    mr_iid = int(delivery["mr"]["iid"])
+    branch = str(delivery["mr"]["branch"])
+    run_id = str(delivery["run_id"])
+    head = mr_head(gl, project_id, mr_iid)
+
+    # 1. the checkpoint payload — one tiny file, built with the app's own
+    #    codec constants (the channel's decoder is the verifier).
+    if not record.get("upload"):
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT / "src"))
+        from forge.adaptive.checkpointing import MANIFEST_SCHEMA
+
+        content = b"R42-04/#377 required-resume negative arm: the held WIP fixture.\n"
+        blob_digest = hashlib.sha256(content).hexdigest()
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": run_id,
+            "sequence": 1,
+            "source_oids": {},
+            "files": {
+                "notes/resume-negative-wip.txt": {
+                    "digest": blob_digest,
+                    "mode": 420,
+                    "role": "new",
+                }
+            },
+            "deletions": [],
+        }
+        manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        checkpoint_id = hashlib.sha256(manifest_bytes).hexdigest()
+        generation = psql(
+            "SELECT COALESCE(cancellation_generation, 0) FROM flow_runs WHERE id = '" + run_id + "'"
+        )
+        if not generation.isdigit():
+            raise Refused(f"no durable attempt generation for the work {run_id[:8]}")
+        minted = podman(
+            "exec",
+            "forge-app",
+            "python",
+            "-c",
+            "import os;from forge.api_lane_control import lane_control_token;"
+            f"print(lane_control_token(os.environ['FORGE_LANE_CONTROL_SECRET'],"
+            f"'{run_id}',generation={generation}))",
+        ).stdout.strip()
+        if not minted:
+            raise Refused("the work token mint (inside forge-app) returned nothing")
+        import base64
+
+        response = httpx.put(
+            f"{APP_API}/lane/checkpoints/{run_id}",
+            json={
+                "manifest": base64.b64encode(manifest_bytes).decode("ascii"),
+                "blobs": {blob_digest: base64.b64encode(content).decode("ascii")},
+                "sequence": 1,
+            },
+            headers={"Authorization": f"Bearer {minted}"},
+            timeout=30.0,
+        )
+        if response.status_code not in (200, 201):
+            raise Refused(
+                f"the channel upload failed: {response.status_code} {response.text[:300]}"
+            )
+        bundle.record(
+            phase,
+            "upload",
+            {
+                "work_id": run_id,
+                "checkpoint_id": checkpoint_id,
+                "file_blob_sha256": blob_digest,
+                "attempt_generation": int(generation),
+                "work_token_sha256_16": sha256_hex(minted)[:16],
+                "status_code": response.status_code,
+                "route": "PUT /lane/checkpoints/{work} through the app's own channel",
+            },
+        )
+        print(f"{phase}: checkpoint {checkpoint_id[:12]} uploaded through the channel")
+    upload = bundle.document["phases"][phase]["upload"]
+    checkpoint_id = str(upload["checkpoint_id"])
+    blob_digest = str(upload["file_blob_sha256"])
+
+    # 2. the integrity premise: corrupt the MANIFEST blob's stored bytes
+    #    (the checkpoint's own content address) in the CAS.
+    if not record.get("corruption"):
+        store_root = REPO_ROOT / "data" / "checkpoints"
+        blob_path = store_root / checkpoint_id[:2] / checkpoint_id
+        if not blob_path.is_file():
+            raise Refused(f"the uploaded manifest blob is not where the store puts it: {blob_path}")
+        original = blob_path.read_bytes()
+        blob_path.write_bytes(original[:-1] + bytes([original[-1] ^ 0xFF]))
+        bundle.record(
+            phase,
+            "corruption",
+            {
+                "path": f"data/checkpoints/{checkpoint_id[:2]}/{checkpoint_id}",
+                "what": "the last byte of the stored MANIFEST blob flipped (bit-rot "
+                "under the content-addressed store; the checkpoint id IS this "
+                "blob's digest — the bytes no longer reproduce it)",
+                "still_served_id": checkpoint_id,
+            },
+        )
+        print(f"{phase}: manifest blob corrupted ({checkpoint_id[:12]})")
+    if not record.get("restored_after"):
+        pass  # the store is disposable-lab state; the teardown deletes the project
+
+    # 3. dispatch the REAL lane job on the candidate wheel with the
+    #    required-resume envelope (no credential ref — the restore gate
+    #    runs before any credential step; zero model calls by construction).
+    if not record.get("dispatch"):
+        control_url = app_env("forge-app", "FORGE_LANE_CONTROL_URL")
+        minted = podman(
+            "exec",
+            "forge-app",
+            "python",
+            "-c",
+            "import os;from forge.api_lane_control import lane_control_token;"
+            f"print(lane_control_token(os.environ['FORGE_LANE_CONTROL_SECRET'],"
+            f"'{run_id}',generation={upload['attempt_generation']}))",
+        ).stdout.strip()
+        created = gl.post(
+            f"/projects/{project_id}/pipeline",
+            params={"ref": branch},
+            json={
+                "variables": [
+                    {"key": "FORGE_RUN_ID", "value": run_id},
+                    {"key": "FORGE_ISSUE_IID", "value": str(delivery["issue"]["iid"])},
+                    {"key": "FORGE_HARNESS_DRIVER", "value": "claude-sdk-lane"},
+                    {
+                        "key": "FORGE_PLAN",
+                        "value": (
+                            "R42-04/#377 required-resume negative arm: this brief is "
+                            "NEVER consumed by a model — the restore gate must halt the "
+                            "lane before any vendor session exists."
+                        ),
+                    },
+                    {"key": "FORGE_ATTEMPT_BASE", "value": head},
+                    {"key": "FORGE_LANE_RESUME", "value": "1"},
+                    {"key": "FORGE_LANE_RESUME_MODE", "value": "required"},
+                    {"key": "FORGE_RESUME_CHECKPOINT", "value": checkpoint_id},
+                    {
+                        "key": "FORGE_ATTEMPT_GENERATION",
+                        "value": str(upload["attempt_generation"]),
+                    },
+                    {"key": "FORGE_LANE_CONTROL_URL", "value": control_url},
+                    {"key": "FORGE_LANE_CONTROL_TOKEN", "value": minted},
+                    {"key": "FORGE_STEERING_ENABLED", "value": "1"},
+                ]
+            },
+        )
+        if created.status_code not in (201, 200):
+            raise Refused(
+                f"the resume-negative pipeline dispatch failed: {created.status_code} "
+                f"{created.text[:300]}"
+            )
+        bundle.record(
+            phase,
+            "dispatch",
+            {
+                "pipeline_id": created.json().get("id"),
+                "ref": branch,
+                "resume_mode": "required",
+                "pinned_checkpoint": checkpoint_id,
+                "control_url": control_url,
+                "token_dispatched_sha256_16": sha256_hex(minted)[:16],
+            },
+        )
+        print(f"{phase}: pipeline {created.json().get('id')} dispatched (required resume)")
+    pipeline_id = int(bundle.document["phases"][phase]["dispatch"]["pipeline_id"])
+
+    # 4. wait the lane job terminal, then read the trace + the meta.
+    def lane_outcome() -> dict[str, Any] | None:
+        for job in gl.get(f"/projects/{project_id}/pipelines/{pipeline_id}/jobs"):
+            if str(job.get("name", "")).startswith("forge-agent"):
+                if job.get("status") in ("success", "failed"):
+                    return {"job_id": job["id"], "status": job.get("status")}
+        return None
+
+    outcome = poll(lane_outcome, "the resume-negative lane job terminal", timeout=1500)
+    bundle.record(phase, "lane_job", outcome)
+    trace = gl.get_text(f"/projects/{project_id}/jobs/{outcome['job_id']}/trace")
+    trace_receipt = capture_trace(gl, project_id, int(outcome["job_id"]), "resume-negative")
+    meta = candidate_meta(gl, project_id, int(outcome["job_id"])) or {}
+
+    halted_marker = "wip_restore_failed" in trace
+    pairing = bool(trace_receipt and trace_receipt.get("version"))
+    usage = meta.get("usage")
+    bundle.record(
+        phase,
+        "outcome",
+        {
+            "job_status": outcome["status"],
+            "terminal_reason": meta.get("terminal_reason"),
+            "driver_exit": meta.get("exit"),
+            "usage": usage,
+            "pairing_marker_version": (trace_receipt or {}).get("version"),
+            "pairing_marker_wheel_sha": (trace_receipt or {}).get("sha"),
+            "halt_reason_head": next(
+                (
+                    line.strip()[:200]
+                    for line in trace.splitlines()
+                    if "wip_restore_failed" in line or "resume checkpoint" in line
+                ),
+                "",
+            ),
+        },
+    )
+    if outcome["status"] != "failed":
+        raise Refused(
+            f"the resume-negative lane job ended {outcome['status']} — the gate must fail it"
+        )
+    if meta.get("terminal_reason") != "wip_restore_failed" or not halted_marker:
+        raise Refused(
+            f"the resume-negative lane did not halt at the restore gate: "
+            f"terminal_reason={meta.get('terminal_reason')!r}"
+        )
+    if not pairing or (trace_receipt or {}).get("sha") != LANE_WHEEL_SHA256:
+        raise Refused(
+            "the halted lane trace does not carry the CANDIDATE wheel's pairing marker "
+            f"({(trace_receipt or {}).get('sha')})"
+        )
+    if usage is not None:
+        raise Refused("the halted lane consumed model usage — the gate ran too late")
+
+    bundle.record(
+        phase,
+        "summary",
+        {
+            "halted_before_model_session": True,
+            "halted_before_credential_step": True,
+            "halt_reason": "wip_restore_failed",
+            "corrupted_checkpoint_sha256": checkpoint_id,
+            "corrupted_blob": f"data/checkpoints/{checkpoint_id[:2]}/{checkpoint_id}",
+            "corruption_shape": "the stored MANIFEST blob's last byte flipped — the "
+            "bytes no longer reproduce the checkpoint's own content address",
+            "selection": "the work's ACTIVE checkpoint (no durable resume command row "
+            "exists for this work — none was fabricated; the lane requires the "
+            "restore regardless and the integrity failure is the halt)",
+            "zero_model_turns": True,
+            "usage": None,
+            "lane_job_status": outcome["status"],
+            "lane_job_id": outcome["job_id"],
+            "candidate_wheel_pairing_in_halted_trace": True,
+        },
+    )
+    bundle.save()
+    print(
+        f"{phase}: lane halted wip_restore_failed BEFORE any model session — zero turns, "
+        f"candidate wheel paired in the halted trace"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # phase: collect — the record + the README; phase: teardown
 # ---------------------------------------------------------------------------
 
@@ -2447,8 +2983,10 @@ REQUIRED_FOR_PASS = (
     "round3.kill.commit_sha",
     "round3.own_commit_count_for_round",
     "round3.candidate_sha",
-    "negative.typed_conflict",
-    "negative.preservation.human_commit_is_head",
+    "conflict_negative.typed_conflict",
+    "conflict_negative.preservation.human_commit_is_head",
+    "resume_negative.summary.halted_before_model_session",
+    "resume_negative.summary.corrupted_checkpoint_sha256",
 )
 
 
@@ -2471,9 +3009,96 @@ def validate_bundle(document: Mapping[str, Any]) -> list[str]:
         findings.append(f"the replay produced new effects: {replay}")
     if _dig(document, "phases.round3.own_commit_count_for_round") != 1:
         findings.append("the round-3 recovery did not hold exactly ONE own commit")
-    if _dig(document, "phases.negative.preservation.human_commit_is_head") is not True:
+    if _dig(document, "phases.conflict_negative.preservation.human_commit_is_head") is not True:
         findings.append("the conflicting human commit is not the preserved head")
+    drift = _dig(document, "phases.conflict_negative.typed_conflict") or {}
+    if "branch_drift" not in (
+        str(drift.get("status_reason") or "") + str(drift.get("round_status_reason") or "")
+    ):
+        findings.append("the conflict lineage did not hit the typed branch_drift conflict")
+    resume = _dig(document, "phases.resume_negative.summary") or {}
+    if resume.get("halted_before_model_session") is not True:
+        findings.append("the required-resume negative did not halt before any model session")
+    halt_reason = str(resume.get("halt_reason") or "") + str(
+        (_dig(document, "phases.resume_negative.outcome") or {}).get("halt_reason_head") or ""
+    )
+    if "wip_restore_failed" not in halt_reason:
+        findings.append("the required-resume negative trace lacks the wip_restore_failed halt")
+    if not resume.get("zero_model_turns"):
+        findings.append("the required-resume negative cannot prove zero model turns")
     return findings
+
+
+def _live_found_block(phases: Mapping[str, Any]) -> dict[str, Any]:
+    """The record's live-found section: the DURABLE behavior findings stay
+    (they describe GitLab/the harness, not one window's tree), the #364
+    window's tree defects are labeled as their resolutions (the patch and
+    the #376 fix both ride THIS candidate), and this window's own findings
+    are read from the bundle (never hand-written into the record)."""
+    block: dict[str, Any] = {
+        "budget_fence_positive": (
+            "PREDECESSOR WINDOW (run fbe62ad5, #364): the claude-code harness fills a "
+            "~200k-token context regardless of task size (196,312/200,000 consumed), "
+            "the finite budget EXHAUSTED at the token axis and the closing review "
+            "stood down with zero reviewer spend — the designed fence, observed live; "
+            "this window's standard profile keeps the receipted 600k ceiling"
+        ),
+        "empty_scope_fail_closed": (
+            "PREDECESSOR WINDOW (run 8be14a80, #364): without the target repo's "
+            ".forge.yml implement.paths the frozen spec's allowed_paths is EMPTY and "
+            "every /fix classifies material_change (fail-closed) — the repo-side "
+            "scope declaration is part of this driver's seed ever since"
+        ),
+        "protected_variable_visibility": (
+            "a PROTECTED GitLab CI variable reaches only protected refs; the "
+            "factory branches are not protected, so the lane fails CLOSED at its "
+            "bootstrap fence (typed FORGE_BOOTSTRAP_FAILED, zero model calls) — "
+            "the carrier is masked, NOT protected, on this lab (observed live "
+            "#364, unchanged this window)"
+        ),
+        "mr_sha_lag": (
+            "the GitLab MR document's sha field lags a just-pushed commit by "
+            "seconds — the driver reads the branch head directly (observed live "
+            "#364, unchanged this window)"
+        ),
+        "publisher_branch_defect": (
+            "PREDECESSOR WINDOW (#364), RESOLVED before this candidate: publish_candidate "
+            "carried no branch parameter so a review round's child committed onto "
+            "factory/<issue>/<child8> beside the lineage's collaboration surface; the "
+            "patch (branch= threaded from _collaboration_branch_or_block) is IN the "
+            "v0.42.0 candidate — this window's rounds publish on the lineage branch "
+            "by construction"
+        ),
+        "doctor_ambient_names": (
+            "PREDECESSOR WINDOW (#364), RESOLVED by #376 IN this candidate: the doctor's "
+            "per-driver lane check is now delivery-mode aware (exactly the substituted "
+            "ambient slot is dropped when the carrier passed its prerequisite) — this "
+            "window provisioned NO ambient duplicate and the doctor passed green"
+        ),
+    }
+    this_window = phases.get("resume_negative", {}).get("this_window_findings") or []
+    for entry in this_window:
+        if isinstance(entry, dict) and entry.get("name"):
+            block[str(entry["name"])] = str(entry.get("finding", ""))
+    for name in ("delivery_attempts_failed", "round2_attempts_failed"):
+        for attempt in phases.get(name, []) or []:
+            run_id = str(attempt.get("run_id") or "")[:8]
+            if run_id:
+                block[f"failed_attempt_{run_id}"] = (
+                    str(attempt.get("reason", ""))[:400]
+                    + " (honestly-failed attempt this window — spend counted)"
+                )
+    reused = phases.get("negative", {})
+    if reused.get("typed_conflict"):
+        block["expired_correction_premise"] = (
+            "LIVE-FOUND: a correction note whose request is ALREADY SATISFIED at the "
+            "base yields an honest model-no-op — the run blocks typed "
+            f"harness_no_changes ({reused['typed_conflict'].get('status_reason')}), zero "
+            "candidate commits, the mid-round human commit stays the preserved head. "
+            "Correction notes must name work that EXISTS at their base; the drift "
+            "fence needs a diff-producing request (the fresh conflict_negative lineage)"
+        )
+    return block
 
 
 def phase_collect(bundle: Bundle) -> int:
@@ -2484,13 +3109,32 @@ def phase_collect(bundle: Bundle) -> int:
     phase = "collect"
     record = bundle.phase(phase)
     findings = validate_bundle(bundle.document)
+    #: BUILD-ONCE (R42-04): the record binds EXACTLY the candidate's
+    #: digests — the manifest recorded them BEFORE qualification; any drift
+    #: means the qualified composition is not the recorded one.
+    candidate = json.loads(CANDIDATE_MANIFEST.read_text(encoding="utf-8"))
+    candidate_wheel = str(candidate.get("wheel", {}).get("sha256") or "")
+    candidate_image = str(candidate.get("image", {}).get("digest") or "")
+    if candidate_wheel != LANE_WHEEL_SHA256:
+        findings.append(
+            f"build-once refused: the candidate manifest's wheel {candidate_wheel[:16]}… "
+            f"!= the driver's pinned wheel {LANE_WHEEL_SHA256[:16]}…"
+        )
+    observed_image = podman(
+        "inspect", "localhost/forge:dev", "--format", "{{.Digest}}"
+    ).stdout.strip()
+    if observed_image != candidate_image or CANDIDATE_IMAGE_DIGEST != candidate_image:
+        findings.append(
+            f"build-once refused: the running image {observed_image[:23]}… is not the "
+            f"candidate manifest's {candidate_image[:23]}…"
+        )
     document = bundle.document
     phases = document["phases"]
     blocked = phases.get("probe", {}).get("result") == "both-dead"
 
     spend_total = 0.0
     spend_breakdown: dict[str, Any] = {}
-    for name in ("delivery", "round2", "round3", "negative"):
+    for name in ("delivery", "round2", "round3", "negative", "conflict_negative"):
         entry = _dig(document, f"phases.{name}.lane_meta_spend") or {}
         spend_breakdown[name] = entry
         spend_total += float(entry.get("total_usd") or 0)
@@ -2500,7 +3144,10 @@ def phase_collect(bundle: Bundle) -> int:
     failed_attempts = document["phases"].get("delivery_attempts_failed", []) + document[
         "phases"
     ].get("round2_attempts_failed", [])
-    failed_spend = 0.2229 + 0.1876 + 0.2237  # fbe62ad5, 8be14a80, 6e0fdf34 lane turns
+    #: This window's honestly-failed attempts are counted from the bundle
+    #: (each entry carries its own lane spend receipt) — never a hardcoded
+    #: predecessor-window number.
+    failed_spend = sum(float(a.get("lane_spend_usd") or 0) for a in failed_attempts)
     spend = {
         "cap_usd": SPEND_CAP_USD,
         "qualifying_lane_spend_usd": round(spend_total, 4),
@@ -2510,9 +3157,9 @@ def phase_collect(bundle: Bundle) -> int:
         "failed_attempts_counted": [a.get("run_id") for a in failed_attempts],
         "cost_basis": (
             "every lane job's own SDK usage receipt (candidate.meta.json: "
-            "total_cost_usd) — the qualifying rounds AND the three honestly-failed "
-            "attempts; the planner/closing-review model calls ride the control "
-            "plane's litellm route inside each run's budget ledger"
+            "total_cost_usd) — the qualifying rounds AND any honestly-failed "
+            "attempts this window; the planner/closing-review model calls ride the "
+            "control plane's litellm route inside each run's budget ledger"
         ),
     }
 
@@ -2526,37 +3173,40 @@ def phase_collect(bundle: Bundle) -> int:
     evidence_class = "live-provider" if not blocked else "offline-operational"
     qualification = {
         "stamp": "forge.profile.qualification/1",
-        "record_id": "gitlab-ce-v1-Q4109-review-loop-2026-09-27",
+        "record_id": "gitlab-ce-v1-Q4204-review-loop-2026-09-28",
         "profile": "gitlab-ce-v1",
         "provider": "gitlab",
         "release_version": _repo_version(),
         "provider_version": (
             "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live "
-            "via GET /api/v4/version on 2026-09-27"
+            "via GET /api/v4/version on 2026-09-28"
         ),
         "runtime_recipe": (
             "python-3.13 (uv in the lane job, venv at /tmp/forge-lane-venv) on the unraid "
             "docker-executor runner (GitLab runner id 4); control plane = podman containers "
-            "forge-app/forge-worker (image sha256:f6ff6308…, v0.41.0, schema 032) under "
+            f"forge-app/forge-worker (image {CANDIDATE_IMAGE_DIGEST[:19]}…, v0.42.0, "
+            "schema 032 — the BUILD-ONCE candidate image, receipts in "
+            "alignment-build-receipts.json) under "
             "FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable; the wheelhost (:8481) "
-            "served the pinned wheel over the lab LAN"
+            "served the pinned candidate wheel over the lab LAN"
         ),
         "harness_binary": "claude-code",
         "harness_version": "2.1.273",
-        "image_digest": ("sha256:f6ff63089bb82af5c7bbf195a2aa56ee2d722c0e0fe19bad4e15b2e8bcf9b114"),
+        "image_digest": CANDIDATE_IMAGE_DIGEST,
         "wheel_sha256": LANE_WHEEL_SHA256,
         "template_defaults_digest": hashlib.sha256(TEMPLATE_SOURCE.read_bytes()).hexdigest(),
         "runtime_dependency_fingerprint": (
-            "lane install forge[interactive] @ file:///tmp/forge-0.41.0-py3-none-any.whl "
-            "(sha256 223d0f25…, verified in-job; the tree's uv build carrying EXACTLY the "
-            "live-found publisher branch patch beyond the 2616d221 freeze) with "
-            "claude-code CLI pinned 2.1.273; control plane = the working-tree alignment "
-            "build (image sha256:f6ff6308…, v0.41.0, schema 032)"
+            "lane install forge[interactive] @ file:///tmp/forge-0.42.0-py3-none-any.whl "
+            f"(sha256 {LANE_WHEEL_SHA256[:16]}…, verified in-job; the ONE uv build of the "
+            "v0.42.0 tree — digests recorded in candidate-manifest.json BEFORE "
+            "qualification) with claude-code CLI pinned 2.1.273; control plane = the "
+            f"BUILD-ONCE alignment image ({CANDIDATE_IMAGE_DIGEST[:19]}…, v0.42.0, "
+            "schema 032) built from the SAME tree"
         ),
         "authority_contract_version": (
             "unmarked-filesystem (no data/checkpoints/migration/authority.json marker "
             "exists; the doctor observes the configured repository is 'filesystem' — "
-            "observed 2026-09-27, the same axis the @0.41.0 record pins)"
+            "observed 2026-09-28, the same axis the @0.41.0 record pins)"
         ),
         "provider_behavior_fingerprint": (
             "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — the protected-"
@@ -2575,37 +3225,56 @@ def phase_collect(bundle: Bundle) -> int:
                 "capability": "review-rounds-correction-loop",
                 "class": evidence_class,
                 "covers": (
-                    "KIND=model-task-execution · COMPOSITION=CURRENT-TREE+THE-ONE-PATCH. The "
-                    "R41-09 (#364) complete review-and-correction loop on ONE real GitLab CE "
-                    "profile: delivery 1 ready_for_human (ordinary classic parent, oracle "
-                    "green on the exact sha) → a nonconflicting human edit → the native /fix "
-                    "→ the budgeted child round from the exact current head → the new "
-                    "candidate on the SAME MR → the oracle on the exact new candidate → the "
-                    "closing reviewer's obligation digest verified → replay idempotence → a "
-                    "second distinct correction with the #358 worker-failure recovery "
-                    "(exactly one provider commit per publication effect) → the "
-                    "conflicting-head typed conflict with the human commit preserved. The "
-                    "model legs rode the gitlab-protected-variable route (probed ALIVE; the "
-                    "broker token 401 typed). Full narrative: the trace section below + "
-                    "docs/evaluation/2026-09-27-review-loop/README.md"
+                    "KIND=model-task-execution · COMPOSITION=THE-EXACT-CANDIDATE (wheel "
+                    f"{LANE_WHEEL_SHA256[:8]}… + image {CANDIDATE_IMAGE_DIGEST[7:15]}…, "
+                    "built ONCE, digests recorded before qualification — the R42-04 "
+                    "build-once contract; the v0.41.0 historical-composition gap this "
+                    "issue disclosed is closed by construction). The R42-04 (#377) "
+                    "review-and-correction loop on ONE real GitLab CE profile: delivery 1 "
+                    "ready_for_human (ordinary classic parent, oracle green on the exact "
+                    "sha) → a nonconflicting human edit → the native /fix → the budgeted "
+                    "child round from the exact current head → the new candidate on the "
+                    "SAME MR → the oracle on the exact new candidate → the closing "
+                    "reviewer's obligation digest verified → replay idempotence → a second "
+                    "distinct correction with the #358 worker-failure recovery (exactly "
+                    "one provider commit per publication effect) → the conflicting-head "
+                    "typed conflict with the human commit preserved → the required-resume "
+                    "negative arm halting BEFORE any model session on the corrupted "
+                    "checkpoint (zero vendor turns, the candidate's own pairing marker in "
+                    "the halted trace). The model legs rode the gitlab-protected-variable "
+                    "route (probed ALIVE; the broker token 401 typed) with the #376 "
+                    "delivery-mode doctor preflight green WITHOUT any ambient duplicate. "
+                    "Full narrative: the trace section below + "
+                    "docs/evaluation/2026-09-28-r4204-build-once/README.md"
                 ),
                 "executed_at": _now(),
                 "outcome": "pass" if not findings else "findings",
             }
         ],
         "credential_route": (
-            "gitlab-protected-variable (FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN, protected+masked; "
+            "gitlab-protected-variable (FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN, masked; "
             "the lane's real model calls rode it — the route probed ALIVE this window "
-            "while the runner-redemption broker token answered 401 token-expired, typed)"
+            "while the runner-redemption broker token answered 401 token-expired, typed; "
+            "the doctor passed WITHOUT the ambient duplicate — the #376 fix on the "
+            "candidate)"
         ),
         "composition": {
-            "control_plane": "the working-tree alignment build (image sha256:11c4bb30…, "
-            "reports 0.41.0, schema head 032) — recreated NEVER rebuilt for the "
-            "credential-mode switch (three env pins; receipts in alignment-receipts.json)",
-            "lane_package": f"forge-0.41.0 wheel @ sha256 {LANE_WHEEL_SHA256[:16]}… "
-            "(sha256-verified in-job; the #365 pairing)",
+            "control_plane": (
+                f"the BUILD-ONCE alignment image ({CANDIDATE_IMAGE_DIGEST[:19]}…, "
+                "reports 0.42.0, schema head 032) — built from the SAME tree as the "
+                "wheel (align_lab.py --apply; receipts in "
+                "alignment-build-receipts.json), digests recorded in "
+                "candidate-manifest.json BEFORE qualification"
+            ),
+            "lane_package": f"forge-0.42.0 wheel @ sha256 {LANE_WHEEL_SHA256[:16]}… "
+            "(the ONE uv build; sha256-verified in-job on every lane leg)",
             "template": "the shipped claude-sdk-lane template VERBATIM (committed, "
             "included BY local include) + the ONE install-seam override",
+            "build_once_contract": (
+                "the release of v0.42.0 must promote THESE bytes: "
+                "generate_template_pins.py --exact-composition refuses a promotion "
+                "whose wheel digest differs from this record's (R42-04 AC-8)"
+            ),
         },
         "trace": {
             "delivery_1": {
@@ -2670,50 +3339,36 @@ def phase_collect(bundle: Bundle) -> int:
                 "typed_conflict": negative.get("typed_conflict"),
                 "preservation": negative.get("preservation"),
             },
+            "negative_reused_note_model_no_op": {
+                "typed_conflict": negative.get("typed_conflict"),
+                "refusal": phases.get("negative", {}).get("refusal"),
+                "finding": (
+                    "LIVE-FOUND: the reused round-4 correction note's premise had "
+                    "EXPIRED at this base — the round-2 candidate already carried the "
+                    "module-level compiled regex the note asked to introduce — so the "
+                    "model honestly produced ZERO changes, the run blocked typed "
+                    "harness_no_changes, zero candidate commits, the human conflicting "
+                    "commit stayed the preserved head, and the round slot freed. The "
+                    "drift fence then ran on the FRESH lineage (conflict_negative) "
+                    "with a request unsatisfiable at its base"
+                ),
+            },
+            "conflict_negative_fresh_lineage": {
+                k: phases.get("conflict_negative", {}).get(k)
+                for k in (
+                    "delivery",
+                    "fix_note",
+                    "child",
+                    "conflicting_commit",
+                    "typed_conflict",
+                    "preservation",
+                )
+            },
+            "resume_negative": phases.get("resume_negative", {}).get("summary"),
             "rounds_table_final": round3.get("round_rows") or round2.get("round_rows"),
         },
         "credential_probe": probe.get("routes"),
-        "live_found": {
-            "publisher_branch_defect": {
-                "what": "the harness publication path passed NO branch to publish_candidate; a review round's child committed onto factory/<issue>/<child8> — a SECOND branch beside the lineage's collaboration surface — and the (target-resolving) drift check blocked the run external_change",
-                "root_cause": "src/forge/runs/publisher.py::publish_candidate had no branch parameter and service.py::_adopt_harness_change passed none — the one #359 branch-consuming leg still deriving from the run id",
-                "patch": "_adopt_harness_change resolves _collaboration_branch_or_block(run_id) (typed block on a refused target, zero provider calls) and threads branch= through publish_candidate; callers passing nothing keep the legacy derivation (byte-identical for non-round runs)",
-                "suite": "FULL uv run pytest -q green with the patch: 9016 passed, 75 skipped (the baseline)",
-                "evidence": "run 6e0fdf34 blocked external_change; wrong-branch commit c75f66e0 on factory/4/6e0fdf34; the post-patch rounds publish on the lineage branch",
-                "composition_note": "the patched tree was rebuilt mid-window (wheel 2616d221 -> 223d0f25, image 11c4bb30 -> f6ff6308) — the #365 precedent; the re-freeze binds the new receipts",
-            },
-            "budget_fence_positive": (
-                "run fbe62ad5: the claude-code harness fills a ~200k-token context "
-                "regardless of task size (196,312/200,000 consumed), the finite "
-                "budget EXHAUSTED at the token axis and the closing review stood "
-                "down with zero reviewer spend — the designed fence, observed live"
-            ),
-            "empty_scope_fail_closed": (
-                "run 8be14a80: without the target repo's .forge.yml implement.paths "
-                "the frozen spec's allowed_paths is EMPTY and every /fix classifies "
-                "material_change (fail-closed; the honest reply landed, MR note 1474) "
-                "— the repo-side scope declaration is mandatory onboarding for the "
-                "review-loop surface"
-            ),
-            "protected_variable_visibility": (
-                "a PROTECTED GitLab CI variable reaches only protected refs; the "
-                "factory branches are not protected, so the lane failed CLOSED at "
-                "its bootstrap fence (typed FORGE_BOOTSTRAP_FAILED, zero model "
-                "calls) — the carrier is masked, NOT protected, on this lab"
-            ),
-            "doctor_ambient_names": (
-                "check_harness_lanes matches DRIVER_CREDENTIAL_VARS names only (not "
-                "delivery-mode aware): under the native route it cannot see the "
-                "FORGE_MODEL_<SEGMENT> carrier and fails project.harness_chain — the "
-                "SAME value is additionally provisioned under the ambient name so "
-                "the app's own doctor stays green (minimal patch proposal recorded; "
-                "NOT patched this window — the composition identity stays frozen)"
-            ),
-            "mr_sha_lag": (
-                "the GitLab MR document's sha field lags a just-pushed commit by "
-                "seconds — the driver reads the branch head directly"
-            ),
-        },
+        "live_found": _live_found_block(phases),
         "oracle_contract": (
             "the precommitted independent oracle: tests/test_text_utils.py (the slugify "
             "six-case pattern + the three file shapes) run by the smoke CI job on every "
@@ -2724,15 +3379,20 @@ def phase_collect(bundle: Bundle) -> int:
             "the oracle pipeline green on the EXACT candidate sha of every delivery; the "
             "reviewer obligation digest recomputed by the driver over the seeded "
             "correction revision == the recorded digest; exactly ONE provider commit per "
-            "publication effect across the whole trace; the bot never merges, never "
-            "resolves a discussion, never deploys"
+            "publication effect across the whole trace; the required-resume negative "
+            "halts wip_restore_failed BEFORE any vendor session (zero model turns on "
+            "the corrupted checkpoint); the bot never merges, never resolves a "
+            "discussion, never deploys; the record's wheel/image digests EQUAL the "
+            "candidate-manifest's (recorded before qualification — build-once)"
         ),
         "spend": spend,
         "validation_findings": findings,
         "evidence_refs": [
-            "docs/evaluation/2026-09-27-review-loop/live-run-evidence.json",
-            "docs/evaluation/2026-09-27-review-loop/alignment-receipts.json",
-            "docs/evaluation/2026-09-27-review-loop/README.md",
+            "docs/evaluation/2026-09-28-r4204-build-once/live-run-evidence.json",
+            "docs/evaluation/2026-09-28-r4204-build-once/alignment-receipts.json",
+            "docs/evaluation/2026-09-28-r4204-build-once/alignment-build-receipts.json",
+            "docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json",
+            "docs/evaluation/2026-09-28-r4204-build-once/README.md",
         ],
     }
     if spend["all_attempt_total_usd"] > SPEND_CAP_USD:
@@ -2780,6 +3440,8 @@ PHASES: dict[str, Callable[..., int]] = {
     "replay": lambda bundle, state: phase_replay(bundle),
     "round3": lambda bundle, state: phase_round3(bundle),
     "negative": lambda bundle, state: phase_negative(bundle),
+    "conflict_negative": lambda bundle, state: phase_conflict_negative(bundle),
+    "resume_negative": lambda bundle, state: phase_resume_negative(bundle),
     "collect": lambda bundle, state: phase_collect(bundle),
     "teardown": lambda bundle, state: phase_teardown(bundle),
 }
@@ -2788,7 +3450,7 @@ PHASES: dict[str, Callable[..., int]] = {
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("phase", choices=[*PHASES, "all"])
-    parser.add_argument("--name", default="forge-review-loop-2026-09-27")
+    parser.add_argument("--name", default="forge-review-loop-2026-09-28")
     args = parser.parse_args(argv)
     bundle = Bundle()
     state = {"name": args.name}

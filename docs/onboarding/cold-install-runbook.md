@@ -33,19 +33,21 @@ installer's.
 Everything below is pinned **together** from the CURRENT committed
 qualification state: the freeze manifest
 `qualification/profiles/supported-gitlab-ce-v1.json` (stamp
-`forge.supported.profile/1`) and the promotion records
-(`docs/releases/evidence/v0.40.0/promotion.json` — the newest promotion;
-the v0.41.0 promotion runs against this tag and re-binds on the
-follow-up release commit). **The manifest is normative** — if this table
+`forge.supported.profile/1`), the promotion records
+(`docs/releases/evidence/v0.41.0/promotion.json` — the newest promotion)
+and the BUILD-ONCE candidate manifest
+(`docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json` —
+the v0.42.0 qualification composition whose digests were recorded BEFORE
+qualification; R42-04/#377). **The manifest is normative** — if this table
 and the manifest ever disagree, the manifest wins and this runbook must
 be re-read; never install from a table.
 
 | Axis | Pinned value | Receipt |
 | --- | --- | --- |
-| Freeze manifest | digest `a365b101e0e90ca32724af1deb1cf6d3f97c4d32be5bb229682ff66f1d3c001a` (frozen 2026-09-27 — the v0.41.0 release follow-up re-freeze) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
-| Promoted release | **v0.41.0**, source `536905c4…`, image `ghcr.io/forcewake/forge` @ `sha256:f1316aafe12d03…`, wheel sha256 `00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e` (built from the release tree carrying the cycle-end correctness fixes; the live traces executed the pre-final build 223d0f25 — the freeze and the record name both, honestly), sdist sha256 `e53f9a02…` | `docs/releases/evidence/v0.41.0/promotion.json` |
-| Control plane + worker (one build) | the promotion's image above; the executed-lab bind (`localhost/forge:dev` @ `sha256:11c4bb30…`, reports 0.41.0, schema head 032, rollback tag `pre-r3708-20260927T024816Z`) is the OTHER bound identity — each image axis must match ONE of them exactly | manifest `control_plane` |
-| Lane wheel (what a cold install installs) | `forge-0.41.0-py3-none-any.whl` @ sha256 `00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e` (`dist/forge-0.41.0-py3-none-any.whl` — the `uv build` of the CURRENT tree incl. the R41-10 preflight + the R41-09 live-found publisher branch patch; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | manifest `lane.wheel` + the wheel receipt |
+| Freeze manifest | digest `3bdb67906841b1d513947ac9aee9b1104db4ed0627d15fa1e5bc36057e2309c2` (frozen 2026-09-28 — re-frozen at the v0.42.0 BUILD-ONCE candidate: the executed-lab bind and the qualification-composition wheel moved together to the candidate; the promoted block stays v0.41.0 until the release) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
+| Promoted release | **v0.41.0**, source `536905c4…`, image `ghcr.io/forcewake/forge` @ `sha256:f1316aafe12d03…`, wheel sha256 `00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e`, sdist sha256 `e53f9a02…` — **the disclosed R42-04 gap**: this promotion shipped `00919993` while the live review-loop trace ran the pre-final build `223d0f25`; the v0.42.0 cycle closes that class by construction (build once, gate the promotion on digest equality) | `docs/releases/evidence/v0.41.0/promotion.json` |
+| Control plane + worker (one build) | the promotion's image above; the executed-lab bind (`localhost/forge:dev` @ `sha256:98ea9031…`, reports 0.42.0, schema head 032, rollback tag `pre-r3708-20260928T014257Z`) is the OTHER bound identity — the BUILD-ONCE candidate the qualification traces executed (digests recorded before qualification) — each image axis must match ONE of them exactly | manifest `control_plane` |
+| Lane wheel (what a cold install installs) | `forge-0.42.0-py3-none-any.whl` @ sha256 `e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33` (`dist/forge-0.42.0-py3-none-any.whl` — the ONE `uv build` of the candidate tree; sha-verified in-job by every qualification lane leg; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | manifest `lane.wheel` + the wheel receipt + the candidate manifest |
 | Lane runtime + dependencies | python **3.13** (uv standalone in the lane job); the wheel's dependency set resolved by uv from the committed `uv.lock` at the freeze (exact pins, e.g. `fastapi==0.135.2`, `uvicorn[standard]==0.42.0`); the harness CLI **claude-code 2.1.273** pinned inside the lane job | `pyproject.toml` + `uv.lock` + manifest `harness` |
 | Schema | head **032**, declared predecessor **031** (the supported upgrade is exactly one step, 031 → 032; guarded downgrades — see §8) | manifest `control_plane.schema_revision` |
 | Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ sha256 `3d74be378bc70120…` — the bytes are frozen INTO the manifest; the install renders from the manifest, never from the working tree | manifest `target_template.frozen` |
@@ -53,33 +55,43 @@ be re-read; never install from a table.
 | Harness | **claude-code 2.1.273** (the lane's pinned harness binary) | manifest `harness` |
 | Model route | litellm `fast` → `openai/glm-5.3-flash` (lane model `glm-5.3-flash` via the z.ai Anthropic-compatible gateway) — **never contacted by any machine step in §3** | manifest `model_route` |
 | Credential mode | `gitlab-protected-variable` + `runner-redemption` (both declared delivery modes; §5's live legs are where they are exercised) | manifest `credential_route` |
-| Delivery preflight | `forge doctor --project <id>` validates the SELECTED mode through the same resolver the dispatch uses (per-mode carrier/grant/scope rules — see docs/operations/supported-profile-runbook.md §8b); the #364 duplicate-ambient workaround is retired from the recipe (machine-proven by tests; the runner-bound live re-verification is #377's window) | doctor checks `credential.*` + `onboarding.review_scope` |
+| Delivery preflight | `forge doctor --project <id>` validates the SELECTED mode through the same resolver the dispatch uses (per-mode carrier/grant/scope rules — see docs/operations/supported-profile-runbook.md §8b); the #364 duplicate-ambient workaround is retired from the recipe and #377's build-once window re-verified it LIVE on the candidate (the doctor green with ONLY the carrier provisioned, no ambient duplicate) | doctor checks `credential.*` + `onboarding.review_scope` |
 | Verification policy | the verification is INDEPENDENT, PRECOMMITTED and CANDIDATE-BOUND: the target project's own `smoke` job (six exact slugify cases + app rewired + legacy deleted) is committed BEFORE any run and must be green on the CURRENT candidate sha; the candidate may not touch `.gitlab-ci.yml` or `tests/`; the merge decision stays human (the bot never merges); and every §3 machine step here spends ZERO model calls — a cold install proves delivery surfaces, never model turns | manifest `verification_contract` + §6 |
 
 **The evidence kinds this kit separates (never blended).** The record
-behind this profile (`qualification/records/gitlab-ce-v1@0.41.0.json`)
-marks every arrow by its evidence kind AND composition:
+behind this profile (`qualification/records/gitlab-ce-v1@0.42.0.json`
+— the pre-release record; `gitlab-ce-v1@0.41.0.json` stays the promoted
+release's record) marks every arrow by its evidence kind AND composition:
 
 | Evidence kind | What it is here | Status on this freeze |
 | --- | --- | --- |
-| Source review | the required CI checks on the tagged sha (lint/typecheck/test matrices) | the v0.40.0 promotion's checks stand; the v0.41.0 checks run with this tag's release |
-| Release canary | the promotion canary stages (fresh install + seeded previous-head upgrade on the released image) | v0.40.0's canary (029→031 with data preservation) stands; v0.41.0's expected edge is 031→032 |
+| Source review | the required CI checks on the tagged sha (lint/typecheck/test matrices) | the v0.41.0 promotion's checks stand (conditional-promote history retained); v0.42.0's checks run with its release |
+| Release canary | the promotion canary stages (fresh install + seeded previous-head upgrade on the released image) | v0.41.0's canary (031→032 with data preservation) stands; v0.42.0's expected edge is 032→032 (same-head preservation unless a 033 lands) |
 | Native transport qualification | the deployment-ops drills + cold-install proofs bound to THIS manifest digest (native note ingress, dispatch, rollback/restore drills) | CURRENT composition — re-executed at this freeze (see §9) |
-| Model-task execution | the live model-consuming traces (the v2 delivery loop, the redemption trace) | HISTORICAL compositions (the v0.39.0-promoted tree; the `ddcb9137` lab) — the current-composition live legs are this cycle's #364 (the correction round) and #365 (the grant pairing); the live /fix leg stays PENDING |
+| Model-task execution | the live model-consuming traces | the COMPLETE correction loop (delivery → /fix → ready → replay → worker-failure recovery → conflicting-head negative → required-resume negative) ran ON THIS EXACT CANDIDATE (the #377 build-once review-loop record, wheel `e7b48d42`/image `98ea9031`); the v2 delivery loop and the redemption trace stay HISTORICAL compositions (the v0.39.0-promoted tree; the `ddcb9137` lab) |
 | External acceptance / human approval | the pilot records and the maintainer's bounded support decision | SEPARATE human artifacts (`qualification/profile-approvals.json`) — this kit approves nothing |
 
-**Where v0.41.0 will re-pin.** At the release the promotion lands
-under `docs/releases/evidence/v0.41.0/promotion.json`,
+**Where v0.42.0 re-pins — under the build-once contract.** At the
+release the promotion lands under
+`docs/releases/evidence/v0.42.0/promotion.json`, and the
+**exact-composition gate**
+(`scripts/generate_template_pins.py --exact-composition
+--expect-version … --expect-wheel-sha256 …`, wired into the release
+workflow right after `uv build`) refuses the promotion UNLESS the
+just-built wheel equals the qualified candidate's `e7b48d42…` byte for
+byte — the v0.41.0 gap (promoted `00919993` vs the traced `223d0f25`)
+cannot recur silently; a changed candidate FAILS the check until a
+qualification record binds the new bytes. Then
 `scripts/freeze_supported_profile.py` re-freezes the manifest bound to
 the promoted digest (the old one is archived first at
 `qualification/profiles/supported-gitlab-ce-v1@<composition>.json` —
 history is archived, never rewritten), and the pins that move together
 are: `manifest_digest`, the promoted release block, `lane.wheel`
-(name/path/sha — the version string changes), the schema heads (if a
-`033` migration lands) and the frozen template sha (if the recipe
-changes). §9 of `docs/operations/supported-profile-runbook.md` owns the
-re-freeze procedure. This runbook's identity card is then refreshed;
-the commands in §3 never change with a re-pin.
+(name/path/sha), the schema heads (if a `033` migration lands) and the
+frozen template sha (if the recipe changes). §9 of
+`docs/operations/supported-profile-runbook.md` owns the re-freeze
+procedure. This runbook's identity card is then refreshed; the commands
+in §3 never change with a re-pin.
 
 ## 2. Prerequisites
 
@@ -128,7 +140,7 @@ echo "$FORGE_COLD_EVIDENCE"
 
 ```bash
 # forge-step: manifest-selfcheck | machine
-# forge-expects: exit 0 and the line "manifest verified" with digest 3fcab8bc…
+# forge-expects: exit 0 and the line "manifest verified" with digest 3bdb6790…
 uv run python scripts/freeze_supported_profile.py --check
 ```
 
@@ -138,7 +150,7 @@ under the same version string is the mutable-tag refusal).
 
 ```bash
 # forge-step: wheel-identity | machine
-# forge-expects: the pinned sha256 bb8f18a8490612954827c848479a0d609d620054cba25613d3d319534117f95b appears for dist/forge-0.41.0-py3-none-any.whl
+# forge-expects: the pinned sha256 e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33 appears for dist/forge-0.42.0-py3-none-any.whl
 shasum -a 256 dist/*.whl
 ```
 
@@ -506,6 +518,22 @@ Blocked-on-lab (named): L1 smoke-gitlab, L2 verify-installed,
 L3 wip-continuation (the shared lab and the paid lane are outside this
 window — §5 records each reason; the sibling issues #364/#365 own this
 cycle's live traces).
+
+Executed AGAIN 2026-09-28 at the R42-04/#377 build-once freeze
+(manifest `3bdb6790…`, wheel `forge-0.42.0` @ `e7b48d42…` — the
+QUALIFIED CANDIDATE, digests recorded before qualification;
+`uv run python scripts/cold_install_check.py --mode from-runbook`):
+**9 machine steps executed as written, 0 refusals; 4 human-step markers
+counted, 3 blocked-on-lab markers recorded** (receipt:
+`docs/evaluation/2026-09-28-r4204-build-once/cold-install-from-runbook.json`).
+The ops drills re-ran the same day: the LIVE deployment-ops drills
+12/13 pass, qualified-for-profile
+(`qualification/deployment-ops-2026-09-28.json` — the 1 fail is the
+honest blocked live leg: the redemption-mode dispatch on the lab's
+expired broker credential, zero model spend); the offline ops drills
+6/6 (`qualification/ops-drills-2026-09-28.json`). The 2026-09-27
+execution below stays as the historical record of the same kit at the
+v0.41.0 freeze.
 
 This section is evidence for the KIT, not for H1: the second
 engineer's own observed numbers land in §7.

@@ -722,11 +722,16 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 ),
                 "wheel_url": str(inputs.latest_promotion.get("wheel_url", "")),
                 "status": (
-                    "promoted FROM the qualified composition — v0.40.0 is built "
-                    "from the exact tree the traces executed and the promoted lane "
-                    "wheel is byte-identical to the qualification wheel "
-                    "(150bf797…); the byte-identity held at v0.39.0 and holds "
-                    "again here"
+                    "the v0.41.0 promotion shipped wheel 00919993 while the live "
+                    "review-loop trace ran the pre-final build 223d0f25 — the "
+                    "disclosed R42-04 gap (honestly documented, never hidden: the "
+                    "@0.41.0 record binds the promoted digest and names the trace's). "
+                    "The v0.42.0 candidate closes it by construction: ONE build "
+                    "(wheel e7b48d42… + the alignment image of the same tree, digests "
+                    "recorded BEFORE qualification in the candidate manifest), "
+                    "qualified as a whole, and the exact-composition gate "
+                    "(generate_template_pins.py --exact-composition) refuses any "
+                    "promotion whose bytes are not the qualified candidate's"
                 ),
                 "receipt": LATEST_PROMOTION_RECEIPT,
             },
@@ -763,14 +768,16 @@ def capture_supported_profile(inputs: CaptureInputs) -> dict[str, Any]:
                 "receipt": "alembic/versions + " + ALIGNMENT_RECEIPT,
             },
             "divergence": (
-                "the promoted v0.40.0 release is built from this exact tree and "
-                "its lane wheel is byte-identical to the qualification wheel "
-                "(150bf797…) — the moving-tree gap stays closed; "
-                "the executed-lab image digest and the promoted GHCR digest still "
-                "differ BY CONSTRUCTION (the podman working-tree build that RAN "
-                "the trace vs the CI build of the same source) — both are bound, "
-                "neither is silently substituted, and the next lab re-alignment "
-                "onto the promoted digest is recorded as the open follow-up"
+                "the executed lab IS the v0.42.0 BUILD-ONCE candidate (image + "
+                "wheel from the same tree) while the promoted release is v0.41.0 — "
+                "the pre-release window, recorded not hidden; the candidate's "
+                "digests were recorded BEFORE qualification "
+                "(docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json) "
+                "and the release of v0.42.0 must promote THOSE bytes or the "
+                "exact-composition gate refuses. The executed-lab image digest and "
+                "the promoted GHCR digest also differ BY CONSTRUCTION (the podman "
+                "working-tree build that RAN the trace vs the CI build of the same "
+                "source) — both are bound, neither silently substituted"
             ),
         },
         "lane": {

@@ -1,0 +1,30 @@
+{
+  "stamp": "forge.candidate.build-once/1",
+  "recorded_at": "2026-09-28T01:47:30+00:00",
+  "recorded_before_qualification": true,
+  "issue": "forge#377 (R42-04) — build once, qualify the candidate, promote THOSE bytes",
+  "purpose": "the ONE candidate for the v0.42.0 cycle: both artifacts built ONCE from the same tree (0f0dc8c + the version bump to 0.42.0), digests recorded here BEFORE any qualification phase ran. The qualification record, the freeze and the promotion must bind THESE digests; a rebuild that changes either digest is a NEW candidate requiring full re-qualification (the exact-composition guard, generate_template_pins.py --exact-composition).",
+  "tree": {
+    "base_commit": "0f0dc8c3631bbf2542afd7344c91340ea522636e",
+    "base_commit_subject": "9e8d6c6 review: composed fault traces as the completion criterion (#378)",
+    "carries": "the M0 fixes (#374 retryable observations, #375 conservative occupancy, #376 credential-mode doctor preflight) + the #378 composed fault traces + the version bump 0.41.0 -> 0.42.0 (src/forge/__init__.py, pyproject.toml)",
+    "version": "0.42.0"
+  },
+  "wheel": {
+    "name": "forge-0.42.0-py3-none-any.whl",
+    "path": "dist/forge-0.42.0-py3-none-any.whl",
+    "sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+    "built_by": "uv build --wheel (2026-09-28T01:42Z, the only wheel build of this cycle)",
+    "served_from": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl (the lab wheelhost)"
+  },
+  "image": {
+    "name": "localhost/forge:dev",
+    "image_id": "7e9077d5fabdfd43291f93527281bef69d53d714371d3ba948e76721aee7e383",
+    "digest": "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed",
+    "built_by": "scripts/align_lab.py --apply (podman build from the same tree; receipts: docs/evaluation/2026-09-28-r4204-build-once/alignment-receipts.json)",
+    "reports_version": "0.42.0",
+    "schema_head": "032",
+    "rollback_tag": "localhost/forge:pre-r3708-20260928T014257Z"
+  },
+  "exact_composition_contract": "the review-loop record (qualification/records/review-loop-2026-09-28.json) binds these digests; the release promotion of v0.42.0 must promote bytes with the SAME wheel sha256 or the exact-composition check refuses (R42-04 AC-8)"
+}
