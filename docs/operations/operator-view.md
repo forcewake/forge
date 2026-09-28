@@ -12,10 +12,14 @@ R37-03 current-state projection rules (exact activation receipts,
 per-attempt generations, current-candidate binding, the source-version
 fence), the R37-16 bounded operator experience (bounded drill-down,
 typed blocked-reason diagnostics, pending-command/occupancy surfaces,
-bounded bundle export, time-to-diagnose observability) and the R38-15
+bounded bundle export, time-to-diagnose observability) the R38-15
 recovery surface (the delivery outcome as a first-class field, the
 five-milestone pause/resume ladder, advisory recovery hints and the
-bounded, allowlisted, backup-free export diagnostics).
+bounded, allowlisted, backup-free export diagnostics) and the R42-07
+command-to-delivery progress view (the command-OUTCOME axis over the
+#374 journals, the five-condition next-step distinction set, the one
+coherent current subject, the command-outcome action fence and the
+bounded, redaction-counted command support slice).
 
 For the control commands themselves, see
 [operator-commands.md](operator-commands.md) and
@@ -819,3 +823,105 @@ This walk is pinned end-to-end as an automated test
 operator class that sees ONLY rendered documents recovers the seeded
 world through the view's own offered actions, with the stale replay
 refused first and the human commit preserved as the new base.
+
+## 16. The command-to-delivery progress view (R42-07, #380)
+
+The live process spans accepted commands, provider observations,
+rounds, checkpoints, verification and human resolution — a single run
+status cannot explain the stages, and "accepted" is not "applied". The
+command-progress view (`forge.adaptive.operator_view.command_progress`,
+the detail route's `command_progress` block) derives the whole ladder
+from the authoritative records: no second mutable truth, no live step
+reads — the #374 journals ARE durable state.
+
+The new reader section is `feedback_events` (the #374 outbox streams:
+`feedback.outcome` — one row per CHANGED outcome per note — and
+`provider_observation.retry` — one row per retryable deferral,
+`observed: false`). It fences with every other section: a journal row
+committed mid-assembly marks the snapshot inconsistent.
+
+### 16.1 The command-outcome axis — accepted ≠ applied ≠ refused
+
+An axis SEPARATE from execution state and human-review state, one row
+per feedback command:
+
+| Outcome | The durable row that proves it |
+|---|---|
+| `accepted` | the durable command identity (the request document / inbox row) with NO outcome journal — accepted, not applied |
+| `pending` | the newest `feedback.outcome` journal reads `pending` (a retryable provider observation deferred; the retry trail counts the deferrals) — VISIBLY retrying, never apparently complete |
+| `applied` | the newest journal reads `completed` — the EFFECT observation landed (the journal's word is "completed"; the operator word is APPLIED) |
+| `refused` | the newest journal reads `refused` — a typed, permanent refusal; the command spent without applying |
+| `exhausted` | the newest journal reads `exhausted` — the step's bounded retry budget spent (the repair query `feedback_steps_without_outcome` lists the same seam from the step side) |
+| `unknown` | the journal authority was not observed — never guessed |
+
+Where no journal row exists, the request lifecycle decides
+(`recorded`/`staged` → accepted, the typed refused statuses → refused,
+a settled lifecycle → applied); the journal outranks the fallback
+wherever both exist. The R42-01 transient acceptance is structural: a
+`pending` command renders `complete: false` with its retry trail and
+the honest note "the command is NOT complete" — on the API block, the
+`/status` note lines AND the MR status comment (one parity test pins
+all three).
+
+### 16.2 The next-step distinction set — five conditions, five safe actions
+
+Never one blurred "blocked": each condition renders its own row with
+its own reason, its own safe action and the sentence naming what it is
+NOT.
+
+| Code | The condition | The safe action |
+|---|---|---|
+| `unresolved_required_discussion` | a code-requesting request (`in-scope_correction` / `material_change`) with no recorded outcome — readiness gates on HUMAN resolution | resolve the discussion on the MR thread (`human:discussion-resolution`) — writing more code will not resolve it |
+| `failed_independent_checks` | a failed verification row — the checks' own verdict; a failure naming a superseded candidate is labelled `binding: historical`, never the current attempt's checks | address the findings, raise a follow-up correction against the current head |
+| `exhausted_review_budget` | the #325/#340 block — the LIMITING axis (a refused amendment's typed refusal, else the closing report's `usd` verdict) and the #340 amendment route named | amend the limiting axis through the #340 command shape (ONE axis, never a re-plan) |
+| `provider_outage` | the newest outcome is `pending` WITH a deferral trail — the bounded backoff already owns it | wait or probe — never a manual retry |
+| `observation_exhausted` | the newest outcome is `exhausted` — the automatic budget is spent | the operator repair decision (address the provider cause, re-drive through the guarded route) — never an automatic replay |
+
+### 16.3 One current subject, honest staleness, the fifth fence
+
+- **One coherent subject.** `current_subject` names the ONE
+  attempt/candidate the document speaks for — the run id, the round
+  reference, the candidate and the attempt id. After a superseding
+  round the run id is the OPEN round's child and the note says this
+  delivery's outcomes are SUPERSEDED history (the #367 rule extended).
+- **STALE, never blended.** A delayed or fence-moved projection
+  renders `stale: true` with its `projection_version` and the basis
+  sentence — the facts stand unchanged beside the label; the reader
+  re-reads before acting.
+- **The command-outcome fence.** The action CAS's fifth rung: the
+  projection names the newest UNRESOLVED feedback command
+  (`feedback_note_ref` + class), every offered action carries it
+  (`expected_command_ref` / `expected_command_outcome`), and an action
+  planned while an observation was RETRYING is refused with the typed
+  `operator.stale_action_refusal` (the issue's spelling:
+  `operator.action_refused_stale` — an alias, one code) once the
+  outcome settles OR a different command becomes the newest unresolved
+  one. A stale action can never mutate a different current attempt.
+
+### 16.4 The bounded command support slice and the observability
+
+The bundle's `command_support` section
+(`export_command_support`) is bounded (12 entries per section),
+ALLOWLISTED per field (`COMMAND_SUPPORT_FIELDS`) and carries: the
+outcome ladder, the distinction set, the RELEVANT typed errors (the
+retry trail's bounded provider excerpts — a provider error string,
+never the reviewer's prompt) and the recovery settings NAMES
+(`FORGE_MAX_REVIEW_ROUNDS`, `FORGE_APPROVERS`, `STEP_MAX_ATTEMPTS` —
+names only, never values). Redactions are counted
+(`support.bundle_redactions`, stated as `export.redactions`); the
+reviewer's note text never enters by construction. The slice's two
+source sections (`run`, `feedback_events`) are read even under a
+narrowed `?sections=` export — the command axis never silently reads
+unknown.
+
+The observability set (the read-model's `command_progress` fold,
+`command_progress_limits_fold` — three records, never blended with the
+four `ops.*` measures): `command.accepted_to_applied_seconds` (per
+applied command, first observed → the applied journal; not-yet-applied
+counted, never zero-filled), `operator.manual_rescue_minutes` (the
+minutes an exhausted/refused command has awaited the human rescue
+decision — a lower bound, a WAIT, never active work; pending commands
+belong to the backoff, not to rescue) and `status.projection_lag` (the
+gauge from the reading moment back to the NEWEST durable command-axis
+fact — a fence observation is a different record,
+`projection.stale_or_inconsistent`).

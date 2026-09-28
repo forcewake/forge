@@ -143,6 +143,8 @@ from forge.adaptive.checkpoint_repository import (
     CheckpointRepositoryUnavailable,
 )
 from forge.adaptive.operator_view import (
+    FEEDBACK_OUTCOME_EVENT,
+    PROVIDER_OBSERVATION_RETRY_EVENT,
     UNRESOLVED_PUBLICATION_STATUSES,
     OperatorProjection,
     _as_datetime,
@@ -185,7 +187,10 @@ COVERAGE_UNKNOWN: str = "unknown"
 #: collaboration target), ``budget`` / ``amendments`` (the run's ledger
 #: with its #340 amendment history) and ``inbox`` (the #357 durable
 #: webhook inbox rows for the run's project — the RECEIVED rung of the
-#: command-state ladder).
+#: command-state ladder). R42-07 (#380) adds ``feedback_events`` (the
+#: #374 journals: the ``feedback.outcome`` outcome stream and the
+#: ``provider_observation.retry`` deferral trail — the COMMAND-OUTCOME
+#: axis's canonical rows).
 COVERAGE_SECTIONS: tuple[str, ...] = (
     "run",
     "attempts",
@@ -202,6 +207,7 @@ COVERAGE_SECTIONS: tuple[str, ...] = (
     "budget",
     "amendments",
     "inbox",
+    "feedback_events",
 )
 
 #: ActionLog statuses → the operator attempt vocabulary. A revival
@@ -480,7 +486,8 @@ _COMMAND_SETTLED: frozenset[str] = frozenset({"applied", "checkpointed", "reject
 #: adds the lineage sections: ``target`` (the #359 collaboration
 #: target), ``budget`` / ``amendments`` (the run's ledger with its
 #: amendment history) and ``inbox`` (the #357 durable webhook inbox —
-#: the RECEIVED rung of the command-state ladder).
+#: the RECEIVED rung of the command-state ladder). R42-07 (#380) adds
+#: ``feedback_events`` (the #374 journals — the command-outcome axis).
 SELECTABLE_SECTIONS: tuple[str, ...] = (
     "run",
     "attempts",
@@ -496,6 +503,7 @@ SELECTABLE_SECTIONS: tuple[str, ...] = (
     "budget",
     "amendments",
     "inbox",
+    "feedback_events",
 )
 
 #: The sections whose reads are windowed by a bounded ``section_limit``
@@ -1236,6 +1244,40 @@ class OperatorSnapshotReader:
                 totals["inbox"] = total
                 truncated["inbox"] = section_limit is not None and total > len(inbox_rows)
 
+        # -- the #374 journals (R42-01, read for R42-07) -------------------
+        # The COMMAND-OUTCOME axis's canonical rows: the outbox's
+        # ``feedback.outcome`` stream (one row per CHANGED outcome per
+        # note) and the ``provider_observation.retry`` deferral trail
+        # (one row per retryable deferral, ``observed: false``). The
+        # retry row's bounded provider-error excerpt rides — the
+        # SUPPORT export surfaces it through the redaction guard; the
+        # view renders only the typed reason. The note TEXT never
+        # enters this mapping (value-free by construction).
+        if "feedback_events" in selected:
+            from forge.durable.models import Outbox
+
+            try:
+                events, total = await self._tail(
+                    session,
+                    select(Outbox).where(
+                        Outbox.flow_run_id == run_id,
+                        Outbox.event_type.in_(
+                            (FEEDBACK_OUTCOME_EVENT, PROVIDER_OBSERVATION_RETRY_EVENT)
+                        ),
+                    ),
+                    journal_order=(Outbox.created_at.asc(), Outbox.id.asc()),
+                    window_order=(Outbox.created_at.desc(), Outbox.id.desc()),
+                    limit=section_limit,
+                )
+            except SQLAlchemyError:
+                logger.warning("feedback events for run %s unreadable — coverage unknown", run_id)
+                events = None
+            if events is not None:
+                rows["feedback_events"] = [self._feedback_event_row(row) for row in events]
+                coverage["feedback_events"] = COVERAGE_PRESENT if events else COVERAGE_MISSING
+                totals["feedback_events"] = total
+                truncated["feedback_events"] = section_limit is not None and total > len(events)
+
         fence_end = await self._source_version(session, run_id)
         rows["_source_version"] = fence_end
         rows["_projection_inconsistent"] = fence_start != fence_end
@@ -1333,6 +1375,7 @@ class OperatorSnapshotReader:
             EventInbox,
             FlowRun,
             GateApproval,
+            Outbox,
             PublicationIntent,
             ReviewRound,
             RunBudget,
@@ -1403,6 +1446,16 @@ class OperatorSnapshotReader:
                 EventInbox.project_id
                 == select(FlowRun.project_id).where(FlowRun.id == run_id).scalar_subquery(),
                 EventInbox.event_type == "run_command",
+            ),
+            # R42-07 (#380): the command-outcome journals fence with the
+            # rest — a feedback.outcome / provider_observation.retry row
+            # committed mid-assembly marks the snapshot inconsistent.
+            select(
+                func.max(Outbox.created_at),
+                func.count(Outbox.id),
+            ).where(
+                Outbox.flow_run_id == run_id,
+                Outbox.event_type.in_((FEEDBACK_OUTCOME_EVENT, PROVIDER_OBSERVATION_RETRY_EVENT)),
             ),
         ):
             row = (await session.execute(statement)).one_or_none()
@@ -1701,6 +1754,29 @@ class OperatorSnapshotReader:
             "limit_before": row.limit_before,
             "limit_after": row.limit_after,
             "applied_at": _iso(row.applied_at),
+        }
+
+    @staticmethod
+    def _feedback_event_row(row: Any) -> dict[str, Any]:
+        """One Outbox row (#374 journal) → the view shape (read for
+        R42-07): the COMMAND-OUTCOME axis's canonical event. Identity
+        and typed fields only — the note id, the outcome word / the
+        deferral reason, the provider status code, the observed flag and
+        the bounded provider-error excerpt (a relevant error the SUPPORT
+        export surfaces through the redaction guard; the render shows
+        the typed reason). The reviewer's note TEXT never rides."""
+        payload = getattr(row, "payload", None)
+        document = payload if isinstance(payload, Mapping) else {}
+        return {
+            "event_id": str(row.id),
+            "event_type": str(row.event_type or ""),
+            "note_id": str(document.get("note_id") or ""),
+            "outcome": str(document.get("outcome") or ""),
+            "reason": str(document.get("reason") or ""),
+            "observed": document.get("observed"),
+            "status_code": document.get("status_code"),
+            "detail": str(document.get("detail") or "")[:400],
+            "at": _iso(row.created_at),
         }
 
     @staticmethod

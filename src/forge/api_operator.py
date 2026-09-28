@@ -40,6 +40,18 @@ all read-only by construction:
   HISTORICAL, and acceptance attributed only to a real human decision.
   Action hints rendered from a snapshot whose consistency fence MOVED
   carry ``stale: true`` plus the current state's safe alternative;
+  R42-07 (#380) adds the ``command_progress`` block
+  (:func:`~forge.adaptive.operator_view.command_progress`): the
+  command-OUTCOME axis (accepted / pending / applied / refused /
+  exhausted — the #374 journals, an axis SEPARATE from execution and
+  human-review state; the R42-01 transient renders VISIBLY pending,
+  never apparently complete), the next-step distinction set (an
+  unresolved required discussion ≠ failed CI ≠ an exhausted review
+  budget ≠ a provider outage ≠ a spent observation budget — each its
+  own reason and safe action, the budget case naming the limiting axis
+  and the amendment route), the ONE current subject (the open round's
+  child after a superseding round) and the STALE labelling with the
+  projection version;
 - ``GET /operator/runs/{run_id}/support-bundle?subject=<canonical>
   &max_bytes=&sections=`` — the exportable
   :class:`~forge.adaptive.support_bundle.SupportBundle` document
@@ -50,7 +62,17 @@ all read-only by construction:
   8 MiB) — narrow with ``?sections=`` instead of truncating evidence —
   and carrying the R38-15 bounded DIAGNOSTICS slice (allowlisted fields
   per section, entry caps, raw operational backup names excluded — the
-  #304 receipts referenced at most).
+  #304 receipts referenced at most) plus the R42-07 (#380) bounded
+  ``command_support`` slice
+  (:func:`~forge.adaptive.operator_view.export_command_support`): the
+  command-outcome ladder, the next-step distinction set, the RELEVANT
+  typed errors (the retry trail's bounded excerpts) and the recovery
+  settings NAMES — scoped ids and evidence refs only, no raw code, no
+  reviewer prompts, no credential values by default, the redactions
+  COUNTED (``support.bundle_redactions``); its two source sections
+  (``run``, ``feedback_events``) are read even under a narrowed
+  ``?sections=`` selection so the command axis never silently renders
+  unknown.
 
 Every response carries the R37-16 time-to-diagnose observability as
 headers: ``operator.query_duration`` (seconds) and
@@ -134,8 +156,10 @@ from forge.adaptive.operator_snapshot import (
 from forge.adaptive.admission import admission_report
 from forge.adaptive.operator_view import (
     action_hint_block,
+    command_progress,
     delivery_view,
     explain_blocked,
+    export_command_support,
     export_diagnostics,
     export_lineage_support,
     lineage_view,
@@ -770,6 +794,23 @@ async def get_operator_run(
         occupancy=snapshot.occupancy,
         projection_inconsistent=snapshot.projection_inconsistent,
     )
+    # The R42-07 (#380) command-to-delivery progress: the command-OUTCOME
+    # axis (accepted / pending / applied / refused / exhausted — an axis
+    # SEPARATE from execution and human-review state, derived from the
+    # #374 journals), the next-step distinction set (an unresolved
+    # required discussion ≠ failed CI ≠ an exhausted review budget ≠ a
+    # provider outage ≠ a spent observation budget — each its own row
+    # with its own reason and safe action), the ONE current subject and
+    # the STALE labelling. A delayed projection renders STALE with its
+    # version, never blended; an unselected feedback_events section
+    # renders the axis unknown, never an empty success.
+    document["command_progress"] = command_progress(
+        snapshot.rows,
+        projection=projection,
+        now=snapshot.computed_at,
+        coverage=snapshot.source_coverage,
+        projection_inconsistent=snapshot.projection_inconsistent,
+    )
     hints = action_hint_block(projection, snapshot_inconsistent=snapshot.projection_inconsistent)
     document["actions"] = hints["actions"]
     document["actions_advisory"] = hints["actions_advisory"]
@@ -804,9 +845,21 @@ async def get_operator_support_bundle(
     scope, _ = await _authorized_subjects(request, authorization, subject, repo)
     selected = _parse_sections(sections, BUNDLE_SECTIONS)
     cap = int(max_bytes) if max_bytes is not None else DEFAULT_MAX_BUNDLE_BYTES
+    # R42-07 (#380): the command support slice rides the SAME snapshot —
+    # its two source sections (``run`` for the request documents,
+    # ``feedback_events`` for the #374 journals) are read even under a
+    # narrowed ``?sections=`` selection, so the command axis never
+    # silently renders unknown because the caller narrowed the BUNDLE's
+    # scope. The declared selection still governs the BUNDLE's own
+    # export scope (stated in the ``export`` block).
+    snapshot_sections = (
+        tuple(dict.fromkeys((*selected, "run", "feedback_events")))
+        if selected is not None
+        else None
+    )
     try:
         snapshot = await _reader(request).snapshot(
-            run_id, scope, sections=selected, section_limit=None
+            run_id, scope, sections=snapshot_sections, section_limit=None
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -842,6 +895,19 @@ async def get_operator_support_bundle(
         coverage=snapshot.source_coverage,
         occupancy=snapshot.occupancy,
         projection_inconsistent=snapshot.projection_inconsistent,
+    )
+    # The R42-07 (#380) bounded COMMAND support slice: the command-outcome
+    # ladder, the next-step distinction set, the RELEVANT typed errors
+    # (the retry trail's bounded provider-error excerpts) and the settings
+    # NAMES the recovery routes name — scoped ids and evidence refs only,
+    # no raw code, no reviewer prompts, no credential values by default,
+    # with the redactions COUNTED (``support.bundle_redactions``). The
+    # same snapshot the bundle read — no second collector, no extra I/O.
+    document["command_support"] = export_command_support(
+        snapshot.rows,
+        coverage=snapshot.source_coverage,
+        projection_inconsistent=snapshot.projection_inconsistent,
+        retry_details=snapshot.rows.get("feedback_events"),
     )
     export: dict[str, Any] = {
         "scope": list(selected) if selected is not None else list(BUNDLE_SECTIONS),

@@ -1986,3 +1986,104 @@ class TestActionSubjectAndRoundStatusFence:
             expected_round=projection.round_ref,
         )
         assert RecoveryActions.decide(legacy, projection).allowed is True
+
+
+class TestCommandOutcomeFence:
+    """R42-07 (#380): the #367 round-status fence extended to the
+    COMMAND axis. The projection names the NEWEST UNRESOLVED feedback
+    command (the #374 ``feedback.outcome`` stream: ``accepted`` /
+    ``pending``) as its command-axis CAS subject; every offered action
+    carries that subject on its ticket, and an action planned while a
+    provider observation was RETRYING is refused once the outcome
+    settles or a different command becomes the newest unresolved one."""
+
+    @staticmethod
+    def _events(*rows: dict) -> dict:
+        return {"feedback_events": list(rows)}
+
+    @staticmethod
+    def _journal(note_id: str, outcome: str, at: str) -> dict:
+        return {
+            "event_id": f"ob-{note_id}-{at}",
+            "event_type": "feedback.outcome",
+            "note_id": note_id,
+            "outcome": outcome,
+            "reason": "head_unavailable",
+            "observed": None,
+            "status_code": None,
+            "detail": "",
+            "at": at,
+        }
+
+    def _executing_rows(self, feedback: dict) -> dict:
+        rows = _rows(attempts=[_attempt("executing", started_at="2026-09-23T11:40:00+00:00")])
+        rows.update(feedback)
+        return rows
+
+    def test_the_projection_names_the_newest_unresolved_command(self):
+        rows = self._executing_rows(
+            self._events(
+                self._journal("9400", "completed", "2026-09-23T10:00:00+00:00"),
+                self._journal("9501", "pending", "2026-09-23T11:00:00+00:00"),
+                self._journal("9600", "completed", "2026-09-23T11:30:00+00:00"),
+            )
+        )
+        projection = initial_projection(rows, NOW)
+        assert projection.feedback_note_ref == "9501"
+        assert projection.feedback_outcome == "pending"
+        settled = self._executing_rows(
+            self._events(
+                self._journal("9501", "pending", "2026-09-23T11:00:00+00:00"),
+                self._journal("9501", "completed", "2026-09-23T11:05:00+00:00"),
+            )
+        )
+        assert initial_projection(settled, NOW).feedback_note_ref == ""
+
+    def test_planned_actions_carry_the_command_ticket(self):
+        rows = self._executing_rows(
+            self._events(self._journal("9501", "pending", "2026-09-23T11:00:00+00:00"))
+        )
+        projection = initial_projection(rows, NOW)
+        for action in RecoveryActions.plan(projection, "op@example", "approver", at=NOW):
+            assert action.expected_command_ref == "9501"
+            assert action.expected_command_outcome == "pending"
+        fact = RecoveryActions.plan(projection, "op@example", "approver", at=NOW)[0].audit_fact()
+        assert fact["expected_command_ref"] == "9501"
+
+    def test_the_render_carries_the_fence_subject(self):
+        rows = self._executing_rows(
+            self._events(self._journal("9501", "pending", "2026-09-23T11:00:00+00:00"))
+        )
+        document = render(initial_projection(rows, NOW))
+        assert document["feedback_command"] == {"note_id": "9501", "outcome": "pending"}
+        bare = render(initial_projection(self._executing_rows({}), NOW))
+        assert bare["feedback_command"] == {}
+
+    def test_the_refusal_is_the_one_typed_code_under_both_spellings(self):
+        from forge.adaptive.operator_view import ACTION_REFUSED_STALE
+
+        assert ACTION_REFUSED_STALE is STALE_ACTION_REFUSAL
+        assert STALE_ACTION_REFUSAL == "operator.stale_action_refusal"
+
+    def test_a_commandless_action_decides_exactly_as_before(self):
+        """Backwards compatibility: a hand-built action without the
+        command ticket is never refused BY the command fence (a settled
+        world decides exactly as it did before R42-07)."""
+        rows = self._executing_rows(
+            self._events(self._journal("9501", "pending", "2026-09-23T11:00:00+00:00"))
+        )
+        projection = initial_projection(rows, NOW)
+        legacy = OperatorAction(
+            action="probe",
+            state=projection.state,
+            actor_role="observer",
+            actor="op@example",
+            digest=projection.action_digest,
+            at="2026-09-23T12:00:00+00:00",
+            linkage=f"run:{RUN_ID}",
+            expected_version=projection.projection_version,
+            via="read-only:/status",
+            expected_candidate=str(projection.identity.get("active_candidate") or ""),
+            expected_round=projection.round_ref,
+        )
+        assert RecoveryActions.decide(legacy, projection).allowed is True

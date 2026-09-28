@@ -111,12 +111,21 @@ from forge.adaptive.operator_timeline import timeline_from_journal
 from forge.adaptive.ops import status_projection
 
 __all__ = [
+    "ACTION_REFUSED_STALE",
     "ACTION_VIA",
     "ACTOR_ROLES",
     "ACTIONS",
     "ActionDecision",
     "BLOCKED_CODES",
     "BlockedReason",
+    "COMMAND_OUTCOMES",
+    "COMMAND_OUTCOME_PROOF",
+    "COMMAND_OUTCOME_UNRESOLVED",
+    "COMMAND_PROGRESS_SCHEMA",
+    "COMMAND_RECOVERY_SETTINGS",
+    "COMMAND_SUPPORT_FIELDS",
+    "COMMAND_SUPPORT_MAX_ENTRIES",
+    "COMMAND_SUPPORT_SCHEMA",
     "DELIVERY_FAILED_OUTCOMES",
     "DELIVERY_OUTCOMES",
     "DELIVERY_VIEW_SCHEMA",
@@ -124,6 +133,7 @@ __all__ = [
     "DIAGNOSTIC_SECTION_FIELDS",
     "DIAGNOSTICS_SCHEMA",
     "DeliveryOutcome",
+    "FEEDBACK_OUTCOME_EVENT",
     "FEEDBACK_REFUSAL_NEXT_ACTIONS",
     "LINEAGE_PREREQUISITE_CODES",
     "LINEAGE_REFERENCE_DELIVERY",
@@ -131,15 +141,18 @@ __all__ = [
     "LINEAGE_SUPPORT_MAX_ENTRIES",
     "LINEAGE_SUPPORT_SCHEMA",
     "LINEAGE_VIEW_SCHEMA",
+    "NEXT_STEP_CODES",
     "NON_RETRYABLE_CODES",
     "OperatorAction",
     "OperatorProjection",
     "OPERATOR_STATES",
     "OPERATOR_VIEW_SCHEMA",
     "OperatorState",
+    "PROVIDER_OBSERVATION_RETRY_EVENT",
     "RECOVERY_MILESTONES",
     "RECOVERY_SCHEMA",
     "REVIEW_ROUND_OPEN_STATUSES",
+    "SUPPORT_BUNDLE_REDACTIONS",
     "REVIEW_ROUND_SUPERSEDING_STATUSES",
     "RecoveryActions",
     "RecoveryHint",
@@ -153,6 +166,8 @@ __all__ = [
     "action_hint_block",
     "apply_update",
     "budget_blocked_review",
+    "command_outcome_rows",
+    "command_progress",
     "command_state_rows",
     "command_state_of_rung",
     "COMMAND_STATES",
@@ -161,6 +176,7 @@ __all__ = [
     "delivery_outcome_of",
     "delivery_view",
     "derive_state",
+    "export_command_support",
     "export_diagnostics",
     "export_lineage_support",
     "explain_blocked",
@@ -168,6 +184,7 @@ __all__ = [
     "lineage_prerequisites",
     "lineage_reference",
     "lineage_view",
+    "next_step_rows",
     "recovery_document",
     "recovery_hint",
     "recovery_ladder",
@@ -725,6 +742,16 @@ class OperatorProjection:
     #: successor, so the status is the second subject an offered action
     #: names.
     round_status: str = ""
+    #: R42-07 (#380): the COMMAND-axis subject this projection's actions
+    #: name — the note id of the NEWEST UNRESOLVED feedback command (the
+    #: #374 ``feedback.outcome`` stream: ``accepted``/``pending``), with
+    #: its outcome class. ``""`` when no unresolved feedback command is
+    #: observed. The command-outcome rung of the action CAS: an action
+    #: planned while a provider observation was RETRYING (``pending``) is
+    #: refused once the observation settles — the R42-01 transient case
+    #: can never act as if it had completed.
+    feedback_note_ref: str = ""
+    feedback_outcome: str = ""
 
     @property
     def action_digest(self) -> str:
@@ -786,6 +813,7 @@ def _rows_observed(source_rows: Mapping[str, Any]) -> dict[str, str]:
         ("publications", ("at",)),
         ("approvals", ("at",)),
         ("questions", ("at",)),
+        ("feedback_events", ("at",)),
     ):
         stamps = [
             _iso(_first(_norm(row), *keys))
@@ -856,6 +884,16 @@ def _assemble(
     )
     _, historical_passes = verification_binding(verifications, candidate_history, candidate_now)
     round_view = review_round_fact(source_rows)
+    # R42-07 (#380): the command-axis CAS subject — the NEWEST UNRESOLVED
+    # feedback command (accepted/pending on the #374 outcome stream). A
+    # settled world carries no fence (the round/candidate fences still
+    # guard it); a RETRYING observation does.
+    unresolved_commands = [
+        row
+        for row in command_outcome_rows(source_rows)
+        if str(row.get("outcome") or "") in COMMAND_OUTCOME_UNRESOLVED
+    ]
+    newest_unresolved = unresolved_commands[-1] if unresolved_commands else None
     return OperatorProjection(
         schema=OPERATOR_VIEW_SCHEMA,
         run_id=run_id,
@@ -879,6 +917,8 @@ def _assemble(
         round_status=str((round_view or {}).get("round", {}).get("status") or "")
         if round_view
         else "",
+        feedback_note_ref=str((newest_unresolved or {}).get("note_id") or ""),
+        feedback_outcome=str((newest_unresolved or {}).get("outcome") or ""),
     )
 
 
@@ -975,6 +1015,17 @@ def render(projection: OperatorProjection) -> dict[str, Any]:
             # section, the status comment) agree through.
             "round_ref": projection.round_ref,
             "superseded_by_round": projection.superseded_by_round,
+            "round_status": projection.round_status,
+            # R42-07 (#380): the COMMAND-axis subject the offered actions
+            # fence (the newest unresolved feedback command and its
+            # outcome class — ``{}`` when the world carries none). The
+            # command_progress document carries the full axis; this is
+            # the render's fence-subject parity field.
+            "feedback_command": (
+                {"note_id": projection.feedback_note_ref, "outcome": projection.feedback_outcome}
+                if projection.feedback_note_ref
+                else {}
+            ),
         }
     )
 
@@ -1039,6 +1090,14 @@ def status_note_lines(projection: OperatorProjection) -> list[str]:
         )
     elif projection.round_ref and projection.round_ref != "delivery:1":
         lines.append(f"Round: {projection.round_ref} is the current delivery.")
+    # R42-07 (#380): the COMMAND-OUTCOME line — accepted ≠ applied, and a
+    # retrying observation (the R42-01 transient) says so OUT LOUD: the
+    # same facts the API's command_progress block and the native status
+    # comment render (the three lines' parity is pinned by a test).
+    if projection.feedback_note_ref:
+        word = projection.feedback_outcome.replace("_", " ") or "unknown"
+        retrying = " — RETRYING, not complete" if projection.feedback_outcome == "pending" else ""
+        lines.append(f"Command: feedback {projection.feedback_note_ref} is {word}{retrying}.")
     if projection.last_transition_at:
         lines.append(f"Last transition: {projection.last_transition_at}")
     return lines
@@ -1907,6 +1966,14 @@ ACTIONS: Final[tuple[str, ...]] = (
 #: CURRENT subject and the safe next action, never a silent apply.
 STALE_ACTION_REFUSAL: Final = "operator.stale_action_refusal"
 
+#: R42-07 (#380): the issue's observability spelling of the same refusal
+#: event — ``operator.action_refused_stale`` counts every stale action
+#: the guarded routes refused (any of the five CAS fences: version,
+#: candidate, round reference, round status, command outcome). An ALIAS
+#: of :data:`STALE_ACTION_REFUSAL`, never a second code: one typed
+#: refusal, two greppable spellings.
+ACTION_REFUSED_STALE: Final = STALE_ACTION_REFUSAL
+
 #: Which guarded path an action links to — the view NEVER duplicates the
 #: path, it names it.
 ACTION_VIA: Final[Mapping[str, str]] = {
@@ -2069,6 +2136,18 @@ class OperatorAction:
     expected_round: str = "delivery:1"
     subject: str = ""
     expected_round_status: str = ""
+    #: R42-07 (#380): the COMMAND-OUTCOME rung of the CAS ticket — the
+    #: unresolved feedback command the operator saw (its note id and its
+    #: outcome class) when the action was planned. An action planned
+    #: while a provider observation was retrying (``pending``) is
+    #: refused once the observation settles (``applied`` /
+    #: ``refused`` / ``exhausted``) or a different command becomes the
+    #: newest unresolved one — the operator re-decides against the
+    #: outcome as it now stands. ``""`` when the projection named no
+    #: unresolved feedback command (a settled world decides exactly as
+    #: before).
+    expected_command_ref: str = ""
+    expected_command_outcome: str = ""
 
     @property
     def safe_action(self) -> str:
@@ -2091,6 +2170,8 @@ class OperatorAction:
             "expected_candidate": self.expected_candidate,
             "expected_round": self.expected_round,
             "expected_round_status": self.expected_round_status,
+            "expected_command_ref": self.expected_command_ref,
+            "expected_command_outcome": self.expected_command_outcome,
         }
 
 
@@ -2165,6 +2246,12 @@ class RecoveryActions:
                 # identity) — and the round-STATUS rung of the CAS ticket.
                 subject=f"{projection.run_id}@{projection.round_ref}",
                 expected_round_status=projection.round_status,
+                # R42-07 (#380): the COMMAND-OUTCOME rung — the unresolved
+                # feedback command the operator saw (the #374 stream), so
+                # an action planned against a retrying observation never
+                # applies after the observation settled.
+                expected_command_ref=projection.feedback_note_ref,
+                expected_command_outcome=projection.feedback_outcome,
             )
             for action in RecoveryActions.valid_for(projection.state, actor_role)
         )
@@ -2198,6 +2285,15 @@ class RecoveryActions:
         comment was accepted, and a recovery is not "valid" because its
         round reference still parses: the world each ticket names must
         still be the world that exists.
+
+        R42-07 (#380) adds the COMMAND-OUTCOME rung to the same refusal:
+        an action planned while a feedback command was UNRESOLVED
+        (``accepted`` / a retrying ``pending`` observation) is refused
+        once the command settles (``applied`` / ``refused`` /
+        ``exhausted``) or a different command becomes the newest
+        unresolved one — the #374 outcome stream is durable state, so
+        the R42-01 transient case acts on the outcome as it NOW stands,
+        never on the one the operator saw.
         """
         actions_now = RecoveryActions.valid_for(current.state, action.actor_role)
         safe_next = actions_now[0] if actions_now else ""
@@ -2255,6 +2351,40 @@ class RecoveryActions:
                     f"{action.expected_round} was {action.expected_round_status!r} but the "
                     f"round is now {current.round_status!r} — the round settled; re-decide "
                     "against the current world"
+                ),
+                current_state=current.state,
+                safe_next_action=safe_next or "probe",
+                action=action,
+            )
+        # the COMMAND-OUTCOME fence (R42-07/#380): the #367 round-status
+        # fence extended to the command axis. An action planned while a
+        # feedback command was UNRESOLVED (accepted / retrying-pending)
+        # is refused once that command settles (applied / refused /
+        # exhausted) or a DIFFERENT command becomes the newest unresolved
+        # one — a retrying provider observation (the R42-01 transient) can
+        # never act as if it had completed, and a stale action can never
+        # mutate a different current attempt.
+        if action.expected_command_ref and (
+            action.expected_command_ref != current.feedback_note_ref
+            or action.expected_command_outcome != current.feedback_outcome
+        ):
+            settled = not current.feedback_note_ref
+            return ActionDecision(
+                allowed=False,
+                reason=(
+                    f"{STALE_ACTION_REFUSAL}: the action was planned while feedback command "
+                    f"{action.expected_command_ref} was "
+                    f"{action.expected_command_outcome!r} but "
+                    + (
+                        "that command has settled (no unresolved feedback command remains) — "
+                        "the outcome moved; re-read it and re-decide"
+                        if settled
+                        else (
+                            f"the current unresolved command is {current.feedback_note_ref!r} "
+                            f"at {current.feedback_outcome!r} — the outcome moved; re-read it "
+                            "and re-decide"
+                        )
+                    )
                 ),
                 current_state=current.state,
                 safe_next_action=safe_next or "probe",
@@ -3278,6 +3408,40 @@ def render_status_comment(source_rows: Mapping[str, Any]) -> str:
         lines.append(f"- **Evidence (immutable, digests):** {' · '.join(links)}")
     for action in view["next_actions"]:
         lines.append(f"- **Next:** {action['code']} — {action['description']}")
+    # R42-07 (#380): the command-outcome facts — the R42-01 transient
+    # case renders VISIBLY pending/retrying on the native comment too,
+    # and the comment's identity digest covers the outcome word (a
+    # replayed delivery of the same world collapses to ONE comment; a
+    # moved outcome is a different world and a different identity). The
+    # line speaks for the SAME subject the projection's actions name —
+    # the NEWEST UNRESOLVED command first (a settled command never
+    # masks a retrying one), else the row with the newest journal
+    # moment; the compact next-step lines carry each condition's CODE
+    # and its safe action (the full reasons and distinction sentences
+    # live on the command_progress document — the codes agree by
+    # construction, pinned by the parity test).
+    command_note = ""
+    command_word = ""
+    progress = command_progress(source_rows)
+    candidates = [row for row in progress["commands"] if str(row.get("note_id") or "")]
+    unresolved = [
+        row for row in candidates if str(row.get("outcome") or "") in COMMAND_OUTCOME_UNRESOLVED
+    ]
+    newest = max(
+        unresolved or candidates,
+        key=lambda row: (str(row.get("last_event_at") or ""), str(row.get("note_id") or "")),
+        default=None,
+    )
+    if newest is not None:
+        command_note = str(newest.get("note_id") or "")
+        command_word = str(newest.get("outcome") or "")
+        suffix = " — RETRYING, not complete" if command_word == "pending" else ""
+        lines.append(
+            f"- **Command:** feedback `{command_note}` is {command_word.replace('_', ' ')}{suffix}"
+        )
+        for step in progress["next_steps"]:
+            action = str((step.get("safe_action") or {}).get("action") or "")
+            lines.append(f"- **Next:** {step['code']} — {action}")
     identity = status_comment_identity(
         run_id=view["run_id"],
         state=str(facts["execution"].get("operator_state") or ""),
@@ -3285,6 +3449,7 @@ def render_status_comment(source_rows: Mapping[str, Any]) -> str:
         candidate_sha=str(candidate["sha"] or ""),
         verification_binding_word=str(verification["binding"] or ""),
         acceptance_state=str(acceptance["state"] or ""),
+        extra={"command_note": command_note, "command_outcome": command_word},
     )
     lines.append(
         f"<!-- {STATUS_COMMENT_MARKER}:1 run={view['run_id']} identity={identity} "
@@ -4408,6 +4573,784 @@ def export_lineage_support(
                 "default — the allowlisted fields never carry them"
             ),
             "redactions": 0,
+        },
+    }
+    redacted_doc = redact(document)
+    redacted_doc["export"]["redactions"] = _redaction_count(document, redacted_doc)
+    return redacted_doc
+
+
+# ---------------------------------------------------------------------------
+# R42-07 (#380) — command-to-delivery progress: the outcome axis as a
+# first-class projection, the next-step distinction set, the command-outcome
+# action fence, and the bounded support slice
+# ---------------------------------------------------------------------------
+
+#: The command-progress document's schema discriminator (versioned like the
+#: view's).
+COMMAND_PROGRESS_SCHEMA: Final = "forge.operator.command-progress/1"
+
+#: The support slice's schema discriminator.
+COMMAND_SUPPORT_SCHEMA: Final = "forge.operator.command-support/1"
+
+#: R42-07 (#380): the issue's observability spelling for the redaction
+#: COUNT the support slice states (``export.redactions``) — what the
+#: guard caught and replaced, never a silent scrub. An alias-name, not a
+#: second counter: the export block names this measure beside the count
+#: so a metric reader can find the number without knowing the schema.
+SUPPORT_BUNDLE_REDACTIONS: Final = "support.bundle_redactions"
+
+#: R42-01 (#374): the step-level outcome stream of a feedback command —
+#: one outbox row per CHANGED ``(outcome, reason)`` per note. These are
+#: the CANONICAL spellings ``forge.runs.service`` journals (a test pins
+#: the parity); the reader section
+#: (:data:`forge.adaptive.operator_snapshot`) selects exactly these
+#: event types, and the projection below derives from the rows alone.
+FEEDBACK_OUTCOME_EVENT: Final = "feedback.outcome"
+PROVIDER_OBSERVATION_RETRY_EVENT: Final = "provider_observation.retry"
+
+#: The closed COMMAND-OUTCOME vocabulary (R42-07, the issue's core ask):
+#: where the COMMAND stands on the accepted → applied ladder, shown as
+#: its OWN projection axis — SEPARATE from execution state, separate
+#: from human-review state. ``accepted`` and ``applied`` are different
+#: rows (accepted ≠ applied); ``pending`` is the VISIBLY retrying
+#: observation (the R42-01 transient — never apparently complete);
+#: ``exhausted`` is the spent bounded retry budget; ``refused`` is the
+#: spent negative; ``unknown`` is the honest unobserved authority.
+COMMAND_OUTCOMES: Final[tuple[str, ...]] = (
+    "accepted",
+    "pending",
+    "applied",
+    "refused",
+    "exhausted",
+    "unknown",
+)
+
+#: The outcome classes that are NOT settled — the newest unresolved
+#: feedback command among them is the projection's command-axis CAS
+#: subject (:attr:`OperatorProjection.feedback_note_ref`).
+COMMAND_OUTCOME_UNRESOLVED: Final[frozenset[str]] = frozenset({"accepted", "pending"})
+
+#: WHICH durable row distinguishes each command outcome — the document
+#: the render states and the tests pin. The #374 journals ARE durable
+#: state: the outcome stream needs no live step read to be current.
+COMMAND_OUTCOME_PROOF: Final[Mapping[str, str]] = {
+    "accepted": (
+        "the durable command identity (the event-inbox row and/or the request "
+        "document at 'recorded') with NO outcome journal yet — accepted ≠ applied"
+    ),
+    "pending": (
+        "the newest feedback.outcome journal row reads pending (a retryable "
+        "provider observation deferred — the provider_observation.retry trail "
+        "counts the deferrals); the bounded backoff continues, the command is "
+        "NOT complete"
+    ),
+    "applied": (
+        "the newest feedback.outcome journal row reads completed — the command's "
+        "effect observation landed (the journal's word is 'completed'; the "
+        "operator axis says APPLIED: the effect, not the acceptance, is done)"
+    ),
+    "refused": (
+        "the newest feedback.outcome journal row reads refused — a typed, "
+        "permanent refusal (the request lifecycle's refused statuses); the "
+        "command spent without applying"
+    ),
+    "exhausted": (
+        "the newest feedback.outcome journal row reads exhausted — the step's "
+        "bounded retry budget spent without the observation landing (the "
+        "operator repair query feedback_steps_without_outcome lists the same "
+        "seam from the step side)"
+    ),
+    "unknown": "the outcome authority (the feedback event journal) was not observed — never guessed",
+}
+
+#: The journal outcome word → the operator axis word (the #374 stream's
+#: ``completed`` IS the application observation of the command's effect).
+_JOURNAL_OUTCOME_TO_AXIS: Final[Mapping[str, str]] = {
+    "completed": "applied",
+    "pending": "pending",
+    "refused": "refused",
+    "exhausted": "exhausted",
+}
+
+#: The request-lifecycle fallback (when no journal row exists for a note
+#: the run's own evidence still records): ``recorded``/``staged`` are the
+#: ACCEPTED identity (durable, no outcome); the typed refused statuses
+#: are ``refused``; every other settled lifecycle is ``applied``. The
+#: journal OUTRANKS this fallback wherever both exist.
+_REQUEST_REFUSED_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "refused_unauthorized",
+        "deleted_discussion",
+        "conflicting_correction",
+        "correction_window_closed",
+        "mr_closed",
+        "round_limit",
+        "collaboration_target_unresolved",
+        "stale_head",
+        "mr_forbidden",
+        "mr_missing",
+    }
+)
+
+#: The review's distinction set (R42-07, the core ask): an unresolved
+#: required discussion, failed independent checks, an exhausted review
+#: budget, a provider outage and a spent observation budget are DIFFERENT
+#: conditions with DIFFERENT safe actions — each renders with its own
+#: code, its own reason, its own remediation and the sentence naming what
+#: it is NOT (never one blurred "blocked").
+NEXT_STEP_CODES: Final[tuple[str, ...]] = (
+    "unresolved_required_discussion",
+    "failed_independent_checks",
+    "exhausted_review_budget",
+    "provider_outage",
+    "observation_exhausted",
+)
+
+#: The settings NAMES the command-recovery routes name (names only — the
+#: bundle never carries configured values): the bounded round policy, the
+#: authorized reviewer set and the step runtime's retry bound (the
+#: code-level default the outbox rows record their budget against).
+COMMAND_RECOVERY_SETTINGS: Final[tuple[Mapping[str, str], ...]] = (
+    {"name": "FORGE_MAX_REVIEW_ROUNDS", "governs": "the bounded review-round count per lineage"},
+    {"name": "FORGE_APPROVERS", "governs": "the authorized reviewer set (refused_unauthorized)"},
+    {"name": "STEP_MAX_ATTEMPTS", "governs": "the step runtime's bounded retry attempts"},
+)
+
+
+def _feedback_event_rows(source_rows: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The normalized ``feedback_events`` section (the #374 journals) —
+    journal order preserved, unreadable rows dropped, never re-sorted."""
+    rows: list[dict[str, Any]] = []
+    for raw in source_rows.get("feedback_events") or []:
+        view = _norm(raw)
+        if view:
+            rows.append(view)
+    return rows
+
+
+def _inbox_note_ids(source_rows: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """The event-inbox rows that name a feedback note — the RECEIPT of the
+    accepted rung (the delivery landed in SQL), keyed by note id."""
+    found: dict[str, dict[str, Any]] = {}
+    for raw in source_rows.get("inbox") or []:
+        row = _norm(raw)
+        note_id = str(row.get("note_id") or "")
+        if note_id and note_id not in found:
+            found[note_id] = row
+    return found
+
+
+def command_outcome_rows(
+    source_rows: Mapping[str, Any],
+    *,
+    coverage: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Every feedback command of one snapshot mapped onto the
+    command-OUTCOME ladder (R42-07) — accepted / pending / applied /
+    refused / exhausted, an axis SEPARATE from execution and
+    human-review state.
+
+    Sources, composed in priority order (all value-free — the reviewer's
+    note TEXT never rides, only identities and typed reasons):
+
+    - the ``feedback_events`` section (the #374 journals: the
+      ``feedback.outcome`` stream per note + the
+      ``provider_observation.retry`` deferral trail) — the NEWEST outcome
+      journal row decides the class; the retry rows count the deferrals
+      with their typed reasons and ``observed: false`` (the
+      head-never-observed fact);
+    - the run evidence's request documents (the lifecycle fallback when
+      no journal row exists: ``recorded``/``staged`` → accepted, the
+      typed refused statuses → refused, every other settled lifecycle →
+      applied);
+    - the event-inbox rows that name a note (the accepted rung's receipt
+      and first-observed moment).
+
+    The R42-01 acceptance is structural: a command whose newest outcome
+    journal reads ``pending`` renders ``complete: False`` with its retry
+    trail — VISIBLY retrying, never apparently complete — and an
+    ``exhausted`` command names the repair-query seam. An unobserved
+    events authority renders ONE honest ``unknown`` entry, never an
+    empty success.
+    """
+    events = source_rows.get("feedback_events")
+    # An absent section is UNKNOWN whenever the caller cannot vouch it was
+    # queried: no coverage map at all, or one that names no word for the
+    # section (a snapshot assembled before R42-07 never queried it). Only
+    # an explicit present/missing word proceeds — an honest unknown,
+    # never an empty success.
+    if events is None and (
+        coverage is None
+        or not str(coverage.get("feedback_events") or "").strip()
+        or str(coverage.get("feedback_events")) == "unknown"
+    ):
+        return (
+            {
+                "note_id": "",
+                "outcome": "unknown",
+                "reason": "",
+                "source": "coverage",
+                "retries": None,
+                "first_observed_at": "",
+                "last_event_at": "",
+                "complete": False,
+                "proven_by": None,
+                "honest_note": COMMAND_OUTCOME_PROOF["unknown"],
+            },
+        )
+    run = _norm(source_rows.get("run") or {})
+    inbox_rows = _inbox_note_ids(source_rows)
+    requests = {str(row.get("note_id") or ""): row for row in _feedback_requests_of(run)}
+
+    notes: dict[str, dict[str, Any]] = {}
+    for view in _feedback_event_rows(source_rows):
+        note_id = str(view.get("note_id") or "")
+        if not note_id:
+            continue
+        bucket = notes.setdefault(
+            note_id,
+            {
+                "note_id": note_id,
+                "outcome_events": [],
+                "retry_events": [],
+                "first_row": view,
+                "last_row": view,
+            },
+        )
+        etype = str(view.get("event_type") or "")
+        if etype == FEEDBACK_OUTCOME_EVENT:
+            bucket["outcome_events"].append(view)
+        elif etype == PROVIDER_OBSERVATION_RETRY_EVENT:
+            bucket["retry_events"].append(view)
+        bucket["last_row"] = view
+
+    entries: list[dict[str, Any]] = []
+    for note_id in sorted(set(notes) | {key for key in requests if key} | set(inbox_rows)):
+        facts = notes.get(
+            note_id,
+            {
+                "note_id": note_id,
+                "outcome_events": [],
+                "retry_events": [],
+                "first_row": inbox_rows.get(note_id) or requests.get(note_id) or {},
+                "last_row": {},
+            },
+        )
+        outcome_events: list[dict[str, Any]] = facts["outcome_events"]
+        retry_events: list[dict[str, Any]] = facts["retry_events"]
+        newest: dict[str, Any] | None = outcome_events[-1] if outcome_events else None
+        source_word = "journal"
+        if newest is None and retry_events:
+            # a deferral journal exists but its outcome row was not read:
+            # the command IS retrying — the retry trail is durable state.
+            newest = {**retry_events[-1], "outcome": "pending"}
+        proven: dict[str, Any] | None
+        if newest is not None:
+            outcome = _JOURNAL_OUTCOME_TO_AXIS.get(str(newest.get("outcome") or ""), "unknown")
+            reason = str(newest.get("reason") or "")
+            proven = newest
+        else:
+            request = requests.get(note_id)
+            status = str((request or {}).get("status") or "")
+            if status in _REQUEST_REFUSED_STATUSES:
+                outcome = "refused"
+            elif status in ("recorded", "staged", ""):
+                outcome = "accepted"
+            else:
+                outcome = "applied"
+            reason = status
+            source_word = "request" if request else "identity"
+            proven = request if request is not None else inbox_rows.get(note_id)
+        retries: dict[str, Any] | None = None
+        if retry_events:
+            retries = {
+                "count": len(retry_events),
+                "reasons": sorted({str(row.get("reason") or "") for row in retry_events} - {""}),
+                "last_at": _iso(retry_events[-1].get("at")),
+                "observed": False,
+            }
+        first = inbox_rows.get(note_id)
+        first_at = _iso(_first(first, "received_at", "created_at")) if first else ""
+        if not first_at:
+            first_at = _iso(facts["first_row"].get("at"))
+        last_at = _iso(facts["last_row"].get("at")) if facts["last_row"] else ""
+        entry: dict[str, Any] = {
+            "note_id": note_id,
+            "outcome": outcome,
+            "reason": reason,
+            "source": source_word,
+            "retries": retries,
+            "first_observed_at": first_at,
+            "last_event_at": last_at,
+            "complete": outcome == "applied",
+            "proven_by": (
+                {
+                    "of": "feedback outcome journal",
+                    "id": str(_first(proven, "event_id", "note_id") or note_id),
+                    "ref": _row_digest(proven),
+                }
+                if proven
+                else None
+            ),
+            "honest_note": COMMAND_OUTCOME_PROOF.get(outcome, ""),
+        }
+        if outcome == "pending":
+            entry["honest_note"] = COMMAND_OUTCOME_PROOF["pending"] + (
+                f" — {retries['count']} deferral(s) journal on the retry trail" if retries else ""
+            )
+        elif outcome == "exhausted":
+            entry["honest_note"] = (
+                COMMAND_OUTCOME_PROOF["exhausted"]
+                + " — repair is a human decision (re-drive through the guarded route), "
+                "never an automatic replay of the historical command"
+            )
+        entries.append(entry)
+    return tuple(entries)
+
+
+def next_step_rows(
+    source_rows: Mapping[str, Any],
+    *,
+    coverage: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """The NEXT-STEP distinction set (R42-07, the review's core ask) —
+    each condition its own row, with its own reason, its own safe action
+    and the sentence naming what it is NOT.
+
+    Five conditions, distinguished BY CONSTRUCTION (never one blurred
+    "blocked"): an unresolved REQUIRED discussion (a code-requesting
+    request with no recorded outcome — the human resolution the run's
+    readiness gates on), failed independent checks (a failed
+    verification row), an exhausted REVIEW budget (the #325/#340 block —
+    the LIMITING axis and the amendment route named), a provider outage
+    (a retrying observation: ``pending`` with a deferral trail — the
+    machinery is already retrying under the bounded backoff) and a spent
+    observation budget (``exhausted`` — the repair-query seam). Pure
+    over the rows; absent rows render an honest empty list.
+    """
+    run = _norm(source_rows.get("run") or {})
+    outcomes = {
+        str(row.get("note_id") or ""): row
+        for row in command_outcome_rows(source_rows, coverage=coverage)
+        if str(row.get("note_id") or "")
+    }
+    requests = {str(row.get("note_id") or ""): row for row in _feedback_requests_of(run)}
+    steps: list[dict[str, Any]] = []
+
+    # 1. an unresolved REQUIRED discussion — a code-requesting correction
+    #    whose outcome is not recorded (accepted/pending on the outcome
+    #    axis, or the request lifecycle still at recorded/staged).
+    for note_id, request in sorted(requests.items()):
+        classification = str(request.get("classification") or "")
+        if classification not in ("in-scope_correction", "material_change"):
+            continue
+        outcome_row = outcomes.get(note_id)
+        outcome_word = str((outcome_row or {}).get("outcome") or "")
+        request_status = str(request.get("status") or "")
+        unresolved = outcome_word in ("", "accepted", "pending") or request_status in (
+            "recorded",
+            "staged",
+            "clarification_open",
+        )
+        if not unresolved or outcome_word in ("refused", "exhausted", "applied"):
+            continue
+        steps.append(
+            {
+                "code": "unresolved_required_discussion",
+                "reason": (
+                    f"the required correction discussion {note_id} has no recorded "
+                    "outcome — the run's readiness gates on its HUMAN resolution "
+                    "(the reviewer resolves the thread; forge never resolves it)"
+                ),
+                "distinct_from": (
+                    "NOT failed CI (no check failed), NOT an exhausted review budget "
+                    "(no budget refusal is recorded), NOT a provider outage (no "
+                    "retryable observation trail) — writing more code will not resolve it"
+                ),
+                "safe_action": {
+                    "action": "resolve the required discussion on the MR thread",
+                    "via": "human:discussion-resolution",
+                },
+                "retryable": False,
+                "evidence": {
+                    "of": "feedback request",
+                    "id": note_id,
+                    "ref": _row_digest(dict(request)),
+                },
+            }
+        )
+
+    # 2. failed INDEPENDENT checks — a failed verification row (the
+    #    candidate's own checks, never a discussion or a budget matter).
+    verifications = [_norm(row) for row in source_rows.get("verifications") or [] if _norm(row)]
+    candidate_shas = [str(sha) for sha in run.get("candidate_shas") or [] if str(sha or "")]
+    candidate_now = current_candidate(run, candidate_shas)
+    for row in verifications:
+        if str(_first(row, "result", "outcome") or "") not in ("failed", "fail"):
+            continue
+        named = str(row.get("candidate_sha") or "")
+        # the #367 binding rule: a failure naming the CURRENT candidate is
+        # the lineage's live failed-CI condition; one naming an older
+        # candidate is HISTORY — still listed (the operator may need it),
+        # never mistaken for the current attempt's checks.
+        binding = (
+            "current"
+            if named and named == candidate_now
+            else "historical"
+            if named and candidate_now
+            else "unknown"
+        )
+        steps.append(
+            {
+                "code": "failed_independent_checks",
+                "binding": binding,
+                "reason": (
+                    "independent verification FAILED for candidate "
+                    f"{(named or candidate_now)[:12]} — the checks' own verdict, "
+                    "not a discussion, not a budget refusal"
+                    + (
+                        " (a HISTORICAL row: it names a candidate the lineage has "
+                        "since superseded, never the current attempt's checks)"
+                        if binding == "historical"
+                        else ""
+                    )
+                ),
+                "distinct_from": (
+                    "NOT an unresolved discussion (no required thread waits on a "
+                    "human), NOT an exhausted review budget (the reviewer never "
+                    "refused — the checks did), NOT a provider outage (no retry "
+                    "trail)"
+                ),
+                "safe_action": {
+                    "action": (
+                        "address the verification findings and raise a follow-up "
+                        "correction against the current head"
+                    ),
+                    "via": ACTION_VIA["follow_up_correction"],
+                },
+                "retryable": True,
+                "evidence": {
+                    "of": "verification",
+                    "id": str(_first(row, "verification_id", "id") or ""),
+                    "ref": _row_digest(row),
+                },
+            }
+        )
+
+    # 3. an EXHAUSTED review budget — the #325/#340 block with its
+    #    LIMITING axis and the amendment route (one axis, one amount, a
+    #    reason, the originating command identity — never a re-plan).
+    budget_block = budget_blocked_review(source_rows)
+    if budget_block is not None and budget_block.get("blocked"):
+        axis = budget_block.get("limiting_axis")
+        steps.append(
+            {
+                "code": "exhausted_review_budget",
+                "reason": (
+                    "the closing review is budget-blocked on the "
+                    f"{axis or 'undetermined'} axis — "
+                    + str(budget_block.get("limiting_axis_basis") or "")
+                ),
+                "distinct_from": (
+                    "NOT failed CI (no check failed — the candidate and its "
+                    "checkpoint SURVIVE the refusal), NOT a provider outage (the "
+                    "provider was never asked), NOT an unresolved discussion — the "
+                    "amendment route is the remedy, never a code retry"
+                ),
+                "safe_action": {
+                    "action": "amend the LIMITING axis through the #340 command shape",
+                    "via": str((budget_block.get("amendment_route") or {}).get("via") or ""),
+                    "shape": dict(AMENDMENT_COMMAND_SHAPE),
+                },
+                "retryable": True,
+                "evidence": dict(budget_block.get("evidence") or {}),
+            }
+        )
+
+    # 4. a PROVIDER outage — a retrying observation: the newest outcome
+    #    is pending WITH a deferral trail. The machinery is already
+    #    retrying under the bounded backoff; a manual retry adds nothing.
+    # 5. a SPENT observation budget — the newest outcome is exhausted:
+    #    the automatic retries are done; repair is a human decision.
+    for note_id in sorted(outcomes):
+        row = outcomes[note_id]
+        word = str(row.get("outcome") or "")
+        retries = row.get("retries") or {}
+        if word == "pending":
+            reasons = ", ".join(str(item) for item in retries.get("reasons") or ()) or "untyped"
+            steps.append(
+                {
+                    "code": "provider_outage",
+                    "reason": (
+                        f"feedback command {note_id} is RETRYING a provider "
+                        f"observation ({reasons}; {retries.get('count', 0)} deferral(s) "
+                        "journaled) — the bounded backoff continues; the command is "
+                        "NOT complete and NOT failed"
+                    ),
+                    "distinct_from": (
+                        "NOT exhausted (the retry budget has not spent — retries "
+                        "continue), NOT failed CI, NOT an unresolved discussion, "
+                        "NOT a review-budget refusal — wait or probe, never a "
+                        "manual retry"
+                    ),
+                    "safe_action": {
+                        "action": "wait for the bounded retry, or probe the current state",
+                        "via": ACTION_VIA["probe"],
+                    },
+                    "retryable": True,
+                    "evidence": dict(row.get("proven_by") or {}),
+                }
+            )
+        elif word == "exhausted":
+            reason = str(row.get("reason") or "")
+            steps.append(
+                {
+                    "code": "observation_exhausted",
+                    "reason": (
+                        f"feedback command {note_id} EXHAUSTED its bounded retry "
+                        f"budget ({reason or 'untyped reason'}) — the step parked "
+                        "dead; the repair query feedback_steps_without_outcome "
+                        "lists this seam from the step side"
+                    ),
+                    "distinct_from": (
+                        "NOT a provider outage (the retries are DONE, not "
+                        "continuing), NOT failed CI, NOT a review-budget refusal — "
+                        "the automatic budget is spent; only the operator repair "
+                        "re-drives it"
+                    ),
+                    "safe_action": {
+                        "action": (
+                            "the operator repair decision: address the provider "
+                            "cause, then re-drive through the guarded route — "
+                            "never an automatic replay of the historical command"
+                        ),
+                        "via": "repair:feedback_steps_without_outcome",
+                    },
+                    "retryable": False,
+                    "evidence": dict(row.get("proven_by") or {}),
+                }
+            )
+    return steps
+
+
+def command_progress(
+    source_rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | None = None,
+    now: datetime | str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    projection_inconsistent: bool = False,
+) -> dict[str, Any]:
+    """The command-to-delivery progress document (R42-07, pure): the
+    command-OUTCOME axis, the next-step distinction set, the ONE current
+    subject and the STALE labelling — one coherent view from accepted
+    command to delivery, derived from the authoritative records (the
+    #374 journals, the request documents, the verification rows, the
+    #340 budget decision), never a second mutable truth.
+
+    - ``commands`` — :func:`command_outcome_rows` (accepted / pending /
+      applied / refused / exhausted, each with its proving row);
+    - ``next_steps`` — :func:`next_step_rows` (the distinction set);
+    - ``current_subject`` — the ONE coherent current attempt/candidate
+      this document speaks for: the run id (the OPEN round's child when
+      a correction round superseded this delivery — the #367 rule), the
+      round reference, the candidate and the attempt id. After a
+      superseding round the note says the outcomes below belong to the
+      SUPERSEDED delivery — history, never the lineage's current
+      command progress;
+    - ``stale`` — a delayed/inconsistent projection is labelled STALE
+      WITH ITS VERSION, never blended: the flag names the projection
+      version and the fence observation, and the reader re-reads before
+      acting.
+    """
+    run = _require_run(source_rows)
+    run_id = str(_first(run, "id", "run_id") or "")
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if projection is None:
+        projection = initial_projection(source_rows, moment)
+    round_view = review_round_fact(source_rows)
+    open_round = bool(
+        round_view
+        and str((round_view.get("round") or {}).get("status") or "") in REVIEW_ROUND_OPEN_STATUSES
+    )
+    superseded_by = projection.superseded_by_round
+    current_run = (
+        str((round_view or {}).get("round", {}).get("child_run_id") or "") if open_round else ""
+    ) or run_id
+    commands = command_outcome_rows(source_rows, coverage=coverage)
+    counts = {word: 0 for word in COMMAND_OUTCOMES}
+    for row in commands:
+        word = str(row.get("outcome") or "unknown")
+        counts[word] = counts.get(word, 0) + 1
+    stale = bool(projection_inconsistent or projection.state == "stale")
+    document: dict[str, Any] = {
+        "schema": COMMAND_PROGRESS_SCHEMA,
+        "run_id": run_id,
+        "computed_at": _iso(moment),
+        "current_subject": {
+            "run_id": current_run,
+            "round_ref": projection.round_ref,
+            "candidate": str(projection.identity.get("active_candidate") or ""),
+            "attempt_id": str(projection.identity.get("attempt_id") or ""),
+            "note": (
+                "the outcomes below belong to a SUPERSEDED delivery — history; the "
+                "lineage's current command progress lives on the open round's "
+                f"child run {current_run}"
+                if superseded_by
+                else "the lineage's current execution"
+            ),
+        },
+        "projection_version": projection.projection_version,
+        "stale": stale,
+        "stale_basis": (
+            "the projection is stale or the source fence moved while the snapshot "
+            f"was read — these facts describe projection v{projection.projection_version}; "
+            "re-read before acting"
+            if stale
+            else f"computed from the rows as they stood at assembly (v{projection.projection_version})"
+        ),
+        "commands": [dict(row) for row in commands],
+        "summary": {
+            **{word: counts.get(word, 0) for word in COMMAND_OUTCOMES},
+            "complete": bool(commands)
+            and all(str(row.get("outcome") or "") == "applied" for row in commands),
+        },
+        "next_steps": next_step_rows(source_rows, coverage=coverage),
+        "distinct_from": (
+            "an unresolved required discussion is NOT failed CI is NOT an exhausted "
+            "review budget is NOT a provider outage is NOT a spent observation "
+            "budget — five different conditions, five different safe actions, "
+            "rendered separately"
+        ),
+        "linkage": (
+            "the outcome axis is derived from the #374 journals (feedback.outcome + "
+            "provider_observation.retry), never from the step seam or a live read; "
+            "the exhaustion arm cross-checks the repair query "
+            "feedback_steps_without_outcome"
+        ),
+    }
+    return redact(document)
+
+
+#: The command support slice's per-section FIELD ALLOWLISTS (the
+#: audit_export pattern): the bounded export serializes ONLY its declared
+#: fields — the reviewer's note TEXT, a raw reviewer brief and any
+#: credential-shaped value a source row ever carried are dropped by
+#: construction, and what the redaction guard catches anyway is COUNTED.
+COMMAND_SUPPORT_FIELDS: Final[Mapping[str, frozenset[str]]] = {
+    "commands": frozenset(
+        {
+            "note_id",
+            "outcome",
+            "reason",
+            "source",
+            "retries",
+            "first_observed_at",
+            "last_event_at",
+            "complete",
+            "proven_by",
+            "honest_note",
+        }
+    ),
+    "next_steps": frozenset(
+        {"code", "binding", "reason", "distinct_from", "safe_action", "retryable", "evidence"}
+    ),
+}
+
+#: The per-section entry bound of the command support slice.
+COMMAND_SUPPORT_MAX_ENTRIES: Final[int] = 12
+
+
+def export_command_support(
+    source_rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | None = None,
+    now: datetime | str | None = None,
+    coverage: Mapping[str, str] | None = None,
+    projection_inconsistent: bool = False,
+    retry_details: Sequence[Mapping[str, Any]] | None = None,
+    max_entries: int = COMMAND_SUPPORT_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """The bounded SUPPORT slice of the command axis (R42-07): scoped
+    ids, the RELEVANT typed errors, the settings NAMES and the evidence
+    references — no raw code, no reviewer prompts and no credential
+    values by default, with the redactions COUNTED.
+
+    Bounded (per-section entry caps), ALLOWLISTED (only the declared
+    :data:`COMMAND_SUPPORT_FIELDS` serialize) and redaction-counted —
+    the ``support.bundle_redactions`` observability the issue names. The
+    *retry_details* parameter is the DEFERRED-ERROR surface: the typed
+    provider-error excerpts the retry trail journaled (one bounded row
+    per deferral — a relevant error, scrubbed by the redaction guard and
+    counted); the caller passes the rows the reader already read, never
+    a second collector.
+    """
+    progress = command_progress(
+        source_rows,
+        projection=projection,
+        now=now,
+        coverage=coverage,
+        projection_inconsistent=projection_inconsistent,
+    )
+    bounded_commands, commands_cut = _bounded(
+        [
+            _allowlisted(dict(row), COMMAND_SUPPORT_FIELDS["commands"])
+            for row in progress["commands"]
+        ],
+        max_entries,
+    )
+    bounded_steps, steps_cut = _bounded(
+        [
+            _allowlisted(dict(row), COMMAND_SUPPORT_FIELDS["next_steps"])
+            for row in progress["next_steps"]
+        ],
+        max_entries,
+    )
+    errors: list[dict[str, Any]] = []
+    for row in retry_details or ():
+        view = _norm(row)
+        if not view or str(view.get("event_type") or "") != PROVIDER_OBSERVATION_RETRY_EVENT:
+            continue
+        errors.append(
+            {
+                "note_id": str(view.get("note_id") or ""),
+                "reason": str(view.get("reason") or ""),
+                "status_code": view.get("status_code"),
+                "observed": bool(view.get("observed")),
+                "detail": str(view.get("detail") or "")[:200],
+                "at": _iso(view.get("at")),
+            }
+        )
+    bounded_errors, errors_cut = _bounded(errors, max_entries)
+    sections: dict[str, Any] = {
+        "commands": bounded_commands,
+        "next_steps": bounded_steps,
+        "relevant_errors": bounded_errors,
+        "settings_names": [dict(entry) for entry in COMMAND_RECOVERY_SETTINGS],
+    }
+    document = {
+        "schema": COMMAND_SUPPORT_SCHEMA,
+        "run_id": progress["run_id"],
+        "computed_at": progress["computed_at"],
+        "current_subject": dict(progress["current_subject"]),
+        "stale": progress["stale"],
+        "sections": sections,
+        "export": {
+            "fields": "allowlisted",
+            "max_entries_per_section": max_entries,
+            "truncated": {
+                "commands": commands_cut,
+                "next_steps": steps_cut,
+                "relevant_errors": errors_cut,
+            },
+            "credential_free": (
+                "scoped ids, typed reasons, settings NAMES and evidence references "
+                "only — no raw code, no reviewer prompts, no credential values by "
+                "default; what the redaction guard caught anyway is counted"
+            ),
+            "redactions": 0,
+            "redactions_measure": SUPPORT_BUNDLE_REDACTIONS,
         },
     }
     redacted_doc = redact(document)

@@ -77,15 +77,18 @@ from forge.adaptive.operator_view import (
 )
 
 __all__ = [
+    "COMMAND_ACCEPTED_TO_APPLIED",
     "COMMAND_APPLICATION_LATENCY",
     "CUSTOMER_STATE_OF_OPERATOR_STATE",
     "HUMAN_ACTOR_ORIGINS",
     "MANUAL_INTERVENTION_MINUTES",
+    "MANUAL_RESCUE_MINUTES",
     "MEASURE_BLENDING_ERROR",
     "NATIVE_OCCUPANCY",
     "OPS_LIMITS_READ_MODEL_SCHEMA",
     "OPS_MEASURE_NAMES",
     "OPS_MEASURES_SCHEMA",
+    "PROJECTION_LAG",
     "PROJECTION_STALE_OR_INCONSISTENT",
     "QUEUE_AGE",
     "RECOVERY_DURATION",
@@ -99,6 +102,7 @@ __all__ = [
     "assert_measures_separate",
     "capped_admission_verdict",
     "command_application_latency",
+    "command_progress_limits_fold",
     "customer_state",
     "delivery_round_block",
     "lineage_limits_fold",
@@ -149,6 +153,23 @@ QUEUE_AGE: Final = "operator.queue_age"
 #: the four measures (a blended "confidence" field is exactly what
 #: :func:`assert_measures_separate` refuses).
 PROJECTION_STALE_OR_INCONSISTENT: Final = "projection.stale_or_inconsistent"
+#: R42-07 (#380) — the command-to-delivery observability, each its own
+#: record in :func:`command_progress_limits_fold`, never joined to the
+#: four ``ops.*`` measures (a DIFFERENT axis: the feedback-command
+#: ladder, not the CTL-04 control-command ladder
+#: :data:`COMMAND_APPLICATION_LATENCY` measures — separate populations,
+#: never blended):
+#: ``command.accepted_to_applied_seconds`` — per feedback command, the
+#: accepted → applied window on the #374 outcome axis;
+#: ``operator.manual_rescue_minutes`` — the WAIT-for-rescue windows (the
+#: minutes an exhausted/refused command has awaited the human repair
+#: decision — a lower bound, like the intervention measure a WAIT, never
+#: active work); ``status.projection_lag`` — how far the reading moment
+#: stands from the NEWEST durable command-axis fact (a gauge over the
+#: facts' own clocks, never a blended confidence).
+COMMAND_ACCEPTED_TO_APPLIED: Final = "command.accepted_to_applied_seconds"
+MANUAL_RESCUE_MINUTES: Final = "operator.manual_rescue_minutes"
+PROJECTION_LAG: Final = "status.projection_lag"
 
 OPS_MEASURE_NAMES: Final[tuple[str, ...]] = (
     COMMAND_APPLICATION_LATENCY,
@@ -1282,6 +1303,154 @@ def lineage_limits_fold(
     }
 
 
+def command_progress_limits_fold(
+    rows: Mapping[str, Any],
+    *,
+    projection: OperatorProjection | Mapping[str, Any],
+    as_of: str = "",
+    coverage: Mapping[str, str] | None = None,
+    projection_inconsistent: bool = False,
+) -> dict[str, Any]:
+    """The R42-07 (#380) command-progress fold for the read-model: the
+    THREE command-axis observability records —
+    ``command.accepted_to_applied_seconds``,
+    ``operator.manual_rescue_minutes`` and ``status.projection_lag`` —
+    each over its own windows, never blended with the four ``ops.*``
+    measures (this is the FEEDBACK-command ladder, a different
+    population than the CTL-04 control ladder
+    :func:`command_application_latency` measures).
+
+    Pure over the same rows the read-model already read, via
+    :func:`forge.adaptive.operator_view.command_outcome_rows` (the #374
+    journals — accepted ≠ applied is structural: only an ``applied``
+    command has a window; everything else is counted, never
+    zero-filled). An unobserved events authority renders every record
+    ``unknown`` — never an empty success."""
+    from forge.adaptive.operator_view import command_outcome_rows
+
+    commands = command_outcome_rows(rows, coverage=coverage)
+    unknown = bool(commands) and str(commands[0].get("outcome") or "") == "unknown"
+
+    samples: list[dict[str, Any]] = []
+    not_yet_applied = 0
+    rescue_windows: list[dict[str, Any]] = []
+    newest_moment = ""
+    for row in commands:
+        note_id = str(row.get("note_id") or "")
+        last_at = str(row.get("last_event_at") or "")
+        first_at = str(row.get("first_observed_at") or "")
+        for moment in (last_at, first_at):
+            if moment > newest_moment:
+                newest_moment = moment
+        outcome = str(row.get("outcome") or "")
+        if outcome == "applied":
+            seconds = _seconds(first_at, last_at)
+            if seconds is None:
+                not_yet_applied += 1  # an unreadable clock is not a sample
+                continue
+            samples.append(
+                {
+                    "note_id": note_id,
+                    "from": first_at,
+                    "to": last_at,
+                    "seconds": round(seconds, 6),
+                }
+            )
+        else:
+            not_yet_applied += 1
+        if outcome in ("exhausted", "refused"):
+            entry: dict[str, Any] = {
+                "note_id": note_id,
+                "outcome": outcome,
+                "awaiting": (
+                    "the operator rescue decision (the repair query / guarded "
+                    "re-drive) since the command settled"
+                ),
+            }
+            wait = _seconds(last_at, as_of) if as_of else None
+            entry["open_wait_minutes"] = round(wait / 60, 3) if wait is not None else None
+            rescue_windows.append(entry)
+
+    if unknown:
+        basis = "the feedback event journal was not observed — never guessed"
+        return {
+            COMMAND_ACCEPTED_TO_APPLIED: _unknown_measure(
+                COMMAND_ACCEPTED_TO_APPLIED, "feedback_events"
+            ),
+            MANUAL_RESCUE_MINUTES: _unknown_measure(MANUAL_RESCUE_MINUTES, "feedback_events"),
+            PROJECTION_LAG: _unknown_measure(PROJECTION_LAG, "feedback_events"),
+            "coverage_basis": basis,
+        }
+
+    lag_seconds = _seconds(newest_moment, as_of) if as_of and newest_moment else None
+    lag_record: dict[str, Any] = {
+        "measure": PROJECTION_LAG,
+        "kind": "gauge",
+        "unit": "s",
+        "definition": (
+            "how far the reading moment (as_of) stands from the NEWEST durable "
+            "command-axis fact the projection derived from — the facts' own "
+            "clocks, never a blended confidence; a moved fence is stated by "
+            "projection.stale_or_inconsistent, a DIFFERENT record"
+        ),
+        "window": f"newest command fact → as_of={as_of or 'unknown'}",
+        "population": 1 if lag_seconds is not None else 0,
+        "samples": (
+            [{"from": newest_moment, "to": as_of, "seconds": round(lag_seconds, 6)}]
+            if lag_seconds is not None
+            else []
+        ),
+        "coverage": "present" if lag_seconds is not None else "unknown",
+        "reason": (
+            ""
+            if lag_seconds is not None
+            else "no readable command-axis clock or no reading moment — never a zero lag"
+        ),
+        "projection_inconsistent": bool(projection_inconsistent),
+    }
+    return {
+        COMMAND_ACCEPTED_TO_APPLIED: _measure(
+            COMMAND_ACCEPTED_TO_APPLIED,
+            kind="duration",
+            unit="s",
+            definition=(
+                "per feedback command: ACCEPTED (first observed — the inbox "
+                "receipt or first journal row) → APPLIED (the applied outcome "
+                "journal's moment — the effect observation, never the "
+                "acceptance). The feedback-command ladder's own latency, a "
+                "different population than ops.command_application_latency "
+                "(the CTL-04 control ladder) — never blended"
+            ),
+            window="first_observed_at → last_event_at, per applied command",
+            samples=samples,
+            extra={"not_yet_applied": not_yet_applied},
+        ),
+        MANUAL_RESCUE_MINUTES: _measure(
+            MANUAL_RESCUE_MINUTES,
+            kind="duration",
+            unit="min",
+            definition=(
+                "WAIT-for-rescue windows only: the minutes an exhausted/refused "
+                "command has stood since its settling journal row, awaiting the "
+                "HUMAN repair decision (the repair query, the guarded re-drive). "
+                "A lower bound on rescue latency — active operator working time "
+                "is recorded nowhere and never invented; pending commands are "
+                "NOT rescue windows (the bounded backoff owns them)"
+            ),
+            window="settled (exhausted/refused) last_event_at → as_of, per command",
+            samples=[],
+            extra={"open_windows": rescue_windows},
+        ),
+        PROJECTION_LAG: lag_record,
+        "fence": (
+            "the source fence moved while the snapshot was assembled — the "
+            "records above describe the rows as they stood; re-read before acting"
+            if projection_inconsistent
+            else "the source fence held while the snapshot was assembled"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # The six-quantity read-model
 # ---------------------------------------------------------------------------
@@ -1484,6 +1653,19 @@ def ops_limits_read_model(
             rows,
             projection=projection,
             as_of=as_of,
+            projection_inconsistent=projection_inconsistent,
+        ),
+        # R42-07 (#380): the command-progress fold — the three
+        # command-axis observability records (accepted→applied seconds,
+        # manual rescue minutes, projection lag) over the #374 journals,
+        # separate from the four ops.* measures and coverage-honest (an
+        # unselected feedback_events section renders unknown, never an
+        # empty success).
+        "command_progress": command_progress_limits_fold(
+            rows,
+            projection=projection,
+            as_of=as_of,
+            coverage=coverage,
             projection_inconsistent=projection_inconsistent,
         ),
         "history_separation": (
