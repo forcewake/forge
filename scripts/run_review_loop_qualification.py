@@ -13,6 +13,18 @@ ride the candidate; the doctor passes WITHOUT the ambient duplicate the
 previous window needed, and the #374 retryable seam exercises naturally
 if any transient observation occurs.
 
+RE-PINNED TO THE FINAL CANDIDATE (the build-once rule applied to
+itself): the first candidate (wheel ``e7b48d42``/image ``98ea9031``,
+bundle ``docs/evaluation/2026-09-28-r4204-build-once/``) was qualified
+at commit 9c20674; three review commits (#380, #379, #389) then landed
+inside the release window and ship in the wheel — a changed candidate is
+a NEW candidate. This driver now pins the FINAL tree (e305478) and its
+ONE build (wheel + alignment image, digests recorded in
+``docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json``
+BEFORE any phase ran); the first candidate's record stays under its own
+identity (``review-loop-2026-09-28-c1-e7b48d42.json``, legacy-marked
+superseded history) and its bundle is never overwritten.
+
 The trace (issue #377's acceptance, on the EXACT candidate bytes):
 
 1. ``probe`` — BOTH credential routes probed at the real model gateway
@@ -58,7 +70,7 @@ The trace (issue #377's acceptance, on the EXACT candidate bytes):
    turns, the candidate's own pairing marker in the halted trace.
 10. ``collect`` — the record ``qualification/records/review-loop-2026-09-28.json``
     (schema ``forge.profile.qualification/1``) + the evidence bundle
-    under ``docs/evaluation/2026-09-28-r4204-build-once/`` (receipts
+    under ``docs/evaluation/2026-09-28-r4204-final/`` (receipts
     WITHOUT values — digests only). ``teardown`` deletes the disposable
     project after capture.
 
@@ -90,7 +102,7 @@ from typing import Any, Callable, Mapping, Sequence
 import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EVAL_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-28-r4204-build-once"
+EVAL_DIR = REPO_ROOT / "docs" / "evaluation" / "2026-09-28-r4204-final"
 EVIDENCE_PATH = EVAL_DIR / "live-run-evidence.json"
 ALIGNMENT_RECEIPTS = EVAL_DIR / "alignment-receipts.json"
 #: The BUILD receipts (align_lab --apply executed by the operator BEFORE
@@ -115,16 +127,18 @@ STATE_PATH = REPO_ROOT / "data" / "review-loop-qualification" / "state.json"
 TEMPLATE_SOURCE = REPO_ROOT / "ci" / "templates" / "claude-sdk-lane.gitlab-ci.yml"
 
 #: The BUILD-ONCE candidate's lane wheel (R42-04/#377): ONE `uv build` of
-#: the v0.42.0 tree (0f0dc8c + the version bump), digest recorded in the
-#: candidate manifest BEFORE qualification; the lane installs EXACTLY
-#: these bytes and the release must promote them.
+#: the FINAL v0.42.0 tree (e305478 — the first candidate e7b48d42… was
+#: qualified at 9c20674 and superseded when #380/#379/#389 landed inside
+#: the release window; per R42-04 a changed candidate is re-qualified).
+#: The digest is recorded in the candidate manifest BEFORE qualification;
+#: the lane installs EXACTLY these bytes and the release must promote them.
 LANE_WHEEL_NAME = "forge-0.42.0-py3-none-any.whl"
 LANE_WHEEL_PATH = REPO_ROOT / "dist" / LANE_WHEEL_NAME
-LANE_WHEEL_SHA256 = "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33"
+LANE_WHEEL_SHA256 = "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a"
 #: The BUILD-ONCE candidate's alignment image (the same tree; the
 #: alignment receipts bind the build). Read back at collect time from
 #: the observed containers — never hand-copied.
-CANDIDATE_IMAGE_DIGEST = "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed"
+CANDIDATE_IMAGE_DIGEST = "sha256:ad769a4af2fd0d7539a4c5d7c828a6697060c9c6d64d2e6c2469890ef87cf689"
 LANE_WHEEL_DIR = REPO_ROOT / "data" / "lane-wheel"
 WHEEL_HOST_PORT = 8481
 LAB_HOST_LAN_IP = "192.168.1.18"
@@ -863,7 +877,15 @@ def phase_align(bundle: Bundle) -> int:
         spec = _container_spec(container)
         env_now = {entry.partition("=")[0]: entry.partition("=")[2] for entry in spec["env"]}
         missing = {key: value for key, value in ALIGNMENT_PINS if env_now.get(key) != value}
-        image_stale = str(spec.get("image_id", "")).strip() != current_image_id
+        # LIVE-FOUND (the re-qualification window): ``podman images
+        # --format {{.ID}}`` yields the 12-hex SHORT id while inspect's
+        # ``.Image`` is the full 64-hex — a naive != compared apples to
+        # oranges, reported "image-drift-detected" on EVERY run and
+        # recreated both consumers (the recreate window then blipped the
+        # host-gateway litellm probe at preflight). Normalize: the full id
+        # must START WITH the short one (equal-full also satisfies it).
+        running_image_id = str(spec.get("image_id", "")).strip().removeprefix("sha256:")
+        image_stale = not running_image_id.startswith(current_image_id)
         if not missing and not image_stale:
             receipts["steps"].append(
                 {
@@ -3173,7 +3195,7 @@ def phase_collect(bundle: Bundle) -> int:
     evidence_class = "live-provider" if not blocked else "offline-operational"
     qualification = {
         "stamp": "forge.profile.qualification/1",
-        "record_id": "gitlab-ce-v1-Q4204-review-loop-2026-09-28",
+        "record_id": "gitlab-ce-v1-Q4204-review-loop-2026-09-28-final",
         "profile": "gitlab-ce-v1",
         "provider": "gitlab",
         "release_version": _repo_version(),
@@ -3245,7 +3267,7 @@ def phase_collect(bundle: Bundle) -> int:
                     "route (probed ALIVE; the broker token 401 typed) with the #376 "
                     "delivery-mode doctor preflight green WITHOUT any ambient duplicate. "
                     "Full narrative: the trace section below + "
-                    "docs/evaluation/2026-09-28-r4204-build-once/README.md"
+                    "docs/evaluation/2026-09-28-r4204-final/README.md"
                 ),
                 "executed_at": _now(),
                 "outcome": "pass" if not findings else "findings",
@@ -3388,11 +3410,11 @@ def phase_collect(bundle: Bundle) -> int:
         "spend": spend,
         "validation_findings": findings,
         "evidence_refs": [
-            "docs/evaluation/2026-09-28-r4204-build-once/live-run-evidence.json",
-            "docs/evaluation/2026-09-28-r4204-build-once/alignment-receipts.json",
-            "docs/evaluation/2026-09-28-r4204-build-once/alignment-build-receipts.json",
-            "docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json",
-            "docs/evaluation/2026-09-28-r4204-build-once/README.md",
+            "docs/evaluation/2026-09-28-r4204-final/live-run-evidence.json",
+            "docs/evaluation/2026-09-28-r4204-final/alignment-verify-receipts.json",
+            "docs/evaluation/2026-09-28-r4204-final/alignment-build-receipts.json",
+            "docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json",
+            "docs/evaluation/2026-09-28-r4204-final/README.md",
         ],
     }
     if spend["all_attempt_total_usd"] > SPEND_CAP_USD:

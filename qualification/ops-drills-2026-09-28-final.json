@@ -1,0 +1,214 @@
+{
+  "authority": "filesystem",
+  "database": "sqlite",
+  "drills": [
+    {
+      "achieved_objectives": [
+        "the restore recovered the SELECTED active checkpoint of each work (verified read)",
+        "the PINNED checkpoint and its pin record recovered with the restore",
+        "the backup carried pins and pending-GC state together with metadata and blobs (coverage {'works': 2, 'checkpoints': 6, 'blobs': 18, 'pins': 1, 'pending_gc': 0, 'metadata_rows': 0})",
+        "the mismatched halves were DETECTED before restore (1 affected checkpoint(s), the t2-only checkpoint named)",
+        "the mismatched restore REFUSED with the typed BackupMismatchError LISTING the affected works \u2014 never silently accepted",
+        "the refused restore wrote NOTHING into the target"
+      ],
+      "drill": "backup_restore",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "backup.restore_coverage": {
+          "active_recovered": true,
+          "blobs": 18,
+          "checkpoints": 6,
+          "metadata_rows": 0,
+          "mismatch_affected_works": [
+            "wp-backup-0"
+          ],
+          "mismatch_refused": true,
+          "pending_gc": 0,
+          "pinned_recovered": true,
+          "pins": 1,
+          "works": 2
+        }
+      },
+      "tested_limits": {
+        "checkpoints_per_work": 3,
+        "mismatch_shape": "metadata at t2 (new checkpoint) + blobs at t1 (pre-t2 bytes)",
+        "pins": 1,
+        "works": 2
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "concurrent uploads never exceeded 2 (peak 2)",
+        "in-flight upload bytes never exceeded 4096B (peak 1616B)",
+        "overload beyond the declared budget produced TYPED refusals, never a silent unbounded queue (5 refused, 27 landed)",
+        "an over-budget single upload was refused TYPED at admission",
+        "a contended sweep refused with the TYPED GCLockTimeout \u2014 nothing deleted",
+        "the lock-wait refusal stayed within its budget (observed 0.2035617500077933s against 0.2s + slack) \u2014 bounded, never an indefinite block",
+        "once the holder released, the same sweep CONVERGED (retry-later is recovery)",
+        "every landing work's active checkpoint reads back VERIFIED after the load (4/4 works)"
+      ],
+      "drill": "checkpoint_upload_load",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "checkpoint.upload_memory_budget": {
+          "landed": 27,
+          "max_concurrent": 2,
+          "max_in_flight_bytes": 4096,
+          "peak_concurrent": 2,
+          "peak_in_flight_bytes": 1616,
+          "typed_refusals": 6
+        },
+        "gc_lock_timeout": {
+          "converged_after_release": true,
+          "observed_wait_s": 0.2035617500077933,
+          "typed_refusal": true
+        }
+      },
+      "tested_limits": {
+        "admission_wait_seconds": 0.05,
+        "gc_lock_wait_seconds": 0.2,
+        "max_concurrent_uploads": 2,
+        "max_in_flight_bytes": 4096,
+        "puts_per_work": 4,
+        "uploaders": 8,
+        "works": 4
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "control-command p95 stayed under 2.0s while uploads and a retention pass contended (p95 0.443s, median 0.436s, worst 0.455s)"
+      ],
+      "drill": "control_responsiveness",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "control.command_latency": {
+          "commands": 30,
+          "max_s": 0.4551,
+          "median_s": 0.4362,
+          "objective_s": 2.0,
+          "p95_s": 0.4425
+        }
+      },
+      "tested_limits": {
+        "commands": 30,
+        "contention_puts": 6,
+        "control_objective_s": 2.0
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "provider latency delayed the start but the cycle COMPLETED typed (0.19s, state parked_draining) \u2014 no hang",
+        "a 429 start left UNKNOWN occupancy that HOLDS its slot (draining) \u2014 never a free-capacity fiction",
+        "a 503 start left UNKNOWN occupancy that HOLDS its slot (draining) \u2014 never a free-capacity fiction",
+        "unknown occupancy stays VISIBLE in the saturation report (3 unknown, oldest age 0s) with its bounded escalation path",
+        "a definite 4xx start refusal returned capacity IMMEDIATELY (proven never accepted)",
+        "after the database engine restart the unknown occupancy is STILL on record (identities survive; no occupancy lost, no oversubscription)",
+        "the restarted worker's reconciler RESOLVED the unknown occupancy by its intent ref (1 released once observed terminal)",
+        "a full-disk-shaped quota refusal is TYPED (StorageQuotaExceededError) and leaves the store byte-identical (no entry, no partial checkpoint)"
+      ],
+      "drill": "degraded_faults",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "degraded_modes": [
+          "provider latency: completed typed (no hang)",
+          "429/503: unknown occupancy held + visible",
+          "404: capacity returned immediately",
+          "database restart: identities survived, reconciler resolved",
+          "full disk: typed quota refusal, store intact"
+        ],
+        "native_start.unknown_age": 1,
+        "provider_latency_observed_s": 0.187
+      },
+      "tested_limits": {
+        "ambiguous_statuses": [
+          429,
+          503
+        ],
+        "database_restart": "engine disposed and recreated",
+        "definite_statuses": [
+          404
+        ],
+        "full_disk": "StoragePolicy per-work quota (typed quota refusal)",
+        "provider_latency_s": 0.1
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "wave 0: every held slot released by ONE reconciler pass after observed-terminal (0 still open)",
+        "wave 1: every held slot released by ONE reconciler pass after observed-terminal (0 still open)",
+        "open leases never exceeded the limit of 3 (peak observed 3), including failed cancels and lost responses",
+        "failed cancellations and lost responses HELD their slots mid-load (draining seen: True, dispatched_unknown seen: True)",
+        "the load drains to zero held slots (final 0)"
+      ],
+      "drill": "native_start_load",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "cycle_end_states": {
+          "cancel_fail_draining": 1,
+          "parked": 41,
+          "parked_draining": 6
+        },
+        "execution.occupied_vs_limit": {
+          "limit": 3,
+          "peak_occupied": 3
+        },
+        "native_start.unknown_age": {
+          "escalation": "reconciler probe (bounded) or audited operator override",
+          "max_observed_seconds": 0
+        }
+      },
+      "tested_limits": {
+        "cancel_fail_ratio": 0.25,
+        "cycles_per_worker": 3,
+        "database": "sqlite+aiosqlite",
+        "lost_response_ratio": 0.25,
+        "max_active_per_project": 3,
+        "workers": 8
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "WITHOUT the override the same terminal release parked draining \u2014 uncertain occupancy is never relabeled observed-terminal by the local verdict alone",
+        "the explicitly approved override released the slot (one audited action)",
+        "the release REASON is the audit: approver and authorization visible verbatim ('terminal:cancelled [override: approver=ops-oncall;reason=runner decommissioned;ticket=CHANGE-280]')",
+        "the override's outcome is honestly 'observed_terminal' \u2014 the AUDIT record is what makes the unobserved risk visible, never a relabeling without a trace"
+      ],
+      "drill": "operator_override_audit",
+      "outcome": "pass",
+      "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+      "signals": {
+        "override.audit": {
+          "approver": "ops-oncall",
+          "audit_trail": "terminal:cancelled [override: approver=ops-oncall;reason=runner decommissioned;ticket=CHANGE-280]",
+          "escalation": "an override requires explicit approver + reason; it is recorded in the release_reason audit trail and reported here \u2014 it never silently asserts the native job ended",
+          "ticket": "CHANGE-280",
+          "unaudited_release_kept_slot": true
+        }
+      },
+      "tested_limits": {
+        "authorization": "approver + reason + ticket (explicit, recorded)",
+        "occupancy_at_override": "dispatched_unknown (intent, no terminal observation)"
+      },
+      "violations": []
+    }
+  ],
+  "generated_at": "2026-09-28T07:08:10+00:00",
+  "profile": "operator",
+  "schema": "forge.ops.drills/1",
+  "scope": "achieved against the tested limits only (disposable single-database fixture, synthetic bounded workloads, the exact N/budget/lock-wait recorded per drill); NOT generalized to larger fleets, higher concurrency or production hardware without new measurement",
+  "summary": {
+    "drills_run": 6,
+    "failed": 0,
+    "passed": 6
+  }
+}

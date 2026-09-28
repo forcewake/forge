@@ -1,0 +1,475 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem' — observed 2026-09-28, the same axis the @0.41.0 record pins)",
+  "capabilities": [
+    "review-rounds-correction-loop"
+  ],
+  "composition": {
+    "build_once_contract": "the release of v0.42.0 must promote THESE bytes: generate_template_pins.py --exact-composition refuses a promotion whose wheel digest differs from this record's (R42-04 AC-8)",
+    "control_plane": "the BUILD-ONCE alignment image (sha256:98ea903125d1…, reports 0.42.0, schema head 032) — built from the SAME tree as the wheel (align_lab.py --apply; receipts in alignment-build-receipts.json), digests recorded in candidate-manifest.json BEFORE qualification",
+    "lane_package": "forge-0.42.0 wheel @ sha256 e7b48d42e4851e9c… (the ONE uv build; sha256-verified in-job on every lane leg)",
+    "template": "the shipped claude-sdk-lane template VERBATIM (committed, included BY local include) + the ONE install-seam override"
+  },
+  "credential_probe": {
+    "gitlab-protected-variable": {
+      "alive": true,
+      "label": "gitlab-protected-variable",
+      "latency_s": 1.21,
+      "max_tokens": 8,
+      "model": "glm-5.3-flash",
+      "status": 200,
+      "token_sha256_16": "800223712be70ebe",
+      "usage": {
+        "cache_read_input_tokens": 0,
+        "input_tokens": 14,
+        "output_tokens": 8,
+        "server_tool_use": {
+          "web_search_requests": 0
+        },
+        "service_tier": "standard"
+      }
+    },
+    "runner-redemption-broker": {
+      "alive": false,
+      "error_message_head": "token expired or incorrect",
+      "error_type": "401",
+      "label": "runner-redemption-broker",
+      "latency_s": 0.19,
+      "max_tokens": 8,
+      "status": 401,
+      "token_sha256_16": "6e3098b52d8991dc"
+    }
+  },
+  "credential_route": "gitlab-protected-variable (FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN, masked; the lane's real model calls rode it — the route probed ALIVE this window while the runner-redemption broker token answered 401 token-expired, typed; the doctor passed WITHOUT the ambient duplicate — the #376 fix on the candidate)",
+  "evidence": [
+    {
+      "artifact_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+      "capability": "review-rounds-correction-loop",
+      "class": "live-provider",
+      "covers": "KIND=model-task-execution · COMPOSITION=THE-EXACT-CANDIDATE (wheel e7b48d42… + image 98ea9031…, built ONCE, digests recorded before qualification — the R42-04 build-once contract; the v0.41.0 historical-composition gap this issue disclosed is closed by construction). The R42-04 (#377) review-and-correction loop on ONE real GitLab CE profile: delivery 1 ready_for_human (ordinary classic parent, oracle green on the exact sha) → a nonconflicting human edit → the native /fix → the budgeted child round from the exact current head → the new candidate on the SAME MR → the oracle on the exact new candidate → the closing reviewer's obligation digest verified → replay idempotence → a second distinct correction with the #358 worker-failure recovery (exactly one provider commit per publication effect) → the conflicting-head typed conflict with the human commit preserved → the required-resume negative arm halting BEFORE any model session on the corrupted checkpoint (zero vendor turns, the candidate's own pairing marker in the halted trace). The model legs rode the gitlab-protected-variable route (probed ALIVE; the broker token 401 typed) with the #376 delivery-mode doctor preflight green WITHOUT any ambient duplicate. Full narrative: the trace section below + docs/evaluation/2026-09-28-r4204-build-once/README.md",
+      "executed_at": "2026-09-28T02:33:52.835225+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-28-r4204-build-once/live-run-evidence.json",
+    "docs/evaluation/2026-09-28-r4204-build-once/alignment-receipts.json",
+    "docs/evaluation/2026-09-28-r4204-build-once/alignment-build-receipts.json",
+    "docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json",
+    "docs/evaluation/2026-09-28-r4204-build-once/README.md"
+  ],
+  "executed_at": "2026-09-28T02:33:52.835203+00:00",
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed",
+  "legacy": true,
+  "live_found": {
+    "budget_fence_positive": "PREDECESSOR WINDOW (run fbe62ad5, #364): the claude-code harness fills a ~200k-token context regardless of task size (196,312/200,000 consumed), the finite budget EXHAUSTED at the token axis and the closing review stood down with zero reviewer spend — the designed fence, observed live; this window's standard profile keeps the receipted 600k ceiling",
+    "doctor_ambient_names": "PREDECESSOR WINDOW (#364), RESOLVED by #376 IN this candidate: the doctor's per-driver lane check is now delivery-mode aware (exactly the substituted ambient slot is dropped when the carrier passed its prerequisite) — this window provisioned NO ambient duplicate and the doctor passed green",
+    "empty_scope_fail_closed": "PREDECESSOR WINDOW (run 8be14a80, #364): without the target repo's .forge.yml implement.paths the frozen spec's allowed_paths is EMPTY and every /fix classifies material_change (fail-closed) — the repo-side scope declaration is part of this driver's seed ever since",
+    "expired_correction_premise": "LIVE-FOUND: a correction note whose request is ALREADY SATISFIED at the base yields an honest model-no-op — the run blocks typed harness_no_changes (harness_code: harness_no_changes), zero candidate commits, the mid-round human commit stays the preserved head. Correction notes must name work that EXISTS at their base; the drift fence needs a diff-producing request (the fresh conflict_negative lineage)",
+    "mr_sha_lag": "the GitLab MR document's sha field lags a just-pushed commit by seconds — the driver reads the branch head directly (observed live #364, unchanged this window)",
+    "protected_variable_visibility": "a PROTECTED GitLab CI variable reaches only protected refs; the factory branches are not protected, so the lane fails CLOSED at its bootstrap fence (typed FORGE_BOOTSTRAP_FAILED, zero model calls) — the carrier is masked, NOT protected, on this lab (observed live #364, unchanged this window)",
+    "publisher_branch_defect": "PREDECESSOR WINDOW (#364), RESOLVED before this candidate: publish_candidate carried no branch parameter so a review round's child committed onto factory/<issue>/<child8> beside the lineage's collaboration surface; the patch (branch= threaded from _collaboration_branch_or_block) is IN the v0.42.0 candidate — this window's rounds publish on the lineage branch by construction"
+  },
+  "oracle_contract": "the precommitted independent oracle: tests/test_text_utils.py (the slugify six-case pattern + the three file shapes) run by the smoke CI job on every candidate; the round-2 contract (tests/test_round2_contract.py — the HUMAN reviewer's file, added before the authorized /fix) runs in the SAME job",
+  "outcome": "pass",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — the protected-variable semantics observed live: a PROTECTED CI variable reaches only protected refs (the factory branches are not; the carrier is masked, not protected on this lab), and the MR document's sha field lags a just-pushed commit by seconds",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-28",
+  "record_id": "gitlab-ce-v1-Q4204-review-loop-2026-09-28",
+  "release_version": "0.42.0",
+  "runtime_dependency_fingerprint": "lane install forge[interactive] @ file:///tmp/forge-0.42.0-py3-none-any.whl (sha256 e7b48d42e4851e9c…, verified in-job; the ONE uv build of the v0.42.0 tree — digests recorded in candidate-manifest.json BEFORE qualification) with claude-code CLI pinned 2.1.273; control plane = the BUILD-ONCE alignment image (sha256:98ea903125d1…, v0.42.0, schema 032) built from the SAME tree",
+  "runtime_recipe": "python-3.13 (uv in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker (image sha256:98ea903125d1…, v0.42.0, schema 032 — the BUILD-ONCE candidate image, receipts in alignment-build-receipts.json) under FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable; the wheelhost (:8481) served the pinned candidate wheel over the lab LAN",
+  "spend": {
+    "all_attempt_total_usd": 0.9647,
+    "cap_usd": 2.5,
+    "cost_basis": "every lane job's own SDK usage receipt (candidate.meta.json: total_cost_usd) — the qualifying rounds AND any honestly-failed attempts this window; the planner/closing-review model calls ride the control plane's litellm route inside each run's budget ledger",
+    "failed_attempt_lane_spend_usd": 0,
+    "failed_attempts_counted": [],
+    "qualifying_breakdown": {
+      "conflict_negative": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.1983,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 198144,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 21943,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 198144,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.1982608,
+              "inputTokens": 21943,
+              "maxOutputTokens": 32000,
+              "outputTokens": 3543,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 3543,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.1982608
+        }
+      },
+      "delivery": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.218,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 176000,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 33388,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 176000,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.21801199999999998,
+              "inputTokens": 33388,
+              "maxOutputTokens": 32000,
+              "outputTokens": 2463,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 2463,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.21801199999999998
+        }
+      },
+      "negative": {},
+      "round2": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.1404,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 149888,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 17762,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 149888,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.1403656,
+              "inputTokens": 17762,
+              "maxOutputTokens": 32000,
+              "outputTokens": 1967,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 1967,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.1403656
+        }
+      },
+      "round3": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.188,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 101440,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 32732,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 101440,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.188016,
+              "inputTokens": 32732,
+              "maxOutputTokens": 32000,
+              "outputTokens": 1840,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 1840,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.188016
+        }
+      }
+    },
+    "qualifying_lane_spend_usd": 0.7447,
+    "uncounted_lane_leg_estimate_usd": 0.22,
+    "uncounted_lane_leg_reason": "the reused-note negative arm's lane turn (job 1202, run 0cdf5eec) ran ONE model turn that honestly produced zero changes; its SDK receipt (candidate.meta.json) lived in the disposable project deleted at teardown before the driver captured it — the durable ledger keeps the dispatch handle but not the SDK usage. Counted as the window's observed per-leg UPPER BOUND (the heaviest single leg was $0.218), labelled estimate — never blended with the receipt-backed figures"
+  },
+  "stamp": "forge.profile.qualification/1",
+  "superseded": {
+    "evidence_bundle_unchanged": "docs/evaluation/2026-09-28-r4204-build-once/",
+    "status": "superseded — the first v0.42.0 candidate (wheel e7b48d42…, image sha256:98ea9031…), qualified at commit 9c20674; three review commits (#380 ae14758, #379 96c2a65, #389 e305478) landed inside the release window and ship in the wheel, so per R42-04 a NEW candidate was minted at the final tree and re-qualified",
+    "superseded_by_candidate_manifest": "docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json",
+    "superseded_by_record": "qualification/records/review-loop-2026-09-28.json"
+  },
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "trace": {
+    "conflict_negative_fresh_lineage": {
+      "child": {
+        "base_head_sha": "8c24366bdda83761230a82e62dce28822337a758",
+        "decision_id": "rd-review-9f0bb84ace4cedbf",
+        "reply_note_id": 1737,
+        "review_row_status": "dispatched",
+        "round_number": 2,
+        "run_id": "34f1b24f0aee4968a35eed669c384303"
+      },
+      "conflicting_commit": {
+        "commit_sha": "f009d9460fc9bfa494afb0063c63be5cff42bd3a",
+        "head_after": "f009d9460fc9bfa494afb0063c63be5cff42bd3a",
+        "path": "src/utils/text.py"
+      },
+      "delivery": {
+        "branch": "factory/2/fed57de4",
+        "candidate_sha": "8c24366bdda83761230a82e62dce28822337a758",
+        "head_at_ready": "8c24366bdda83761230a82e62dce28822337a758",
+        "mr_iid": 2,
+        "run_id": "fed57de498874f0ea93911f66c8792fb"
+      },
+      "fix_note": {
+        "author": "forcewake",
+        "body_head": "/fix Review correction: rename slugify_len to slug_length in src/utils/text.py (",
+        "discussion_id": "a841421e90aad120a6fb3f81d06ba5aade1ce674",
+        "head_at_note": "8c24366bdda83761230a82e62dce28822337a758",
+        "note_id": 1736
+      },
+      "preservation": {
+        "bot_commits_after_human": 2,
+        "head_after_dust": "f009d9460fc9bfa494afb0063c63be5cff42bd3a",
+        "human_commit_is_head": true,
+        "human_commit_sha": "f009d9460fc9bfa494afb0063c63be5cff42bd3a"
+      },
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "candidate_rejected: branch_drift: branch 'factory/2/fed57de4' head drifted: expected '8c24366bdda83761230a82e62dce28822337a758', actual 'f009d9460fc9bfa494afb0063c63be5cff42bd3a'"
+      }
+    },
+    "delivery_1": {
+      "budget": {
+        "closing_partition_policy": null,
+        "closing_reserved_calls": null,
+        "closing_reserved_tokens": null,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "1a0c2ee00b85833d16bb6e31990a03204369534f",
+      "closing_review_verdict": "ok",
+      "mr_draft": true,
+      "mr_iid": 1,
+      "oracle_pipeline": 847,
+      "ordinary_parent_active_plan_absent": true,
+      "run_id": "37f94098fabc48cebf2c73f42b56e202"
+    },
+    "negative_conflicting_head": {
+      "child_run_id": "0cdf5eec562b4e34822635f6ea7a7add",
+      "conflicting_commit": {
+        "commit_sha": "84352371a711ee89cda9f80757fc8a6bb31d316c",
+        "head_after": "84352371a711ee89cda9f80757fc8a6bb31d316c",
+        "path": "src/utils/text.py"
+      },
+      "fix_note": {
+        "head_at_note": "441826776fbbb87565f12cf2446de4aa06ba06a2",
+        "note_id": 1720
+      },
+      "preservation": null,
+      "round_number": 4,
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "harness_code: harness_no_changes"
+      }
+    },
+    "negative_reused_note_model_no_op": {
+      "finding": "LIVE-FOUND: the reused round-4 correction note's premise had EXPIRED at this base — the round-2 candidate already carried the module-level compiled regex the note asked to introduce — so the model honestly produced ZERO changes, the run blocked typed harness_no_changes, zero candidate commits, the human conflicting commit stayed the preserved head, and the round slot freed. The drift fence then ran on the FRESH lineage (conflict_negative) with a request unsatisfiable at its base",
+      "refusal": "the negative arm settled without the typed conflict: {'run_status': 'blocked', 'status_reason': 'harness_code: harness_no_changes', 'round_status': 'ended', 'round_status_reason': 'child run blocked'}",
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "harness_code: harness_no_changes"
+      }
+    },
+    "replay": {
+      "deltas": {
+        "bot_commits": 0,
+        "pipelines": 0,
+        "requests": 0,
+        "round_rows": 0
+      },
+      "redelivery": {
+        "body_head": "{\"status\":\"accepted\",\"event\":\"note\",\"deduplicated\":true}",
+        "delivery_uuid": "6449eb05-5e00-41e6-8d31-40218f8e9786",
+        "note_id": 1699,
+        "status_code": 202
+      },
+      "verdict": "no extra child/turn/commit"
+    },
+    "resume_negative": {
+      "candidate_wheel_pairing_in_halted_trace": true,
+      "corrupted_blob": "data/checkpoints/39/39968fa33e141ee50977115120938bef6a29c67e62e3732ea45131703b690556",
+      "corrupted_checkpoint_sha256": "39968fa33e141ee50977115120938bef6a29c67e62e3732ea45131703b690556",
+      "corruption_shape": "the stored MANIFEST blob's last byte flipped — the bytes no longer reproduce the checkpoint's own content address",
+      "halt_reason": "wip_restore_failed",
+      "halted_before_credential_step": true,
+      "halted_before_model_session": true,
+      "lane_job_id": 1215,
+      "lane_job_status": "failed",
+      "selection": "the work's ACTIVE checkpoint (no durable resume command row exists for this work — none was fabricated; the lane requires the restore regardless and the integrity failure is the halt)",
+      "usage": null,
+      "zero_model_turns": true
+    },
+    "round_2": {
+      "base_head_is_human_edit_head": true,
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_diff_paths": [
+        "src/app.py",
+        "src/utils/legacy.py",
+        "src/utils/text.py",
+        "tests/test_round2_contract.py"
+      ],
+      "candidate_sha": "96729b2819dd5544a9b498f91241f40af000b5db",
+      "child_run_id": "1439a11de86d4ef19460c0a5890acbdc",
+      "correction_visible": {
+        "oracle_file_untouched": true,
+        "slugify_parts_present": true
+      },
+      "fix_note": {
+        "discussion_id": "8ef4ea353992477ebaa45036403e8113ff7e55ca",
+        "head_at_note": "40b1b5ee44ff685073d1428f90894f0237041a0e",
+        "note_id": 1699
+      },
+      "human_edit": {
+        "commit_sha": "40b1b5ee44ff685073d1428f90894f0237041a0e",
+        "head_after": "40b1b5ee44ff685073d1428f90894f0237041a0e",
+        "path": "tests/test_round2_contract.py",
+        "shape": "new-file-nonconflicting"
+      },
+      "oracle_pipeline": 852,
+      "provider_commit_count_after": 2,
+      "readiness_gate_held": {
+        "note": "the green-pipeline -> review handoff held the child (the first gate)",
+        "observed_at": "2026-09-28T02:01:45.347589+00:00",
+        "status": "evaluating_ci"
+      },
+      "reviewer_obligation": {
+        "active_plan_seed": {
+          "activated_by_decision": "rd-review-2c6cb9db3d1168cb",
+          "plan_digest": "5e4fec6d76c2f5274f0cfe707d919200d1a4ed43c6ac2ad6c0a0521af15ed16d",
+          "revised_from_digest": "1e292dae78c27c806120c8655d205f4e311d990f2e388d985c8b88414fa59d65"
+        },
+        "brief_carries_correction_text": true,
+        "brief_head": "Implementation plan — active revision 2 of spec-0a0b4bcb60bedcf1 (digest 5e4fec6d76c2f5274f0cfe707d919200d1a4ed43c6ac2ad6c0a0521af15ed16d)\nActivated by approved",
+        "recomputed_digest": "6bbd8d081ee6621868e71af842465297cc50e1e1ad21e13c8c5dffb19ca4cfc1",
+        "recorded_digest": "6bbd8d081ee6621868e71af842465297cc50e1e1ad21e13c8c5dffb19ca4cfc1",
+        "required_obligations": 1,
+        "review_verdict": "ok",
+        "reviewed_sha": "96729b2819dd5544a9b498f91241f40af000b5db"
+      },
+      "reviewer_resolve": {
+        "discussion_id": "8ef4ea353992477ebaa45036403e8113ff7e55ca",
+        "resolved_by": "forcewake",
+        "returncode": 200
+      },
+      "round_number": 2
+    },
+    "round_3_second_correction_and_worker_failure": {
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "441826776fbbb87565f12cf2446de4aa06ba06a2",
+      "child_run_id": "1e5c771bb3bd42ce8413d9524fefef1f",
+      "correction_visible": {
+        "docstring_marker_present": true
+      },
+      "fix_note": {
+        "discussion_id": "3e5d50a815b58d12807b259d0ddca1e6087a6c64",
+        "head_at_note": "96729b2819dd5544a9b498f91241f40af000b5db",
+        "note_id": 1710
+      },
+      "oracle_pipeline": 855,
+      "recovery_own_commit_count": 1,
+      "round_number": 3,
+      "worker_kill": {
+        "bot_commits_before": 2,
+        "commit_sha": "441826776fbbb87565f12cf2446de4aa06ba06a2",
+        "killed_at": "2026-09-28T02:05:17.712712+00:00",
+        "observed_child_phase_at_kill": "ensuring_draft_mr",
+        "restart": "started"
+      }
+    },
+    "rounds_table_final": [
+      {
+        "base_head_sha": "40b1b5ee44ff685073d1428f90894f0237041a0e",
+        "child_run_id": "1439a11de86d4ef19460c0a5890acbdc",
+        "decision_id": "rd-review-2c6cb9db3d1168cb",
+        "id": "1ad021abb7b64218b9a0476e2a144e7f",
+        "mr_iid": 1,
+        "note_id": "1699",
+        "parent_run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "requested_by": "forcewake",
+        "root_run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "round_number": 2,
+        "status": "completed",
+        "status_reason": "child run ready_for_human"
+      },
+      {
+        "base_head_sha": "96729b2819dd5544a9b498f91241f40af000b5db",
+        "child_run_id": "1e5c771bb3bd42ce8413d9524fefef1f",
+        "decision_id": "rd-review-1fc9977917589f68",
+        "id": "5fd1bddf46b54ab0b9913f61322812e6",
+        "mr_iid": 1,
+        "note_id": "1710",
+        "parent_run_id": "1439a11de86d4ef19460c0a5890acbdc",
+        "requested_by": "forcewake",
+        "root_run_id": "37f94098fabc48cebf2c73f42b56e202",
+        "round_number": 3,
+        "status": "dispatched",
+        "status_reason": null
+      }
+    ]
+  },
+  "validation_findings": [],
+  "verification_contract": "the oracle pipeline green on the EXACT candidate sha of every delivery; the reviewer obligation digest recomputed by the driver over the seeded correction revision == the recorded digest; exactly ONE provider commit per publication effect across the whole trace; the required-resume negative halts wip_restore_failed BEFORE any vendor session (zero model turns on the corrupted checkpoint); the bot never merges, never resolves a discussion, never deploys; the record's wheel/image digests EQUAL the candidate-manifest's (recorded before qualification — build-once)",
+  "wheel_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33"
+}

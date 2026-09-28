@@ -1,0 +1,1013 @@
+{
+  "phases": {
+    "align": {
+      "finished_at": "2026-09-28T06:21:12.079265+00:00",
+      "health": {
+        "database": "ok",
+        "dlq_depth": 3,
+        "litellm": "ok",
+        "queue_depth": 0,
+        "redis": "ok",
+        "status": "ok",
+        "version": "0.42.0"
+      },
+      "receipts": {
+        "generated_at": "2026-09-28T06:20:50.859928+00:00",
+        "pins": {
+          "FORGE_BUDGET_PROFILES": "{\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":600000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+          "FORGE_CREDENTIAL_DELIVERY": "gitlab-protected-variable",
+          "FORGE_MAX_REVIEW_ROUNDS": "3",
+          "FORGE_REVIEW_FEEDBACK_ENABLED": "1"
+        },
+        "purpose": "the R42-04 build-once alignment: the candidate image was BUILT from the tree by align_lab.py --apply (its receipts live in this document \u2014 the same file this phase appends the verify receipt to) and both consumers run it with exactly the pins below; this phase re-verifies the pins and re-runs align_lab.py as a verify-only receipt",
+        "stamp": "forge.lab.alignment/1",
+        "steps": [
+          {
+            "action": "verified",
+            "sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+            "step": "wheelhost",
+            "url": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl"
+          },
+          {
+            "action": "image-drift-detected",
+            "current_image_id": "a58ab3818009\u2026",
+            "reason": "the live-found publisher patch was rebuilt into the tag",
+            "running_image_id": "a58ab38180095dfc05c\u2026",
+            "step": "recreate:forge-app"
+          },
+          {
+            "action": "recreated-from-observed-spec",
+            "argv_shape": "podman run -d --name <container> --network <observed> -v <observed binds> -p <observed ports> -e <observed env + pins> <image> <cmd> \u2014 every observed env entry carried over verbatim (secrets never receipted)",
+            "image": "localhost/forge:dev",
+            "image_id": "a58ab38180095dfc05c6988d4a1762acfe9207efa743f27ba03534ad3f0fb78b",
+            "pins_added": [],
+            "step": "recreate:forge-app"
+          },
+          {
+            "action": "image-drift-detected",
+            "current_image_id": "a58ab3818009\u2026",
+            "reason": "the live-found publisher patch was rebuilt into the tag",
+            "running_image_id": "a58ab38180095dfc05c\u2026",
+            "step": "recreate:forge-worker"
+          },
+          {
+            "action": "recreated-from-observed-spec",
+            "argv_shape": "podman run -d --name <container> --network <observed> -v <observed binds> -p <observed ports> -e <observed env + pins> <image> <cmd> \u2014 every observed env entry carried over verbatim (secrets never receipted)",
+            "image": "localhost/forge:dev",
+            "image_id": "a58ab38180095dfc05c6988d4a1762acfe9207efa743f27ba03534ad3f0fb78b",
+            "pins_added": [],
+            "step": "recreate:forge-worker"
+          },
+          {
+            "action": "polling /health until ok",
+            "step": "health-wait"
+          },
+          {
+            "action": "ok",
+            "health": {
+              "database": "ok",
+              "dlq_depth": 3,
+              "litellm": "ok",
+              "queue_depth": 0,
+              "redis": "ok",
+              "status": "ok",
+              "version": "0.42.0"
+            },
+            "step": "health-wait"
+          },
+          {
+            "returncode": 0,
+            "stderr_tail": "",
+            "stdout_tail": "alignment plan (ALREADY ALIGNED \u2014 verify only):\n  verify: /health reports the repo version, schema at the repo head, numerical caps on both consumers\nalign_lab: receipts \u2192 /Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-28-r4204-final/alignment-verify-receipts.json\nalign_lab: result: aligned\n",
+            "step": "align_lab_verify"
+          }
+        ]
+      },
+      "result": "green",
+      "started_at": "2026-09-28T06:20:50.859854+00:00"
+    },
+    "collect": {
+      "findings": [],
+      "finished_at": "2026-09-28T07:03:02.342494+00:00",
+      "record_path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/qualification/records/review-loop-2026-09-28.json",
+      "result": "re-run",
+      "spend": {
+        "all_attempt_total_usd": 0.7742,
+        "cap_usd": 2.5,
+        "cost_basis": "every lane job's own SDK usage receipt (candidate.meta.json: total_cost_usd) \u2014 the qualifying rounds AND any honestly-failed attempts this window; the planner/closing-review model calls ride the control plane's litellm route inside each run's budget ledger",
+        "failed_attempt_lane_spend_usd": 0,
+        "failed_attempts_counted": [],
+        "qualifying_breakdown": {
+          "conflict_negative": {
+            "cost_basis": "sdk-total_cost_usd",
+            "receipt_count": 1,
+            "total_usd": 0.2058,
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 180096,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 33137,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 180096,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.20582720000000004,
+                  "inputTokens": 33137,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 1863,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 1863,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.20582720000000004
+            }
+          },
+          "delivery": {
+            "cost_basis": "sdk-total_cost_usd",
+            "receipt_count": 1,
+            "total_usd": 0.1603,
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 173248,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 18656,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 173248,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.16033359999999997,
+                  "inputTokens": 18656,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 2553,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 2553,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.16033359999999997
+            }
+          },
+          "negative": {},
+          "round2": {
+            "cost_basis": "sdk-total_cost_usd",
+            "receipt_count": 1,
+            "total_usd": 0.1995,
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 117248,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 33297,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 117248,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.19951759999999996,
+                  "inputTokens": 33297,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 2144,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 2144,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.19951759999999996
+            }
+          },
+          "round3": {
+            "cost_basis": "sdk-total_cost_usd",
+            "receipt_count": 1,
+            "total_usd": 0.2086,
+            "usage": {
+              "cache_write_tokens": 0,
+              "cached_input_tokens": 258432,
+              "completeness": "aggregate",
+              "driver": "claude-sdk-lane",
+              "input_tokens": 22449,
+              "model_usage": {
+                "glm-5.3-flash": {
+                  "cacheCreationInputTokens": 0,
+                  "cacheReadInputTokens": 258432,
+                  "canonicalModel": "glm-5.3-flash",
+                  "contextWindow": 200000,
+                  "costBasis": "unknown",
+                  "costUSD": 0.2086424,
+                  "inputTokens": 22449,
+                  "maxOutputTokens": 32000,
+                  "outputTokens": 3358,
+                  "provider": "firstParty",
+                  "thinkingTokens": 0,
+                  "webSearchRequests": 0
+                }
+              },
+              "output_tokens": 3358,
+              "source": "claude-agent-sdk",
+              "total_cost_usd": 0.2086424
+            }
+          }
+        },
+        "qualifying_lane_spend_usd": 0.7742
+      },
+      "started_at": "2026-09-28T07:03:01.829788+00:00"
+    },
+    "conflict_negative": {
+      "child": {
+        "base_head_sha": "748b11ed40e3d3df48589607570f1b28c71edd88",
+        "decision_id": "rd-review-1089bf4f288a1998",
+        "reply_note_id": 1826,
+        "review_row_status": "dispatched",
+        "round_number": 2,
+        "run_id": "7ed104b592744735a320d7fec81dd671"
+      },
+      "conflicting_commit": {
+        "commit_sha": "780464c963748d55644e2ca6c5d430e10fedb24b",
+        "head_after": "780464c963748d55644e2ca6c5d430e10fedb24b",
+        "path": "src/utils/text.py"
+      },
+      "delivery": {
+        "branch": "factory/2/8409e817",
+        "candidate_sha": "748b11ed40e3d3df48589607570f1b28c71edd88",
+        "head_at_ready": "748b11ed40e3d3df48589607570f1b28c71edd88",
+        "mr_iid": 2,
+        "run_id": "8409e817f2bc433a90685373dc79d449"
+      },
+      "finished_at": "2026-09-28T07:00:36.653733+00:00",
+      "fix_note": {
+        "author": "forcewake",
+        "body_head": "/fix Review correction: rename slugify_len to slug_length in src/utils/text.py (",
+        "discussion_id": "faf3ba44e4d5587f11dc9a554e095c592ba40665",
+        "head_at_note": "748b11ed40e3d3df48589607570f1b28c71edd88",
+        "note_id": 1825
+      },
+      "issue": {
+        "iid": 2,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-review-loop-2026-09-28b/-/work_items/2"
+      },
+      "lane": {
+        "job_id": 1256,
+        "pipeline_id": 910,
+        "status": "success"
+      },
+      "lane_meta_spend": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.2058,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 180096,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 33137,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 180096,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.20582720000000004,
+              "inputTokens": 33137,
+              "maxOutputTokens": 32000,
+              "outputTokens": 1863,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 1863,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.20582720000000004
+        }
+      },
+      "lane_trace_receipt": {
+        "path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-28-r4204-final/traces/conflict-negative-job1256.log",
+        "sha": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+        "trace_sha256": "e60c65dd3565a2fa7ac84cee2d3df9688403c3ec3491470393ca720acf5af0d4",
+        "version": "0.42.0",
+        "wheel": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl"
+      },
+      "paid": true,
+      "plan": {
+        "note_id": 1815,
+        "run_id": "8409e817f2bc433a90685373dc79d449"
+      },
+      "preservation": {
+        "bot_commits_after_human": 2,
+        "head_after_dust": "780464c963748d55644e2ca6c5d430e10fedb24b",
+        "human_commit_is_head": true,
+        "human_commit_sha": "780464c963748d55644e2ca6c5d430e10fedb24b"
+      },
+      "result": "green",
+      "run_id": "8409e817f2bc433a90685373dc79d449",
+      "started_at": "2026-09-28T06:49:57.025746+00:00",
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "candidate_rejected: branch_drift: branch 'factory/2/8409e817' head drifted: expected '748b11ed40e3d3df48589607570f1b28c71edd88', actual '780464c963748d55644e2ca6c5d430e10fedb24b'"
+      }
+    },
+    "delivery": {
+      "budget": {
+        "closing_partition_policy": null,
+        "closing_reserved_calls": null,
+        "closing_reserved_tokens": null,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "e2f8a156055f2afbe064f3f79599d06e3cfee449",
+      "closing_review": {
+        "obligation_digest": "d8c754b19c8848d490590b8846bf20880452723dbc912a3018ae7e0d020c5585",
+        "reviewed_sha": "e2f8a156055f2afbe064f3f79599d06e3cfee449",
+        "summary_head": "The diff implements the plan faithfully: slugify() is added in the new src/utils/text.py using the exact regex approach specified, src/app.py is rewired from utils.legacy.shout to utils.text.slugify, ",
+        "verdict": "ok"
+      },
+      "finished_at": "2026-09-28T06:25:50.762940+00:00",
+      "issue": {
+        "iid": 1,
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-review-loop-2026-09-28b/-/work_items/1"
+      },
+      "lane": {
+        "job_id": 1234,
+        "pipeline_id": 888,
+        "status": "success"
+      },
+      "lane_meta_spend": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.1603,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 173248,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 18656,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 173248,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.16033359999999997,
+              "inputTokens": 18656,
+              "maxOutputTokens": 32000,
+              "outputTokens": 2553,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 2553,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.16033359999999997
+        }
+      },
+      "lane_trace_receipt": {
+        "path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-28-r4204-final/traces/delivery1-job1234.log",
+        "sha": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+        "trace_sha256": "714951d725797f5b2a52d1f8720e14aaadb3699c05e1f0bd97ff101a1165e911",
+        "version": "0.42.0",
+        "wheel": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl"
+      },
+      "mr": {
+        "branch": "factory/1/e637067a",
+        "draft": true,
+        "iid": 1,
+        "state": "opened",
+        "url": "https://gitlab.forcewake.duckdns.org/forcewake/forge-review-loop-2026-09-28b/-/merge_requests/1"
+      },
+      "oracle": {
+        "candidate_sha": "e2f8a156055f2afbe064f3f79599d06e3cfee449",
+        "pipeline_id": 891,
+        "status": "success"
+      },
+      "ordinary_parent": {
+        "active_plan_absent": true
+      },
+      "paid": true,
+      "plan": {
+        "harness_line": "- Harness: **claude-sdk-lane** \u00b7 model glm-5.3-flash",
+        "note_id": 1780,
+        "run_id": "e637067a155a402c89f66b42627a6b17"
+      },
+      "result": "green",
+      "run_id": "e637067a155a402c89f66b42627a6b17",
+      "started_at": "2026-09-28T06:22:30.643749+00:00",
+      "terminal": {
+        "at": "2026-09-28T06:25:50.064475+00:00",
+        "status": "ready_for_human"
+      }
+    },
+    "negative": {
+      "child": {
+        "base_head_sha": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+        "decision_id": "rd-review-5fe81fedc666fdd5",
+        "reply_note_id": 1810,
+        "review_row_status": "dispatched",
+        "round_number": 4,
+        "run_id": "e68a325b739141bbba2b524fbd8e2908"
+      },
+      "conflicting_commit": {
+        "commit_sha": "5d64f034583cebfba5bd40c10e409986b6c0637f",
+        "head_after": "5d64f034583cebfba5bd40c10e409986b6c0637f",
+        "path": "src/utils/text.py"
+      },
+      "failures": [
+        {
+          "at": "2026-09-28T06:44:39.704383+00:00",
+          "message": "the negative arm settled without the typed conflict: {'run_status': 'blocked', 'status_reason': 'harness_code: harness_no_changes', 'round_status': 'ended', 'round_status_reason': 'child run blocked'}"
+        }
+      ],
+      "fix_note": {
+        "author": "forcewake",
+        "body_head": "/fix Internal tidy-up: move the split pattern to a single module-level compiled ",
+        "discussion_id": "4097038886319ef8254680ba66c7172a33d2d992",
+        "head_at_note": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+        "note_id": 1809
+      },
+      "paid": true,
+      "refusal": "the negative arm settled without the typed conflict: {'run_status': 'blocked', 'status_reason': 'harness_code: harness_no_changes', 'round_status': 'ended', 'round_status_reason': 'child run blocked'}",
+      "result": "refused",
+      "started_at": "2026-09-28T06:39:07.687934+00:00",
+      "typed_conflict": {
+        "round_status": "ended",
+        "round_status_reason": "child run blocked",
+        "run_status": "blocked",
+        "status_reason": "harness_code: harness_no_changes"
+      }
+    },
+    "preflight": {
+      "checks": {
+        "controlplane.health": {
+          "status": "ok",
+          "version": "0.42.0"
+        },
+        "doctor": {
+          "attempt": 1,
+          "failed": [],
+          "returncode": 0
+        },
+        "env.forge-app": {
+          "caps_ok": true,
+          "pins_ok": true
+        },
+        "env.forge-worker": {
+          "caps_ok": true,
+          "pins_ok": true
+        },
+        "runners_online": [
+          4
+        ],
+        "schema_head": "032"
+      },
+      "failures": [
+        {
+          "at": "2026-09-28T06:21:19.820283+00:00",
+          "message": "control plane not aligned onto the repo version 0.42.0: {'status': 'degraded', 'version': '0.42.0', 'database': 'ok', 'litellm': 'unreachable', 'redis': 'ok', 'queue_depth': 0, 'dlq_depth': 3}"
+        }
+      ],
+      "finished_at": "2026-09-28T06:22:30.643613+00:00",
+      "refusal": "control plane not aligned onto the repo version 0.42.0: {'status': 'degraded', 'version': '0.42.0', 'database': 'ok', 'litellm': 'unreachable', 'redis': 'ok', 'queue_depth': 0, 'dlq_depth': 3}",
+      "result": "green",
+      "started_at": "2026-09-28T06:22:20.248826+00:00"
+    },
+    "probe": {
+      "finished_at": "2026-09-28T06:20:50.859752+00:00",
+      "model": "glm-5.3-flash",
+      "model_gateway": "https://api.z.ai/api/anthropic",
+      "protected_variable_sha256_16": "800223712be70ebe",
+      "result": "green",
+      "routes": {
+        "gitlab-protected-variable": {
+          "alive": true,
+          "label": "gitlab-protected-variable",
+          "latency_s": 1.37,
+          "max_tokens": 8,
+          "model": "glm-5.3-flash",
+          "status": 200,
+          "token_sha256_16": "800223712be70ebe",
+          "usage": {
+            "cache_read_input_tokens": 0,
+            "input_tokens": 14,
+            "output_tokens": 8,
+            "server_tool_use": {
+              "web_search_requests": 0
+            },
+            "service_tier": "standard"
+          }
+        },
+        "runner-redemption-broker": {
+          "alive": false,
+          "error_message_head": "token expired or incorrect",
+          "error_type": "401",
+          "label": "runner-redemption-broker",
+          "latency_s": 0.18,
+          "max_tokens": 8,
+          "status": 401,
+          "token_sha256_16": "6e3098b52d8991dc"
+        }
+      },
+      "started_at": "2026-09-28T06:20:48.565801+00:00",
+      "variable_name": "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
+    },
+    "replay": {
+      "after": {
+        "bot_commits": 2,
+        "pipelines": 9
+      },
+      "before": {
+        "bot_commits": 2,
+        "pipelines": 9
+      },
+      "deltas": {
+        "bot_commits": 0,
+        "pipelines": 0,
+        "requests": 0,
+        "round_rows": 0
+      },
+      "finished_at": "2026-09-28T06:31:03.646432+00:00",
+      "redelivery": {
+        "body_head": "{\"status\":\"accepted\",\"event\":\"note\",\"deduplicated\":true}",
+        "delivery_uuid": "3f34bf73-9373-4ff9-a168-8d49d2619096",
+        "note_id": 1787,
+        "status_code": 202
+      },
+      "result": "green",
+      "started_at": "2026-09-28T06:30:32.464493+00:00"
+    },
+    "resume_negative": {
+      "corruption": {
+        "path": "data/checkpoints/a5/a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "still_served_id": "a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "what": "the last byte of the stored MANIFEST blob flipped (bit-rot under the content-addressed store; the checkpoint id IS this blob's digest \u2014 the bytes no longer reproduce it)"
+      },
+      "dispatch": {
+        "control_url": "https://forge.forcewake.me",
+        "pinned_checkpoint": "a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "pipeline_id": 913,
+        "ref": "factory/1/e637067a",
+        "resume_mode": "required",
+        "token_dispatched_sha256_16": "209876be84dd2528"
+      },
+      "finished_at": "2026-09-28T07:03:00.925816+00:00",
+      "lane_job": {
+        "job_id": 1259,
+        "status": "failed"
+      },
+      "outcome": {
+        "driver_exit": "failed",
+        "halt_reason_head": "2026-09-28T07:02:52.004935Z 01E lane_driver: wip_restore_failed (checkpoint download failed: control plane refused GET /lane/checkpoints/e637067a155a402c89f66b42627a6b17: 500 \u2014 stored checkpoint conte",
+        "job_status": "failed",
+        "pairing_marker_version": "0.42.0",
+        "pairing_marker_wheel_sha": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+        "terminal_reason": "wip_restore_failed",
+        "usage": null
+      },
+      "paid": false,
+      "result": "green",
+      "started_at": "2026-09-28T07:02:19.854198+00:00",
+      "summary": {
+        "candidate_wheel_pairing_in_halted_trace": true,
+        "corrupted_blob": "data/checkpoints/a5/a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "corrupted_checkpoint_sha256": "a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "corruption_shape": "the stored MANIFEST blob's last byte flipped \u2014 the bytes no longer reproduce the checkpoint's own content address",
+        "halt_reason": "wip_restore_failed",
+        "halted_before_credential_step": true,
+        "halted_before_model_session": true,
+        "lane_job_id": 1259,
+        "lane_job_status": "failed",
+        "selection": "the work's ACTIVE checkpoint (no durable resume command row exists for this work \u2014 none was fabricated; the lane requires the restore regardless and the integrity failure is the halt)",
+        "usage": null,
+        "zero_model_turns": true
+      },
+      "upload": {
+        "attempt_generation": 0,
+        "checkpoint_id": "a54c5034b774c94ae1e63caeea7ecf7231519bcfeab53db85d3d07a9f5ed265b",
+        "file_blob_sha256": "08794758cd4f6cb920bf7c7def964b2e72daf9984cd01b95167223811d2bf4e0",
+        "route": "PUT /lane/checkpoints/{work} through the app's own channel",
+        "status_code": 200,
+        "work_id": "e637067a155a402c89f66b42627a6b17",
+        "work_token_sha256_16": "209876be84dd2528"
+      }
+    },
+    "round2": {
+      "branch_commits_after": [
+        {
+          "author_name": "forge",
+          "created_at": "2026-09-28T06:27:46.000+00:00",
+          "id": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+          "short_id": "6e86d1b4",
+          "title": "forge: implement 1 (run 70e845a6) (forge-op:eee1bc0d1a8a)"
+        },
+        {
+          "author_name": "Pavel",
+          "created_at": "2026-09-28T06:25:51.000+00:00",
+          "id": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+          "short_id": "b00f3713",
+          "title": "human review: add the round-2 correction contract (red until corrected)"
+        },
+        {
+          "author_name": "forge",
+          "created_at": "2026-09-28T06:25:08.000+00:00",
+          "id": "e2f8a156055f2afbe064f3f79599d06e3cfee449",
+          "short_id": "e2f8a156",
+          "title": "forge: implement 1 (run e637067a) (forge-op:40b9a7ce3312)"
+        },
+        {
+          "author_name": "Pavel",
+          "created_at": "2026-09-28T06:21:13.000+00:00",
+          "id": "de5e649a9bee2fb6d9e93c35b783b65b7ae21d26",
+          "short_id": "de5e649a",
+          "title": "seed: the shipped SDK lane template verbatim + the wheel-override CI + the precommitted independent oracle (co"
+        }
+      ],
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_diff_paths": [
+        "src/app.py",
+        "src/utils/legacy.py",
+        "src/utils/text.py",
+        "tests/test_round2_contract.py"
+      ],
+      "candidate_sha": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+      "child": {
+        "base_head_sha": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+        "decision_id": "rd-review-ac8f1dd6d19fa95f",
+        "reply_note_id": 1789,
+        "review_row_status": "dispatched",
+        "round_number": 2,
+        "run_id": "70e845a6956d4071b284c992ecef0c1c"
+      },
+      "correction_visible": {
+        "oracle_file_untouched": true,
+        "slugify_parts_present": true
+      },
+      "finished_at": "2026-09-28T06:30:32.464260+00:00",
+      "fix_note": {
+        "author": "forcewake",
+        "body_head": "/fix The reviewer added tests/test_round2_contract.py on the current head (it is",
+        "discussion_id": "70f5a48a5356ea38f565ac2b81b7b505c3fed73d",
+        "head_at_note": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+        "note_id": 1787
+      },
+      "human_edit": {
+        "commit_sha": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+        "head_after": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+        "path": "tests/test_round2_contract.py",
+        "shape": "new-file-nonconflicting"
+      },
+      "lane": {
+        "job_id": 1240,
+        "pipeline_id": 894,
+        "status": "success"
+      },
+      "lane_meta_spend": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.1995,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 117248,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 33297,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 117248,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.19951759999999996,
+              "inputTokens": 33297,
+              "maxOutputTokens": 32000,
+              "outputTokens": 2144,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 2144,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.19951759999999996
+        }
+      },
+      "lane_trace_receipt": {
+        "path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-28-r4204-final/traces/round2-job1240.log",
+        "sha": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+        "trace_sha256": "99f6f017706b75266709443d2f8172e23fdb7919087afabf8d8b79ecc1538960",
+        "version": "0.42.0",
+        "wheel": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl"
+      },
+      "oracle": {
+        "candidate_sha": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+        "pipeline_id": 896,
+        "status": "success"
+      },
+      "paid": true,
+      "provider_commit_count": 2,
+      "readiness_gate_held": {
+        "note": "the green-pipeline -> review handoff held the child (the first gate)",
+        "observed_at": "2026-09-28T06:29:58.896076+00:00",
+        "status": "evaluating_ci"
+      },
+      "result": "green",
+      "reviewer_obligation": {
+        "active_plan_seed": {
+          "activated_by_decision": "rd-review-ac8f1dd6d19fa95f",
+          "plan_digest": "b52bf0342c3875972aa4344b33907048bf53cafc3a7fa9e209b6c9e5d10c4ea9",
+          "revised_from_digest": "8af7558f69b18677dde1b451cef6d002e611bb3be3e94955850f4076b2b63576"
+        },
+        "brief_carries_correction_text": true,
+        "brief_head": "Implementation plan \u2014 active revision 2 of spec-4c2913e53a0b3229 (digest b52bf0342c3875972aa4344b33907048bf53cafc3a7fa9e209b6c9e5d10c4ea9)\nActivated by approved",
+        "recomputed_digest": "7857827abb8872dfa62abdbd55f25d649e75e4897b9480e4b20bb3f5c672364f",
+        "recorded_digest": "7857827abb8872dfa62abdbd55f25d649e75e4897b9480e4b20bb3f5c672364f",
+        "required_obligations": 1,
+        "review_verdict": "ok",
+        "reviewed_sha": "6e86d1b47e559f808190d1cab13669be713cdb9d"
+      },
+      "reviewer_resolve": {
+        "discussion_id": "70f5a48a5356ea38f565ac2b81b7b505c3fed73d",
+        "resolved_by": "forcewake",
+        "returncode": 200
+      },
+      "round_rows": [
+        {
+          "base_head_sha": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+          "child_run_id": "70e845a6956d4071b284c992ecef0c1c",
+          "decision_id": "rd-review-ac8f1dd6d19fa95f",
+          "id": "93a10167e6d54af69995ebf9f82a8c9d",
+          "mr_iid": 1,
+          "note_id": "1787",
+          "parent_run_id": "e637067a155a402c89f66b42627a6b17",
+          "requested_by": "forcewake",
+          "root_run_id": "e637067a155a402c89f66b42627a6b17",
+          "round_number": 2,
+          "status": "completed",
+          "status_reason": "child run ready_for_human"
+        }
+      ],
+      "started_at": "2026-09-28T06:25:50.763241+00:00",
+      "terminal": {
+        "at": "2026-09-28T06:30:31.118652+00:00",
+        "status": "ready_for_human"
+      }
+    },
+    "round3": {
+      "branch_commits_after": [
+        {
+          "author_name": "forge",
+          "created_at": "2026-09-28T06:33:51.000+00:00",
+          "id": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+          "short_id": "81fb8149",
+          "title": "forge: implement 1 (run bd478f3c) (forge-op:4cf75aeee6a5)"
+        },
+        {
+          "author_name": "forge",
+          "created_at": "2026-09-28T06:27:46.000+00:00",
+          "id": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+          "short_id": "6e86d1b4",
+          "title": "forge: implement 1 (run 70e845a6) (forge-op:eee1bc0d1a8a)"
+        },
+        {
+          "author_name": "Pavel",
+          "created_at": "2026-09-28T06:25:51.000+00:00",
+          "id": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+          "short_id": "b00f3713",
+          "title": "human review: add the round-2 correction contract (red until corrected)"
+        },
+        {
+          "author_name": "forge",
+          "created_at": "2026-09-28T06:25:08.000+00:00",
+          "id": "e2f8a156055f2afbe064f3f79599d06e3cfee449",
+          "short_id": "e2f8a156",
+          "title": "forge: implement 1 (run e637067a) (forge-op:40b9a7ce3312)"
+        },
+        {
+          "author_name": "Pavel",
+          "created_at": "2026-09-28T06:21:13.000+00:00",
+          "id": "de5e649a9bee2fb6d9e93c35b783b65b7ae21d26",
+          "short_id": "de5e649a",
+          "title": "seed: the shipped SDK lane template verbatim + the wheel-override CI + the precommitted independent oracle (co"
+        }
+      ],
+      "budget": {
+        "closing_partition_policy": "closing-partition/1",
+        "closing_reserved_calls": 6,
+        "closing_reserved_tokens": 90000,
+        "max_calls": 40,
+        "max_tokens": 600000,
+        "status": "open",
+        "wallclock_s": 3600
+      },
+      "candidate_sha": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+      "child": {
+        "base_head_sha": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+        "decision_id": "rd-review-dde149d81697d574",
+        "reply_note_id": 1799,
+        "review_row_status": "dispatched",
+        "round_number": 3,
+        "run_id": "bd478f3cd6b342b9aa3e15aa5acb4560"
+      },
+      "correction_visible": {
+        "docstring_marker_present": true
+      },
+      "finished_at": "2026-09-28T06:39:07.687756+00:00",
+      "fix_note": {
+        "author": "forcewake",
+        "body_head": "/fix Documentation correction: the module docstring of src/utils/text.py must st",
+        "discussion_id": "7bcb578822a10e5dd73cda15c5d5533f11632bf4",
+        "head_at_note": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+        "note_id": 1798
+      },
+      "kill": {
+        "bot_commits_before": 2,
+        "commit_sha": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+        "killed_at": "2026-09-28T06:33:51.840034+00:00",
+        "observed_child_phase_at_kill": "ensuring_draft_mr",
+        "restart": "started"
+      },
+      "lane": {
+        "job_id": 1243,
+        "pipeline_id": 897,
+        "status": "success"
+      },
+      "lane_meta_spend": {
+        "cost_basis": "sdk-total_cost_usd",
+        "receipt_count": 1,
+        "total_usd": 0.2086,
+        "usage": {
+          "cache_write_tokens": 0,
+          "cached_input_tokens": 258432,
+          "completeness": "aggregate",
+          "driver": "claude-sdk-lane",
+          "input_tokens": 22449,
+          "model_usage": {
+            "glm-5.3-flash": {
+              "cacheCreationInputTokens": 0,
+              "cacheReadInputTokens": 258432,
+              "canonicalModel": "glm-5.3-flash",
+              "contextWindow": 200000,
+              "costBasis": "unknown",
+              "costUSD": 0.2086424,
+              "inputTokens": 22449,
+              "maxOutputTokens": 32000,
+              "outputTokens": 3358,
+              "provider": "firstParty",
+              "thinkingTokens": 0,
+              "webSearchRequests": 0
+            }
+          },
+          "output_tokens": 3358,
+          "source": "claude-agent-sdk",
+          "total_cost_usd": 0.2086424
+        }
+      },
+      "lane_trace_receipt": {
+        "path": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-28-r4204-final/traces/round3-job1243.log",
+        "sha": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+        "trace_sha256": "8422ceeeef0179a67a78dd29b73845fc894e4afea70c3993f4f1c6416cd78fc5",
+        "version": "0.42.0",
+        "wheel": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl"
+      },
+      "oracle": {
+        "candidate_sha": "81fb81496caf5172ad7e993b9559fc74e2bc281f",
+        "pipeline_id": 899,
+        "status": "success"
+      },
+      "own_commit_count_for_round": 1,
+      "paid": true,
+      "readiness_gate_held": {
+        "note": "the green-pipeline -> review handoff held the child (the first gate)",
+        "observed_at": "2026-09-28T06:37:54.510570+00:00",
+        "status": "evaluating_ci"
+      },
+      "result": "green",
+      "reviewer_resolve": {
+        "discussion_id": "7bcb578822a10e5dd73cda15c5d5533f11632bf4",
+        "resolved_by": "forcewake",
+        "returncode": 200
+      },
+      "round_rows": [
+        {
+          "base_head_sha": "b00f371341bee2e04405ac4aaa5c0b85365f4885",
+          "child_run_id": "70e845a6956d4071b284c992ecef0c1c",
+          "decision_id": "rd-review-ac8f1dd6d19fa95f",
+          "id": "93a10167e6d54af69995ebf9f82a8c9d",
+          "mr_iid": 1,
+          "note_id": "1787",
+          "parent_run_id": "e637067a155a402c89f66b42627a6b17",
+          "requested_by": "forcewake",
+          "root_run_id": "e637067a155a402c89f66b42627a6b17",
+          "round_number": 2,
+          "status": "completed",
+          "status_reason": "child run ready_for_human"
+        },
+        {
+          "base_head_sha": "6e86d1b47e559f808190d1cab13669be713cdb9d",
+          "child_run_id": "bd478f3cd6b342b9aa3e15aa5acb4560",
+          "decision_id": "rd-review-dde149d81697d574",
+          "id": "563a190a0d8f460ea417d5580bb08de1",
+          "mr_iid": 1,
+          "note_id": "1798",
+          "parent_run_id": "70e845a6956d4071b284c992ecef0c1c",
+          "requested_by": "forcewake",
+          "root_run_id": "e637067a155a402c89f66b42627a6b17",
+          "round_number": 3,
+          "status": "completed",
+          "status_reason": "child run ready_for_human"
+        }
+      ],
+      "started_at": "2026-09-28T06:31:03.646629+00:00",
+      "terminal": {
+        "at": "2026-09-28T06:39:06.816540+00:00",
+        "status": "ready_for_human"
+      }
+    },
+    "setup": {
+      "binding": {
+        "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+        "env_var": "ANTHROPIC_AUTH_TOKEN",
+        "revision": 1,
+        "subject": "gitlab/-/184"
+      },
+      "bot_member": {
+        "user_id": 15,
+        "username": "forge"
+      },
+      "ci_yaml_sha256": "43ef14f37f5ac3ecd99040904f4a6b3af267a7185165c04b33105f353b87fbbe",
+      "finished_at": "2026-09-28T06:21:14.800457+00:00",
+      "project": {
+        "id": 184,
+        "path": "forcewake/forge-review-loop-2026-09-28b"
+      },
+      "repo_config": {
+        "committed_before_any_qualifying_run": true,
+        "content_sha256": "e214204dc48f792936639a6e5e8d80756a5846145a1c2931f2145860422aa925",
+        "key": "implement.paths",
+        "path": ".forge.yml"
+      },
+      "result": "green",
+      "seed_commit_sha": "de5e649a9bee2fb6d9e93c35b783b65b7ae21d26",
+      "started_at": "2026-09-28T06:21:12.079400+00:00",
+      "template_sha256": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+      "variables": {
+        "ambient_duplicate_for_doctor": null,
+        "carrier": {
+          "masked": true,
+          "name": "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+          "protected": false,
+          "protected_note": "masked, NOT protected \u2014 LIVE-FOUND: GitLab exposes protected variables only to protected refs and the factory branches are not protected; attempt 1 failed CLOSED at the lane's bootstrap fence (typed FORGE_BOOTSTRAP_FAILED, zero model spend)",
+          "value_sha256_16": "800223712be70ebe"
+        },
+        "keys": [
+          "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
+          "ANTHROPIC_BASE_URL",
+          "FORGE_LANE_WHEEL",
+          "FORGE_LANE_WHEEL_SHA256",
+          "FORGE_STEERING_ENABLED",
+          "FORGE_BOT_READ_TOKEN"
+        ],
+        "model_route": "https://api.z.ai/api/anthropic",
+        "no_ambient_duplicate_note": "#376 fix on the candidate: the doctor is delivery-mode aware and substitutes the carrier for the ambient slot \u2014 no ambient ANTHROPIC_AUTH_TOKEN variable is provisioned this window"
+      },
+      "webhook_url": "https://forge.forcewake.me/webhook"
+    },
+    "teardown": {
+      "deleted": true,
+      "finished_at": "2026-09-28T07:03:04.536606+00:00",
+      "project_id": 184,
+      "result": "green",
+      "started_at": "2026-09-28T07:03:02.749225+00:00"
+    }
+  },
+  "schema": "forge.review-loop.live/1"
+}

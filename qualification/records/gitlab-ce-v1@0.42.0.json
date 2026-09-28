@@ -15,30 +15,30 @@
     "approve-revision",
     "review-rounds"
   ],
-  "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential by gitlab-protected-variable (LIVE on the BUILD-ONCE v0.42.0 candidate 2026-09-28 \u2014 every model leg of the #377 review-loop trace rode the masked carrier FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN with the #376 delivery-mode doctor preflight green WITHOUT any ambient duplicate) OR runner-redemption (live-qualified on the transport identity at the predecessor composition; its MODEL legs stay blocked on the expired broker credential until the maintainer rotates it \u2014 401, typed, re-probed 2026-09-28)",
+  "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential by gitlab-protected-variable (LIVE on the BUILD-ONCE FINAL v0.42.0 candidate 2026-09-28 \u2014 re-qualified at tree e305478 after #380/#379/#389 landed; every model leg of the review-loop trace rode the masked carrier FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN with the #376 delivery-mode doctor preflight green WITHOUT any ambient duplicate) OR runner-redemption (live-qualified on the transport identity at the predecessor composition; its MODEL legs stay blocked on the expired broker credential until the maintainer rotates it \u2014 401, typed, re-probed 2026-09-28 at this window's probe)",
   "evidence": [
     {
-      "artifact_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+      "artifact_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
       "capability": "review-rounds-correction-loop",
       "class": "live-provider",
-      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=THE-EXACT-CANDIDATE (wheel e7b48d42\u2026 + image sha256:98ea9031\u2026, built ONCE from the same tree, digests recorded in docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json BEFORE qualification). The R42-04 (#377) build-once loop: delivery 1 ready_for_human (run 37f94098, MR !1, candidate 1a0c2ee0, oracle pipeline 847 on the exact sha) \u2192 the nonconflicting human edit \u2192 the native /fix \u2192 the budgeted child (1439a11d) from the exact head \u2192 candidate 96729b28, oracle 852, the reviewer obligation digest recomputed == recorded, the readiness gate held until the reviewer resolved \u2192 ready again \u2192 replay idempotence (zero new effects) \u2192 a second correction with the #358 worker-kill recovery (child 1e5c771b, exactly ONE provider commit 44182677) \u2192 the conflicting-head typed branch_drift on a fresh lineage (run fed57de4's child blocked candidate_rejected: branch_drift, the human commit f009d946 preserved as head) \u2192 the required-resume negative (checkpoint 39968fa1 uploaded through the app's own channel, its stored manifest blob corrupted, the required-resume lane halted wip_restore_failed BEFORE any model session \u2014 zero vendor turns, the candidate wheel's pairing marker in the halted trace). Full record: qualification/records/review-loop-2026-09-28.json",
-      "executed_at": "2026-09-28T02:38:00+00:00",
+      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=THE-EXACT-FINAL-CANDIDATE (wheel ff1d0769\u2026 + image sha256:ad769a4a\u2026 of tree e305478, built ONCE, digests recorded in docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json BEFORE qualification \u2014 superseding the first candidate e7b48d42\u2026/98ea9031\u2026 qualified at 9c20674 when #380/#379/#389 landed inside the release window, per R42-04's own changed-candidate rule). The R42-04 (#377) review-and-correction loop RE-RUN on the final composition: delivery 1 ready_for_human (run e637067a, MR !1, candidate e2f8a156, oracle pipeline 891 on the exact sha, ordinary classic parent) \u2192 the nonconflicting human edit b00f3713 \u2192 the native /fix \u2192 the budgeted child 70e845a6 from the exact head \u2192 candidate 6e86d1b4, oracle 896, the reviewer obligation digest recomputed == recorded, the readiness gate held until the reviewer resolved \u2192 ready again \u2192 replay idempotence (zero new effects) \u2192 a second correction with the #358 worker-kill recovery (child bd478f3c killed at own commit 81fb8149 pre-bookkeeping, exactly ONE provider commit adopted, oracle 899) \u2192 the reused-note negative reproduced the predecessor's live-found honest no-op (harness_no_changes, zero candidate commits, the human commit 5d64f034 preserved) \u2192 the conflicting-head typed branch_drift on a fresh lineage (run 8409e817's child 7ed104b5 blocked candidate_rejected: branch_drift, the human commit 780464c9 preserved as head) \u2192 the required-resume negative (checkpoint a54c5034 uploaded through the app's own channel, its stored manifest blob corrupted, the required-resume lane halted wip_restore_failed BEFORE any model session on pipeline 913 \u2014 zero vendor turns, the candidate wheel's pairing marker in the halted trace). Full record: qualification/records/review-loop-2026-09-28.json",
+      "executed_at": "2026-09-28T07:17:00.570795+00:00",
       "outcome": "pass"
     },
     {
-      "artifact_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+      "artifact_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
       "capability": "real-provider-e2e",
       "class": "live-provider",
-      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=THE-EXACT-CANDIDATE. The delivery leg of the same build-once trace (the issue\u2192plan\u2192/go\u2192lane\u2192candidate\u2192Draft MR\u2192green oracle\u2192closing review within reserve\u2192ready arc) ran on the candidate bytes \u2014 the v2 historical trace's arc, re-proven at the exact composition. The lane sha-verified the wheel e7b48d42\u2026 in-job on every leg (the pairing marker)",
-      "executed_at": "2026-09-28T02:38:00+00:00",
+      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=THE-EXACT-FINAL-CANDIDATE. The delivery leg of the same build-once trace (the issue\u2192plan\u2192/go\u2192lane\u2192candidate\u2192Draft MR\u2192green oracle\u2192closing review within reserve\u2192ready arc) ran on the final candidate bytes \u2014 the v2 historical trace's arc, re-proven at the exact composition. The lane sha-verified the wheel ff1d0769\u2026 in-job on every leg (the pairing marker)",
+      "executed_at": "2026-09-28T07:17:00.570795+00:00",
       "outcome": "pass"
     },
     {
-      "artifact_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+      "artifact_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
       "capability": "real-provider-e2e",
       "class": "offline-operational",
-      "covers": "KIND=native-transport + install qualification \u00b7 COMPOSITION=CURRENT (the build-once v0.42.0 candidate). Executed 2026-09-28 at this freeze (manifest 3bdb6790\u2026): the cold-install kit re-executed from the runbook AS WRITTEN (--mode from-runbook: 9 machine steps, 0 refusals, 4 human-step markers, 3 blocked-on-lab markers \u2014 receipt docs/evaluation/2026-09-28-r4204-build-once/cold-install-from-runbook.json); the LIVE deployment-ops drills re-ran 12/13 pass, qualified-for-profile \u2014 the 1 fail is the honestly-recorded blocked live leg (the workflow-envelope drill's redemption-mode dispatch: the lab's expired broker credential mints no grant, the lane fails CLOSED, zero model spend \u2014 the protected-variable route carried every qualified model leg; qualification/deployment-ops-2026-09-28.json); the offline ops drills 6/6 (qualification/ops-drills-2026-09-28.json); freeze --check green; the exact-composition gate GREEN",
-      "executed_at": "2026-09-28T02:01:00+00:00",
+      "covers": "KIND=native-transport + install qualification \u00b7 COMPOSITION=CURRENT (the build-once FINAL v0.42.0 candidate). Executed 2026-09-28 at this re-freeze (manifest 23ac40df\u2026): the cold-install kit re-executed from the runbook AS WRITTEN (--mode from-runbook: 9 machine steps, 0 refusals, 4 human-step markers, 3 blocked-on-lab markers \u2014 receipt docs/evaluation/2026-09-28-r4204-final/cold-install-from-runbook.json); the LIVE deployment-ops drills re-ran (receipt qualification/deployment-ops-2026-09-28_final.json \u2014 the honestly-recorded blocked live leg stays the workflow-envelope drill's redemption-mode dispatch: the lab's expired broker credential mints no grant, the lane fails CLOSED, zero model spend; the protected-variable route carried every qualified model leg); the offline ops drills 6/6 (qualification/ops-drills-2026-09-28-final.json); freeze --check green; the exact-composition gate GREEN",
+      "executed_at": "2026-09-28T07:17:00.570795+00:00",
       "outcome": "pass"
     },
     {
@@ -58,11 +58,11 @@
       "outcome": "pass"
     },
     {
-      "artifact_sha256": "6b665cf4000000000000000000000000000000000000000000000000000000dd",
+      "artifact_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
       "capability": "operation-grant-redemption",
       "class": "live-provider",
-      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=HISTORICAL-PREDECESSOR (the redemption lab alignment ddcb9137, schema 031). The grant\u2192redemption\u2192consumer identity trace (2026-09-26, run 3360ff64) with generation retirement and cold-restart deadline preservation; 7 typed negative classes. Its model legs at the CURRENT composition wait on the broker rotation (the token stays 401, typed). Full record: qualification/records/redemption-2026-09-26.json",
-      "executed_at": "2026-09-26T13:25:00+00:00",
+      "covers": "KIND=model-task-execution \u00b7 COMPOSITION=THE-EXACT-FINAL-CANDIDATE for the loop's own reviews: every closing review of the re-qualified #377 trace (delivery 1, round 2, round 3 and the fresh conflict lineage's delivery) completed on its run's own budget under the configured closing reserve (closing-partition/1 on the round children), bound to the exact candidate sha (verdict ok each time). The HISTORICAL v2 trace (the v0.39.0-promoted build, run f0d559fd) first proved the reserve partitioning; full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-28T07:17:00.570795+00:00",
       "outcome": "pass"
     },
     {
@@ -75,19 +75,19 @@
     }
   ],
   "evidence_refs": [
-    "docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json",
-    "docs/evaluation/2026-09-28-r4204-build-once/cold-install-from-runbook.json",
-    "docs/evaluation/2026-09-28-r4204-build-once/live-run-evidence.json",
-    "qualification/deployment-ops-2026-09-28.json",
-    "qualification/inventory-2026-09-28-review-loop.json",
-    "qualification/ops-drills-2026-09-28.json",
+    "docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json",
+    "docs/evaluation/2026-09-28-r4204-final/cold-install-from-runbook.json",
+    "docs/evaluation/2026-09-28-r4204-final/live-run-evidence.json",
+    "qualification/deployment-ops-2026-09-28_final.json",
+    "qualification/inventory-2026-09-28-final.json",
+    "qualification/ops-drills-2026-09-28-final.json",
     "qualification/records/review-loop-2026-09-28.json"
   ],
   "harness_binary": "claude-code",
   "harness_version": "2.1.273",
-  "image_digest": "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed",
+  "image_digest": "sha256:ad769a4af2fd0d7539a4c5d7c828a6697060c9c6d64d2e6c2469890ef87cf689",
   "legacy": false,
-  "note": "R42 cycle pre-release record (the build-once window, forge#377). THE EVIDENCE-KIND MAP (kinds never blended, compositions never merged): (1) SOURCE REVIEW \u2014 the v0.41.0 promotion's required CI checks stand; the v0.42.0 checks run with its release. (2) RELEASE CANARY \u2014 v0.41.0's seeded 031\u2192032 canary stands; v0.42.0's expected edge is 032\u2192032 (same-head preservation \u2014 no new migration this cycle). (3) NATIVE TRANSPORT \u2014 the drills + cold-install kit re-executed at THIS freeze on the candidate (offline-operational, zero model calls). (4) MODEL-TASK EXECUTION \u2014 the COMPLETE correction loop ran on THE EXACT CANDIDATE (live-provider; the v0.41.0 window's gap \u2014 a live trace on pre-final bytes \u2014 closed by construction). (5) EXTERNAL ACCEPTANCE \u2014 the pilot records; SEPARATE human artifacts, never generated. THE BUILD-ONCE CONTRACT: wheel e7b48d42\u2026 + image sha256:98ea9031\u2026 were built ONCE from the same tree (base 0f0dc8c + the M0 fixes + the version bump), digests recorded BEFORE qualification (docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json); the promotion of v0.42.0 is gated on digest equality with this record (scripts/generate_template_pins.py --exact-composition, wired into the release workflow and CI) \u2014 a changed candidate FAILS the check until re-qualified",
+  "note": "R42 cycle pre-release record (the build-once window, forge#377 \u2014 RE-BOUND to the FINAL candidate). THE EVIDENCE-KIND MAP (kinds never blended, compositions never merged): (1) SOURCE REVIEW \u2014 the v0.41.0 promotion's required CI checks stand; the v0.42.0 checks run with its release. (2) RELEASE CANARY \u2014 v0.41.0's seeded 031\u2192032 canary stands; v0.42.0's expected edge is 032\u2192032 (same-head preservation \u2014 no new migration this cycle). (3) NATIVE TRANSPORT \u2014 the drills + cold-install kit re-executed at THIS re-freeze on the final candidate (offline-operational, zero model calls). (4) MODEL-TASK EXECUTION \u2014 the COMPLETE correction loop ran on THE EXACT FINAL CANDIDATE (live-provider): the first candidate (wheel e7b48d42\u2026 + image 98ea9031\u2026, qualified at 9c20674) was superseded when three review commits (#380 ae14758, #379 96c2a65, #389 e305478) landed inside the release window and shipped in the wheel \u2014 R42-04's own rule (a changed candidate is a new candidate until re-qualified) minted the FINAL candidate at e305478 (wheel ff1d0769\u2026 + image sha256:ad769a4a\u2026, digests recorded BEFORE qualification in docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json) and the full loop re-ran green on it (zero findings, spend $0.7742); the first candidate's record stays under its own identity (review-loop-2026-09-28-c1-e7b48d42.json, legacy-marked superseded history) and its evidence bundle is byte-identical under 2026-09-28-r4204-build-once/. (5) EXTERNAL ACCEPTANCE \u2014 the pilot records; SEPARATE human artifacts, never generated. THE BUILD-ONCE CONTRACT: the promotion of v0.42.0 is gated on digest equality with the qualification record (scripts/generate_template_pins.py --exact-composition, wired into the release workflow and CI) \u2014 a changed candidate FAILS the check until re-qualified",
   "outcome": "pass",
   "profile": "gitlab-ce-v1",
   "provider": "gitlab",
@@ -96,7 +96,7 @@
   "record_id": "gitlab-ce-v1@0.42.0",
   "refusal_resolution": [
     {
-      "action": "#377's build-once window re-verified the doctor LIVE on the candidate: green with ONLY the carrier provisioned (project.harness.claude-sdk-lane: 'delivered credential substitutes the ambient ANTHROPIC_AUTH_TOKEN') \u2014 no ambient duplicate",
+      "action": "the re-qualification window re-verified the doctor LIVE on the FINAL candidate: green with ONLY the carrier provisioned (the #376 delivery-mode check) \u2014 no ambient duplicate",
       "owner": "#377 (this window)",
       "refusal": "the @0.41.0 window needed an ambient ANTHROPIC_AUTH_TOKEN duplicate for the doctor (check_harness_lanes was not delivery-mode aware)",
       "status": "resolved"
@@ -104,7 +104,7 @@
     {
       "action": "rotate the lab's expired broker credential, then run the redemption model legs at the current composition",
       "owner": "maintainer (Pavel) \u2014 lab credentials",
-      "refusal": "the lab's broker credential (env:ANTHROPIC_AUTH_TOKEN on forge-app) answers 401 'token expired or incorrect' at the z.ai anthropic gateway \u2014 re-probed 2026-09-28 before the loop; the protected-variable carrier answered 200 and carried every model leg",
+      "refusal": "the lab's broker credential (env:ANTHROPIC_AUTH_TOKEN on forge-app) answers 401 'token expired or incorrect' at the z.ai anthropic gateway \u2014 re-probed 2026-09-28 at this window's probe (the re-qualification loop's probe phase); the protected-variable carrier answered 200 and carried every model leg",
       "status": "open"
     },
     {
@@ -121,20 +121,20 @@
     }
   ],
   "release_version": "0.42.0",
-  "runtime_dependency_fingerprint": "lane install forge[interactive] @ file:///tmp/forge-0.42.0-py3-none-any.whl (sha256 e7b48d42\u2026, verified in-job on every lane leg incl. the halted resume-negative trace) with claude-code CLI pinned 2.1.273; control plane = the BUILD-ONCE alignment image (sha256:98ea9031\u2026, v0.42.0, schema 032) built from the SAME tree \u2014 the digests were recorded before qualification and the release must promote them",
-  "runtime_recipe": "python-3.13 (uv standalone in the lane job) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker (image sha256:98ea9031\u2026, v0.42.0, schema 032) under FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable",
+  "runtime_dependency_fingerprint": "lane install forge[interactive] @ file:///tmp/forge-0.42.0-py3-none-any.whl (sha256 ff1d0769\u2026, verified in-job on every lane leg incl. the halted resume-negative trace) with claude-code CLI pinned 2.1.273; control plane = the BUILD-ONCE FINAL alignment image (sha256:ad769a4a\u2026, v0.42.0, schema 032) built from the SAME tree e305478 \u2014 the digests were recorded before qualification and the release must promote them",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker (image sha256:ad769a4a\u2026, v0.42.0, schema 032) under FORGE_CREDENTIAL_DELIVERY=gitlab-protected-variable",
   "spend": {
-    "all_attempt_total_usd": 0.9647,
+    "all_attempt_total_usd": 0.7742,
     "cap_usd": 2.5,
-    "cost_basis": "every lane job's own SDK usage receipt (candidate.meta.json: total_cost_usd); the reused-note negative arm's uncounted turn is bounded by a labelled estimate (its receipt lived in the deleted disposable project)",
-    "review_loop_qualifying_usd": 0.7447,
+    "cost_basis": "every lane job's own SDK usage receipt (candidate.meta.json: total_cost_usd) \u2014 the qualifying legs of the re-qualification run; the reused-note negative arm's uncounted turn is bounded by a labelled estimate (its receipt lived in the deleted disposable project)",
+    "review_loop_qualifying_usd": 0.7742,
     "review_loop_record": "qualification/records/review-loop-2026-09-28.json"
   },
   "stamp": "forge.profile.qualification/1",
   "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
   "upgrade": {
     "claim": "",
-    "evidence_ref": "NO upgrade claim this cycle (the schema's rule: nothing seeded, nothing checked \u2014 no label): the 2026-09-28 alignment migrate ran head->head on the candidate image (032->032, no new migration this cycle); the N-1->032 transition stays proven by the v0.41.0 canary's seeded 031->032 upgrade with data preservation",
+    "evidence_ref": "NO upgrade claim this cycle (the schema's rule: nothing seeded, nothing checked \u2014 no label): the 2026-09-28 FINAL-candidate alignment migrate ran head->head on the new image (032->032, no new migration this cycle); the N-1->032 transition stays proven by the v0.41.0 canary's seeded 031->032 upgrade with data preservation",
     "preservation_checks": [],
     "seeded_records": [],
     "source_schema": "032",
@@ -142,5 +142,5 @@
   },
   "validation_findings": [],
   "verification_contract": "the precommitted independent oracle (the smoke CI job on every candidate sha); the reviewer obligation digest recomputed by the driver == the recorded digest; exactly ONE provider commit per publication effect; the bot never merges, never resolves a discussion, never deploys; the record's wheel/image digests EQUAL the pre-qualification candidate manifest's (build-once, machine-checked by the exact-composition gate)",
-  "wheel_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33"
+  "wheel_sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a"
 }

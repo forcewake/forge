@@ -30,8 +30,12 @@ native issue → researched plan → human approval (immutable ApprovedInput)
 **Which arrows are actually proven, and where (the honest map — no arrow is
 claimed above its evidence).** Since R42-04 (#377) the correction-loop arrow
 and the correction-loop composition are ONE identity: the trace ran the
-build-once v0.42.0 candidate (wheel `e7b48d42…` + image `sha256:98ea9031…`,
-digests recorded in the candidate manifest BEFORE qualification), and the
+build-once v0.42.0 FINAL candidate (wheel `ff1d0769…` + image
+`sha256:ad769a4a…` of tree e305478, digests recorded in the candidate
+manifest BEFORE qualification — re-qualified live when three review
+commits (#380/#379/#389) landed after the first qualification,
+superseding the first candidate `e7b48d42…`/`98ea9031…` per the
+build-once rule itself), and the
 promotion of v0.42.0 is gated on digest equality with that record — the
 v0.41.0 historical-composition gap (live trace `223d0f25` vs promoted
 `00919993`) cannot recur silently:
@@ -52,8 +56,8 @@ every live row above — including which composition each trace executed.
 
 | Axis | Identity (the v0.42.0 BUILD-ONCE candidate — promotion pending, gated on digest equality with the qualification record) |
 | --- | --- |
-| Control plane / worker image | the BUILD-ONCE alignment build `localhost/forge:dev` @ `sha256:98ea9031…` (reports 0.42.0, schema 032, receipts in the alignment build receipts; digests recorded in the candidate manifest BEFORE qualification) + the promoted GHCR digest **v0.41.0** (`sha256:f1316aaf…`) as the released axis — two bound identities, never merged |
-| Lane wheel | `forge-0.42.0-py3-none-any.whl` @ sha256 `e7b48d42…` — the ONE `uv build` of the candidate tree; sha-verified in-job by every lane leg of the qualification trace; the release must promote THESE bytes (the exact-composition gate refuses otherwise) |
+| Control plane / worker image | the BUILD-ONCE FINAL alignment build `localhost/forge:dev` @ `sha256:ad769a4a…` (reports 0.42.0, schema 032, receipts in the alignment build receipts; digests recorded in the candidate manifest BEFORE qualification) + the promoted GHCR digest **v0.41.0** (`sha256:f1316aaf…`) as the released axis — two bound identities, never merged |
+| Lane wheel | `forge-0.42.0-py3-none-any.whl` @ sha256 `ff1d0769…` — the ONE `uv build` of the final candidate tree; sha-verified in-job by every lane leg of the qualification trace; the release must promote THESE bytes (the exact-composition gate refuses otherwise) |
 | CI template | the frozen supported profile manifest (`qualification/profiles/supported-gitlab-ce-v1.json`, re-frozen at the candidate) |
 | Schema | alembic head **032** (predecessor 031) with the guarded-downgrade policy (a downgrade that would destroy round/grant linkage evidence refuses typed) |
 | Provider | GitLab CE 19.3.2 (behavior-fingerprinted in the record) |
@@ -122,10 +126,11 @@ explicit typed refusals, never silent best-effort.
 4. Review is not a dead end: corrections after `ready_for_human` run as
    bounded rounds (#338) without rewriting history — LIVE-PROVEN on the
    exact candidate composition (the build-once review-loop record,
-   2026-09-28: the full ready → `/fix` → ready arc, replay idempotence,
+   re-qualified 2026-09-28 at the final tree: the full ready → `/fix` →
+   ready arc, replay idempotence,
    the worker-failure recovery, the conflicting-head typed conflict and
-   the required-resume negative, all on wheel `e7b48d42…`/image
-   `98ea9031…`).
+   the required-resume negative, all on wheel `ff1d0769…`/image
+   `ad769a4a…`).
 5. Budget decisions are executable: amendments change the enforcing guard,
    the closing reserve is partitioned before coding (#340, mutation-gated).
 6. At least one external code owner records an acceptance decision

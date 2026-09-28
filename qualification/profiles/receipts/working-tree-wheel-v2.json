@@ -3,6 +3,6 @@
   "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
   "name": "forge-0.42.0-py3-none-any.whl",
   "path": "dist/forge-0.42.0-py3-none-any.whl",
-  "sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+  "sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
   "source": "local-uv-build"
 }

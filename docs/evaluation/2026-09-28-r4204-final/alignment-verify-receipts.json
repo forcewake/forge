@@ -1,0 +1,90 @@
+{
+  "already_aligned_at_start": true,
+  "generated_at": "2026-09-28T06:21:12.061156+00:00",
+  "observations": {
+    "caps": {
+      "forge-app": {
+        "FORGE_BUDGET_PROFILES": {
+          "numerical": true,
+          "present": true
+        },
+        "FORGE_LANE_BUDGET_SECONDS": {
+          "numerical": true,
+          "present": true
+        }
+      },
+      "forge-worker": {
+        "FORGE_BUDGET_PROFILES": {
+          "numerical": true,
+          "present": true
+        },
+        "FORGE_LANE_BUDGET_SECONDS": {
+          "numerical": true,
+          "present": true
+        }
+      }
+    },
+    "caps_ok": true,
+    "controlplane_unreachable": "",
+    "deployed_schema_head": "032",
+    "deployed_version": "0.42.0",
+    "extra_env_keys": [
+      "FORGE_BUDGET_PROFILES",
+      "FORGE_CREDENTIAL_DELIVERY",
+      "FORGE_MAX_REVIEW_ROUNDS",
+      "FORGE_REVIEW_FEEDBACK_ENABLED"
+    ],
+    "extra_env_ok": true,
+    "repo_schema_head": "032",
+    "repo_version": "0.42.0",
+    "schema_ok": true,
+    "version_ok": true,
+    "worker_mounts_ok": true,
+    "worker_mounts_requested": []
+  },
+  "result": "aligned",
+  "runs": [
+    {
+      "finished_at": "2026-09-28T06:21:12.061125+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-28T06:21:07.081690+00:00",
+      "steps": [
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.42.0",
+              "observed": "0.42.0",
+              "result": "match"
+            },
+            "health.status": "ok",
+            "schema == repo chain head": {
+              "expected": "032",
+              "observed": "032",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-642905b5c6a4",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    }
+  ],
+  "stamp": "forge.lab.alignment/1",
+  "steps": []
+}

@@ -44,10 +44,10 @@ be re-read; never install from a table.
 
 | Axis | Pinned value | Receipt |
 | --- | --- | --- |
-| Freeze manifest | digest `3bdb67906841b1d513947ac9aee9b1104db4ed0627d15fa1e5bc36057e2309c2` (frozen 2026-09-28 — re-frozen at the v0.42.0 BUILD-ONCE candidate: the executed-lab bind and the qualification-composition wheel moved together to the candidate; the promoted block stays v0.41.0 until the release) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
+| Freeze manifest | digest `23ac40df589c81c5d8c3607fb69ff4822dfc2416b8bfb7ff090ecba7ab2bb56f` (frozen 2026-09-28 — re-frozen at the v0.42.0 BUILD-ONCE FINAL candidate: the executed-lab bind and the qualification-composition wheel moved together to the candidate re-qualified after #380/#379/#389 landed; the promoted block stays v0.41.0 until the release) | the manifest vouches for itself (`freeze_supported_profile.py --check`) |
 | Promoted release | **v0.41.0**, source `536905c4…`, image `ghcr.io/forcewake/forge` @ `sha256:f1316aafe12d03…`, wheel sha256 `00919993453832008696fd7c4d8e4a67da122fbfd2d778dfdec8703975f7c05e`, sdist sha256 `e53f9a02…` — **the disclosed R42-04 gap**: this promotion shipped `00919993` while the live review-loop trace ran the pre-final build `223d0f25`; the v0.42.0 cycle closes that class by construction (build once, gate the promotion on digest equality) | `docs/releases/evidence/v0.41.0/promotion.json` |
-| Control plane + worker (one build) | the promotion's image above; the executed-lab bind (`localhost/forge:dev` @ `sha256:98ea9031…`, reports 0.42.0, schema head 032, rollback tag `pre-r3708-20260928T014257Z`) is the OTHER bound identity — the BUILD-ONCE candidate the qualification traces executed (digests recorded before qualification) — each image axis must match ONE of them exactly | manifest `control_plane` |
-| Lane wheel (what a cold install installs) | `forge-0.42.0-py3-none-any.whl` @ sha256 `e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33` (`dist/forge-0.42.0-py3-none-any.whl` — the ONE `uv build` of the candidate tree; sha-verified in-job by every qualification lane leg; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | manifest `lane.wheel` + the wheel receipt + the candidate manifest |
+| Control plane + worker (one build) | the promotion's image above; the executed-lab bind (`localhost/forge:dev` @ `sha256:ad769a4a…`, reports 0.42.0, schema head 032, rollback tag `pre-r3708-20260928T061811Z`) is the OTHER bound identity — the BUILD-ONCE FINAL candidate the qualification traces executed (digests recorded before qualification; it supersedes the first candidate `98ea9031…`/`e7b48d42…` re-qualified after #380/#379/#389) — each image axis must match ONE of them exactly | manifest `control_plane` |
+| Lane wheel (what a cold install installs) | `forge-0.42.0-py3-none-any.whl` @ sha256 `ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a` (`dist/forge-0.42.0-py3-none-any.whl` — the ONE `uv build` of the final candidate tree e305478; sha-verified in-job by every qualification lane leg; the committed receipt `qualification/profiles/receipts/working-tree-wheel-v2.json` covers a dist-less checkout) | manifest `lane.wheel` + the wheel receipt + the candidate manifest |
 | Lane runtime + dependencies | python **3.13** (uv standalone in the lane job); the wheel's dependency set resolved by uv from the committed `uv.lock` at the freeze (exact pins, e.g. `fastapi==0.135.2`, `uvicorn[standard]==0.42.0`); the harness CLI **claude-code 2.1.273** pinned inside the lane job | `pyproject.toml` + `uv.lock` + manifest `harness` |
 | Schema | head **032**, declared predecessor **031** (the supported upgrade is exactly one step, 031 → 032; guarded downgrades — see §8) | manifest `control_plane.schema_revision` |
 | Target template | `ci/templates/claude-sdk-lane.gitlab-ci.yml` @ sha256 `3d74be378bc70120…` — the bytes are frozen INTO the manifest; the install renders from the manifest, never from the working tree | manifest `target_template.frozen` |
@@ -68,7 +68,7 @@ release's record) marks every arrow by its evidence kind AND composition:
 | Source review | the required CI checks on the tagged sha (lint/typecheck/test matrices) | the v0.41.0 promotion's checks stand (conditional-promote history retained); v0.42.0's checks run with its release |
 | Release canary | the promotion canary stages (fresh install + seeded previous-head upgrade on the released image) | v0.41.0's canary (031→032 with data preservation) stands; v0.42.0's expected edge is 032→032 (same-head preservation unless a 033 lands) |
 | Native transport qualification | the deployment-ops drills + cold-install proofs bound to THIS manifest digest (native note ingress, dispatch, rollback/restore drills) | CURRENT composition — re-executed at this freeze (see §9) |
-| Model-task execution | the live model-consuming traces | the COMPLETE correction loop (delivery → /fix → ready → replay → worker-failure recovery → conflicting-head negative → required-resume negative) ran ON THIS EXACT CANDIDATE (the #377 build-once review-loop record, wheel `e7b48d42`/image `98ea9031`); the v2 delivery loop and the redemption trace stay HISTORICAL compositions (the v0.39.0-promoted tree; the `ddcb9137` lab) |
+| Model-task execution | the live model-consuming traces | the COMPLETE correction loop (delivery → /fix → ready → replay → worker-failure recovery → conflicting-head negative → required-resume negative) ran ON THIS EXACT CANDIDATE (the #377 build-once review-loop record, re-qualified at the FINAL tree e305478: wheel `ff1d0769`/image `ad769a4a`, spend $0.7742, zero findings); the v2 delivery loop and the redemption trace stay HISTORICAL compositions (the v0.39.0-promoted tree; the `ddcb9137` lab) |
 | External acceptance / human approval | the pilot records and the maintainer's bounded support decision | SEPARATE human artifacts (`qualification/profile-approvals.json`) — this kit approves nothing |
 
 **Where v0.42.0 re-pins — under the build-once contract.** At the
@@ -78,7 +78,7 @@ release the promotion lands under
 (`scripts/generate_template_pins.py --exact-composition
 --expect-version … --expect-wheel-sha256 …`, wired into the release
 workflow right after `uv build`) refuses the promotion UNLESS the
-just-built wheel equals the qualified candidate's `e7b48d42…` byte for
+just-built wheel equals the qualified candidate's `ff1d0769…` byte for
 byte — the v0.41.0 gap (promoted `00919993` vs the traced `223d0f25`)
 cannot recur silently; a changed candidate FAILS the check until a
 qualification record binds the new bytes. Then
@@ -140,7 +140,7 @@ echo "$FORGE_COLD_EVIDENCE"
 
 ```bash
 # forge-step: manifest-selfcheck | machine
-# forge-expects: exit 0 and the line "manifest verified" with digest 3bdb6790…
+# forge-expects: exit 0 and the line "manifest verified" with digest 23ac40df…
 uv run python scripts/freeze_supported_profile.py --check
 ```
 
@@ -150,7 +150,7 @@ under the same version string is the mutable-tag refusal).
 
 ```bash
 # forge-step: wheel-identity | machine
-# forge-expects: the pinned sha256 e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33 appears for dist/forge-0.42.0-py3-none-any.whl
+# forge-expects: the pinned sha256 ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a appears for dist/forge-0.42.0-py3-none-any.whl
 shasum -a 256 dist/*.whl
 ```
 
@@ -519,19 +519,25 @@ L3 wip-continuation (the shared lab and the paid lane are outside this
 window — §5 records each reason; the sibling issues #364/#365 own this
 cycle's live traces).
 
-Executed AGAIN 2026-09-28 at the R42-04/#377 build-once freeze
-(manifest `3bdb6790…`, wheel `forge-0.42.0` @ `e7b48d42…` — the
-QUALIFIED CANDIDATE, digests recorded before qualification;
+Executed AGAIN 2026-09-28 at the R42-04/#377 FINAL-candidate re-freeze
+(manifest `23ac40df…`, wheel `forge-0.42.0` @ `ff1d0769…` — the
+RE-QUALIFIED FINAL CANDIDATE of tree e305478, digests recorded before
+qualification, superseding the first candidate `3bdb6790…`/`e7b48d42…`
+after #380/#379/#389 landed;
 `uv run python scripts/cold_install_check.py --mode from-runbook`):
 **9 machine steps executed as written, 0 refusals; 4 human-step markers
 counted, 3 blocked-on-lab markers recorded** (receipt:
-`docs/evaluation/2026-09-28-r4204-build-once/cold-install-from-runbook.json`).
+`docs/evaluation/2026-09-28-r4204-final/cold-install-from-runbook.json`).
 The ops drills re-ran the same day: the LIVE deployment-ops drills
 12/13 pass, qualified-for-profile
-(`qualification/deployment-ops-2026-09-28.json` — the 1 fail is the
+(`qualification/deployment-ops-2026-09-28_final.json` — the 1 fail is the
 honest blocked live leg: the redemption-mode dispatch on the lab's
 expired broker credential, zero model spend); the offline ops drills
-6/6 (`qualification/ops-drills-2026-09-28.json`). The 2026-09-27
+6/6 (`qualification/ops-drills-2026-09-28-final.json`). The first
+candidate's receipts stay under their own names
+(`docs/evaluation/2026-09-28-r4204-build-once/cold-install-from-runbook.json`,
+`qualification/deployment-ops-2026-09-28.json`,
+`qualification/ops-drills-2026-09-28.json`). The 2026-09-27
 execution below stays as the historical record of the same kit at the
 v0.41.0 freeze.
 

@@ -1,0 +1,37 @@
+{
+  "stamp": "forge.candidate.build-once/1",
+  "recorded_at": "2026-09-28T06:20:00+00:00",
+  "recorded_before_qualification": true,
+  "issue": "forge#377 (R42-04) — the FINAL v0.42.0 candidate, minted and re-qualified after three review commits landed inside the release window",
+  "purpose": "the FIRST candidate (wheel e7b48d42… + image 98ea9031…, manifest docs/evaluation/2026-09-28-r4204-build-once/candidate-manifest.json) was qualified at commit 9c20674, after which #380 (ae14758), #379 (96c2a65) and #389 (e305478) landed — all shipping in the wheel. Per R42-04's own rule (a changed candidate is a NEW candidate until re-qualified) those bytes are superseded: THIS manifest records the FINAL candidate, built ONCE from the final tree, digests recorded here BEFORE any qualification phase ran. The qualification record, the freeze and the promotion must bind THESE digests.",
+  "tree": {
+    "base_commit": "e305478e36e9c8094cbeb3ad4365b8424ad2a5c3",
+    "base_commit_subject": "9e8d6c6 review: authority consolidation — one set of numbers on every surface (#389)",
+    "carries": "the M0 fixes (#374-#376) + #378 composed fault traces + #377's build-once guard + #380 (command-to-delivery progress projection, ae14758) + #379 (budget calibration, 96c2a65) + #389 (authority consolidation, e305478), all on version 0.42.0",
+    "version": "0.42.0"
+  },
+  "wheel": {
+    "name": "forge-0.42.0-py3-none-any.whl",
+    "path": "dist/forge-0.42.0-py3-none-any.whl",
+    "sha256": "ff1d0769ea6b0d127196665a56a15996bf24e37e00337afb322fbbb91708802a",
+    "built_by": "uv build --wheel (2026-09-28T06:17Z, the only wheel build of the final tree)",
+    "served_from": "http://192.168.1.18:8481/forge-0.42.0-py3-none-any.whl (the lab wheelhost)"
+  },
+  "image": {
+    "name": "localhost/forge:dev",
+    "image_id": "a58ab38180095dfc05c6988d4a1762acfe9207efa743f27ba03534ad3f0fb78b",
+    "digest": "sha256:ad769a4af2fd0d7539a4c5d7c828a6697060c9c6d64d2e6c2469890ef87cf689",
+    "built_by": "scripts/align_lab.py --apply (podman build from the same final tree; receipts: docs/evaluation/2026-09-28-r4204-final/alignment-build-receipts.json — backup, rollback-tag, build, stop, migrate 032->032, recreate, verify)",
+    "reports_version": "0.42.0",
+    "schema_head": "032",
+    "rollback_tag": "localhost/forge:pre-r3708-20260928T061811Z"
+  },
+  "supersedes": {
+    "wheel_sha256": "e7b48d42e4851e9c142657f7f9597106f80e7da43de66e0ea39d5d6477462d33",
+    "image_digest": "sha256:98ea903125d1c4c6d05582682f1d5a0ed8d15fc6bdb00ee37747a854f5b58bed",
+    "qualified_at_commit": "9c20674",
+    "record": "qualification/records/review-loop-2026-09-28-c1-e7b48d42.json (kept under its own identity, legacy-marked as superseded history)",
+    "evidence_bundle": "docs/evaluation/2026-09-28-r4204-build-once/ (byte-identical, never overwritten)"
+  },
+  "exact_composition_contract": "the review-loop record (qualification/records/review-loop-2026-09-28.json) binds these digests; the release promotion of v0.42.0 must promote bytes with the SAME wheel sha256 or the exact-composition check refuses (R42-04 AC-8)"
+}

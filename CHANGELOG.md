@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the 9e8d6c6 review, R42-04 applied to itself: the FINAL candidate re-qualified (#377 follow-up)
+
+The first v0.42.0 candidate (wheel `e7b48d42…`/image `98ea9031…`) was
+qualified at `9c20674`; three review commits then landed inside the
+release window and ship in the wheel (#380 `ae14758`, #379 `96c2a65`,
+#389 `e305478`). Per the build-once rule a changed candidate is a NEW
+candidate: the FINAL tree was built ONCE (wheel `ff1d0769…` + alignment
+image `sha256:ad769a4a…`, digests recorded BEFORE qualification in
+`docs/evaluation/2026-09-28-r4204-final/candidate-manifest.json`), the
+complete review-and-correction loop re-ran live on those bytes
+(delivery → `/fix` → ready → replay → worker-kill recovery → the
+conflicting-head `branch_drift` negative → the required-resume negative
+— run `e637067a` and children, spend $0.7742 of the $2.50 cap, zero
+validation findings), and every record re-bound: the review-loop record
+`review-loop-2026-09-28.json` (the first candidate's kept under its own
+identity `…-c1-e7b48d42.json`, legacy-marked superseded history), the
+`@0.42.0` profile record, the freeze (manifest `23ac40df…`, `--check`
+green), the committed wheel receipt, the inventory snapshot, the drills
+(offline 6/6; the LIVE deployment-ops re-run dated beside them) and the
+cold-install kit re-executed from the re-pinned runbook. The
+exact-composition gate is GREEN on the final candidate and still
+refuses the old shape (release-time, pending-window and post-release
+arms pinned by `tests/test_exact_composition_guard.py`). Suite 9283
+passed / 75 skipped at this tree. LIVE-FOUND and minimally patched in
+the driver: the align phase's image-drift check compared podman's
+12-hex short image id against the inspect's full 64-hex id (a spurious
+consumer recreate every run, whose window blipped the litellm probe at
+the first preflight attempt — the honest refusal stays recorded); and
+the reused round-4 correction note's expired premise reproduced
+deterministically (the honest `harness_no_changes` no-op — correction
+notes must name work that exists at their base).
+
 ### Added — the 9e8d6c6 review, R42-06: budget calibration without weakened verification (#379)
 
 The recorded basis: the #364 live window raised the standard token cap
