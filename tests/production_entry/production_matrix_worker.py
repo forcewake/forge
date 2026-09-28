@@ -22,7 +22,15 @@ startup, before any loop runs:
 - ``--kill journal-completion --nth N`` — SIGKILL after the Nth
   ``ChangesetWriter.apply`` returned: intent, commit and journal all
   completed durably, the run state still sits mid-leg (the mid-leg
-  idempotency window — a fresh worker adopts the journaled candidate).
+  idempotency window — a fresh worker adopts the journaled candidate);
+- ``--kill observation-boundary`` — R42-05 (#378): SIGKILL INSIDE the
+  #374 retryable-observation seam — after ``_defer_review_observation``
+  committed its journals (``provider_observation.retry`` +
+  ``feedback.outcome=pending``) and BEFORE its typed raise reached the
+  step runtime's ``fail_step``. The deferral is durable; the step row
+  still sits claimed/leased by the now-dead worker with no retry record —
+  the composed process-kill dimension the in-process #374 traces cannot
+  produce (their worker survives to record the retry).
 
 The regression patches (the defects the matrix's mutation arms seed back,
 applied to the SHIPPED symbols exactly the way a revert would):
@@ -41,7 +49,12 @@ applied to the SHIPPED symbols exactly the way a revert would):
   ``not_dispatched`` at the base and ``foreign`` on ANY moved head;
 - ``--mutation any-terminal-occupancy`` — the pre-#360 occupancy predicate:
   ANY terminal pipeline in the branch listing released the slot, so a
-  historical success beside a current running job read TERMINAL.
+  historical success beside a current running job read TERMINAL;
+- ``--mutation plain-return-defer`` — R42-05 (#378): the #374 revert — the
+  retryable-observation defer plain-returns instead of raising, so a
+  transient observation failure records step SUCCESS with no request
+  outcome (the review's P01 verbatim: ``step=succeeded, requests=0,
+  handler_calls=1``).
 
 The model is ALWAYS the deterministic stub (``build_default_agents`` patched
 to the stub agents — the sanctioned double: "stubs may replace the model and
@@ -211,6 +224,25 @@ def _install_kill_point(name: str, nth: int) -> None:
 
         writer_module.ChangesetWriter.apply = kill_after_apply
         return
+    if name == "observation-boundary":
+        # R42-05 (#378): die at the #374 seam — AFTER the deferral's
+        # journals committed (their own transactions), BEFORE the typed
+        # raise reaches the step runtime's fail_step. The durable state at
+        # the kill is exactly the composed window: observability trail
+        # present, step still claimed, no retry record, no outcome.
+        from forge.runs.service import RunService
+
+        real_defer = RunService._defer_review_observation
+
+        async def kill_inside_the_defer(self, run_id, note_id, reason, exc):  # noqa: ANN001
+            try:
+                await real_defer(self, run_id, note_id, reason, exc)
+            except BaseException:
+                _hard_kill()  # pragma: no cover — never returns
+                raise  # pragma: no cover — satisfies the type checker
+
+        RunService._defer_review_observation = kill_inside_the_defer
+        return
     raise SystemExit(f"unknown kill point: {name!r}")
 
 
@@ -254,6 +286,20 @@ def _install_mutation(name: str) -> None:
             return NativeStatus.RUNNING
 
         RunService._branch_search_occupancy = classmethod(any_terminal)  # type: ignore[assignment]
+        return
+    if name == "plain-return-defer":
+        # R42-05 (#378): the #374 revert — the defer logs-and-returns, so
+        # the transient observation failure records step SUCCESS with no
+        # request outcome (the review's P01 verbatim). The SAME defect the
+        # in-process RO-5 arm patches; here it runs inside the worker
+        # child so the composed trace's detector can be paired at the
+        # process level.
+        from forge.runs.service import RunService
+
+        async def _plain_return(self, run_id, note_id, reason, exc) -> None:  # noqa: ANN001
+            return None  # the reverted defer: log-and-return
+
+        RunService._defer_review_observation = _plain_return
         return
     raise SystemExit(f"unknown mutation: {name!r}")
 
@@ -406,12 +452,17 @@ def main() -> int:
     parser.add_argument("--quiet-polls", type=int, default=3)
     parser.add_argument(
         "--kill",
-        choices=("child-admission", "native-commit", "journal-completion"),
+        choices=("child-admission", "native-commit", "journal-completion", "observation-boundary"),
     )
     parser.add_argument("--nth", type=int, default=1, help="the Nth call for writer kill points")
     parser.add_argument(
         "--mutation",
-        choices=("budget-before-child", "base-guard-first", "any-terminal-occupancy"),
+        choices=(
+            "budget-before-child",
+            "base-guard-first",
+            "any-terminal-occupancy",
+            "plain-return-defer",
+        ),
     )
     args = parser.parse_args()
 

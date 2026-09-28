@@ -1000,12 +1000,21 @@ class TestFreshSessionBrief:
 
 
 class _DurableWorld:
-    """A sqlite-backed FlowRun evidence store for the activation transaction."""
+    """A sqlite-backed FlowRun evidence store for the activation transaction.
+
+    R42-05 (#378): the engine is tracked on the instance and disposed by
+    :meth:`stop` at every owner (the ``durable`` fixture and the inline
+    constructions) — an abandoned StaticPool aiosqlite connection leaves
+    its ``_connection_worker_thread`` resolving against a closed event
+    loop under later GC, the closed-loop thread warning the 3.13 CI log
+    carried.
+    """
 
     def __init__(self, active: ActivePlanState) -> None:
         self._initial = active
         self.factory = None
         self.run_id = "a" * 32
+        self._engine = None
 
     async def start(self) -> None:
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -1015,6 +1024,7 @@ class _DurableWorld:
         from forge.models.base import Base
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+        self._engine = engine
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         self.factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -1022,6 +1032,13 @@ class _DurableWorld:
             session.add(FlowRun(id=self.run_id, project_id=1, status="planning"))
             await session.commit()
         await self.set_active(self._initial)
+
+    async def stop(self) -> None:
+        """Teardown at the allocation origin: join the aiosqlite worker
+        thread before this test's event loop closes."""
+        if self._engine is not None:
+            await self._engine.dispose()
+            self._engine = None
 
     async def set_active(self, active: ActivePlanState) -> None:
         from forge.adaptive.revisions import ACTIVE_PLAN_KEY
@@ -1062,7 +1079,10 @@ class _DurableWorld:
 async def durable(tmp_path):
     world = _DurableWorld(_current())
     await world.start()
-    return world
+    try:
+        yield world
+    finally:
+        await world.stop()  # R42-05 (#378): teardown at the owning fixture
 
 
 class TestDurableActivation:
@@ -1260,11 +1280,10 @@ class TestActivationMovesTheDurablePlanIdentity:
             run = await session.get(FlowRun, durable.run_id)
             assert run.plan_digest == plan_digest(proposed)  # the ACTIVE plan
 
-    async def test_activation_rebinds_the_human_gate_to_the_revised_digest(self, tmp_path):
+    async def test_activation_rebinds_the_human_gate_to_the_revised_digest(self, durable):
         from forge.adaptive.revisions import activate_pending_revision, stage_pending_revision
 
-        world = _DurableWorld(_current())
-        await world.start()
+        world = durable  # R42-05 (#378): the owning fixture disposes the engine
         proposed = _revision(_base_steps(), revision=2, parent_revision=1)
         decision = _decision(proposed)
         await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
@@ -1328,7 +1347,7 @@ class TestApproveRevisionIngress:
             "note_id": note_id,
         }
 
-    async def test_router_routes_approval_into_the_durable_transaction(self, tmp_path):
+    async def test_router_routes_approval_into_the_durable_transaction(self, durable):
         from forge.adaptive.command_router import ControlCommandRouter
         from forge.adaptive.revisions import (
             PENDING_PROPOSAL_KEY,
@@ -1336,15 +1355,11 @@ class TestApproveRevisionIngress:
         )
         from forge.config import Settings
         from forge.durable import FlowRun
-        from forge.models.base import Base
         from pydantic import SecretStr
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-        from sqlalchemy.pool import StaticPool
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # R42-05 (#378): the durable fixture OWNS the engine (schema created,
+        # disposed at teardown) — this test only adds its own run row.
+        factory = durable.factory
         run_id = "b" * 32
         async with factory() as session:
             session.add(
@@ -1411,19 +1426,14 @@ class TestApproveRevisionIngress:
             run = await session.get(FlowRun, run_id)
             assert (run.evidence or {})["active_plan"]["active_revision"] == 2
 
-    async def test_non_approver_is_refused_with_a_note(self, tmp_path):
+    async def test_non_approver_is_refused_with_a_note(self, durable):
         from forge.adaptive.command_router import ControlCommandRouter
         from forge.config import Settings
         from forge.durable import FlowRun
-        from forge.models.base import Base
         from pydantic import SecretStr
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-        from sqlalchemy.pool import StaticPool
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # R42-05 (#378): the durable fixture owns the engine's lifecycle.
+        factory = durable.factory
         async with factory() as session:
             session.add(
                 FlowRun(
@@ -1466,10 +1476,11 @@ class TestRevisionJourneyToDispatch:
     notes "revised from <old-digest> to <new-digest>", rendered from the
     durable pointer the same transaction wrote."""
 
-    async def _world_with_old_plan(self, tmp_path):
-        """A durable world whose ACTIVE plan is revision 1 with a digest."""
-        world = _DurableWorld(_current())
-        await world.start()
+    async def _world_with_old_plan(self, world):
+        """Seed the owning fixture's world: ACTIVE plan revision 1, with a digest.
+
+        R42-05 (#378): the caller passes the ``durable`` fixture's world —
+        the engine's owner disposes it at teardown."""
         old_plan = _revision(_base_steps(), revision=1)
         async with world.factory() as session:
             from forge.adaptive.revisions import ACTIVE_PLAN_KEY
@@ -1485,14 +1496,14 @@ class TestRevisionJourneyToDispatch:
             await session.commit()
         return world, old_plan
 
-    async def test_approve_revision_then_the_next_go_dispatches_the_new_plan(self, tmp_path):
+    async def test_approve_revision_then_the_next_go_dispatches_the_new_plan(self, durable):
         from forge.adaptive.revisions import (
             activate_pending_revision,
             dispatch_plan_binding,
             stage_pending_revision,
         )
 
-        world, old_plan = await self._world_with_old_plan(tmp_path)
+        world, old_plan = await self._world_with_old_plan(durable)
         proposed = _revision(_base_steps(), revision=2, parent_revision=1)
         decision = _decision(proposed)
         await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
@@ -1535,7 +1546,7 @@ class TestRevisionJourneyToDispatch:
         assert stale_callback_guard(plan_digest(old_plan), binding.plan_digest) is False
         assert stale_callback_guard(binding.plan_digest, binding.plan_digest) is True
 
-    async def test_the_revised_plan_comment_notes_old_to_new_digests(self, tmp_path):
+    async def test_the_revised_plan_comment_notes_old_to_new_digests(self, durable):
         from forge.adaptive.revisions import (
             REVISION_NOTE_MARKER,
             activate_pending_revision,
@@ -1545,7 +1556,7 @@ class TestRevisionJourneyToDispatch:
             stage_pending_revision,
         )
 
-        world, old_plan = await self._world_with_old_plan(tmp_path)
+        world, old_plan = await self._world_with_old_plan(durable)
         proposed = _revision(_base_steps(), revision=2, parent_revision=1)
         decision = _decision(proposed)
         await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
@@ -1574,14 +1585,14 @@ class TestRevisionJourneyToDispatch:
         binding = await dispatch_plan_binding(world.factory, world.run_id)
         assert (binding.revised_from_digest, binding.plan_digest) == (old_digest, new_digest)
 
-    async def test_a_stale_go_with_the_old_digest_is_refused(self, tmp_path):
+    async def test_a_stale_go_with_the_old_digest_is_refused(self, durable):
         from forge.adaptive.revisions import (
             activate_pending_revision,
             dispatch_plan_binding,
             stage_pending_revision,
         )
 
-        world, old_plan = await self._world_with_old_plan(tmp_path)
+        world, old_plan = await self._world_with_old_plan(durable)
         proposed = _revision(_base_steps(), revision=2, parent_revision=1)
         decision = _decision(proposed)
         await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
@@ -1611,11 +1622,12 @@ class TestRevisionJourneyToDispatch:
         assert unknown.dispatchable is False
         assert unknown.code == "plan_digest_mismatch"
 
-    async def test_a_run_without_an_active_plan_refuses_the_dispatch(self, tmp_path):
+    async def test_a_run_without_an_active_plan_refuses_the_dispatch(self, durable):
         from forge.adaptive.revisions import dispatch_plan_binding
 
-        world = _DurableWorld(_current())
-        await world.start()  # evidence active_plan exists here — so use a stranger
+        # R42-05 (#378): the owning fixture disposes the engine; its world's
+        # evidence active_plan exists — so use a stranger run.
+        world = durable
         stranger = "b" * 32
         async with world.factory() as session:
             from forge.durable import FlowRun

@@ -315,12 +315,18 @@ def run_mx_worker(
     mode: str = "full",
     ticks: int = 2,
     max_seconds: float = 75.0,
+    strict_exit: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """One REAL worker subprocess run — the installed step loop + the
     reconciler pass tuple over a fresh engine, until the queue is quiet.
 
     ``kill`` names the fault window the child SIGKILLs itself at (the
     return code is then ``-9``); ``mutation`` seeds one regression.
+    ``strict_exit=False`` (R42-05 / #378) hands the outcome back WITHOUT
+    the exit-code check — for the traces whose SEMANTIC durable-state
+    detector must fail before the process-level corroboration does (a
+    seeded plain-return regression survives to exit 0; the trace's
+    succeeded-with-no-outcome assertion fires first).
     """
     ready = tmp_path / f"{name}-{time.monotonic_ns()}-ready.json"
     env = _mx_env(
@@ -357,7 +363,7 @@ def run_mx_worker(
         timeout=max_seconds + 45,
     )
     expected = -9 if kill else 0
-    if outcome.returncode != expected:
+    if strict_exit and outcome.returncode != expected:
         raise AssertionError(
             f"the worker child exited {outcome.returncode} (expected {expected}):\n"
             f"stdout: {outcome.stdout[-3000:]}\nstderr: {outcome.stderr[-3000:]}"

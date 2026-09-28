@@ -154,6 +154,16 @@ class TestManifestCheck:
             "::TestMX3TheMutationArms::test_budget_before_child_restored_kills_the_finite_round",
             "tests/production_entry/test_production_matrix.py"
             "::TestMX3TheMutationArms::test_any_terminal_occupancy_restored_oversubscribes",
+            # R42-05 (#378): the composed fault traces — each baseline
+            # WITH its seeded-regression arm.
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
         ]
         assert gate.missing_required(manifest) == []
         matches = gate.required_test_ids(manifest)
@@ -190,6 +200,16 @@ class TestManifestCheck:
             "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+            # R42-05 (#378): the composed fault traces — each baseline
+            # WITH its seeded-regression arm.
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [
@@ -228,6 +248,16 @@ class TestManifestCheck:
             "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+            # R42-05 (#378): the composed fault traces — each baseline
+            # WITH its seeded-regression arm.
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
         ]
         production_entry, checkpoint = gate.PROFILES[0], gate.PROFILES[1]
         assert gate.missing_required(pe_only, gate.traces_for_profile(production_entry)) == []
@@ -257,6 +287,16 @@ class TestManifestCheck:
             "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+            # R42-05 (#378): the composed fault traces — each baseline
+            # WITH its seeded-regression arm.
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [
@@ -338,6 +378,16 @@ class TestR4107MatrixTraces:
             # …MX-2 and MX-3 present, MX-1 REMOVED:
             "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
             "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+            # R42-05 (#378): the composed fault traces — each baseline
+            # WITH its seeded-regression arm.
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
         ]
         absent = gate.missing_required(manifest)
         assert [trace.label for trace in absent] == [
@@ -391,6 +441,94 @@ class TestR4107MatrixTraces:
         actual = {node.rsplit("[", 1)[-1].removesuffix("]") for node in matrix_arms}
         expected = {cell.removesuffix("]").removeprefix("[") for cell in expected}
         assert actual == expected, (expected - actual, actual - expected)
+
+
+class TestR4205ComposedFaultTraces:
+    """R42-05 (#378): the composed fault traces — the killed-observation
+    baseline (CF-A) with its #374 plain-return arm (CF-M1), and the
+    lost-start mixed-occupancy baseline (CF-B) with its #375
+    ambiguous-guard arm (CF-M2) — are REQUIRED production-entry traces: a
+    removed baseline OR a removed arm is the marker-removal mutation the
+    manifest check detects."""
+
+    CF_LABELS = {
+        "R42-05 (#378) CF-A the killed observation trace (real process kill at the #374 seam)",
+        "R42-05 (#378) CF-M1 the #374 plain-return mutation arm",
+        "R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)",
+        "R42-05 (#378) CF-M2 the #375 ambiguous-guard-disabled mutation arm",
+    }
+
+    def test_a_removed_composed_fault_trace_refuses(self, gate: ModuleType) -> None:
+        # The mutation: the whole CF-B class was deleted — its ids no
+        # longer collect, and the gate must refuse (never quietly run the
+        # #375 mixed-occupancy criterion on nothing).
+        manifest = [
+            # every OTHER required trace present (one node id each)…
+            "tests/production_entry/test_production_entry.py"
+            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
+            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
+            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
+            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
+            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres::test_x",
+            "tests/test_credential_audit.py::TestRealPostgres"
+            "::test_concurrent_redemptions_and_evidence_writers_survive",
+            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
+            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
+            "tests/production_entry/test_feedback_ingress.py"
+            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
+            "tests/production_entry/test_feedback_ingress.py"
+            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
+            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
+            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
+            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
+            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
+            # …CF-A and both arms present, CF-B REMOVED:
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFATheKilledObservationTrace::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM1ThePlainReturnDeferArm::test_x",
+            "tests/production_entry/test_composed_faults.py"
+            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
+        ]
+        absent = gate.missing_required(manifest)
+        assert [trace.label for trace in absent] == [
+            "R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)"
+        ]
+
+    def test_the_composed_fault_traces_belong_to_the_production_entry_profile(
+        self, gate: ModuleType
+    ) -> None:
+        scoped = {trace.label for trace in gate.traces_for_profile(gate.PROFILES[0])}
+        assert self.CF_LABELS <= scoped  # PROFILES[0] is production-entry
+
+    def test_the_live_collection_carries_every_composed_fault_trace(self, gate: ModuleType) -> None:
+        """The detector is wired to reality: collecting the REAL module
+        right now must capture all four CF classes — a renamed baseline or
+        arm refuses the gate, never quietly shrinks the criterion set."""
+        import subprocess
+
+        collected = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "tests/production_entry/test_composed_faults.py",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert collected.returncode == 0, collected.stderr
+        manifest = gate.parse_collected_manifest(collected.stdout)
+        cf_traces = tuple(trace for trace in gate.REQUIRED_TRACES if trace.label in self.CF_LABELS)
+        assert gate.missing_required(manifest, cf_traces) == []
 
 
 # ---------------------------------------------------------------------------

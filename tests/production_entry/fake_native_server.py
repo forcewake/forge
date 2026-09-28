@@ -554,7 +554,17 @@ class GitLabState:
         return str(commits[0]["id"]) if commits else None
 
     def create_pipeline(self, ref: str, variables: list[dict]) -> dict:
-        """The harness dispatch: mint pipeline + its forge-agent job."""
+        """The harness dispatch: mint pipeline + its forge-agent job.
+
+        R42-05 (#378): the minted pipeline carries NO ``created_at`` — the
+        same degraded-timestamp convention every seeded pipeline follows
+        (one fixture voice: branch-listing rows here never carry a
+        trustworthy ``created_at``, which is precisely the degraded
+        surface the R42-02/#375 ambiguity rules exist to classify). The
+        minted row starts at the branch HEAD — the input revision — so a
+        lost create response leaves an AMBIGUOUS possibly-current row,
+        exactly the GitLab shape a coding start presents before its first
+        agent commit."""
         pipeline_id = self._id()
         sha = self.branch_head(ref) or ("0" * 40)
         pipeline = {
@@ -564,7 +574,6 @@ class GitLabState:
             "status": "running",
             "source": "api",
             "web_url": f"https://gitlab.test/project-{self.project_id}/-/pipelines/{pipeline_id}",
-            "created_at": "2026-09-23T00:00:00Z",
         }
         self.pipelines.append(pipeline)
         job = {
@@ -947,6 +956,13 @@ def make_gitlab_handler(state: GitLabState) -> type[BaseHTTPRequestHandler]:
             post = state.latency_ms("POST", tail, "response")
             if post > 0:
                 time.sleep(post / 1000.0)
+            # R42-05 (#378): the DROP phase — the effect is registered and
+            # the connection closes WITHOUT a reply: the caller sees a
+            # transport error while the native start genuinely landed (the
+            # lost-create-response window the occupancy intent exists for).
+            if state.latency_ms("POST", tail, "drop") > 0:
+                self.close_connection = True
+                return
             self._send_json(status, document)
 
         def _project_post(self, tail: list[str], body: dict) -> tuple[int, object] | None:

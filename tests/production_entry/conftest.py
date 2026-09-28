@@ -556,13 +556,18 @@ class FakeGitLabNative:
         """Inject provider latency (the deterministic slow-native surface).
 
         Each rule shapes like ``{"method": "POST", "tail": ["merge_requests"],
-        "phase": "request"|"response", "ms": 4000, "nth": 2}`` — ``tail``
-        matches the exact project-tail path (``["repository", "commits"]``,
-        ``["merge_requests"]``, …) and ``segment`` matches one segment
-        anywhere in it. ``phase="response"`` registers the effect and delays
-        only the reply (the slow/lost-response window); the default
-        ``phase="request"`` delays before the effect lands. A rule fires
-        once — on the first match, or the ``nth`` one — then disarms.
+        "phase": "request"|"response"|"drop", "ms": 4000, "nth": 2}`` —
+        ``tail`` matches the exact project-tail path (``["repository",
+        "commits"]``, ``["merge_requests"]``, ``["pipeline"]``, …) and
+        ``segment`` matches one segment anywhere in it. ``phase="response"``
+        registers the effect and delays only the reply (the slow/lost-
+        response window); the default ``phase="request"`` delays before the
+        effect lands. ``phase="drop"`` (R42-05 / #378) registers the effect
+        and closes the connection WITHOUT any reply — the lost-create-
+        response window: the native start landed, the caller saw a
+        transport error (the rule's ``ms`` is the fired signal — pass at
+        least 1). A rule fires once — on the first match, or the ``nth``
+        one — then disarms.
         """
         self._ctl("set_latency", rules=rules)
 

@@ -1,8 +1,8 @@
-# The production-entry mutation gates (R40-08, issue #344 — the R41-07 / #362 matrix appended)
+# The production-entry mutation gates (R40-08, issue #344 — the R41-07 / #362 and R42-05 / #378 sets appended)
 
 External review `b521e1a`, item R40-08. CI greenness proved nothing
-about four high-risk invariants: a service-level test can pass a
-correct grant explicitly, invoke a reconciler method directly, or use a
+about four high-risk invariants: a service-level test can pass a correct
+grant explicitly, invoke a reconciler method directly, or use a
 reviewer double that ignores the budget — it stays green while the
 INSTALLED command cannot reach the feature or its guard is unchanged.
 
@@ -12,7 +12,9 @@ ingress.py`), its mutation arms, the honesty rules both obey, and the
 report plumbing that keeps their evidence separable. The **production
 matrix** (R41-07 / issue #362, external review `68f22b8`) extends the
 same discipline to the COMBINATIONS the review said the components
-missed — see the last section.
+missed, and the **composed fault traces** (R42-05 / issue #378, review
+`9f2c850`) make exactly those combinations the completion criterion —
+see the last two sections.
 
 ## The trace set — one per high-risk invariant, each WITH its mutant
 
@@ -225,3 +227,107 @@ LIVE collection carries the full 24-cell cross — a dropped parametrize
 entry refuses the gate, never quietly shrinks the matrix. The MX traces
 write `forge.trace-record/1` records beside the MG set when
 `FORGE_TRACE_RECORD_DIR` is exported.
+
+## The composed fault traces (R42-05, issue #378)
+
+External review `9f2c850`: the suite was green and the R42
+counterexamples lived in COMPOSITIONS no component suite crosses — a
+transient observation fault composed with a real worker DEATH at the
+observation seam, and a lost native start composed with the
+mixed-history occupancy verdict. `tests/production_entry/
+test_composed_faults.py` makes those two compositions the completion
+criterion, each baseline paired with its seeded regression:
+
+### CF-A — the killed observation (the #374 seam at a real process boundary)
+
+The reviewer's `/fix` note is accepted through the REAL ASGI ingress
+(the 202 follows the inbox+StepRun commit — asserted durable BEFORE any
+worker exists); the worker is a REAL OS PROCESS running the INSTALLED
+composition (`run_step_worker` + `run_reconciler` + `run_step_reaper`,
+the exact loops `worker/app.main` gathers); GitLab is transiently down
+on both head-reading paths through the fault proxy; the child SIGKILLs
+itself INSIDE `_defer_review_observation` — after the deferral's
+journals committed, before the typed raise reached `fail_step`. The
+durable state at the kill is the composed window the in-process #374
+traces cannot produce (their worker survives to record the retry):
+observability trail durable (`provider_observation.retry` +
+`feedback.outcome=pending`), the step row still claimed by the dead
+worker, attempt 0, no outcome. A FRESH worker process (fault healed,
+the dead claim's lease expired by the trace's clock advance) re-executes
+the SAME durable command through the REAL reaper + step loop: ONE
+outcome, ONE operator reply, ONE inbox row — asserted as durable states
+and NATIVE EFFECT COUNTS, never exception text.
+
+### CF-B — the lost start under mixed occupancy (the #375 verdict)
+
+The whole trace rides the installed dispatcher: a REAL gateway
+subprocess takes `/implement` and `/go`; the worker child's dispatch leg
+acquires the execution lease (capacity ONE, pinned like `--no-nudge`)
+and records the native-start intent BEFORE the provider call; the fake
+native's DROP rule (new in this issue: the latency machinery's
+`phase="drop"` registers the pipeline then closes the connection without
+a reply) produces a REAL lost create response — the ledger row exists
+while the worker saw a transport error. The run parks blocked with its
+lease DRAINING. The branch listing then carries a PRIOR attempt's
+journaled terminal (historical), a CORRELATED terminal the current
+attempt can own, and the lost start's own RUNNING row at the input
+revision — degraded timestamp, base SHA: AMBIGUOUS (the fake now mints
+pipelines WITHOUT `created_at`, the degraded convention every seeded row
+already followed — the exact surface the R42-02 ambiguity rules exist
+for). The #375 verdict answers RUNNING: the lease KEEPS its slot; a
+second run's real `/go` dispatch is refused at the cap (the native start
+count stays ONE); when the ambiguous row resolves terminal, the
+correlated terminal releases the slot EXACTLY ONCE.
+
+### The mutation pairings (CF-M1 / CF-M2)
+
+| Arm | The seeded defect | The defect's observable |
+| --- | --- | --- |
+| CF-M1 `plain-return-defer` | the #374 revert — the retryable-observation defer logs-and-returns instead of raising (seeded into the worker child) | the step records SUCCESS with no request outcome — the review's P01 verbatim (`step=succeeded, requests=0, handler_calls=1`) |
+| CF-M2 `ambiguous-guard-disabled` | the #375 guard removed — rule 2 (ambiguous-ACTIVE precedes any all-terminal verdict) no longer runs | the correlated terminal beside the still-running ambiguous row answers TERMINAL, the drain pass releases the slot, and the next acquire OVERSUBSCRIBES at capacity one |
+
+### Mutation evidence (CF, the proof protocol)
+
+Each baseline was run with its defect seeded INTO THE SOURCE (the exact
+hunk edited, run, then edited back — never a git checkout), and FAILED
+at the named assertion; green after the revert:
+
+- **CF-A under the #374 plain-return seed** — failed at the
+  succeeded-with-no-outcome detector:
+  `AssertionError: the faulted observation completed the step
+  (succeeded) with request=None — succeeded with no outcome (the
+  pre-#374 plain return)` (`assert 'succeeded' == 'running'`).
+- **CF-B under the #375 ambiguous-guard-disabled seed** — failed at the
+  lease-kept assertion: `AssertionError: the lost start's lease was
+  RELEASED while its own pipeline row was still AMBIGUOUS-ACTIVE on the
+  listing (the pre-#375 reducer order — the correlated terminal must not
+  release past an active ambiguous row)`.
+
+### Fixture hygiene (the ten closed-loop thread warnings)
+
+The ten `PytestUnhandledThreadExceptionWarning: … _connection_worker_thread
+/ RuntimeError: Event loop is closed` entries in the 3.13 CI log were
+GC-finalized aiosqlite connections whose engines were never disposed —
+the emission site (later tests) was never the allocation origin. The
+owners, fixed at their fixtures this issue: `tests/
+test_revision_executor_proof.py`'s `world` fixture (seven engines, one
+per test) and `tests/test_adaptive_revisions.py`'s `_DurableWorld`
+constructions (the `durable` fixture now yields with teardown, and the
+inline constructions route through it) — both dispose (`engine.dispose()`
+joins the aiosqlite worker thread) before the test's event loop closes.
+The mechanism was proven by a minimal experiment (an abandoned
+StaticPool engine leaves its worker thread alive past the loop; a
+disposed one leaves nothing). The focused CF suite escalates
+`PytestUnhandledThreadExceptionWarning` to an error for ITS tests only
+and asserts at module teardown that no aiosqlite worker thread started
+during the suite is still alive — the repeated focused run ends with
+zero leaked DB threads.
+
+### Gate plumbing (CF)
+
+The four CF classes are REQUIRED traces in `scripts/pg_gate.py`
+(`R42-05 (#378) CF-A/CF-M1/CF-B/CF-M2`, class-prefix patterns on the
+production-entry profile); `tests/test_pg_gate.py` pins that a removed
+baseline or arm refuses and that the LIVE collection carries all four.
+The CF traces write `forge.trace-record/1` records beside the MG/MX sets
+when `FORGE_TRACE_RECORD_DIR` is exported.

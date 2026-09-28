@@ -410,12 +410,20 @@ class TestExecutorInputDigest:
 
 
 class _World:
-    """A sqlite-backed FlowRun evidence store (the activation transaction)."""
+    """A sqlite-backed FlowRun evidence store (the activation transaction).
+
+    R42-05 (#378): the world's engine is tracked on the instance and
+    disposed by the ``world`` fixture — an abandoned StaticPool aiosqlite
+    connection leaves its ``_connection_worker_thread`` alive past the
+    test's event loop, and its later GC finalization is the closed-loop
+    thread warning the 3.13 CI log carried (seven of the ten).
+    """
 
     def __init__(self, evidence: dict | None = None) -> None:
         self.run_id = "2" * 32
         self._seed = evidence or {}
         self.factory = None
+        self._engine = None
 
     async def start(self, *, store_dir: str, monkeypatch) -> None:
         # Hermetic env (monkeypatch, never a bare os.environ write that
@@ -424,6 +432,7 @@ class _World:
         monkeypatch.setenv("FORGE_CHECKPOINT_STORE_DIR", store_dir)
         monkeypatch.delenv("FORGE_CHECKPOINT_DURABILITY", raising=False)
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+        self._engine = engine
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         self.factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -433,6 +442,17 @@ class _World:
             session.add(FlowRun(id=self.run_id, project_id=1, status="planning"))
             await session.commit()
         await self.set_evidence(self._seed)
+
+    async def stop(self) -> None:
+        """Teardown AT THE ALLOCATION ORIGIN: dispose the world's engine.
+
+        ``engine.dispose()`` closes the StaticPool aiosqlite connection and
+        joins its worker thread BEFORE the test's event loop closes — the
+        allocation never becomes garbage to finalize against a dead loop.
+        """
+        if self._engine is not None:
+            await self._engine.dispose()
+            self._engine = None
 
     async def set_evidence(self, evidence: dict) -> None:
         from forge.adaptive.revisions import ACTIVE_PLAN_KEY
@@ -474,7 +494,13 @@ class _World:
 async def world(tmp_path, monkeypatch):
     instance = _World()
     await instance.start(store_dir=str(tmp_path / "checkpoints"), monkeypatch=monkeypatch)
-    return instance
+    try:
+        yield instance
+    finally:
+        # R42-05 (#378): teardown awaited AT THE OWNING FIXTURE — the
+        # world's engine (and its aiosqlite worker thread) never outlives
+        # this test's event loop.
+        await instance.stop()
 
 
 class TestActivationPersistsReuseDecision:

@@ -317,6 +317,47 @@ REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
         ),
         profile="production-entry",
     ),
+    # R42-05 (#378): the composed fault traces — the completion criterion.
+    # Each baseline is paired with its seeded-regression arm (a removed arm
+    # is the same marker-removal mutation the manifest check detects):
+    # CF-A composes the #374 retryable seam with a REAL worker kill at the
+    # observation boundary (durable states + native effect counts, never
+    # exception text); CF-B composes a REAL lost create response with the
+    # #375 mixed-occupancy verdict (the lease KEEPS while the lost start's
+    # own row is ambiguous-ACTIVE; only the correlated terminal releases,
+    # exactly once; the native start count stays one at capacity one).
+    RequiredTrace(
+        label="R42-05 (#378) CF-A the killed observation trace (real process kill at the #374 seam)",
+        pattern=re.compile(
+            r"tests/production_entry/test_composed_faults\.py"
+            r"::TestCFATheKilledObservationTrace::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R42-05 (#378) CF-M1 the #374 plain-return mutation arm",
+        pattern=re.compile(
+            r"tests/production_entry/test_composed_faults\.py"
+            r"::TestCFM1ThePlainReturnDeferArm::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)",
+        pattern=re.compile(
+            r"tests/production_entry/test_composed_faults\.py"
+            r"::TestCFBTheLostStartMixedOccupancyTrace::"
+        ),
+        profile="production-entry",
+    ),
+    RequiredTrace(
+        label="R42-05 (#378) CF-M2 the #375 ambiguous-guard-disabled mutation arm",
+        pattern=re.compile(
+            r"tests/production_entry/test_composed_faults\.py"
+            r"::TestCFM2TheAmbiguousGuardDisabledArm::"
+        ),
+        profile="production-entry",
+    ),
 )
 
 #: Lab-environment-bound traces: executed wherever the local lab exists
