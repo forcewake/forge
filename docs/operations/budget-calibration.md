@@ -140,19 +140,21 @@ alters an already-approved run — `open_budget` is idempotent per run
 with limits frozen at open time, and moving a live run's limits takes
 the recorded amendment below.
 
-One named gap (pinned by
+The #379 named gap, closed (R42-16, pinned by
 `tests/test_budget_calibration.py::TestPlannerAssessment`): the GitLab
 `RunService` opens the budget row at the DEFAULT class's numbers
 BEFORE the first paid call and recompiles the selection after the plan
-— so an assessment-driven class change can leave the spec's budgets
+— so an assessment-driven class change could leave the spec's budgets
 block showing the assessment's ceilings while the durable row keeps
-the pre-plan ones. The guard enforces the ROW, which makes the
+the pre-plan ones. The guard enforces the ROW, which made the
 divergence safe in both directions (an escalation REQUEST cannot raise
 the opened ceiling; a narrowing cannot spend below the opened floor
-either), and the GitHub service additionally pins the selection's
-displayed ceilings to the opened row (its B11 block). The GitLab
-display pin is owed in `runs/service.py` — deliberately out of this
-issue's file ownership.
+either). Since R42-16 the GitLab leg pins the selection's displayed
+ceilings to the opened row exactly like the GitHub service's B11 block
+(same note, same numbers): the selection keeps the planner's class,
+its ceilings stay the opened ones, and the pin is loud in the
+selection reason — the spec's budgets block, the evidence record and
+the durable row carry ONE set of numbers on both providers.
 
 ## 5. The closing reserve, verified on the real guard
 

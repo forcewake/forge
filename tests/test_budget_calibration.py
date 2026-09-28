@@ -188,23 +188,22 @@ class TestPlannerAssessment:
         # The planner's REQUEST was honored — class trivial, reason named.
         assert selection["budget_class"] == "trivial"
         assert selection["budget_class_reason"] == "planner assessment: trivial"
-        # The gate sees the assessment's class and its configured profile.
-        assert selection["budget_ceilings"] == {
-            "max_calls": 8,
-            "max_tokens": 40000,
-            "wallclock_s": 900,
-        }
         # The ENFORCED budget row opened BEFORE the first paid call (R13 —
         # the planner itself reserves) at the DEFAULT class's numbers, and
         # the assessment never moves an opened row: a request, never a
-        # grant. The spec's budgets block follows the selection's resolved
-        # ceilings (C02) — the gate approves 40k while the durable row
-        # keeps the pre-plan 600k it opened at; the guard enforces the
-        # ROW, so the divergence can only ever be SAFE (an escalation
-        # REQUEST cannot raise the opened ceiling either). The GitHub
-        # service additionally pins the selection's displayed ceilings to
-        # the opened row (B11); the GitLab path's display pin is a named
-        # gap owed in runs/service.py — a file this issue does not touch.
+        # grant. R42-16 (#379's named pin, landed): the selection keeps
+        # the planner's class but its ceilings are PINNED to the opened
+        # row's numbers with the pin loud in the selection reason — the
+        # GitHub leg's B11 block — so the spec's budgets block, the
+        # evidence record and the durable row carry ONE set of numbers
+        # (the pre-plan standard profile), never a display the guard
+        # does not enforce.
+        assert selection["budget_ceilings"] == {
+            "max_calls": 40,
+            "max_tokens": 600000,
+            "wallclock_s": 3600,
+        }
+        assert "budget pinned to the pre-plan class" in selection["selection_reason"]
         assert run.evidence["budget"]["budget_class"] == "trivial"
         assert run.evidence["budget"]["max_tokens"] == 600000
         from sqlalchemy import select
@@ -222,7 +221,10 @@ class TestPlannerAssessment:
                 .scalars()
                 .one()
             )
-        assert spec.document["budgets"]["max_tokens"] == 40000  # the gate's approval
+        # The pin: the gate's approval, the evidence record and the
+        # enforced row agree — the divergence #379 named is gone.
+        assert spec.document["budgets"]["max_tokens"] == 600000
+        assert spec.document["budgets"]["max_calls"] == 40
         assert row.max_tokens == 600000  # the enforced row — never moved
 
     async def test_the_stub_path_records_the_absent_case(self, db, fake_gitlab):
@@ -254,7 +256,70 @@ class TestPlannerAssessment:
         selection = run.evidence["harness_selection"]
         assert selection["budget_class"] == "heavy"
         assert selection["budget_class_reason"] == "planner assessment: heavy"
-        assert selection["budget_ceilings"]["max_tokens"] == 600000
+        # R42-16: the escalation keeps the planner's class but the row's
+        # numbers — an escalation REQUEST never raises the opened ceiling
+        # and never freezes a spec the row cannot enforce.
+        assert selection["budget_ceilings"] == {
+            "max_calls": 40,
+            "max_tokens": 600000,
+            "wallclock_s": 3600,
+        }
+        assert "budget pinned to the pre-plan class" in selection["selection_reason"]
+
+    async def test_the_pin_is_one_set_of_numbers_on_every_surface(self, db, fake_gitlab):
+        """R42-16 — the #379 named gap, landed and pinned BOTH directions.
+
+        Whatever class the assessment requests, the three surfaces that
+        describe the run's budget — the frozen spec's budgets block (what
+        the gate approves), the run evidence record (what the operator
+        reads) and the durable RunBudget row (what the guard enforces) —
+        carry the SAME numbers: the ones the pre-plan row opened at. The
+        assessment names the class and the reason; it never moves a
+        number. The heavy arm is the escalation direction (the request
+        asks for MORE), the trivial arm the downgrade direction (the
+        request asks for LESS) — neither may diverge."""
+        from sqlalchemy import select
+
+        from forge.durable import RunBudget, RunSpec
+
+        settings = make_settings(FORGE_BUDGET_PROFILES=json.dumps(RECORDED_LAB_PROFILES))
+        for plan_json in (HEAVY_PLAN_JSON, TRIVIAL_PLAN_JSON):
+            _, run_id = await start_with_planner(
+                db, fake_gitlab, script=[plan_json], settings=settings
+            )
+            run = await get_run(db, run_id)
+            evidence = run.evidence["budget"]
+            async with db() as session:
+                spec = (
+                    (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                    .scalars()
+                    .one()
+                )
+                row = (
+                    (await session.execute(select(RunBudget).where(RunBudget.run_id == run_id)))
+                    .scalars()
+                    .one()
+                )
+            budgets = spec.document["budgets"]
+            assert (
+                (budgets["max_calls"], budgets["max_tokens"], budgets["wallclock_s"])
+                == (
+                    evidence["max_calls"],
+                    evidence["max_tokens"],
+                    evidence["wallclock_s"],
+                )
+                == (row.max_calls, row.max_tokens, row.wallclock_s)
+                == (
+                    40,
+                    600000,
+                    3600,
+                )
+            ), "the spec, the evidence record and the enforced row diverged"
+            # The class the planner assessed still names the selection —
+            # the pin touches the NUMBERS and the reason, never the class.
+            assert run.evidence["harness_selection"]["selection_reason"].endswith(
+                "(budget pinned to the pre-plan class — idempotent budget row)"
+            )
 
     def test_the_lenient_reader(self):
         llm = FakeLLM(script=[])

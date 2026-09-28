@@ -1253,6 +1253,235 @@ def _check_round_admission_confinement(modules: dict[str, _ModuleIndex]) -> list
     return violations
 
 
+def _module_string_constants(index: _ModuleIndex) -> dict[str, str]:
+    """The module's simple ``NAME = "literal"`` top-level assignments."""
+    constants: dict[str, str] = {}
+    for node in index.tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            constants[node.targets[0].id] = node.value.value
+    return constants
+
+
+def _assigned_name_strings(
+    index: _ModuleIndex, name: str, modules: dict[str, _ModuleIndex]
+) -> set[str] | None:
+    """The element strings of one module-level ``NAME = frozenset({...})``
+    (or ``NAME: Final[...] = frozenset({...})``) assignment — ``None``
+    when the module does not spell that name at all. Elements may be
+    string literals OR names (the authority spells the statuses through
+    constants imported from the revisions module — resolved by value
+    through the importing module's own top-level literals and one
+    ImportFrom hop into the exporting module). An element that resolves
+    to no string raises ``ValueError`` — the caller surfaces it as a
+    finding so the rule never passes vacuously over an opaque element."""
+    constants = _module_string_constants(index)
+    imported: dict[str, tuple[str, str]] = {}
+    for node in index.tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                imported[alias.asname or alias.name] = (node.module, alias.name)
+    for node in index.tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target, value = node.target, node.value
+        if (
+            isinstance(target, ast.Name)
+            and target.id == name
+            and isinstance(value, ast.Call)
+            and _dotted(value.func) == "frozenset"
+            and value.args
+            and isinstance(value.args[0], ast.Set | ast.Tuple | ast.List)
+        ):
+            elements: set[str] = set()
+            for element in value.args[0].elts:
+                if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                    elements.add(element.value)
+                elif isinstance(element, ast.Name):
+                    if element.id in constants:
+                        elements.add(constants[element.id])
+                        continue
+                    source = imported.get(element.id)
+                    resolved: str | None = None
+                    if source is not None:
+                        exporter = modules.get(source[0])
+                        if exporter is not None:
+                            resolved = _module_string_constants(exporter).get(source[1])
+                    if resolved is None:
+                        raise ValueError(f"{name}[{element.id}] resolves to no string")
+                    elements.add(resolved)
+            return elements
+    return None
+
+
+def _assigned_dict_keys(index: _ModuleIndex, name: str) -> set[str] | None:
+    """The key strings of one module-level ``NAME = {...}`` (or the
+    annotated spelling) — ``None`` when the name is not spelled."""
+    for node in index.tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target, value = node.target, node.value
+        if isinstance(target, ast.Name) and target.id == name and isinstance(value, ast.Dict):
+            return {
+                key.value
+                for key in value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+    return None
+
+
+def _journaled_outcome_words(index: _ModuleIndex) -> set[str] | None:
+    """The ``feedback.outcome`` vocabulary the journaling authority
+    writes: the string literals of every ``_outcome_of_status`` return,
+    plus every string constant inside the OUTCOME argument (positional
+    index 2 or the ``outcome=`` keyword) of each ``_journal_feedback_outcome``
+    call — an ``"exhausted" if x else "pending"`` conditional counts both
+    branches. ``None`` when the module spells neither shape (renamed)."""
+    words: set[str] = set()
+    spelled = False
+    for fn in _functions(index.tree):
+        if fn.name == "_outcome_of_status":
+            spelled = True
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
+                    if isinstance(node.value.value, str):
+                        words.add(node.value.value)
+    for call, callee in index.calls():
+        if not callee.split(".")[-1] == "_journal_feedback_outcome":
+            continue
+        spelled = True
+        outcome_arg: ast.AST | None = None
+        if len(call.args) >= 3:
+            outcome_arg = call.args[2]
+        for keyword in call.keywords:
+            if keyword.arg == "outcome":
+                outcome_arg = keyword.value
+        if outcome_arg is not None:
+            for node in ast.walk(outcome_arg):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    words.add(node.value)
+    return words if spelled else None
+
+
+def _check_command_outcome_parity(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """R42-16 (#389): the command-OUTCOME classification has ONE journaling
+    authority — the #374 typed-outcome stream in ``forge.runs.service``
+    (``_FEEDBACK_REFUSED_STATUSES`` / ``_outcome_of_status`` decide which
+    request lifecycle statuses are the REFUSED class; the
+    ``_journal_feedback_outcome`` literals are the closed vocabulary). The
+    #380 projection's request-lifecycle FALLBACK in
+    ``forge.adaptive.operator_view`` spells the same classification for the
+    no-journal window — the module landed this cycle and is change-frozen,
+    so the fallback keeps its literal spelling and this rule makes any
+    DRIFT between the two spellings a mechanical failure: a status the
+    authority journals ``refused`` but the fallback does not know would
+    project ``applied`` (complete) on the fallback path — exactly the
+    one-layer-interprets-more-strongly defect class. Unknown outcome words
+    stay representable (the projection maps an unmapped word to the honest
+    ``unknown`` axis word) — the rule pins that NO known word is ever
+    silently degraded, both directions."""
+    authority = modules.get(boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE)
+    projection = modules.get(boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE)
+    violations: list[str] = []
+    if authority is None:
+        return [
+            f"{boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE} was not "
+            "found under src/forge — the #374 outcome journaling authority "
+            "is gone; update the parity rule"
+        ]
+    if projection is None:
+        return [
+            f"{boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE} was not "
+            "found under src/forge — the command-axis projection is gone; "
+            "update the parity rule"
+        ]
+    authority_refused = None
+    projection_refused = None
+    try:
+        authority_refused = _assigned_name_strings(authority, "_FEEDBACK_REFUSED_STATUSES", modules)
+    except ValueError as exc:
+        violations.append(
+            f"{authority.module}: the refused-status set carries an element that "
+            f"resolves to no string ({exc}) — the parity rule cannot verify it; "
+            "spell the status as a resolvable constant or update the rule"
+        )
+    try:
+        projection_refused = _assigned_name_strings(
+            projection, "_REQUEST_REFUSED_STATUSES", modules
+        )
+    except ValueError as exc:
+        violations.append(
+            f"{projection.module}: the fallback refused-status set carries an "
+            f"element that resolves to no string ({exc}) — the parity rule "
+            "cannot verify it; spell the status as a resolvable constant or "
+            "update the rule"
+        )
+    if authority_refused is None:
+        violations.append(
+            f"{authority.module} no longer spells _FEEDBACK_REFUSED_STATUSES — "
+            "the journaling authority's refused classification renamed; "
+            "update the parity rule and the projection's fallback together"
+        )
+    if projection_refused is None:
+        violations.append(
+            f"{projection.module} no longer spells _REQUEST_REFUSED_STATUSES — "
+            "the command-axis fallback classification renamed; update the "
+            "parity rule and the authority's set together"
+        )
+    if authority_refused is not None and projection_refused is not None:
+        if authority_refused != projection_refused:
+            only_authority = sorted(authority_refused - projection_refused)
+            only_projection = sorted(projection_refused - authority_refused)
+            violations.append(
+                "the refused-status classification diverged between the #374 "
+                f"journaling authority ({authority.module}) and the #380 "
+                f"projection fallback ({projection.module}): "
+                f"authority-only={only_authority} "
+                f"fallback-only={only_projection} — a status only one side "
+                "knows renders refused on one path and applied (complete) on "
+                "the other; the two spellings must agree exactly (the "
+                "consolidation rung is one import onto the authority's "
+                "vocabulary, ADR-0034 §4)"
+            )
+    journaled = _journaled_outcome_words(authority)
+    mapped = _assigned_dict_keys(projection, "_JOURNAL_OUTCOME_TO_AXIS")
+    if journaled is None:
+        violations.append(
+            f"{authority.module} no longer spells the outcome journaling "
+            "shapes (_outcome_of_status / _journal_feedback_outcome) — the "
+            "#374 authority renamed; update the parity rule"
+        )
+    if mapped is None:
+        violations.append(
+            f"{projection.module} no longer spells _JOURNAL_OUTCOME_TO_AXIS — "
+            "the journal-word → axis-word mapping renamed; update the parity "
+            "rule together with the authority's vocabulary"
+        )
+    if journaled is not None and mapped is not None:
+        if journaled != mapped:
+            unmapped = sorted(journaled - mapped)
+            stale = sorted(mapped - journaled)
+            violations.append(
+                "the feedback.outcome vocabulary diverged from the projection's "
+                f"journal-word mapping: authority-writes-but-unmapped={unmapped} "
+                f"mapping-knows-but-never-journaled={stale} — an unmapped word "
+                "silently degrades to the unknown axis word instead of its "
+                "agreed class; the two spellings must agree exactly"
+            )
+    return violations
+
+
 ALL_CHECKS = (
     ("legacy lookup confinement", _check_legacy_lookup_confinement),
     ("resolve_repository monopoly", _check_resolve_repository_monopoly),
@@ -1270,6 +1499,7 @@ ALL_CHECKS = (
     ("factory branch confinement", _check_factory_branch_confinement),
     ("gateway dedup confinement", _check_gateway_dedup_confinement),
     ("round admission confinement", _check_round_admission_confinement),
+    ("command outcome parity", _check_command_outcome_parity),
 )
 
 
@@ -1776,6 +2006,151 @@ class TestIntentionalViolationTraps:
         helper."""
         assert not _check_gateway_dedup_confinement(_src_modules())
         assert not _check_round_admission_confinement(_src_modules())
+
+    def _parity_pair(self, *, authority_refused: str, projection_refused: str) -> dict:
+        """A synthetic journaling-authority + projection-fallback pair for
+        the command-outcome parity rule: the module SOURCES mirror the two
+        real spellings (module-level frozensets, the status→outcome helper,
+        the journaling call sites, the mapping)."""
+        authority = _synthetic(
+            "forge.runs.service",
+            "REQUEST_STALE_HEAD = 'stale_head'\n"
+            "REQUEST_MR_CLOSED = 'mr_closed'\n"
+            f"_FEEDBACK_REFUSED_STATUSES = frozenset({authority_refused})\n"
+            "\n"
+            "\n"
+            "def _outcome_of_status(status: str) -> str:\n"
+            '    return "refused" if status in _FEEDBACK_REFUSED_STATUSES else "completed"\n'
+            "\n"
+            "\n"
+            "async def _mark(self, run_id, note_id, status):\n"
+            "    return await self._journal_feedback_outcome(\n"
+            "        run_id, note_id, _outcome_of_status(status), status\n"
+            "    )\n"
+            "\n"
+            "\n"
+            "async def _defer(self, run_id, note_id, reason, exhausted):\n"
+            "    return await self._journal_feedback_outcome(\n"
+            '        run_id, note_id, "exhausted" if exhausted else "pending", reason\n'
+            "    )\n",
+        )
+        projection = _synthetic(
+            "forge.adaptive.operator_view",
+            f"_REQUEST_REFUSED_STATUSES: Final = frozenset({projection_refused})\n"
+            "_JOURNAL_OUTCOME_TO_AXIS: Final = "
+            '{"completed": "applied", "pending": "pending", "refused": "refused", '
+            '"exhausted": "exhausted"}\n',
+        )
+        return {**authority, **projection}
+
+    def test_a_refused_status_only_the_authority_knows_is_caught(self) -> None:
+        """The disconnect trap: the journaling authority gains a refused
+        status the projection's fallback does not spell — a request that
+        settled refused on the fallback path would render APPLIED
+        (complete). The parity rule fires."""
+        modules = self._parity_pair(
+            authority_refused="{'stale_head', 'mr_closed', 'new_typed_refusal'}",
+            projection_refused="{'stale_head', 'mr_closed'}",
+        )
+        violations = _check_command_outcome_parity(modules)
+        assert any("refused-status classification diverged" in text for text in violations)
+        assert any("new_typed_refusal" in text for text in violations)
+
+    def test_a_refused_status_only_the_projection_knows_is_caught(self) -> None:
+        """The other direction: a fallback-only status journals
+        ``completed`` at the authority while the fallback renders refused —
+        drift is a finding whichever side moved."""
+        modules = self._parity_pair(
+            authority_refused="{'stale_head'}",
+            projection_refused="{'stale_head', 'mr_closed'}",
+        )
+        violations = _check_command_outcome_parity(modules)
+        assert any("refused-status classification diverged" in text for text in violations)
+        assert any("fallback-only" in text for text in violations)
+
+    def test_a_journaled_outcome_word_the_mapping_dropped_is_caught(self) -> None:
+        """The vocabulary trap: the authority journals a word the
+        projection's mapping no longer carries — the word would silently
+        degrade to the unknown axis word instead of its agreed class."""
+        modules = self._parity_pair(
+            authority_refused="{'stale_head'}", projection_refused="{'stale_head'}"
+        )
+        # Drop "exhausted" from the mapping (the defer path still journals it).
+        modules["forge.adaptive.operator_view"] = _ModuleIndex(
+            "forge.adaptive.operator_view",
+            ast.parse(
+                "_REQUEST_REFUSED_STATUSES: Final = frozenset({'stale_head'})\n"
+                '_JOURNAL_OUTCOME_TO_AXIS: Final = {"completed": "applied", '
+                '"pending": "pending", "refused": "refused"}\n',
+            ),
+        )
+        violations = _check_command_outcome_parity(modules)
+        assert any("vocabulary diverged" in text for text in violations)
+        assert any("exhausted" in text for text in violations)
+
+    def test_a_renamed_classification_spelling_is_caught(self) -> None:
+        """The inverse-guard trap: either module renaming its
+        classification spelling hollows the parity — the rule may not pass
+        vacuously over a renamed seam."""
+        renamed_authority = self._parity_pair(
+            authority_refused="{'stale_head'}", projection_refused="{'stale_head'}"
+        )
+        renamed_authority["forge.runs.service"] = _ModuleIndex(
+            "forge.runs.service",
+            ast.parse("_OTHER_SET = frozenset({'stale_head'})\n"),
+        )
+        violations = _check_command_outcome_parity(renamed_authority)
+        assert any("no longer spells _FEEDBACK_REFUSED_STATUSES" in text for text in violations), (
+            violations
+        )
+        renamed_projection = self._parity_pair(
+            authority_refused="{'stale_head'}", projection_refused="{'stale_head'}"
+        )
+        renamed_projection["forge.adaptive.operator_view"] = _ModuleIndex(
+            "forge.adaptive.operator_view",
+            ast.parse("_OTHER_FALLBACK: Final = frozenset({'stale_head'})\n"),
+        )
+        violations = _check_command_outcome_parity(renamed_projection)
+        assert any("no longer spells _REQUEST_REFUSED_STATUSES" in text for text in violations), (
+            violations
+        )
+
+    def test_the_real_tree_is_quiet_for_the_parity_rule(self) -> None:
+        """The contrast arm: over the REAL tree the journaling authority
+        and the projection fallback agree exactly — both spellings carry
+        the same ten refused statuses and the same four-word vocabulary.
+        The extracted VALUES are pinned here so the rule can never pass
+        vacuously over two silently-empty extractions."""
+        assert not _check_command_outcome_parity(_src_modules())
+        modules = _src_modules()
+        authority = modules[boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE]
+        projection = modules[boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE]
+        refused = _assigned_name_strings(authority, "_FEEDBACK_REFUSED_STATUSES", modules)
+        assert refused == {
+            "refused_unauthorized",
+            "deleted_discussion",
+            "conflicting_correction",
+            "correction_window_closed",
+            "mr_closed",
+            "round_limit",
+            "collaboration_target_unresolved",
+            "stale_head",
+            "mr_forbidden",
+            "mr_missing",
+        }, refused
+        assert refused == _assigned_name_strings(projection, "_REQUEST_REFUSED_STATUSES", modules)
+        assert _journaled_outcome_words(authority) == {
+            "completed",
+            "pending",
+            "refused",
+            "exhausted",
+        }
+        assert _assigned_dict_keys(projection, "_JOURNAL_OUTCOME_TO_AXIS") == {
+            "completed",
+            "pending",
+            "refused",
+            "exhausted",
+        }
 
 
 # ---------------------------------------------------------------------------

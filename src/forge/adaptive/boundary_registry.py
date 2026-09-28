@@ -55,6 +55,20 @@ transaction and its integrity arbiters) — plus the three allow-sets
 DEDUP_CACHE_PROBE_MODULES / LEGACY_EVENT_DEDUP_CALLERS /
 ROUND_ADMISSION_CALLERS below.
 
+R42-16 (#389, ADR-0034's map refreshed again) added the command-outcome
+CLASSIFICATION parity rule-set below (COMMAND_OUTCOME_JOURNALING_MODULE
+/ COMMAND_OUTCOME_PROJECTION_MODULE): the #374 typed-outcome stream in
+``forge.runs.service`` is the journaling AUTHORITY (which request
+lifecycle statuses are the REFUSED outcome class, which words the
+``feedback.outcome`` stream writes), and the #380 projection's
+request-lifecycle FALLBACK in ``forge.adaptive.operator_view`` spells
+the same classification for the no-journal window. The projection
+module landed this cycle and is change-frozen, so the fallback keeps
+its literal spelling — the parity rule makes any drift between the two
+spellings a mechanical architecture failure (the consolidation
+instrument for a decision whose second site may not be edited away in
+the same change).
+
 This module is deliberately IMPORT-LIGHT (pure stdlib data, no forge
 imports): the registry must be loadable by tooling and tests without
 importing any owner.
@@ -78,6 +92,8 @@ __all__ = [
     "ATTEMPT_START_CONSTRUCTORS",
     "BRIEF_DISPATCH_VARIABLES",
     "BUDGET_AMENDMENT_APPLICANTS",
+    "COMMAND_OUTCOME_JOURNALING_MODULE",
+    "COMMAND_OUTCOME_PROJECTION_MODULE",
     "COMPOSED_DISPATCH_ENTRIES",
     "CONTINUATION_MODE_CONSTRUCTION_MODULES",
     "DEDUP_CACHE_PROBE_MODULES",
@@ -391,7 +407,15 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
         enforcement=(
             "Import-registration only: the projection composes the "
             "existing pure projections (never forks their parsing) and "
-            "the snapshot reader is the only live-surface assembler."
+            "the snapshot reader is the only live-surface assembler. "
+            "R42-16 (#389): the command-axis request-lifecycle FALLBACK "
+            "is PARITY-CONFINED to the #374 journaling authority — "
+            "COMMAND_OUTCOME_JOURNALING_MODULE's refused-status set and "
+            "journaled outcome vocabulary must equal "
+            "COMMAND_OUTCOME_PROJECTION_MODULE's fallback set and "
+            "journal-word mapping (the architectural test pins both "
+            "directions; unknown outcome words stay representable as "
+            "the honest ``unknown`` axis word)."
         ),
         negative_contract=(
             "No surface may assert a state workers did not derive, "
@@ -840,6 +864,24 @@ ROUND_ADMISSION_CALLERS: tuple[str, ...] = (
     "forge.runs.round_admission",
     "forge.runs.service",
 )
+
+#: R42-16 (#389, ADR-0034 §1 refresh) — the command-outcome
+#: classification parity modules. The #374 typed-outcome stream in the
+#: journaling module is the AUTHORITY: ``_FEEDBACK_REFUSED_STATUSES`` +
+#: ``_outcome_of_status`` decide which request lifecycle statuses are
+#: the REFUSED outcome class, and the ``_journal_feedback_outcome`` call
+#: sites' literals are the closed ``feedback.outcome`` vocabulary. The
+#: projection module's request-lifecycle FALLBACK
+#: (``_REQUEST_REFUSED_STATUSES`` + ``_JOURNAL_OUTCOME_TO_AXIS``) spells
+#: the SAME classification for the no-journal window (pre-#374 requests,
+#: an unread events authority's identity-only rows). The projection
+#: landed in #380 this cycle and is change-frozen, so the fallback keeps
+#: its literal spelling — the parity rule in
+#: ``tests/test_architecture_boundaries.py`` makes any drift between the
+#: two spellings a mechanical failure, and the follow-up rung (one
+#: import onto the authority's vocabulary) is recorded in ADR-0034 §4.
+COMMAND_OUTCOME_JOURNALING_MODULE: str = "forge.runs.service"
+COMMAND_OUTCOME_PROJECTION_MODULE: str = "forge.adaptive.operator_view"
 
 
 def boundary_by_name(name: str) -> AuthorityBoundary:

@@ -1371,6 +1371,30 @@ class RunService:
             # planner's ``last_plan`` is THIS plan) — a reused planner can
             # never leak a previous run's plan into this decision.
             harness_selection = self._compile_harness_selection()
+            # R42-16 (#379's named pin): the pre-plan budget row above froze
+            # its limits at open time (idempotent by run — an assessment is
+            # a REQUEST, never a grant). A proposal-driven class change must
+            # not freeze a spec whose ceilings the opened row cannot
+            # enforce: the selection keeps the planner's class, its
+            # ENFORCEABLE ceilings stay the opened ones, and the pin is
+            # loud — the GitHub leg's B11 block is the precedent, so the
+            # spec's budgets block, the evidence record and the durable
+            # row now carry ONE set of numbers on both providers.
+            if budget_limits is not None:
+                opened_ceilings = BudgetCeilings(
+                    max_calls=budget_limits.max_calls,
+                    max_tokens=budget_limits.max_tokens,
+                    wallclock_s=budget_limits.wallclock_s,
+                )
+                if harness_selection.budget_ceilings != opened_ceilings:
+                    harness_selection = replace(
+                        harness_selection,
+                        budget_ceilings=opened_ceilings,
+                        reason=(
+                            f"{harness_selection.reason} "
+                            "(budget pinned to the pre-plan class — idempotent budget row)"
+                        ).strip(),
+                    )
             digest = plan_digest_of(plan)
             task_digest = task_digest_of(issue_title, issue_description)
             # R07 CHECKPOINT FIRST: the paid plan result becomes durable
