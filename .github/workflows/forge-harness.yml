@@ -174,7 +174,7 @@ jobs:
           echo "forge-output/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
