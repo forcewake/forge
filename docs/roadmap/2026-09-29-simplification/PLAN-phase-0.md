@@ -411,9 +411,11 @@ def test_a_guarded_child_exits_when_its_parent_is_killed(tmp_path):
         "import orphan_guard; orphan_guard.install(0.1); "
         f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
     )
+    # The parent reaps its child, so a guard that exits early leaves no zombie
+    # behind that would still look alive to ``os.kill(pid, 0)``.
     parent_code = (
         "import subprocess, sys, time; "
-        f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}]).wait(); time.sleep(60)"
     )
     parent = subprocess.Popen([sys.executable, "-c", parent_code])
     child = None
