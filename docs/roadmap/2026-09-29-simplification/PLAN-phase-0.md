@@ -380,6 +380,7 @@ changes.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -415,9 +416,12 @@ def test_a_guarded_child_exits_when_its_parent_is_killed(tmp_path):
         f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)"
     )
     parent = subprocess.Popen([sys.executable, "-c", parent_code])
+    child = None
     try:
         _wait_for(lambda: pid_file.is_file() and pid_file.read_text(), 15, "child never started")
         child = int(pid_file.read_text())
+        time.sleep(0.3)  # several guard polls: the guard must not exit on its own
+        assert _alive(child), "the guard exited while its parent was alive"
         parent.kill()
         parent.wait(timeout=10)
         _wait_for(lambda: not _alive(child), 10, "the orphaned child outlived its parent")
@@ -425,6 +429,11 @@ def test_a_guarded_child_exits_when_its_parent_is_killed(tmp_path):
         if parent.poll() is None:
             parent.kill()
             parent.wait(timeout=10)
+        if child is not None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
