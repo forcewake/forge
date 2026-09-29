@@ -163,6 +163,51 @@ jobs:
       - name: Run tests (slow tier)
         run: uv run pytest -q -m slow
 
+  # ADR-0035 / DESIGN §4: the Invariant Suite (I1-I8) must execute, never skip.
+  invariants:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies (with the postgres extra)
+        run: uv sync --extra postgres
+
+      - name: Invariant Suite
+        run: >-
+          uv run pytest -q -m invariant --junitxml=invariants.xml
+          $(uv run python -m tests.invariants.registry)
+
+      - name: Every invariant test executed
+        run: uv run python scripts/assert_no_skips.py invariants.xml
+
   # Real-Postgres integration stage (F29): the ADR-0017 failure-injection
   # exit bar (tests/test_failure_injection.py) runs only when
   # FORGE_PG_TEST_URL is set — without the service it self-skips, so this

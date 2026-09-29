@@ -25,6 +25,15 @@ def test_ordinary_tests_have_no_tier():
     assert _hygiene.tiers_for("tests/test_ordinary.py::TestThing::test_a") == set()
 
 
+def test_registered_invariant_files_are_marked():
+    assert _hygiene.tiers_for("tests/test_publisher.py::test_a") == {"invariant"}
+    assert _hygiene.tiers_for("tests/invariants/test_i1_no_merge.py::test_x") == {"invariant"}
+    assert _hygiene.tiers_for("tests/production_entry/test_concurrent_publication.py::t") == {
+        "slow",
+        "invariant",
+    }
+
+
 @needs_pgrep
 def test_a_running_child_is_killed_and_reported_with_its_command():
     child = subprocess.Popen(SLEEPER)

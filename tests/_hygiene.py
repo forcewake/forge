@@ -9,6 +9,8 @@ import signal
 import subprocess
 from collections.abc import Collection
 
+from tests.invariants.registry import INVARIANT_FILES
+
 SLOW_PREFIXES = ("tests/production_entry/", "tests/fi_os/")
 SLOW_FILES = frozenset({"tests/test_failure_injection_os.py"})
 
@@ -19,6 +21,8 @@ def tiers_for(nodeid: str) -> set[str]:
     tiers = set()
     if path.startswith(SLOW_PREFIXES) or path in SLOW_FILES:
         tiers.add("slow")
+    if path.startswith("tests/invariants/") or path in INVARIANT_FILES:
+        tiers.add("invariant")
     return tiers
 
 
