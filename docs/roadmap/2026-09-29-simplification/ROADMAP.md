@@ -236,7 +236,7 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
     "Known gotchas" section of AGENTS.md and ADR-0028. Each entry has a
     symptom, a cause and the pinning test (file::test).
   - Write missing tests for entries without one.
-- **Done when:** every entry names an existing test.
+- **Done when:** every code-level entry names at least one existing test, and every operational entry names an existing reference.
 - **Depends:** —
 - **Size:** M
 

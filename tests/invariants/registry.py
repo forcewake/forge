@@ -80,7 +80,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         "SELF-TRIGGER",
         "Bot-authored notes are never commands",
-        ("tests/test_bot_loop.py",),
+        ("tests/test_bot_loop.py", "tests/test_github_webhook.py"),
     ),
 )
 

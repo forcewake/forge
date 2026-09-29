@@ -1,4 +1,9 @@
-"""Static existence check for pytest node ids (no collection, no imports)."""
+"""Static existence check for pytest node ids (no collection, no imports).
+
+Limits: tests inherited from a base class, or defined under ``if``, are
+reported missing (the check fails safe); a parameter id in ``[...]`` is not
+checked, only the function name.
+"""
 
 from __future__ import annotations
 
