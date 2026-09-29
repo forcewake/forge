@@ -303,15 +303,24 @@ Expected: the first push run of `ci.yml` on the branch is green (the push run on
 **Files:**
 - Modify: `tests/test_lane_install_contract.py` (the `lane_runner` fixture)
 
-The install fragment calls `python`. On hosts that ship only `python3`
-(macOS), 8 tests fail with `python: command not found`. The fixture already
-seeds a venv interpreter; expose it as `python` on the stub `PATH`.
+The install fragment calls `python`, so the tests depend on the caller's
+`PATH`:
 
-- [ ] **Step 1: Reproduce the failure (macOS; on Linux, go to Step 2)**
+- Under `uv run pytest`, `.venv/bin` is on `PATH`, so `python` is the
+  project interpreter, not the fixture's seeded one. The tests pass, but not
+  hermetically.
+- Under `.venv/bin/python -m pytest` (the AGENTS.md command) on hosts that
+  ship only `python3` (macOS), 8 tests fail with `python: command not found`.
 
-Run: `uv run pytest -q tests/test_lane_install_contract.py -k RealBash`
-Expected on macOS: `8 failed` with `bash: line 145: python: command not found`
-or `FORGE_LANE_INSTALL_IDENTITY_MISMATCH … '<not importable>'`.
+The fixture already seeds a venv interpreter; expose it as `python` on the
+stub `PATH`.
+
+- [ ] **Step 1: Reproduce the failure without the venv on `PATH` (macOS; on Linux, go to Step 2)**
+
+Run: `env -u VIRTUAL_ENV PATH=/usr/bin:/bin .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
+Expected on macOS: `8 failed, 15 passed` with
+`bash: line 145: python: command not found` or
+`FORGE_LANE_INSTALL_IDENTITY_MISMATCH … '<not importable>'`.
 
 - [ ] **Step 2: Apply the fix**
 
@@ -330,10 +339,13 @@ index 7b15d94..ff2c3b1 100644
      return {"STUB": str(stub), "PYTHON": str(python)}
 ```
 
-- [ ] **Step 3: Run the file**
+- [ ] **Step 3: Run the file, with and without the venv on `PATH`**
 
 Run: `uv run pytest -q tests/test_lane_install_contract.py`
 Expected: `61 passed`.
+
+Run: `env -u VIRTUAL_ENV PATH=/usr/bin:/bin .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
+Expected: `23 passed, 38 deselected`.
 
 - [ ] **Step 4: Commit**
 
