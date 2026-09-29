@@ -317,7 +317,9 @@ stub `PATH`.
 
 - [ ] **Step 1: Reproduce the failure without the venv on `PATH` (macOS; on Linux, go to Step 2)**
 
-Run: `env -u VIRTUAL_ENV PATH=/usr/bin:/bin .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
+The fixture needs `uv` to seed its interpreter, so `uv`'s directory stays on `PATH`.
+
+Run: `env -u VIRTUAL_ENV PATH="$(dirname "$(command -v uv)"):/usr/bin:/bin" .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
 Expected on macOS: `8 failed, 15 passed` with
 `bash: line 145: python: command not found` or
 `FORGE_LANE_INSTALL_IDENTITY_MISMATCH … '<not importable>'`.
@@ -344,7 +346,7 @@ index 7b15d94..ff2c3b1 100644
 Run: `uv run pytest -q tests/test_lane_install_contract.py`
 Expected: `61 passed`.
 
-Run: `env -u VIRTUAL_ENV PATH=/usr/bin:/bin .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
+Run: `env -u VIRTUAL_ENV PATH="$(dirname "$(command -v uv)"):/usr/bin:/bin" .venv/bin/python -m pytest -q tests/test_lane_install_contract.py -k RealBash`
 Expected: `23 passed, 38 deselected`.
 
 - [ ] **Step 4: Commit**
