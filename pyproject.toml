@@ -36,6 +36,7 @@ dev = [
     # Stubs for the `yaml` import in forge.config — keeps mypy clean without
     # per-module ignore comments (blocking typecheck, F29).
     "types-PyYAML>=6.0.12",
+    "import-linter==2.1",
 ]
 
 [project.optional-dependencies]
@@ -101,3 +102,24 @@ filterwarnings = [
     "ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning",
 ]
 testpaths = ["tests"]
+
+# ADR-0035 guardrail: mechanical import boundaries. The ignore lists record
+# existing debt and may only shrink (ROADMAP P0-07).
+[tool.importlinter]
+root_package = "forge"
+
+[[tool.importlinter.contracts]]
+name = "durable does not import the run services, adaptive, gateway or integrations"
+type = "forbidden"
+source_modules = ["forge.durable"]
+forbidden_modules = ["forge.runs", "forge.adaptive", "forge.gateway", "forge.integrations"]
+ignore_imports = [
+    "forge.durable.budgets -> forge.adaptive.usage_ingestion",
+    "forge.durable.budgets -> forge.runs.candidate",
+]
+
+[[tool.importlinter.contracts]]
+name = "harnesses do not import the provider lifecycle services"
+type = "forbidden"
+source_modules = ["forge.harnesses"]
+forbidden_modules = ["forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service"]

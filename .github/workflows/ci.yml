@@ -35,6 +35,9 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      - name: Import contracts
+        run: uv run lint-imports
+
       # R38-03 (#304): refuse database-archive artifacts (PGDMP magic, pg_dump
       # extensions, archives containing dump members) in the tracked tree
       # outside the reviewed synthetic-fixture allowlist, and validate the
