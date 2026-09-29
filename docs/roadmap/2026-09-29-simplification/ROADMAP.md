@@ -40,6 +40,8 @@ gantt
 
 ## Phase 0 — Guardrails and baseline (week 1)
 
+The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
+
 **Exit criteria:**
 
 - ADR-0035 is accepted.
@@ -110,8 +112,11 @@ gantt
 - **Work:**
   - Register the markers `slow` and `invariant`.
   - Mark `tests/production_entry/`, `tests/fi_os/` and every test that
-    spawns `redis-server` or a real worker process as `slow`.
-  - Default `addopts = -m "not slow"`.
+    spawns `redis-server` or a real worker process as `slow` (by path, in
+    a collection hook).
+  - There is no `addopts` filter, because it would deselect the explicit
+    selections of `scripts/pg_gate.py`. CI passes `-m "not slow"` to the
+    default job instead.
   - In `ci.yml`, add a job `tests-slow` on `main`, nightly and on
     `workflow_dispatch`.
   - Record timings with `--durations=30` in CI output.
@@ -126,7 +131,10 @@ gantt
   - Create `tests/invariants/` with one module per invariant (listed
     below). Each module holds new focused tests or thin wrappers that run
     the strongest existing tests; see DESIGN §4.
-  - Add a CI job `invariants` (`pytest -m invariant`), required.
+  - Add a required CI job `invariants` with Postgres and Redis services.
+    It selects the registered files, `pytest -m invariant $(python -m
+    tests.invariants.registry)`, and fails on any skip
+    (`scripts/assert_no_skips.py`).
 
   | Module | Content |
   | --- | --- |
@@ -207,17 +215,19 @@ gantt
     - default-suite duration from JUnit XML.
   - It writes `docs/roadmap/2026-09-29-simplification/metrics.md` (table
     with a date column appended).
-- **Done when:** running it reproduces the §2 baseline within ±1%, and it
-  runs in the weekly scheduled workflow.
+- **Done when:** running it reproduces the §2 baseline within ±1%, and a
+  snapshot is recorded with `--write` at every phase gate.
 - **Depends:** —
 - **Size:** M
 
 ### P0-11 Optional provider settings and a doctor that never raises
 - **Goal:** a fresh clone gets a report, not a traceback.
 - **Work:**
-  - `FORGE_PROVIDERS` (default: the providers that have credentials set).
+  - Add `FORGE_GITLAB_ENABLED` (default `true`), consistent with the
+    existing `FORGE_GITHUB_ENABLED` and `FORGE_AZDO_ENABLED` flags.
   - `GITLAB_URL`, `GITLAB_TOKEN` and `GITLAB_WEBHOOK_SECRET` become
-    optional and are validated only when `gitlab` is enabled.
+    optional and are validated only when GitLab is enabled. GitLab ingress
+    fails closed (503) when its secret is empty.
   - `doctor.main` catches `ValidationError` and prints FAIL lines that
     name the missing variables. It exits 1 and never prints a traceback.
 - **Done when:** in an empty environment, `python -m forge.doctor` prints
@@ -239,7 +249,7 @@ gantt
 ### P0-13 Test disposition ledger
 - **Goal:** every test file has a fate before code is deleted.
 - **Work:**
-  - `scripts/test_ledger.py` generates `test-ledger.csv` with columns
+  - `scripts/build_test_ledger.py` generates `test-ledger.csv` with columns
     `file, tests, loc, imports_runtime, imports_tests_only, area,
     disposition, phase, note`.
   - `disposition` ∈ {keep, port-engine, port-adapter, drop-with-code,

@@ -670,8 +670,9 @@ moves.
 
 ### 6.11 Configuration, doctor, observability
 
-- **Settings.** Provider sections are optional. `FORGE_PROVIDERS=github,gitlab`
-  decides which sections are validated. New settings:
+- **Settings.** A provider's section is validated only when its
+  `FORGE_<PROVIDER>_ENABLED` flag is on. `FORGE_GITLAB_ENABLED` joins the
+  existing GitHub and Azure flags in Phase 0. New settings:
   - `FORGE_PUBLIC_URL`;
   - `FORGE_GATEWAY_URL` and `FORGE_GATEWAY_ADMIN_KEY`;
   - `FORGE_GATEWAY_SPEND_FLUSH_SECONDS`;
