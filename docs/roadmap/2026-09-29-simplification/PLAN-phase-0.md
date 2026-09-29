@@ -3680,6 +3680,34 @@ def test_curated_columns_survive_regeneration(tmp_path):
         "P3",
         "owner decision",
     )
+
+
+def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
+    tree = {
+        **TREE,
+        "pyproject.toml": '[project]\nname = "x"\n[project.scripts]\nforge = "forge.cli:main"\n',
+        "src/forge/doctor.py": "X = 1\n",
+        "src/forge/cli.py": "Y = 1\n",
+        "src/forge/pinned.py": "Z = 1\n",
+        "tests/test_doctor.py": "from forge import doctor\n",
+        "tests/test_cli.py": "from forge import cli\n",
+        "tests/test_pinned.py": "from forge import pinned\n",
+        "tests/invariants/registry.py": 'EVIDENCE = frozenset(("tests/test_only.py",))\n',
+        "docs/reference/edge-cases.md": "| EC-01 | a | b | c | `tests/test_pinned.py::test_x` |\n",
+    }
+    root = write_tree(tmp_path, tree)
+    (root / ledger.LEDGER).parent.mkdir(parents=True)
+    assert ledger.main(["--root", str(root)]) == 0
+    rows = _rows(root)
+    names = (
+        "tests/test_doctor.py",
+        "tests/test_cli.py",
+        "tests/test_only.py",
+        "tests/test_pinned.py",
+    )
+    assert {name: rows[name]["disposition"] for name in names} == dict.fromkeys(names, "keep")
+    assert rows["tests/test_only.py"]["note"] == "invariant evidence"
+    assert rows["tests/test_pinned.py"]["note"] == "edge-case pin"
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -3696,6 +3724,11 @@ One row per test file under ``tests/``. The measured columns are recomputed
 on every run; the curated columns (``disposition``, ``phase``, ``note``)
 are preserved for files already in the ledger.
 
+The default disposition never drops a file that is invariant evidence
+(``tests/invariants/registry.py``) or an edge-case pin
+(``docs/reference/edge-cases.md``), nor a test of tooling that stays
+(``forge.doctor`` and the ``[project.scripts]`` commands).
+
 Usage::
 
     uv run python scripts/build_test_ledger.py      # writes docs/roadmap/2026-09-29-simplification/test-ledger.csv
@@ -3706,6 +3739,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -3726,10 +3760,14 @@ FIELDS = (
 SERVICES = ("forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service")
 PROVIDER_CLIENTS = ("forge.gitlab", "forge.integrations", "forge.repository.writer")
 CURATED = ("disposition", "phase", "note")
+KEPT_TOOLING_ROOTS = ("forge.doctor",)
+INVARIANT_REGISTRY = Path("tests/invariants/registry.py")
+EDGE_CASE_REGISTER = Path("docs/reference/edge-cases.md")
+PINNED_FILE = re.compile(r"`(tests/[^`:]+\.py)(?:::[^`]*)?`")
 
 
 def count_tests(path: Path) -> int:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return sum(
         1
         for node in ast.walk(tree)
@@ -3745,13 +3783,31 @@ def area(rel: str) -> str:
     return stem.split("_", 1)[0]
 
 
-def default_disposition(rel: str, imported: set[str], reach: cb.Reachability) -> tuple[str, str]:
+def protected_files(root: Path) -> dict[str, str]:
+    """Test files that are invariant evidence or edge-case pins, with the reason."""
+    found: dict[str, str] = {}
+    registry = root / INVARIANT_REGISTRY
+    if registry.is_file():
+        tree = ast.parse(registry.read_text(encoding="utf-8"), filename=str(registry))
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            for node in ast.walk(call):
+                value = node.value if isinstance(node, ast.Constant) else None
+                if isinstance(value, str) and value.startswith("tests/") and value.endswith(".py"):
+                    found.setdefault(value, "invariant evidence")
+    register = root / EDGE_CASE_REGISTER
+    if register.is_file():
+        for rel in PINNED_FILE.findall(register.read_text(encoding="utf-8")):
+            found.setdefault(rel, "edge-case pin")
+    return found
+
+
+def default_disposition(rel: str, imported: set[str], droppable: set[str]) -> tuple[str, str]:
     """A starting point for the owner to curate — never the final word.
 
     ``imported`` holds leaf modules only (packages are excluded), so a test
-    that imports nothing but test-only or tooling-only code is recognised.
+    that imports nothing but code that is going away is recognised.
     """
-    if imported and imported <= (reach.tests_only | reach.tooling_only):
+    if imported and imported <= droppable:
         return "drop-with-code", "P1"
     if any(name.startswith(SERVICES) for name in imported) or "production_entry" in rel:
         return "port-engine", "P3"
@@ -3763,6 +3819,10 @@ def default_disposition(rel: str, imported: set[str], reach: cb.Reachability) ->
 def build_rows(root: Path, previous: dict[str, dict[str, str]]) -> list[dict[str, str]]:
     modules = cb.discover_modules(root)
     reach = cb.classify(root, modules)
+    kept_roots = {*KEPT_TOOLING_ROOTS, *cb.console_script_modules(root)}
+    kept = cb.reachable(kept_roots, cb.import_graph(modules))
+    droppable = reach.tests_only | (reach.tooling_only - kept)
+    protected = protected_files(root)
     rows = []
     for path in sorted((root / "tests").rglob("test*.py")):
         if "__pycache__" in path.parts:
@@ -3773,7 +3833,10 @@ def build_rows(root: Path, previous: dict[str, dict[str, str]]) -> list[dict[str
             for m in cb.imports_of(path, modules)
             if m.startswith("forge") and modules[m].path.name != "__init__.py"
         }
-        disposition, phase = default_disposition(rel, imported, reach)
+        disposition, phase = default_disposition(rel, imported, droppable)
+        note = protected.get(rel, "")
+        if note and disposition.startswith("drop"):
+            disposition, phase = "keep", "-"
         row = {
             "file": rel,
             "tests": str(count_tests(path)),
@@ -3783,7 +3846,7 @@ def build_rows(root: Path, previous: dict[str, dict[str, str]]) -> list[dict[str
             "area": area(rel),
             "disposition": disposition,
             "phase": phase,
-            "note": "",
+            "note": note,
         }
         if rel in previous:
             row.update({key: previous[rel][key] for key in CURATED})
@@ -3819,14 +3882,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests again**
 
 Run: `uv run pytest -q tests/test_script_build_test_ledger.py`
-Expected: `2 passed`.
+Expected: `3 passed`.
 
 - [ ] **Step 5: Generate the ledger**
 
 Run: `uv run python scripts/build_test_ledger.py`
-Expected: about `test-ledger: 300 files → … {'keep': ~182,
-'port-adapter': 45, 'port-engine': 49, 'drop-with-code': 24}`. The exact
-counts depend on the tests added by Tasks 1–13.
+Expected: about `test-ledger: 303 files → … {'port-adapter': 45, 'keep': ~186,
+'port-engine': 49, 'drop-with-code': 23}`. Invariant evidence and edge-case
+pins carry a note and are never `drop-*` by default. The exact counts depend
+on the tests added by Tasks 1–13.
 
 - [ ] **Step 6: Owner review (human step)**
 
