@@ -661,6 +661,9 @@ def lane_runner(tmp_path_factory):
     (stub / "pip").write_text("#!/bin/sh\nexit 0\n")
     (stub / "pip").chmod((stub / "pip").stat().st_mode | stat.S_IEXEC)
     python = root / "venv" / "bin" / "python"
+    # The fragment calls ``python``; hosts that only ship ``python3`` (macOS)
+    # must still resolve it — to the seeded interpreter, never the host's.
+    (stub / "python").symlink_to(python)
     return {"STUB": str(stub), "PYTHON": str(python)}
 
 
