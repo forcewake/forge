@@ -1474,11 +1474,12 @@ git commit -m "test: the Invariant Suite I1-I8 as a required CI job that may not
 
 **Files:**
 - Create: `tests/test_settings_gitlab_optional.py`, `tests/test_doctor_settings.py`
-- Modify: `src/forge/config.py`, `src/forge/gateway/validator.py`, `src/forge/doctor.py`, `.env.example`
+- Modify: `src/forge/config.py`, `src/forge/gateway/validator.py`, `src/forge/gateway/router.py`, `src/forge/doctor.py`, `.env.example`, `docs/getting-started/github.md`
 
 The flag follows the existing `FORGE_GITHUB_ENABLED` and
-`FORGE_AZDO_ENABLED` convention. It defaults to `true`, so existing
-deployments behave exactly as before.
+`FORGE_AZDO_ENABLED` convention: it defaults to `true`, so existing
+deployments behave exactly as before, and when it is off the GitLab webhook
+answers 503 even if a secret is still configured.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1489,10 +1490,13 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from forge.config import Settings
+from forge.database import reset_engine
 from forge.gateway.validator import validate_webhook_token
+from forge.main import create_app
 
 GITLAB_ENV = ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGE_GITLAB_ENABLED")
 
@@ -1536,6 +1540,31 @@ def test_configured_gitlab_ingress_still_checks_the_token():
     with pytest.raises(HTTPException) as caught:
         validate_webhook_token("s3cret", "wrong")
     assert caught.value.status_code == 401
+
+
+def test_settings_errors_never_echo_secret_values(clean_env):
+    with pytest.raises(ValidationError) as caught:
+        Settings(GITLAB_URL="https://gitlab.test", GITLAB_TOKEN="glpat-do-not-print")
+    assert "glpat-do-not-print" not in str(caught.value)
+
+
+async def test_disabled_gitlab_ingress_refuses_even_a_matching_token(test_settings):
+    settings = test_settings.model_copy(update={"FORGE_GITLAB_ENABLED": False})
+    token = settings.GITLAB_WEBHOOK_SECRET.get_secret_value()
+    reset_engine()
+    app = create_app(settings=settings)
+    try:
+        async with app.router.lifespan_context(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/webhook",
+                    headers={"X-Gitlab-Token": token, "X-Gitlab-Event": "Note Hook"},
+                    json={},
+                )
+    finally:
+        reset_engine()
+    assert response.status_code == 503
 ```
 
 ```python
@@ -1573,12 +1602,20 @@ def test_missing_settings_in_json(empty_env, capsys):
     assert report["status"] == "failed"
     assert report["checks"][0]["name"] == "settings"
     assert "GITLAB_URL" in report["checks"][0]["detail"]
+    assert not report["checks"][0]["detail"].startswith("Value error")
 
 
 async def test_disabled_gitlab_is_a_warning_not_a_network_call(empty_env):
     empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
     results = await doctor.check_gitlab_identity(Settings())
     assert [(r.name, r.status) for r in results] == [("gitlab.token", doctor.WARN)]
+
+
+async def test_project_checks_refuse_when_gitlab_is_disabled(empty_env):
+    empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
+    results = await doctor.check_gitlab_project(Settings(), 68)
+    assert [(r.name, r.status) for r in results] == [("project", doctor.FAIL)]
+    assert "FORGE_GITLAB_ENABLED=false" in results[0].detail
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -1588,15 +1625,16 @@ Expected failures:
 - the settings tests: the validation message differs, and
   `FORGE_GITLAB_ENABLED` does not exist yet;
 - the validator test: `validate_webhook_token("", "")` returns instead of
-  raising 503;
+  raising 503, and a disabled GitLab still accepts a matching token (202);
+- the secret-echo test: the validation error contains the token;
 - the doctor tests: the `ValidationError` traceback propagates, and
-  `check_gitlab_identity` does not exist.
+  `check_gitlab_identity` and `check_gitlab_project` do not exist.
 
 - [ ] **Step 3: Make GitLab settings optional behind the flag**
 
 ```diff
 diff --git a/src/forge/config.py b/src/forge/config.py
-index 08693c6..436ca03 100644
+index 08693c6..01f041b 100644
 --- a/src/forge/config.py
 +++ b/src/forge/config.py
 @@ -6,7 +6,7 @@ from pathlib import Path
@@ -1608,14 +1646,21 @@ index 08693c6..436ca03 100644
  from pydantic_settings import BaseSettings, SettingsConfigDict
  
  from forge.repository.changeset import BUILTIN_WRITE_PROFILES
-@@ -17,12 +17,32 @@ class Settings(BaseSettings):
+@@ -15,14 +15,37 @@ from forge.repository.changeset import BUILTIN_WRITE_PROFILES
+ class Settings(BaseSettings):
+     """Core settings loaded from environment / .env file."""
  
-     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
- 
+-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+-
 -    # GitLab connection
 -    GITLAB_URL: str
 -    GITLAB_TOKEN: SecretStr
 -    GITLAB_WEBHOOK_SECRET: SecretStr
++    # hide_input_in_errors: a validation error must never echo a token.
++    model_config = SettingsConfigDict(
++        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
++    )
++
 +    # GitLab connection. Required while FORGE_GITLAB_ENABLED is true (the
 +    # default); a GitHub-only deployment sets FORGE_GITLAB_ENABLED=false.
 +    FORGE_GITLAB_ENABLED: bool = True
@@ -1647,11 +1692,26 @@ index 08693c6..436ca03 100644
  
 ```
 
-- [ ] **Step 4: Fail closed when GitLab ingress is unconfigured**
+- [ ] **Step 4: Fail closed when GitLab ingress is off or unconfigured**
 
 ```diff
+diff --git a/src/forge/gateway/router.py b/src/forge/gateway/router.py
+index dbb3929..16ab557 100644
+--- a/src/forge/gateway/router.py
++++ b/src/forge/gateway/router.py
+@@ -774,8 +774,9 @@ async def webhook(
+ ) -> dict[str, Any]:
+     """Accept GitLab webhook events."""
+     settings = request.app.state.settings
++    gitlab_enabled = getattr(settings, "FORGE_GITLAB_ENABLED", True)
+     validate_webhook_token(
+-        expected_secret=settings.GITLAB_WEBHOOK_SECRET.get_secret_value(),
++        expected_secret=settings.GITLAB_WEBHOOK_SECRET.get_secret_value() if gitlab_enabled else "",
+         x_gitlab_token=x_gitlab_token,
+     )
+ 
 diff --git a/src/forge/gateway/validator.py b/src/forge/gateway/validator.py
-index 2d184a7..e4f5701 100644
+index 2d184a7..4eb1492 100644
 --- a/src/forge/gateway/validator.py
 +++ b/src/forge/gateway/validator.py
 @@ -18,7 +18,9 @@ def validate_webhook_token(
@@ -1659,9 +1719,9 @@ index 2d184a7..e4f5701 100644
      x_gitlab_token: str | None = Header(None),
  ) -> str:
 -    """Raise 401 if the token is missing or does not match."""
-+    """Raise 503 if GitLab ingress is unconfigured, 401 if the token is missing or wrong."""
++    """Raise 503 if GitLab ingress is off or unconfigured, 401 if the token is missing or wrong."""
 +    if not expected_secret:
-+        raise HTTPException(status_code=503, detail="GitLab ingress is not configured")
++        raise HTTPException(status_code=503, detail="GitLab ingress is disabled or not configured")
      if x_gitlab_token is None:
          raise HTTPException(status_code=401, detail="Missing X-Gitlab-Token header")
      if not hmac.compare_digest(x_gitlab_token, expected_secret):
@@ -1671,7 +1731,7 @@ index 2d184a7..e4f5701 100644
 
 ```diff
 diff --git a/src/forge/doctor.py b/src/forge/doctor.py
-index 87569ca..c9e9736 100644
+index 87569ca..a27ee5f 100644
 --- a/src/forge/doctor.py
 +++ b/src/forge/doctor.py
 @@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass
@@ -1682,7 +1742,7 @@ index 87569ca..c9e9736 100644
  
  from forge.config import Settings
  from forge.gitlab.client import GitLabClient, GitLabAPIError
-@@ -97,6 +98,23 @@ async def check_bot_token(settings: Settings) -> CheckResult:
+@@ -97,6 +98,30 @@ async def check_bot_token(settings: Settings) -> CheckResult:
          return _result("forge.bot_token", False, "", _short(exc))
  
  
@@ -1699,14 +1759,21 @@ index 87569ca..c9e9736 100644
 +    for error in exc.errors():
 +        location = ".".join(str(part) for part in error["loc"])
 +        name = f"settings.{location}" if location else "settings"
-+        results.append(CheckResult(name, FAIL, error["msg"]))
++        results.append(CheckResult(name, FAIL, error["msg"].removeprefix("Value error, ")))
 +    return results
++
++
++async def check_gitlab_project(settings: Settings, project_id: int) -> list[CheckResult]:
++    """Target-project checks, or one failure when GitLab is disabled."""
++    if not getattr(settings, "FORGE_GITLAB_ENABLED", True):
++        return [CheckResult("project", FAIL, "--project needs GitLab; FORGE_GITLAB_ENABLED=false")]
++    return await check_project(settings, project_id)
 +
 +
  async def check_redis(settings: Settings) -> CheckResult:
      from forge.utils.redis_client import RedisManager
  
-@@ -1028,8 +1046,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
+@@ -1028,8 +1053,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
      results = [
          CheckResult("python.version", PASS, f"{sys.version_info.major}.{sys.version_info.minor}")
      ]
@@ -1716,7 +1783,16 @@ index 87569ca..c9e9736 100644
      results.append(await check_redis(settings))
      results.append(await check_database(settings))
      results.append(await check_litellm(settings))
-@@ -1100,8 +1117,12 @@ def main(argv: list[str] | None = None) -> int:
+@@ -1043,7 +1067,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
+     # earlier ordering guarantees stay untouched.
+     results.extend(await check_checkpoint_authority(settings))
+     if project_id is not None:
+-        results.extend(await check_project(settings, project_id))
++        results.extend(await check_gitlab_project(settings, project_id))
+     # NXT-02: offline honesty check, appended last so existing ordering
+     # guarantees (python.version, gitlab.token first) are untouched.
+     results.append(check_capabilities())
+@@ -1100,8 +1124,12 @@ def main(argv: list[str] | None = None) -> int:
          # Offline mode: the support matrix owns its own exit verdict.
          return _support_matrix_mode(args.json)
  
@@ -1740,26 +1816,38 @@ index 87569ca..c9e9736 100644
 
 ```diff
 diff --git a/.env.example b/.env.example
-index 8fd5fb1..f97c03a 100644
+index 8fd5fb1..d72afa7 100644
 --- a/.env.example
 +++ b/.env.example
 @@ -1,4 +1,7 @@
  # GitLab
-+# GitLab is enabled by default; a GitHub-only deployment sets FORGE_GITLAB_ENABLED=false
-+# and may then leave the three GITLAB_* values unset.
++# GitLab is enabled by default. A GitHub-only deployment sets FORGE_GITLAB_ENABLED=false
++# and deletes or blanks the three GITLAB_* values; GitLab webhooks then get 503.
 +FORGE_GITLAB_ENABLED=true
  GITLAB_URL=https://gitlab.example.com
  GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
  GITLAB_WEBHOOK_SECRET=change-me-to-a-random-string
+diff --git a/docs/getting-started/github.md b/docs/getting-started/github.md
+index ab96cf9..91c29c6 100644
+--- a/docs/getting-started/github.md
++++ b/docs/getting-started/github.md
+@@ -57,6 +57,7 @@ Add to forge's environment (`.env` / container env):
+ 
+ ```bash
+ FORGE_GITHUB_ENABLED=true
++FORGE_GITLAB_ENABLED=false                       # GitHub-only: no GITLAB_* settings needed
+ FORGE_GITHUB_WEBHOOK_SECRET=<same value as the App webhook secret>
+ FORGE_GITHUB_APP_ID=<client id or app id>
+ FORGE_GITHUB_PRIVATE_KEY=/path/to/app.pem        # PEM text or a file path
 ```
 
 - [ ] **Step 7: Run the new and the neighbouring tests**
 
 Run: `uv run pytest -q tests/test_settings_gitlab_optional.py tests/test_doctor_settings.py tests/test_doctor.py tests/test_bot_loop.py`
-Expected: `40 passed`.
+Expected: `43 passed`.
 
 Run: `cd "$(mktemp -d)" && uv run --project "$OLDPWD" python -m forge.doctor; cd "$OLDPWD"`
-Expected: `FAIL settings  Value error, GITLAB_URL, GITLAB_TOKEN, GITLAB_WEBHOOK_SECRET must be set while FORGE_GITLAB_ENABLED is true`
+Expected: `FAIL settings  GITLAB_URL, GITLAB_TOKEN, GITLAB_WEBHOOK_SECRET must be set while FORGE_GITLAB_ENABLED is true`
 and exit code 1, with no traceback.
 
 - [ ] **Step 8: Typecheck the blocking set**
@@ -1771,7 +1859,7 @@ unchanged (`str` and `SecretStr`).
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/forge/config.py src/forge/gateway/validator.py src/forge/doctor.py .env.example tests/test_settings_gitlab_optional.py tests/test_doctor_settings.py
+git add src/forge/config.py src/forge/gateway/validator.py src/forge/gateway/router.py src/forge/doctor.py .env.example docs/getting-started/github.md tests/test_settings_gitlab_optional.py tests/test_doctor_settings.py
 git commit -m "feat(config): GitLab settings optional behind FORGE_GITLAB_ENABLED; doctor never raises" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
