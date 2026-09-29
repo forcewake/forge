@@ -313,7 +313,9 @@ The install fragment calls `python`, so the tests depend on the caller's
   ship only `python3` (macOS), 8 tests fail with `python: command not found`.
 
 The fixture already seeds a venv interpreter; expose it as `python` on the
-stub `PATH`.
+stub `PATH` through a small exec wrapper. A symlink would not work: Python
+finds the venv's `pyvenv.cfg` from the path it is started by, so a symlinked
+`python` runs the base interpreter, with host and user site-packages.
 
 - [ ] **Step 1: Reproduce the failure without the venv on `PATH` (macOS; on Linux, go to Step 2)**
 
@@ -328,16 +330,18 @@ Expected on macOS: `8 failed, 15 passed` with
 
 ```diff
 diff --git a/tests/test_lane_install_contract.py b/tests/test_lane_install_contract.py
-index 7b15d94..ff2c3b1 100644
+index 7b15d94..ad6708c 100644
 --- a/tests/test_lane_install_contract.py
 +++ b/tests/test_lane_install_contract.py
-@@ -661,6 +661,9 @@ def lane_runner(tmp_path_factory):
+@@ -661,6 +661,11 @@ def lane_runner(tmp_path_factory):
      (stub / "pip").write_text("#!/bin/sh\nexit 0\n")
      (stub / "pip").chmod((stub / "pip").stat().st_mode | stat.S_IEXEC)
      python = root / "venv" / "bin" / "python"
 +    # The fragment calls ``python``; hosts that only ship ``python3`` (macOS)
-+    # must still resolve it — to the seeded interpreter, never the host's.
-+    (stub / "python").symlink_to(python)
++    # must still resolve it — to the seeded venv, never the host's. A wrapper,
++    # not a symlink: Python finds the venv's pyvenv.cfg from the path it runs.
++    (stub / "python").write_text(f'#!/bin/sh\nexec "{python}" "$@"\n')
++    (stub / "python").chmod((stub / "python").stat().st_mode | stat.S_IEXEC)
      return {"STUB": str(stub), "PYTHON": str(python)}
 ```
 
