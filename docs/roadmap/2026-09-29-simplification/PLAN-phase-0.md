@@ -3143,12 +3143,14 @@ git commit -m "tools: size ratchet — oversized code may only shrink" -m "Co-au
 ### Task 11: Diff coverage (ROADMAP P0-08, part 2)
 
 **Files:**
-- Modify: `pyproject.toml`, `uv.lock`, `.github/workflows/ci.yml` (new `coverage` job)
+- Modify: `pyproject.toml`, `uv.lock`, `.gitignore`, `.github/workflows/ci.yml` (new `coverage` job)
 
 - [ ] **Step 1: Add the tools**
 
 Run: `uv add --dev "pytest-cov==7.1.0" "diff-cover==10.6.0"`
 Expected: both appear under `[dependency-groups] dev`.
+
+Add `coverage.xml` to `.gitignore`, next to the existing `.coverage` entry.
 
 - [ ] **Step 2: Add the CI job**
 
@@ -3171,7 +3173,7 @@ Add before the `integration` job:
         run: uv sync
 
       - name: Default tier with coverage
-        run: uv run pytest -q -m "not slow" --cov=forge --cov-report=xml
+        run: uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml
 
       - name: Diff coverage (at least 85% of changed lines)
         run: >-
@@ -3181,14 +3183,17 @@ Add before the `integration` job:
 
 - [ ] **Step 3: Try it locally on this branch**
 
-Run: `uv run pytest -q -m "not slow" --cov=forge --cov-report=xml && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=85`
-Expected: diff-cover reports the Task 7 lines in `config.py`, `validator.py`,
-`router.py` and `doctor.py` as covered, at or above 85%. Do not commit `coverage.xml`.
+Run: `uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=85`
+Expected: diff-cover lists the Phase 0 changes so far (the Task 7 lines in
+`config.py`, `validator.py`, `router.py` and `doctor.py`, and the new
+scripts) at or above 85% in total. `--cov=scripts` is there because the
+program's own scripts are the most-changed code in Phase 0. Do not commit
+`coverage.xml`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add pyproject.toml uv.lock .github/workflows/ci.yml
+git add pyproject.toml uv.lock .gitignore .github/workflows/ci.yml
 git commit -m "ci: diff coverage of at least 85% on changed lines" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
