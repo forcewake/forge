@@ -245,12 +245,12 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 - **Work:**
   - `scripts/build_test_ledger.py` generates `test-ledger.csv` with columns
     `file, tests, loc, imports_runtime, imports_tests_only, deleted_by,
-    area, disposition, phase, note`.
+    protected, review, area, disposition, phase, note`.
   - `disposition` ∈ {keep, port-engine, port-adapter, drop-with-code,
     drop-obsolete} is pre-filled by rule and then curated.
 - **Done when:** all test files (`tests/**/test*.py`, nested suites included)
   have a disposition, and the owner has reviewed every `drop-*` row and every
-  row noted "partly deleted: review".
+  row with a `review` value.
 - **Depends:** P0-10
 - **Size:** M
 
@@ -371,10 +371,13 @@ run last so that they do not churn code about to be deleted.
     `delivery_economics`, `research_cohort`, `research_cohort_live`,
     `pilot`, `pilot_ladder`, `checkpoint_migration`,
     `steering_causality`, `discovery_profile`, `discovery_authority` and
-    `support_matrix`. Delete their scripts: `run_*`, `build_*`,
+    `support_matrix`. Delete their scripts: `run_*`, `build_*` (except
+    `build_test_ledger.py`),
     `freeze_supported_profile.py`, `generate_template_pins.py`,
     `gate_conformance.py`, `pg_gate.py` (only if superseded by P1-08),
-    `qualify_gitlab_ce.py` and `cold_install_*`.
+    `qualify_gitlab_ce.py` and `cold_install_*`. The simplification
+    program's own scripts (`_codebase.py`, `metrics.py`, `ratchet.py`,
+    `prose_lint.py`, `assert_no_skips.py`, `build_test_ledger.py`) stay.
   - Move the surviving dev and lab scripts (`align_lab.py`,
     `inventory_lab.py`, `setup_gitlab.py`, `driver_live_smoke.py`,
     `gh_live_smoke.py`, `canary_smoke.py`) to `tools/`, which is outside

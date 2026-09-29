@@ -151,3 +151,22 @@ def test_names_re_exported_by_a_package_resolve_to_their_module(tmp_path):
     modules = cb.discover_modules(root)
     imported = cb.imports_of(root / "tests/test_x.py", modules)
     assert {"forge.runs", "forge.runs.service", "forge.runs.spec"} <= imported
+
+
+def test_the_reexport_table_follows_a_rediscovered_tree(tmp_path):
+    root = write_tree(
+        tmp_path,
+        {
+            "src/forge/__init__.py": "",
+            "src/forge/runs/__init__.py": "from forge.runs.service import RunService\n",
+            "src/forge/runs/service.py": "class RunService: ...\n",
+            "tests/test_x.py": "from forge.runs import RunService\n",
+        },
+    )
+    assert "forge.runs.service" in cb.imports_of(
+        root / "tests/test_x.py", cb.discover_modules(root)
+    )
+    (root / "src/forge/runs/service.py").unlink()
+    (root / "src/forge/runs/__init__.py").write_text("class RunService: ...\n")
+    modules = cb.discover_modules(root)
+    assert "forge.runs.service" not in cb.imports_of(root / "tests/test_x.py", modules)

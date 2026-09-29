@@ -37,6 +37,7 @@ REVIEW_REF = re.compile(
     r"|\b[Rr]eview\s+`?[0-9a-f]{7,40}\b"
 )
 ADR_REF = re.compile(r"\bADR-\d{4}\b")
+_REEXPORTS: dict[Path, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ def module_name(path: Path, src_dir: Path) -> str:
 
 
 def discover_modules(root: Path) -> dict[str, Module]:
+    _REEXPORTS.clear()  # the re-export table belongs to one discovered tree
     modules: dict[str, Module] = {}
     for src_dir in source_dirs(root):
         for path in iter_python_files(src_dir):
@@ -153,9 +155,6 @@ def _from_target(node: ast.ImportFrom, current: str | None, is_package: bool) ->
     return ".".join([*base, node.module] if node.module else base)
 
 
-_REEXPORTS: dict[Path, dict[str, str]] = {}
-
-
 def reexports(package: Module, modules: dict[str, Module]) -> dict[str, str]:
     """Names a package ``__init__`` imports at top level, mapped to their module."""
     if package.path not in _REEXPORTS:
@@ -192,7 +191,8 @@ def imports_of(path: Path, modules: dict[str, Module], current: str | None = Non
                     continue
                 found.add(hit)
                 if hit == full and modules[hit].path.name == "__init__.py":
-                    if (source := reexports(modules[hit], modules).get(alias.name)) is not None:
+                    source = reexports(modules[hit], modules).get(alias.name)
+                    if source is not None and source in modules:
                         found.add(source)
         elif isinstance(node, ast.Call) and node.args:
             func = node.func

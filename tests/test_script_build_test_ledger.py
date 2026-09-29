@@ -65,7 +65,7 @@ def test_planned_deletions_drive_drop_phase_and_deleted_by(tmp_path):
     )
     mixed = rows["tests/test_mixed.py"]
     assert (mixed["disposition"], mixed["deleted_by"]) == ("keep", "P1-11")
-    assert mixed["note"] == "partly deleted: review"
+    assert (mixed["review"], mixed["note"]) == ("partly deleted", "")
 
 
 def test_port_rules(tmp_path):
@@ -103,6 +103,7 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
         "tests/test_cli.py": "from forge import cli\n",
         "tests/test_pinned.py": "from forge import pinned\n",
         "tests/invariants/registry.py": 'INVARIANT_FILES = frozenset({"tests/test_only.py"})\n',
+        "tests/invariants/test_suite.py": "from forge import only_tests\n",
         "docs/reference/edge-cases.md": "| EC-01 | a | b | c | `tests/test_pinned.py::test_x` |\n",
     }
     rows = _run(write_tree(tmp_path, tree))
@@ -111,10 +112,39 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
         "tests/test_cli.py",
         "tests/test_only.py",
         "tests/test_pinned.py",
+        "tests/invariants/test_suite.py",
     )
     assert {name: rows[name]["disposition"] for name in names} == dict.fromkeys(names, "keep")
-    assert rows["tests/test_only.py"]["note"] == "invariant evidence"
-    assert rows["tests/test_pinned.py"]["note"] == "edge-case pin"
+    assert rows["tests/test_only.py"]["protected"] == "invariant evidence"
+    assert rows["tests/test_pinned.py"]["protected"] == "edge-case pin"
+    assert rows["tests/invariants/test_suite.py"]["protected"] == "invariant suite"
+    assert rows["tests/test_only.py"]["note"] == ""
+
+
+def test_moved_modules_scripts_and_orphans_are_reviewed_not_guessed(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/main.py": (
+            "from forge import core\nfrom forge.orchestrator import orchestrator, project_config\n"
+        ),
+        "src/forge/orchestrator/__init__.py": "",
+        "src/forge/orchestrator/orchestrator.py": "from forge.stores import conversation\n",
+        "src/forge/orchestrator/project_config.py": "",
+        "src/forge/stores/__init__.py": "",
+        "src/forge/stores/conversation.py": "",
+        "tests/test_config.py": "from forge.orchestrator import project_config\n",
+        "tests/test_orchestrator.py": "from forge.orchestrator import orchestrator\n",
+        "tests/test_store.py": "from forge.stores import conversation\n",
+        "tests/test_gate.py": "from forge import core\nfrom scripts.run_live_qualification import main\n",
+    }
+    rows = _run(write_tree(tmp_path, tree))
+    config = rows["tests/test_config.py"]
+    assert (config["disposition"], config["deleted_by"]) == ("keep", "")
+    orchestrator = rows["tests/test_orchestrator.py"]
+    assert (orchestrator["disposition"], orchestrator["phase"]) == ("drop-with-code", "P1-12")
+    assert rows["tests/test_store.py"]["review"] == "orphaned by Phase 1"
+    gate = rows["tests/test_gate.py"]
+    assert (gate["deleted_by"], gate["review"]) == ("P1-07", "partly deleted")
 
 
 def test_curated_columns_survive_regeneration(tmp_path):
@@ -125,17 +155,23 @@ def test_curated_columns_survive_regeneration(tmp_path):
     assert (kept["disposition"], kept["phase"], kept["note"]) == ("port-engine", "P3", "owner")
 
 
-def test_warnings_for_vanished_and_protected_drop_rows(tmp_path, capsys):
-    tree = {**TREE, "tests/invariants/registry.py": 'INVARIANT_FILES = {"tests/test_only.py"}\n'}
+def test_warnings_for_vanished_protected_and_unknown_rows(tmp_path, capsys):
+    tree = {
+        **TREE,
+        "tests/invariants/registry.py": 'INVARIANT_FILES = {"tests/test_only.py"}\n',
+        "tests/test_misc.py": "from forge import core\n",
+    }
     root = write_tree(tmp_path, tree)
     _run(root)
     _curate(root, "tests/test_only.py", disposition="drop-obsolete")
     _curate(root, "tests/test_core.py", note="owner decision")
+    _curate(root, "tests/test_misc.py", disposition="maybe")
     (root / "tests/test_core.py").unlink()
     _run(root)
     err = capsys.readouterr().err
     assert "tests/test_only.py is invariant evidence but marked drop-obsolete" in err
-    assert "tests/test_core.py vanished" in err
+    assert "tests/test_core.py vanished while marked keep (owner decision)" in err
+    assert "tests/test_misc.py: unknown disposition 'maybe'" in err
 
 
 def test_the_csv_uses_lf_line_endings(tmp_path):

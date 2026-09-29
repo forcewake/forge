@@ -2,7 +2,7 @@
 
 One row per test file under ``tests/``. Measured columns are recomputed on
 every run; the curated columns (``disposition``, ``phase``, ``note``)
-survive regeneration.
+survive regeneration and belong to the owner.
 
 Default dispositions, a starting point for the owner:
 
@@ -13,11 +13,14 @@ Default dispositions, a starting point for the owner:
 - ``port-adapter``: the test drives a provider client;
 - ``keep``: everything else.
 
-Invariant evidence and edge-case pins are never ``drop-*`` by default and
-carry a note. ``deleted_by`` lists the Phase 1 tasks whose deletions a test
-imports; a row that imports deleted code without defaulting to drop gets the
-note "partly deleted: review". Warnings on stderr name
-curated rows whose file vanished and protected rows marked ``drop-*``.
+Measured columns that guide the review: ``deleted_by`` (Phase 1 tasks whose
+deletions the test imports, including scripts that P1-07 deletes),
+``protected`` (invariant suite, invariant evidence or edge-case pin; never
+``drop-*`` by default) and ``review`` ("partly deleted" when the test
+imports deleted code without defaulting to drop; "orphaned by Phase 1" when
+it imports runtime code that loses its last importer). Warnings on stderr
+name unknown dispositions, protected rows marked ``drop-*`` and non-drop
+rows whose file vanished.
 
 Usage::
 
@@ -32,6 +35,7 @@ import csv
 import re
 import runpy
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import _codebase as cb
@@ -44,12 +48,15 @@ FIELDS = (
     "imports_runtime",
     "imports_tests_only",
     "deleted_by",
+    "protected",
+    "review",
     "area",
     "disposition",
     "phase",
     "note",
 )
 CURATED = ("disposition", "phase", "note")
+DISPOSITIONS = frozenset({"keep", "port-engine", "port-adapter", "drop-with-code", "drop-obsolete"})
 SERVICES = ("forge.runs.service", "forge.runs.github_service")
 PROVIDER_CLIENTS = (
     "forge.gitlab.client",
@@ -68,7 +75,10 @@ SHARED = (
     "forge.gitlab.schemas",
     "forge.gitlab.events",
     "forge.utils",
+    "forge.orchestrator.project_config",
 )
+# Moved by P1-01 rather than deleted with its package.
+MOVED = ("forge.orchestrator.project_config",)
 KEPT_TOOLING_ROOTS = ("forge.doctor",)
 # Module (or package) -> the ROADMAP Phase 1 task that deletes it.
 PLANNED_DELETIONS: dict[str, str] = {
@@ -100,6 +110,7 @@ PLANNED_DELETIONS: dict[str, str] = {
             "forge.adaptive.verification_executor",
             "forge.adaptive.dotnet_recipe",
             "forge.runs.conformance",
+            "forge.agents.classifier",
         ),
         "P1-03",
     ),
@@ -134,6 +145,7 @@ PLANNED_DELETIONS: dict[str, str] = {
             "forge.gateway.azure_webhook",
             "forge.reactive.azure_review",
             "forge.reactive.azure_ci_debug",
+            "forge.execution.azure_pipelines",
         ),
         "P1-11",
     ),
@@ -165,6 +177,12 @@ PLANNED_DELETIONS: dict[str, str] = {
         "P1-15",
     ),
 }
+# Scripts that P1-07 deletes; the program's own scripts stay.
+PLANNED_SCRIPT_DELETIONS = re.compile(
+    r"run_\w+|build_(?:accepted_task_ledger|budget_calibration|economics_report|lane_closure)"
+    r"|freeze_supported_profile|generate_template_pins|gate_conformance|qualify_gitlab_ce"
+    r"|cold_install_\w+"
+)
 INVARIANT_REGISTRY = Path("tests/invariants/registry.py")
 EDGE_CASE_REGISTER = Path("docs/reference/edge-cases.md")
 PIN_ROW = re.compile(r"^\| EC-\d{2} \|(?P<rest>.*)\|$")
@@ -177,6 +195,8 @@ def _within(name: str, prefixes: tuple[str, ...]) -> bool:
 
 def deleted_by(name: str) -> str | None:
     """The Phase 1 task that deletes ``name``, if any."""
+    if _within(name, MOVED):
+        return None
     owners = [p for p in PLANNED_DELETIONS if name == p or name.startswith(p + ".")]
     return PLANNED_DELETIONS[max(owners, key=len)] if owners else None
 
@@ -199,11 +219,13 @@ def area(rel: str) -> str:
 
 
 def protected_files(root: Path) -> dict[str, str]:
-    """Test files that are invariant evidence or edge-case pins, with the reasons."""
+    """Test files the invariant suite or the edge-case register depend on, with reasons."""
     reasons: dict[str, list[str]] = {}
+    for path in sorted((root / "tests" / "invariants").glob("test*.py")):
+        reasons.setdefault(path.relative_to(root).as_posix(), []).append("invariant suite")
     registry = root / INVARIANT_REGISTRY
     if registry.is_file():
-        for rel in runpy.run_path(str(registry)).get("INVARIANT_FILES", ()):
+        for rel in runpy.run_path(str(registry))["INVARIANT_FILES"]:
             reasons.setdefault(rel, []).append("invariant evidence")
     register = root / EDGE_CASE_REGISTER
     if register.is_file():
@@ -212,6 +234,24 @@ def protected_files(root: Path) -> dict[str, str]:
                 for pin in PIN.findall(match["rest"].rsplit("|", 1)[-1]):
                     reasons.setdefault(pin.split("::", 1)[0], []).append("edge-case pin")
     return {rel: "; ".join(dict.fromkeys(why)) for rel, why in reasons.items()}
+
+
+def loads_deleted_script(tree: ast.Module) -> bool:
+    """True when a test imports, or names the file of, a script that P1-07 deletes."""
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value.endswith(".py") and "/" not in node.value:
+                names = ["scripts." + node.value.removesuffix(".py")]
+        for name in names:
+            head, _, script = name.partition(".")
+            if head == "scripts" and PLANNED_SCRIPT_DELETIONS.fullmatch(script):
+                return True
+    return False
 
 
 def default_disposition(rel: str, imported: set[str], droppable: set[str]) -> tuple[str, str]:
@@ -227,60 +267,84 @@ def default_disposition(rel: str, imported: set[str], droppable: set[str]) -> tu
     return "keep", "-"
 
 
-def _droppable(root: Path, modules: dict[str, cb.Module], reach: cb.Reachability) -> set[str]:
+@dataclass(frozen=True)
+class Context:
+    modules: dict[str, cb.Module]
+    reach: cb.Reachability
+    droppable: set[str]
+    orphaned: set[str]
+    protected: dict[str, str]
+
+
+def analyse(root: Path) -> Context:
+    modules = cb.discover_modules(root)
+    reach = cb.classify(root, modules)
+    graph = cb.import_graph(modules)
     planned = {name for name in modules if deleted_by(name)}
     kept_roots = {*KEPT_TOOLING_ROOTS, *cb.console_script_modules(root)}
-    kept = cb.reachable(kept_roots, cb.import_graph(modules)) - planned
-    return planned | reach.tests_only | (reach.tooling_only - kept)
+    kept = cb.reachable(kept_roots, graph) - planned
+    pruned = {name: deps - planned for name, deps in graph.items() if name not in planned}
+    roots = (*cb.CONTROL_PLANE_ROOTS, *cb.LANE_ROOTS)
+    orphaned = reach.runtime - planned - cb.reachable(roots, pruned)
+    droppable = planned | reach.tests_only | (reach.tooling_only - kept)
+    return Context(modules, reach, droppable, orphaned, protected_files(root))
+
+
+def measure(root: Path, path: Path, ctx: Context) -> dict[str, str]:
+    rel = path.relative_to(root).as_posix()
+    imported = {
+        m
+        for m in cb.imports_of(path, ctx.modules)
+        if m.startswith("forge") and ctx.modules[m].path.name != "__init__.py"
+    }
+    tasks = {task for m in imported if (task := deleted_by(m))}
+    if loads_deleted_script(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        tasks.add("P1-07")
+    disposition, phase = default_disposition(rel, imported, ctx.droppable)
+    protected = ctx.protected.get(rel, "")
+    if protected and disposition.startswith("drop"):
+        disposition, phase = "keep", "-"
+    review = []
+    if tasks and not disposition.startswith("drop"):
+        review.append("partly deleted")
+    if imported & ctx.orphaned:
+        review.append("orphaned by Phase 1")
+    return {
+        "file": rel,
+        "tests": str(count_tests(path)),
+        "loc": str(cb.count_lines(path)),
+        "imports_runtime": str(bool(imported & ctx.reach.runtime)).lower(),
+        "imports_tests_only": str(bool(imported & ctx.reach.tests_only)).lower(),
+        "deleted_by": ",".join(sorted(tasks)),
+        "protected": protected,
+        "review": ", ".join(review),
+        "area": area(rel),
+        "disposition": disposition,
+        "phase": phase,
+        "note": "",
+    }
 
 
 def build_rows(
     root: Path, previous: dict[str, dict[str, str]]
 ) -> tuple[list[dict[str, str]], list[str]]:
-    modules = cb.discover_modules(root)
-    reach = cb.classify(root, modules)
-    droppable = _droppable(root, modules, reach)
-    protected = protected_files(root)
+    ctx = analyse(root)
     rows, warnings = [], []
     for path in sorted((root / "tests").rglob("test*.py")):
         if "__pycache__" in path.parts:
             continue
-        rel = path.relative_to(root).as_posix()
-        imported = {
-            m
-            for m in cb.imports_of(path, modules)
-            if m.startswith("forge") and modules[m].path.name != "__init__.py"
-        }
-        disposition, phase = default_disposition(rel, imported, droppable)
-        reason = protected.get(rel, "")
-        if reason and disposition.startswith("drop"):
-            disposition, phase = "keep", "-"
-        deleted = ",".join(sorted({t for m in imported if (t := deleted_by(m))}))
-        review = "partly deleted: review" if deleted and not disposition.startswith("drop") else ""
-        row = {
-            "file": rel,
-            "tests": str(count_tests(path)),
-            "loc": str(cb.count_lines(path)),
-            "imports_runtime": str(bool(imported & reach.runtime)).lower(),
-            "imports_tests_only": str(bool(imported & reach.tests_only)).lower(),
-            "deleted_by": deleted,
-            "area": area(rel),
-            "disposition": disposition,
-            "phase": phase,
-            "note": "; ".join(filter(None, (reason, review))),
-        }
-        if rel in previous:
-            row.update({key: previous[rel][key] for key in CURATED})
-            row["note"] = row["note"] or "; ".join(filter(None, (reason, review)))
-        if reason and row["disposition"].startswith("drop"):
-            warnings.append(f"{rel} is {reason} but marked {row['disposition']}")
+        row = measure(root, path, ctx)
+        if row["file"] in previous:
+            row.update({key: previous[row["file"]][key] for key in CURATED})
+        if row["disposition"] not in DISPOSITIONS:
+            warnings.append(f"{row['file']}: unknown disposition {row['disposition']!r}")
+        if row["protected"] and row["disposition"].startswith("drop"):
+            warnings.append(f"{row['file']} is {row['protected']} but marked {row['disposition']}")
         rows.append(row)
     current = {row["file"] for row in rows}
     for rel, old in sorted(previous.items()):
-        if rel not in current:
-            warnings.append(
-                f"{rel} vanished; its row ({old['disposition']}: {old['note']}) is dropped"
-            )
+        if rel not in current and not old["disposition"].startswith("drop"):
+            warnings.append(f"{rel} vanished while marked {old['disposition']} ({old['note']})")
     return rows, warnings
 
 
