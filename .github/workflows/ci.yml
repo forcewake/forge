@@ -206,6 +206,29 @@ jobs:
       - name: Every invariant test executed
         run: uv run python scripts/assert_no_skips.py invariants.xml
 
+  # Diff coverage: new and changed lines need at least 85% coverage.
+  coverage:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Default tier with coverage
+        run: uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml
+
+      - name: Diff coverage (at least 85% of changed lines)
+        run: >-
+          uv run diff-cover coverage.xml
+          --compare-branch=origin/${{ github.base_ref }} --fail-under=85
+
   # Real-Postgres integration stage (F29): the ADR-0017 failure-injection
   # exit bar (tests/test_failure_injection.py) runs only when
   # FORGE_PG_TEST_URL is set — without the service it self-skips, so this

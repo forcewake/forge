@@ -37,6 +37,8 @@ dev = [
     # per-module ignore comments (blocking typecheck, F29).
     "types-PyYAML>=6.0.12",
     "import-linter==2.15",
+    "pytest-cov==7.1.0",
+    "diff-cover==10.6.0",
 ]
 
 [project.optional-dependencies]
