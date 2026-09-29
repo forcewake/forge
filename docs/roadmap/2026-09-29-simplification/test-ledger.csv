@@ -1,304 +1,304 @@
-file,tests,loc,imports_runtime,imports_tests_only,area,disposition,phase,note
-tests/contract/test_client_endpoints.py,30,1013,true,false,contract,port-adapter,P3,
-tests/contract/test_known_deviations.py,4,165,true,false,contract,port-adapter,P3,
-tests/contract/test_webhook_payloads.py,7,198,true,false,contract,port-adapter,P3,
-tests/invariants/test_i1_no_merge.py,6,184,false,false,invariants,keep,-,invariant evidence
-tests/invariants/test_registry_integrity.py,4,33,false,false,invariants,keep,-,
-tests/production_entry/test_causal_steering.py,3,640,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_composed_faults.py,4,1009,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_concurrent_publication.py,2,240,true,false,production_entry,port-engine,P3,invariant evidence
-tests/production_entry/test_continuation_identity.py,3,443,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_credential_dispatch.py,31,1741,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_durable_ingress.py,15,1019,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_durable_ingress_parity.py,8,782,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_feedback_ingress.py,6,679,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_gitlab_ce_entry.py,6,624,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_gitlab_dispatch_parity.py,7,616,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_gitlab_revision_rebind.py,4,704,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_mutation_gates.py,6,1034,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_production_entry.py,9,973,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_production_matrix.py,10,1570,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_retryable_observations.py,3,602,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_review_feedback.py,2,451,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_revision_executor_proof.py,7,880,true,false,production_entry,port-engine,P3,
-tests/production_entry/test_system_verification_executor.py,6,390,false,true,production_entry,drop-with-code,P1,
-tests/production_entry/test_two_writer_durable.py,6,378,true,true,production_entry,port-engine,P3,
-tests/production_entry/test_two_writer_native.py,9,882,true,true,production_entry,port-engine,P3,
-tests/test_adaptive_adapters.py,40,401,true,false,adaptive,keep,-,
-tests/test_adaptive_admission.py,84,1592,true,false,adaptive,keep,-,
-tests/test_adaptive_artifact_store.py,17,224,true,false,adaptive,keep,-,
-tests/test_adaptive_audit_export.py,15,435,true,false,adaptive,keep,-,
-tests/test_adaptive_benchmark.py,16,158,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_capability_profiles.py,30,223,true,false,adaptive,keep,-,
-tests/test_adaptive_checkpoint_channel.py,102,2682,true,false,adaptive,keep,-,
-tests/test_adaptive_checkpointing.py,56,1736,true,false,adaptive,keep,-,
-tests/test_adaptive_command_router.py,30,750,true,false,adaptive,keep,-,
-tests/test_adaptive_compat.py,29,228,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_compat_fixtures.py,35,353,true,true,adaptive,keep,-,
-tests/test_adaptive_continuation.py,96,1951,true,false,adaptive,port-engine,P3,
-tests/test_adaptive_contracts.py,35,365,true,false,adaptive,keep,-,
-tests/test_adaptive_control.py,95,1261,true,false,adaptive,keep,-,
-tests/test_adaptive_dedup.py,9,192,true,true,adaptive,keep,-,
-tests/test_adaptive_delivery_metrics.py,33,944,true,false,adaptive,keep,-,
-tests/test_adaptive_discovery.py,42,307,true,false,adaptive,keep,-,
-tests/test_adaptive_discovery_stage.py,78,2281,true,false,adaptive,port-engine,P3,
-tests/test_adaptive_discovery_tools.py,22,208,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_claude_sdk.py,23,599,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_codex_app.py,20,646,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_copilot_acp.py,29,650,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_live_registrations.py,46,572,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_opencode.py,31,822,true,false,adaptive,keep,-,
-tests/test_adaptive_driver_opencode_serve.py,12,234,true,false,adaptive,keep,-,
-tests/test_adaptive_drivers_package.py,4,63,true,false,adaptive,keep,-,
-tests/test_adaptive_executed_evidence.py,9,128,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_impact.py,17,175,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_independent_checks.py,60,1223,true,true,adaptive,keep,-,
-tests/test_adaptive_lane_channel.py,33,714,true,false,adaptive,keep,-,
-tests/test_adaptive_lane_control.py,57,1178,true,false,adaptive,keep,-,
-tests/test_adaptive_lane_supervisor.py,21,549,true,false,adaptive,keep,-,
-tests/test_adaptive_lease_occupancy.py,58,1616,true,false,adaptive,port-engine,P3,edge-case pin
-tests/test_adaptive_mailbox_db.py,30,757,true,false,adaptive,keep,-,
-tests/test_adaptive_operator_timeline.py,26,487,true,false,adaptive,keep,-,
-tests/test_adaptive_operator_view.py,126,2089,true,false,adaptive,keep,-,
-tests/test_adaptive_ops.py,49,360,true,false,adaptive,keep,-,
-tests/test_adaptive_pilot.py,61,1206,false,false,adaptive,drop-with-code,P1,
-tests/test_adaptive_project_credentials.py,32,450,true,false,adaptive,keep,-,
-tests/test_adaptive_project_map.py,20,193,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_publication_saga.py,16,438,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_qualification.py,87,1260,true,false,adaptive,keep,-,
-tests/test_adaptive_read_guards.py,29,233,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_research_cohort.py,55,1180,true,false,adaptive,keep,-,
-tests/test_adaptive_research_planner.py,28,811,true,false,adaptive,keep,-,
-tests/test_adaptive_revisions.py,81,2152,true,false,adaptive,keep,-,
-tests/test_adaptive_runtime.py,27,292,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_snapshots.py,17,180,true,true,adaptive,keep,-,
-tests/test_adaptive_support_bundle.py,14,276,true,false,adaptive,keep,-,
-tests/test_adaptive_support_matrix.py,25,550,true,false,adaptive,keep,-,
-tests/test_adaptive_system_context.py,19,419,true,false,adaptive,keep,-,
-tests/test_adaptive_system_manifest.py,21,253,false,true,adaptive,drop-with-code,P1,
-tests/test_adaptive_two_writer.py,34,583,true,true,adaptive,keep,-,
-tests/test_adaptive_verification_sets.py,98,1002,true,false,adaptive,keep,-,
-tests/test_adaptive_wiring.py,25,409,true,false,adaptive,keep,-,
-tests/test_adaptive_workpackage.py,83,1111,true,false,adaptive,keep,-,
-tests/test_adaptive_workpackage_service.py,21,598,true,true,adaptive,keep,-,
-tests/test_adr_status_banners.py,1,27,false,false,adr,keep,-,
-tests/test_agent_mcp_integration.py,8,115,true,false,agent,keep,-,
-tests/test_agent_registry.py,14,136,true,false,agent,keep,-,
-tests/test_align_lab.py,11,395,false,false,align,keep,-,
-tests/test_api_lane_control.py,64,1345,true,false,api,keep,-,
-tests/test_api_operator.py,26,1197,true,false,api,keep,-,
-tests/test_application_regressions.py,25,1726,true,false,application,keep,-,edge-case pin
-tests/test_architecture_boundaries.py,50,2426,true,true,architecture,keep,-,
-tests/test_azure_client.py,86,1744,true,false,azure,port-adapter,P3,
-tests/test_azure_integration_joins.py,18,848,true,false,azure,port-engine,P3,
-tests/test_azure_pipelines_executor.py,48,858,true,false,azure,port-adapter,P3,
-tests/test_azure_reactive.py,31,884,true,false,azure,port-adapter,P3,
-tests/test_azure_runs.py,94,3214,true,false,azure,port-engine,P3,
-tests/test_azure_webhook.py,59,1151,true,false,azure,keep,-,
-tests/test_blob_reads.py,33,553,true,false,blob,port-adapter,P3,
-tests/test_bot_loop.py,8,91,true,false,bot,port-adapter,P3,invariant evidence
-tests/test_bounded_steps.py,18,925,true,false,bounded,port-engine,P3,
-tests/test_budget_amendment.py,25,866,true,false,budget,keep,-,invariant evidence
-tests/test_budget_calibration.py,25,779,true,false,budget,keep,-,
-tests/test_budget_wiring.py,13,558,true,false,budget,keep,-,
-tests/test_budgets.py,53,1092,true,false,budgets,keep,-,invariant evidence
-tests/test_candidate.py,49,661,true,false,candidate,keep,-,
-tests/test_candidate_collector.py,35,871,true,false,candidate,keep,-,
-tests/test_capability_manifest.py,44,588,true,false,capability,keep,-,
-tests/test_causal_steering.py,27,506,false,false,causal,drop-with-code,P1,
-tests/test_changeset_materialize.py,22,290,true,false,changeset,keep,-,
-tests/test_chat_agent.py,10,186,true,false,chat,port-adapter,P3,
-tests/test_checkpoint_gc.py,34,1428,true,false,checkpoint,keep,-,
-tests/test_checkpoint_migration.py,48,1253,true,false,checkpoint,keep,-,
-tests/test_checkpoint_repository.py,29,655,true,false,checkpoint,keep,-,
-tests/test_checkpoint_retry_authority.py,32,1010,true,false,checkpoint,keep,-,
-tests/test_ci_contract.py,21,117,true,false,ci,port-adapter,P3,
-tests/test_ci_debug.py,25,713,true,false,ci,port-adapter,P3,
-tests/test_claim_slots.py,9,397,true,false,claim,keep,-,
-tests/test_claims.py,25,563,true,false,claims,keep,-,
-tests/test_classifier.py,9,93,false,true,classifier,drop-with-code,P1,
-tests/test_closing_budget.py,27,616,true,false,closing,keep,-,invariant evidence
-tests/test_closing_review_obligations.py,13,487,true,false,closing,port-engine,P3,
-tests/test_closure_matrix.py,20,259,false,true,closure,drop-with-code,P1,
-tests/test_cohort_runner.py,47,971,false,false,cohort,keep,-,
-tests/test_cold_install_runbook.py,30,521,false,false,cold,keep,-,
-tests/test_collaboration_target.py,26,1030,true,false,collaboration,keep,-,
-tests/test_combined_steering.py,35,655,true,false,combined,keep,-,
-tests/test_command_progress.py,52,1272,true,false,command,port-engine,P3,
-tests/test_composition_adoption.py,39,838,true,false,composition,port-engine,P3,
-tests/test_config_scope.py,39,737,true,false,config,port-adapter,P3,
-tests/test_conformance.py,26,1074,true,true,conformance,port-engine,P3,
-tests/test_conformance_consumers.py,14,384,false,false,conformance,keep,-,
-tests/test_consistency.py,29,600,true,false,consistency,port-engine,P3,
-tests/test_context_engine.py,6,292,true,false,context,port-adapter,P3,
-tests/test_conversation_store.py,10,126,true,false,conversation,keep,-,
-tests/test_credential_audit.py,18,525,true,false,credential,keep,-,
-tests/test_credential_broker.py,59,982,true,false,credential,keep,-,
-tests/test_credential_consumption.py,28,691,true,false,credential,keep,-,
-tests/test_credential_preflight.py,40,610,true,false,credential,keep,-,
-tests/test_cutover_fence.py,21,773,true,false,cutover,keep,-,
-tests/test_database.py,2,59,false,false,database,keep,-,
-tests/test_database_lifecycle.py,13,373,true,false,database,keep,-,
-tests/test_dedup.py,5,91,true,false,dedup,port-adapter,P3,
-tests/test_delivery_economics.py,50,3024,true,false,delivery,keep,-,
-tests/test_delivery_measurement.py,39,1089,true,false,delivery,keep,-,
-tests/test_deployment_ops.py,25,586,true,false,deployment,keep,-,
-tests/test_diff_parser.py,10,122,true,false,diff,keep,-,
-tests/test_discovery_authority.py,30,998,true,false,discovery,keep,-,
-tests/test_discovery_live.py,37,580,false,false,discovery,drop-with-code,P1,
-tests/test_discovery_profile.py,82,908,false,false,discovery,drop-with-code,P1,
-tests/test_doctor.py,24,597,true,false,doctor,port-adapter,P3,
-tests/test_doctor_settings.py,4,48,true,false,doctor,keep,-,
-tests/test_dotnet_recipe.py,34,811,true,true,dotnet,keep,-,
-tests/test_durable_controller.py,28,423,true,false,durable,keep,-,
-tests/test_durable_gates.py,9,148,true,false,durable,keep,-,invariant evidence
-tests/test_durable_inbox.py,9,168,true,false,durable,keep,-,
-tests/test_durable_models.py,6,121,true,false,durable,keep,-,
-tests/test_edge_case_register.py,4,56,false,false,edge,keep,-,edge-case pin
-tests/test_error_handling.py,12,182,true,false,error,keep,-,
-tests/test_event_parsing.py,10,139,true,false,event,port-adapter,P3,
-tests/test_evidence_policy.py,7,239,true,false,evidence,keep,-,
-tests/test_exact_composition_guard.py,17,302,false,false,exact,keep,-,
-tests/test_execution_profile.py,93,1348,true,false,execution,port-adapter,P3,
-tests/test_execution_spec.py,49,624,false,false,execution,keep,-,
-tests/test_factory_llm.py,21,278,true,false,factory,keep,-,
-tests/test_failure_injection.py,8,1003,true,false,failure,port-adapter,P3,invariant evidence
-tests/test_failure_injection_os.py,10,1011,true,false,failure,keep,-,
-tests/test_fallback.py,7,196,true,false,fallback,keep,-,
-tests/test_findings.py,37,1135,true,false,findings,port-adapter,P3,
-tests/test_findings_triage.py,25,1093,true,false,findings,keep,-,
-tests/test_flow_api.py,2,58,true,false,flow,keep,-,
-tests/test_flow_conditions.py,24,93,true,false,flow,keep,-,
-tests/test_flow_loader.py,12,191,true,false,flow,keep,-,
-tests/test_flow_runner.py,11,326,true,false,flow,keep,-,
-tests/test_flow_state.py,9,125,true,false,flow,keep,-,
-tests/test_flow_templates.py,11,62,true,false,flow,keep,-,
-tests/test_forge_config.py,9,96,true,false,forge,keep,-,
-tests/test_gate_conformance.py,38,1241,true,false,gate,port-engine,P3,
-tests/test_gate_public_artifacts.py,18,347,false,false,gate,keep,-,
-tests/test_gateway_issue_lifecycle.py,24,538,true,false,gateway,port-adapter,P3,
-tests/test_github_actions_executor.py,51,1029,true,false,github,keep,-,edge-case pin
-tests/test_github_actions_template.py,42,1036,false,false,github,keep,-,
-tests/test_github_client.py,37,807,true,false,github,port-adapter,P3,edge-case pin
-tests/test_github_flow.py,30,764,true,false,github,port-adapter,P3,
-tests/test_github_harness.py,18,720,true,false,github,port-engine,P3,
-tests/test_github_reactive_review.py,25,635,true,false,github,port-engine,P3,
-tests/test_github_reconciler_scope.py,5,374,true,false,github,port-engine,P3,
-tests/test_github_runs.py,128,4784,true,false,github,port-engine,P3,edge-case pin
-tests/test_github_webhook.py,45,974,true,false,github,keep,-,invariant evidence
-tests/test_gitlab_client.py,30,646,true,false,gitlab,port-adapter,P3,
-tests/test_gitlab_client_commits.py,6,150,true,false,gitlab,port-adapter,P3,
-tests/test_gitlab_dispatch_parity.py,13,533,true,false,gitlab,port-engine,P3,
-tests/test_gitlab_sdk_lane_finalization.py,8,442,false,false,gitlab,keep,-,
-tests/test_gitlab_tools.py,10,138,true,false,gitlab,keep,-,
-tests/test_go_resolution_typed.py,5,230,true,false,go,keep,-,
-tests/test_guarded_mutations.py,16,681,true,false,guarded,keep,-,
-tests/test_harness_entry.py,98,1905,true,false,harness,keep,-,edge-case pin
-tests/test_harness_mcp.py,18,145,true,false,harness,keep,-,
-tests/test_harness_prompt.py,19,205,true,false,harness,keep,-,
-tests/test_harness_selection.py,65,1051,true,false,harness,port-engine,P3,
-tests/test_health.py,4,75,false,false,health,keep,-,
-tests/test_hygiene.py,6,67,false,false,hygiene,keep,-,
-tests/test_implementer.py,11,258,true,false,implementer,port-adapter,P3,
-tests/test_import_contract_debt.py,1,17,false,false,import,keep,-,
-tests/test_incremental_review.py,11,516,true,false,incremental,port-adapter,P3,
-tests/test_inventory_lab.py,24,605,false,false,inventory,keep,-,
-tests/test_lab_pilot.py,7,311,false,false,lab,drop-with-code,P1,
-tests/test_lane_closure.py,38,542,true,false,lane,keep,-,
-tests/test_lane_driver.py,120,2359,true,false,lane,keep,-,
-tests/test_lane_install_contract.py,60,1329,false,false,lane,drop-with-code,P1,
-tests/test_legacy_credential_deadline.py,24,479,true,false,legacy,keep,-,
-tests/test_lineage_view.py,39,1266,true,false,lineage,keep,-,
-tests/test_liveness.py,12,629,true,false,liveness,port-engine,P3,
-tests/test_llm_provider.py,9,100,true,false,llm,keep,-,
-tests/test_log_parser.py,17,140,true,false,log,keep,-,
-tests/test_main.py,3,79,true,false,main,keep,-,
-tests/test_matcher.py,15,258,true,false,matcher,port-adapter,P3,
-tests/test_mcp_manager.py,12,216,true,false,mcp,keep,-,
-tests/test_mcp_registry.py,16,138,true,false,mcp,keep,-,
-tests/test_mcp_runs_tools.py,37,713,true,false,mcp,keep,-,
-tests/test_mcp_server.py,29,505,true,false,mcp,port-adapter,P3,
-tests/test_mcp_tools_endpoint.py,3,71,true,false,mcp,keep,-,
-tests/test_mention.py,21,129,true,false,mention,keep,-,
-tests/test_native_locator.py,35,586,true,false,native,keep,-,
-tests/test_operation_grant.py,73,2210,true,false,operation,keep,-,
-tests/test_operator_canonical_subjects.py,24,651,true,false,operator,keep,-,
-tests/test_operator_experience.py,23,764,true,false,operator,keep,-,
-tests/test_operator_recovery_surface.py,24,928,true,false,operator,keep,-,
-tests/test_operator_snapshot.py,36,1152,true,false,operator,keep,-,
-tests/test_ops_drills.py,40,1304,true,false,ops,keep,-,
-tests/test_ops_limits.py,40,1395,true,false,ops,keep,-,
-tests/test_orchestrator.py,14,359,true,false,orchestrator,port-adapter,P3,
-tests/test_orphan_guard.py,1,61,false,false,orphan,keep,-,
-tests/test_patch_differential.py,19,341,true,false,patch,keep,-,invariant evidence
-tests/test_pg_gate.py,42,992,false,false,pg,keep,-,
-tests/test_pilot_ladder.py,51,982,false,false,pilot,drop-with-code,P1,
-tests/test_pipeline_debugger.py,5,126,true,false,pipeline,port-adapter,P3,
-tests/test_profile_bound_ops.py,34,787,true,false,profile,keep,-,
-tests/test_profile_qualification.py,100,1666,false,false,profile,drop-with-code,P1,
-tests/test_project_config.py,23,372,true,false,project,port-adapter,P3,
-tests/test_prompt_budgets.py,10,336,true,false,prompt,keep,-,
-tests/test_prompts.py,15,148,true,false,prompts,port-adapter,P3,
-tests/test_provider_namespaces.py,22,829,true,false,provider,keep,-,
-tests/test_publication_boundary.py,13,503,true,false,publication,port-adapter,P3,invariant evidence
-tests/test_publication_intents.py,40,1422,true,false,publication,port-engine,P3,invariant evidence
-tests/test_publisher.py,49,976,true,false,publisher,port-adapter,P3,invariant evidence
-tests/test_real_construction_surfaces.py,36,670,true,false,real,port-adapter,P3,
-tests/test_redactor.py,13,95,true,false,redactor,keep,-,
-tests/test_reference_separation.py,13,400,false,true,reference,drop-with-code,P1,
-tests/test_release_manifest.py,24,422,false,false,release,drop-with-code,P1,
-tests/test_release_promotion.py,42,1013,true,false,release,keep,-,
-tests/test_report_inventory_strict.py,27,1069,true,false,report,keep,-,
-tests/test_repository_changeset.py,60,474,true,false,repository,keep,-,
-tests/test_repository_writer.py,15,336,true,false,repository,port-adapter,P3,edge-case pin
-tests/test_research_cohort_live.py,53,2206,true,false,research,keep,-,
-tests/test_resource_lifecycle.py,8,355,true,false,resource,keep,-,
-tests/test_retryable_observations.py,13,692,true,false,retryable,port-engine,P3,
-tests/test_review_feedback.py,56,1562,true,false,review,port-engine,P3,
-tests/test_review_regressions.py,4,347,true,false,review,keep,-,
-tests/test_review_rounds.py,37,1897,true,false,review,port-engine,P3,edge-case pin
-tests/test_revision_executor_proof.py,25,718,true,false,revision,keep,-,invariant evidence
-tests/test_revival_durability.py,20,722,true,false,revival,port-engine,P3,
-tests/test_round_head_classification.py,16,357,true,false,round,port-engine,P3,
-tests/test_runs_api.py,10,274,true,false,runs,keep,-,
-tests/test_runs_backends.py,27,604,true,false,runs,keep,-,
-tests/test_runs_cancel.py,5,221,true,false,runs,keep,-,
-tests/test_runs_composition.py,78,761,true,false,runs,keep,-,
-tests/test_runs_harness_service.py,20,639,true,false,runs,port-adapter,P3,
-tests/test_runs_reconciler.py,14,432,true,false,runs,port-adapter,P3,
-tests/test_runs_repair.py,23,908,true,false,runs,port-engine,P3,
-tests/test_runs_revival.py,36,863,true,false,runs,port-engine,P3,
-tests/test_runs_service.py,63,1872,true,false,runs,port-engine,P3,
-tests/test_runs_spec.py,50,1064,true,false,runs,port-engine,P3,invariant evidence
-tests/test_runs_verification.py,21,416,true,false,runs,port-adapter,P3,invariant evidence
-tests/test_runs_wiring.py,20,536,true,false,runs,port-engine,P3,
-tests/test_saga_durable.py,36,941,true,true,saga,keep,-,
-tests/test_saga_native.py,43,1047,true,true,saga,port-adapter,P3,
-tests/test_script_assert_no_skips.py,4,36,false,false,script,keep,-,
-tests/test_script_build_test_ledger.py,3,80,false,false,script,keep,-,
-tests/test_script_codebase.py,8,135,false,false,script,keep,-,
-tests/test_script_metrics.py,8,93,false,false,script,keep,-,
-tests/test_script_prose_lint.py,9,94,false,false,script,keep,-,
-tests/test_script_ratchet.py,13,155,false,false,script,keep,-,
-tests/test_script_rendering.py,4,156,true,false,script,keep,-,
-tests/test_security_report.py,12,184,true,false,security,keep,-,
-tests/test_security_triage.py,5,140,true,false,security,port-adapter,P3,
-tests/test_settings_gitlab_optional.py,7,81,true,false,settings,keep,-,
-tests/test_setup_script.py,4,102,false,false,setup,keep,-,
-tests/test_slash_routing.py,8,333,true,false,slash,port-adapter,P3,
-tests/test_step_runtime.py,24,963,true,false,step,keep,-,
-tests/test_supported_profile.py,42,694,false,false,supported,drop-with-code,P1,
-tests/test_system_verification.py,60,890,true,true,system,keep,-,
-tests/test_task_queue.py,12,209,true,false,task,keep,-,
-tests/test_templates.py,63,755,true,false,templates,keep,-,
-tests/test_token_counter.py,15,91,true,false,token,keep,-,
-tests/test_usage_ingestion.py,44,1771,true,false,usage,keep,-,
-tests/test_usage_receipts.py,21,483,true,false,usage,keep,-,invariant evidence
-tests/test_usecases.py,19,661,true,false,usecases,port-adapter,P3,
-tests/test_useful_wip_resume.py,34,612,false,false,useful,keep,-,
-tests/test_verification_binding.py,48,1083,true,false,verification,port-adapter,P3,invariant evidence
-tests/test_verification_executor.py,62,1573,true,true,verification,keep,-,
-tests/test_webhook_auth.py,4,60,false,false,webhook,keep,-,
-tests/test_webhook_capture.py,3,99,true,false,webhook,keep,-,
-tests/test_worker.py,3,130,true,false,worker,port-adapter,P3,
-tests/test_write_profiles.py,30,257,true,false,write,keep,-,
+file,tests,loc,imports_runtime,imports_tests_only,deleted_by,area,disposition,phase,note
+tests/contract/test_client_endpoints.py,30,1013,true,false,,contract,port-adapter,P3,
+tests/contract/test_known_deviations.py,4,165,true,false,,contract,port-adapter,P3,
+tests/contract/test_webhook_payloads.py,7,198,true,false,,contract,keep,-,
+tests/invariants/test_i1_no_merge.py,6,184,false,false,,invariants,keep,-,invariant evidence
+tests/invariants/test_registry_integrity.py,4,33,false,false,,invariants,keep,-,
+tests/production_entry/test_causal_steering.py,3,640,true,false,P1-07,production_entry,port-engine,P3,partly deleted: review
+tests/production_entry/test_composed_faults.py,4,1009,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_concurrent_publication.py,2,240,true,false,,production_entry,port-engine,P3,invariant evidence; edge-case pin
+tests/production_entry/test_continuation_identity.py,3,443,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_credential_dispatch.py,31,1741,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_durable_ingress.py,15,1019,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_durable_ingress_parity.py,8,782,true,false,P1-11,production_entry,port-engine,P3,partly deleted: review
+tests/production_entry/test_feedback_ingress.py,6,679,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_gitlab_ce_entry.py,6,624,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_gitlab_dispatch_parity.py,7,616,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_gitlab_revision_rebind.py,4,704,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_mutation_gates.py,6,1034,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_production_entry.py,9,973,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_production_matrix.py,10,1570,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_retryable_observations.py,3,602,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_review_feedback.py,2,451,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_revision_executor_proof.py,7,880,true,false,,production_entry,port-engine,P3,
+tests/production_entry/test_system_verification_executor.py,6,390,false,true,P1-03,production_entry,drop-with-code,P1-03,
+tests/production_entry/test_two_writer_durable.py,6,378,true,true,P1-02,production_entry,port-engine,P3,partly deleted: review
+tests/production_entry/test_two_writer_native.py,9,882,true,true,"P1-02,P1-03",production_entry,port-engine,P3,partly deleted: review
+tests/test_adaptive_adapters.py,40,401,true,false,,adaptive,keep,-,
+tests/test_adaptive_admission.py,84,1592,true,false,,adaptive,keep,-,
+tests/test_adaptive_artifact_store.py,17,224,true,false,,adaptive,keep,-,
+tests/test_adaptive_audit_export.py,15,435,true,false,P1-15,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_benchmark.py,16,158,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_capability_profiles.py,30,223,true,false,,adaptive,keep,-,
+tests/test_adaptive_checkpoint_channel.py,102,2682,true,false,,adaptive,keep,-,
+tests/test_adaptive_checkpointing.py,56,1736,true,false,,adaptive,keep,-,
+tests/test_adaptive_command_router.py,30,750,true,false,P1-11,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_compat.py,29,228,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_compat_fixtures.py,35,353,true,true,P1-03,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_continuation.py,96,1951,true,false,,adaptive,port-engine,P3,
+tests/test_adaptive_contracts.py,35,365,true,false,,adaptive,keep,-,
+tests/test_adaptive_control.py,95,1261,true,false,,adaptive,keep,-,
+tests/test_adaptive_dedup.py,9,192,true,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_delivery_metrics.py,33,944,true,false,P1-15,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_discovery.py,42,307,true,false,,adaptive,keep,-,
+tests/test_adaptive_discovery_stage.py,78,2281,true,false,P1-12,adaptive,port-engine,P3,partly deleted: review
+tests/test_adaptive_discovery_tools.py,22,208,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_claude_sdk.py,23,599,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_codex_app.py,20,646,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_copilot_acp.py,29,650,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_live_registrations.py,46,572,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_opencode.py,31,822,true,false,,adaptive,keep,-,
+tests/test_adaptive_driver_opencode_serve.py,12,234,true,false,,adaptive,keep,-,
+tests/test_adaptive_drivers_package.py,4,63,true,false,,adaptive,keep,-,
+tests/test_adaptive_executed_evidence.py,9,128,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_impact.py,17,175,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_independent_checks.py,60,1223,true,true,P1-03,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_lane_channel.py,33,714,true,false,,adaptive,keep,-,
+tests/test_adaptive_lane_control.py,57,1178,true,false,,adaptive,keep,-,
+tests/test_adaptive_lane_supervisor.py,21,549,true,false,,adaptive,keep,-,
+tests/test_adaptive_lease_occupancy.py,58,1616,true,false,,adaptive,port-engine,P3,edge-case pin
+tests/test_adaptive_mailbox_db.py,30,757,true,false,,adaptive,keep,-,
+tests/test_adaptive_operator_timeline.py,26,487,true,false,,adaptive,keep,-,
+tests/test_adaptive_operator_view.py,126,2089,true,false,,adaptive,keep,-,
+tests/test_adaptive_ops.py,49,360,true,false,,adaptive,keep,-,
+tests/test_adaptive_pilot.py,61,1206,false,false,P1-07,adaptive,drop-with-code,P1-07,
+tests/test_adaptive_project_credentials.py,32,450,true,false,,adaptive,keep,-,
+tests/test_adaptive_project_map.py,20,193,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_publication_saga.py,16,438,false,true,P1-02,adaptive,drop-with-code,P1-02,
+tests/test_adaptive_qualification.py,87,1260,true,false,"P1-07,P1-15",adaptive,keep,-,partly deleted: review
+tests/test_adaptive_read_guards.py,29,233,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_research_cohort.py,55,1180,true,false,P1-07,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_research_planner.py,28,811,true,false,,adaptive,keep,-,
+tests/test_adaptive_revisions.py,81,2152,true,false,,adaptive,keep,-,
+tests/test_adaptive_runtime.py,27,292,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_snapshots.py,17,180,true,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_support_bundle.py,14,276,true,false,P1-15,adaptive,drop-with-code,P1-15,
+tests/test_adaptive_support_matrix.py,25,550,true,false,P1-07,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_system_context.py,19,419,true,false,P1-12,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_system_manifest.py,21,253,false,true,P1-03,adaptive,drop-with-code,P1-03,
+tests/test_adaptive_two_writer.py,34,583,true,true,P1-02,adaptive,keep,-,partly deleted: review
+tests/test_adaptive_verification_sets.py,98,1002,true,false,,adaptive,keep,-,
+tests/test_adaptive_wiring.py,25,409,true,false,,adaptive,keep,-,
+tests/test_adaptive_workpackage.py,83,1111,true,false,,adaptive,keep,-,
+tests/test_adaptive_workpackage_service.py,21,598,true,true,P1-03,adaptive,keep,-,partly deleted: review
+tests/test_adr_status_banners.py,1,27,false,false,,adr,keep,-,
+tests/test_agent_mcp_integration.py,8,115,true,false,P1-12,agent,drop-with-code,P1-12,
+tests/test_agent_registry.py,14,136,true,false,P1-12,agent,drop-with-code,P1-12,
+tests/test_align_lab.py,11,395,false,false,,align,keep,-,
+tests/test_api_lane_control.py,64,1345,true,false,,api,keep,-,
+tests/test_api_operator.py,26,1197,true,false,,api,keep,-,
+tests/test_application_regressions.py,25,1726,true,false,,application,keep,-,edge-case pin
+tests/test_architecture_boundaries.py,50,2426,true,true,P1-05,architecture,keep,-,partly deleted: review
+tests/test_azure_client.py,86,1744,true,false,P1-11,azure,drop-with-code,P1-11,
+tests/test_azure_integration_joins.py,18,848,true,false,"P1-11,P1-12",azure,keep,-,partly deleted: review
+tests/test_azure_pipelines_executor.py,48,858,true,false,P1-11,azure,keep,-,partly deleted: review
+tests/test_azure_reactive.py,31,884,true,false,"P1-11,P1-12,P1-13",azure,keep,-,partly deleted: review
+tests/test_azure_runs.py,94,3214,true,false,"P1-10,P1-11,P1-12",azure,port-engine,P3,partly deleted: review
+tests/test_azure_webhook.py,59,1151,true,false,P1-11,azure,keep,-,partly deleted: review
+tests/test_blob_reads.py,33,553,true,false,P1-11,blob,port-adapter,P3,partly deleted: review
+tests/test_bot_loop.py,8,91,true,false,,bot,keep,-,invariant evidence; edge-case pin
+tests/test_bounded_steps.py,18,925,true,false,,bounded,port-engine,P3,
+tests/test_budget_amendment.py,25,866,true,false,,budget,keep,-,invariant evidence
+tests/test_budget_calibration.py,25,779,true,false,,budget,port-engine,P3,
+tests/test_budget_wiring.py,13,558,true,false,"P1-10,P1-12",budget,port-engine,P3,partly deleted: review
+tests/test_budgets.py,53,1092,true,false,,budgets,keep,-,invariant evidence
+tests/test_candidate.py,49,661,true,false,P1-10,candidate,keep,-,partly deleted: review
+tests/test_candidate_collector.py,35,871,true,false,,candidate,keep,-,
+tests/test_capability_manifest.py,44,588,true,false,"P1-07,P1-11",capability,keep,-,partly deleted: review
+tests/test_causal_steering.py,27,506,false,false,P1-07,causal,drop-with-code,P1-07,
+tests/test_changeset_materialize.py,22,290,true,false,,changeset,keep,-,
+tests/test_chat_agent.py,10,186,true,false,P1-12,chat,drop-with-code,P1-12,
+tests/test_checkpoint_gc.py,34,1428,true,false,,checkpoint,keep,-,
+tests/test_checkpoint_migration.py,48,1253,true,false,P1-07,checkpoint,keep,-,partly deleted: review
+tests/test_checkpoint_repository.py,29,655,true,false,,checkpoint,keep,-,
+tests/test_checkpoint_retry_authority.py,32,1010,true,false,,checkpoint,keep,-,
+tests/test_ci_contract.py,21,117,true,false,,ci,keep,-,
+tests/test_ci_debug.py,25,713,true,false,"P1-12,P1-13",ci,port-engine,P3,partly deleted: review
+tests/test_claim_slots.py,9,397,true,false,,claim,keep,-,
+tests/test_claims.py,25,563,true,false,,claims,keep,-,
+tests/test_classifier.py,9,93,false,true,P1-12,classifier,drop-with-code,P1-12,
+tests/test_closing_budget.py,27,616,true,false,P1-15,closing,keep,-,invariant evidence; partly deleted: review
+tests/test_closing_review_obligations.py,13,487,true,false,,closing,port-engine,P3,
+tests/test_closure_matrix.py,20,259,false,true,P1-06,closure,drop-with-code,P1-06,
+tests/test_cohort_runner.py,47,971,false,false,,cohort,keep,-,
+tests/test_cold_install_runbook.py,30,521,false,false,,cold,keep,-,
+tests/test_collaboration_target.py,26,1030,true,false,,collaboration,keep,-,
+tests/test_combined_steering.py,35,655,true,false,P1-07,combined,keep,-,partly deleted: review
+tests/test_command_progress.py,52,1272,true,false,P1-15,command,port-engine,P3,partly deleted: review
+tests/test_composition_adoption.py,39,838,true,false,,composition,port-engine,P3,
+tests/test_config_scope.py,39,737,true,false,P1-12,config,port-adapter,P3,partly deleted: review
+tests/test_conformance.py,26,1074,true,true,"P1-03,P1-11",conformance,port-adapter,P3,partly deleted: review
+tests/test_conformance_consumers.py,14,384,false,false,,conformance,keep,-,
+tests/test_consistency.py,29,600,true,false,P1-11,consistency,port-engine,P3,partly deleted: review
+tests/test_context_engine.py,6,292,true,false,P1-12,context,port-adapter,P3,partly deleted: review
+tests/test_conversation_store.py,10,126,true,false,,conversation,keep,-,
+tests/test_credential_audit.py,18,525,true,false,,credential,keep,-,
+tests/test_credential_broker.py,59,982,true,false,,credential,keep,-,
+tests/test_credential_consumption.py,28,691,true,false,,credential,keep,-,
+tests/test_credential_preflight.py,40,610,true,false,,credential,keep,-,
+tests/test_cutover_fence.py,21,773,true,false,P1-07,cutover,keep,-,partly deleted: review
+tests/test_database.py,2,59,true,false,,database,keep,-,
+tests/test_database_lifecycle.py,13,373,true,false,,database,keep,-,
+tests/test_dedup.py,5,91,true,false,,dedup,keep,-,
+tests/test_delivery_economics.py,50,3024,true,false,"P1-07,P1-15",delivery,keep,-,partly deleted: review
+tests/test_delivery_measurement.py,39,1089,true,false,P1-15,delivery,drop-with-code,P1-15,
+tests/test_deployment_ops.py,25,586,true,false,P1-07,deployment,keep,-,partly deleted: review
+tests/test_diff_parser.py,10,122,true,false,P1-12,diff,drop-with-code,P1-12,
+tests/test_discovery_authority.py,30,998,true,false,P1-07,discovery,keep,-,partly deleted: review
+tests/test_discovery_live.py,37,580,false,false,P1-07,discovery,drop-with-code,P1-07,
+tests/test_discovery_profile.py,82,908,false,false,P1-07,discovery,drop-with-code,P1-07,
+tests/test_doctor.py,24,597,true,false,P1-12,doctor,keep,-,partly deleted: review
+tests/test_doctor_settings.py,4,48,true,false,,doctor,keep,-,
+tests/test_dotnet_recipe.py,34,811,true,true,"P1-03,P1-15",dotnet,drop-with-code,"P1-03,P1-15",
+tests/test_durable_controller.py,28,423,true,false,,durable,keep,-,
+tests/test_durable_gates.py,9,148,true,false,,durable,keep,-,invariant evidence
+tests/test_durable_inbox.py,9,168,true,false,,durable,keep,-,
+tests/test_durable_models.py,6,121,true,false,,durable,keep,-,
+tests/test_edge_case_register.py,4,56,false,false,,edge,keep,-,
+tests/test_error_handling.py,12,182,true,false,P1-12,error,drop-with-code,P1-12,
+tests/test_event_parsing.py,10,139,true,false,,event,keep,-,
+tests/test_evidence_policy.py,7,239,true,false,P1-10,evidence,port-engine,P3,partly deleted: review
+tests/test_exact_composition_guard.py,17,302,false,false,,exact,keep,-,
+tests/test_execution_profile.py,93,1348,true,false,,execution,keep,-,
+tests/test_execution_spec.py,49,624,false,false,P1-07,execution,keep,-,partly deleted: review
+tests/test_factory_llm.py,21,278,true,false,,factory,keep,-,
+tests/test_failure_injection.py,8,1003,true,false,,failure,port-engine,P3,invariant evidence
+tests/test_failure_injection_os.py,10,1011,true,false,,failure,keep,-,
+tests/test_fallback.py,7,196,true,false,,fallback,keep,-,
+tests/test_findings.py,37,1135,true,false,"P1-12,P1-13",findings,port-adapter,P3,partly deleted: review
+tests/test_findings_triage.py,25,1093,true,false,"P1-12,P1-13",findings,keep,-,partly deleted: review
+tests/test_flow_api.py,2,58,true,false,P1-12,flow,drop-with-code,P1-12,
+tests/test_flow_conditions.py,24,93,true,false,P1-12,flow,drop-with-code,P1-12,
+tests/test_flow_loader.py,12,191,true,false,P1-12,flow,drop-with-code,P1-12,
+tests/test_flow_runner.py,11,326,true,false,P1-12,flow,keep,-,partly deleted: review
+tests/test_flow_state.py,9,125,true,false,P1-12,flow,drop-with-code,P1-12,
+tests/test_flow_templates.py,11,62,true,false,P1-12,flow,drop-with-code,P1-12,
+tests/test_forge_config.py,9,96,true,false,,forge,keep,-,
+tests/test_gate_conformance.py,38,1241,true,false,P1-11,gate,port-engine,P3,partly deleted: review
+tests/test_gate_public_artifacts.py,18,347,false,false,,gate,keep,-,
+tests/test_gateway_issue_lifecycle.py,24,538,true,false,,gateway,keep,-,
+tests/test_github_actions_executor.py,51,1029,true,false,,github,keep,-,edge-case pin
+tests/test_github_actions_template.py,42,1036,false,false,,github,keep,-,
+tests/test_github_client.py,37,807,true,false,,github,port-adapter,P3,edge-case pin
+tests/test_github_flow.py,30,764,true,false,,github,port-adapter,P3,
+tests/test_github_harness.py,18,720,true,false,,github,port-engine,P3,
+tests/test_github_reactive_review.py,25,635,true,false,,github,port-engine,P3,
+tests/test_github_reconciler_scope.py,5,374,true,false,,github,port-engine,P3,
+tests/test_github_runs.py,128,4784,true,false,"P1-10,P1-11,P1-12",github,port-engine,P3,edge-case pin; partly deleted: review
+tests/test_github_webhook.py,45,974,true,false,,github,keep,-,invariant evidence; edge-case pin
+tests/test_gitlab_client.py,30,646,true,false,,gitlab,port-adapter,P3,
+tests/test_gitlab_client_commits.py,6,150,true,false,,gitlab,port-adapter,P3,
+tests/test_gitlab_dispatch_parity.py,13,533,true,false,,gitlab,port-engine,P3,
+tests/test_gitlab_sdk_lane_finalization.py,8,442,false,false,,gitlab,keep,-,
+tests/test_gitlab_tools.py,10,138,true,false,P1-12,gitlab,drop-with-code,P1-12,
+tests/test_go_resolution_typed.py,5,230,true,false,,go,port-engine,P3,
+tests/test_guarded_mutations.py,16,681,true,false,,guarded,keep,-,
+tests/test_harness_entry.py,98,1905,true,false,,harness,keep,-,edge-case pin
+tests/test_harness_mcp.py,18,145,true,false,,harness,keep,-,
+tests/test_harness_prompt.py,19,205,true,false,,harness,keep,-,
+tests/test_harness_selection.py,65,1051,true,false,,harness,port-engine,P3,
+tests/test_health.py,4,75,false,false,,health,keep,-,
+tests/test_hygiene.py,6,67,false,false,,hygiene,keep,-,
+tests/test_implementer.py,11,258,true,false,P1-10,implementer,port-adapter,P3,partly deleted: review
+tests/test_import_contract_debt.py,1,17,false,false,,import,keep,-,
+tests/test_incremental_review.py,11,516,true,false,P1-12,incremental,drop-with-code,P1-12,
+tests/test_inventory_lab.py,24,605,false,false,,inventory,keep,-,
+tests/test_lab_pilot.py,7,311,false,false,P1-07,lab,drop-with-code,P1-07,
+tests/test_lane_closure.py,38,542,true,false,P1-15,lane,drop-with-code,P1-15,
+tests/test_lane_driver.py,120,2359,true,false,,lane,keep,-,
+tests/test_lane_install_contract.py,60,1329,false,false,P1-07,lane,drop-with-code,P1-07,
+tests/test_legacy_credential_deadline.py,24,479,true,false,,legacy,keep,-,
+tests/test_lineage_view.py,39,1266,true,false,,lineage,keep,-,
+tests/test_liveness.py,12,629,true,false,,liveness,port-engine,P3,
+tests/test_llm_provider.py,9,100,true,false,P1-12,llm,drop-with-code,P1-12,
+tests/test_log_parser.py,17,140,true,false,P1-12,log,drop-with-code,P1-12,
+tests/test_main.py,3,79,true,false,,main,keep,-,
+tests/test_matcher.py,15,258,true,false,P1-12,matcher,drop-with-code,P1-12,
+tests/test_mcp_manager.py,12,216,true,false,P1-12,mcp,drop-with-code,P1-12,
+tests/test_mcp_registry.py,16,138,true,false,P1-12,mcp,drop-with-code,P1-12,
+tests/test_mcp_runs_tools.py,37,713,true,false,P1-13,mcp,keep,-,partly deleted: review
+tests/test_mcp_server.py,29,505,true,false,P1-13,mcp,port-adapter,P3,partly deleted: review
+tests/test_mcp_tools_endpoint.py,3,71,true,false,P1-12,mcp,drop-with-code,P1-12,
+tests/test_mention.py,21,129,true,false,,mention,keep,-,
+tests/test_native_locator.py,35,586,true,false,,native,keep,-,
+tests/test_operation_grant.py,73,2210,true,false,,operation,port-engine,P3,
+tests/test_operator_canonical_subjects.py,24,651,true,false,,operator,keep,-,
+tests/test_operator_experience.py,23,764,true,false,,operator,keep,-,
+tests/test_operator_recovery_surface.py,24,928,true,false,,operator,keep,-,
+tests/test_operator_snapshot.py,36,1152,true,false,P1-15,operator,keep,-,partly deleted: review
+tests/test_ops_drills.py,40,1304,true,false,P1-07,ops,keep,-,partly deleted: review
+tests/test_ops_limits.py,40,1395,true,false,"P1-07,P1-15",ops,keep,-,partly deleted: review
+tests/test_orchestrator.py,14,359,true,false,P1-12,orchestrator,drop-with-code,P1-12,
+tests/test_orphan_guard.py,1,61,false,false,,orphan,keep,-,
+tests/test_patch_differential.py,19,341,true,false,,patch,keep,-,invariant evidence
+tests/test_pg_gate.py,42,992,false,false,,pg,keep,-,
+tests/test_pilot_ladder.py,51,982,false,false,P1-07,pilot,drop-with-code,P1-07,
+tests/test_pipeline_debugger.py,5,126,true,false,P1-12,pipeline,drop-with-code,P1-12,
+tests/test_profile_bound_ops.py,34,787,true,false,P1-07,profile,keep,-,partly deleted: review
+tests/test_profile_qualification.py,100,1666,false,false,P1-07,profile,drop-with-code,P1-07,
+tests/test_project_config.py,23,372,true,false,"P1-11,P1-12",project,port-adapter,P3,partly deleted: review
+tests/test_prompt_budgets.py,10,336,true,false,P1-10,prompt,drop-with-code,P1-10,
+tests/test_prompts.py,15,148,true,false,P1-12,prompts,drop-with-code,P1-12,
+tests/test_provider_namespaces.py,22,829,true,false,,provider,port-engine,P3,
+tests/test_publication_boundary.py,13,503,true,false,,publication,port-adapter,P3,invariant evidence
+tests/test_publication_intents.py,40,1422,true,false,P1-11,publication,port-engine,P3,invariant evidence; edge-case pin; partly deleted: review
+tests/test_publisher.py,49,976,true,false,,publisher,port-adapter,P3,invariant evidence
+tests/test_real_construction_surfaces.py,36,670,true,false,P1-11,real,port-adapter,P3,partly deleted: review
+tests/test_redactor.py,13,95,true,false,,redactor,keep,-,
+tests/test_reference_separation.py,13,400,false,true,"P1-02,P1-03,P1-04,P1-07",reference,drop-with-code,"P1-02,P1-03,P1-04,P1-07",
+tests/test_release_manifest.py,24,422,false,false,P1-07,release,drop-with-code,P1-07,
+tests/test_release_promotion.py,42,1013,true,false,P1-07,release,keep,-,partly deleted: review
+tests/test_report_inventory_strict.py,27,1069,true,false,P1-15,report,keep,-,partly deleted: review
+tests/test_repository_changeset.py,60,474,true,false,,repository,keep,-,
+tests/test_repository_writer.py,15,336,true,false,,repository,port-adapter,P3,edge-case pin
+tests/test_research_cohort_live.py,53,2206,true,false,P1-07,research,keep,-,partly deleted: review
+tests/test_resource_lifecycle.py,8,355,true,false,,resource,keep,-,
+tests/test_retryable_observations.py,13,692,true,false,,retryable,port-engine,P3,
+tests/test_review_feedback.py,56,1562,true,false,,review,port-engine,P3,
+tests/test_review_regressions.py,4,347,true,false,,review,keep,-,
+tests/test_review_rounds.py,37,1897,true,false,,review,port-engine,P3,edge-case pin
+tests/test_revision_executor_proof.py,25,718,true,false,,revision,keep,-,invariant evidence
+tests/test_revival_durability.py,20,722,true,false,,revival,port-engine,P3,
+tests/test_round_head_classification.py,16,357,true,false,,round,port-engine,P3,
+tests/test_runs_api.py,10,274,true,false,,runs,keep,-,
+tests/test_runs_backends.py,27,604,true,false,,runs,port-adapter,P3,
+tests/test_runs_cancel.py,5,221,true,false,,runs,port-engine,P3,
+tests/test_runs_composition.py,78,761,true,false,,runs,keep,-,
+tests/test_runs_harness_service.py,20,639,true,false,,runs,port-engine,P3,
+tests/test_runs_reconciler.py,14,432,true,false,,runs,port-engine,P3,
+tests/test_runs_repair.py,23,908,true,false,P1-10,runs,port-engine,P3,partly deleted: review
+tests/test_runs_revival.py,36,863,true,false,P1-11,runs,port-engine,P3,partly deleted: review
+tests/test_runs_service.py,63,1872,true,false,,runs,port-engine,P3,
+tests/test_runs_spec.py,50,1064,true,false,"P1-10,P1-12",runs,port-engine,P3,invariant evidence; partly deleted: review
+tests/test_runs_verification.py,21,416,true,false,,runs,port-engine,P3,invariant evidence
+tests/test_runs_wiring.py,20,536,true,false,,runs,port-engine,P3,
+tests/test_saga_durable.py,36,941,true,true,P1-02,saga,keep,-,partly deleted: review
+tests/test_saga_native.py,43,1047,true,true,P1-02,saga,port-adapter,P3,partly deleted: review
+tests/test_script_assert_no_skips.py,4,36,false,false,,script,keep,-,
+tests/test_script_build_test_ledger.py,7,144,false,false,,script,keep,-,
+tests/test_script_codebase.py,9,153,false,false,,script,keep,-,
+tests/test_script_metrics.py,8,93,false,false,,script,keep,-,
+tests/test_script_prose_lint.py,9,94,false,false,,script,keep,-,
+tests/test_script_ratchet.py,13,155,false,false,,script,keep,-,
+tests/test_script_rendering.py,4,156,true,false,,script,keep,-,
+tests/test_security_report.py,12,184,true,false,P1-12,security,drop-with-code,P1-12,
+tests/test_security_triage.py,5,140,true,false,P1-12,security,drop-with-code,P1-12,
+tests/test_settings_gitlab_optional.py,7,81,true,false,,settings,keep,-,
+tests/test_setup_script.py,4,102,false,false,,setup,keep,-,
+tests/test_slash_routing.py,8,333,true,false,P1-12,slash,keep,-,partly deleted: review
+tests/test_step_runtime.py,24,963,true,false,,step,port-engine,P3,
+tests/test_supported_profile.py,42,694,false,false,P1-07,supported,drop-with-code,P1-07,
+tests/test_system_verification.py,60,890,true,true,"P1-02,P1-03",system,keep,-,partly deleted: review
+tests/test_task_queue.py,12,209,true,false,,task,keep,-,
+tests/test_templates.py,63,755,true,false,,templates,keep,-,
+tests/test_token_counter.py,15,91,true,false,P1-12,token,drop-with-code,P1-12,
+tests/test_usage_ingestion.py,44,1771,true,false,"P1-07,P1-15",usage,keep,-,partly deleted: review
+tests/test_usage_receipts.py,21,483,true,false,,usage,keep,-,invariant evidence
+tests/test_usecases.py,19,661,true,false,,usecases,keep,-,
+tests/test_useful_wip_resume.py,34,612,false,false,,useful,keep,-,
+tests/test_verification_binding.py,48,1083,true,false,P1-15,verification,port-adapter,P3,invariant evidence; partly deleted: review
+tests/test_verification_executor.py,62,1573,true,true,P1-03,verification,keep,-,partly deleted: review
+tests/test_webhook_auth.py,4,60,false,false,,webhook,keep,-,
+tests/test_webhook_capture.py,3,99,true,false,,webhook,keep,-,
+tests/test_worker.py,3,130,true,false,,worker,keep,-,
+tests/test_write_profiles.py,30,257,true,false,,write,keep,-,

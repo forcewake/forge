@@ -141,9 +141,41 @@ def _resolve(name: str, modules: dict[str, Module]) -> str | None:
     return None
 
 
+def _from_target(node: ast.ImportFrom, current: str | None, is_package: bool) -> str:
+    """The absolute module named by a ``from ... import`` statement."""
+    if not (node.level and current is not None):
+        return node.module or ""
+    base = current.split(".")
+    if not is_package:
+        base = base[:-1]
+    if node.level > 1:
+        base = base[: -(node.level - 1)]
+    return ".".join([*base, node.module] if node.module else base)
+
+
+_REEXPORTS: dict[Path, dict[str, str]] = {}
+
+
+def reexports(package: Module, modules: dict[str, Module]) -> dict[str, str]:
+    """Names a package ``__init__`` imports at top level, mapped to their module."""
+    if package.path not in _REEXPORTS:
+        tree = ast.parse(package.path.read_text(encoding="utf-8"), filename=str(package.path))
+        exports: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                full = _from_target(node, package.name, is_package=True)
+                for alias in node.names:
+                    target = _resolve(f"{full}.{alias.name}", modules) or _resolve(full, modules)
+                    if target is not None and target != package.name:
+                        exports[alias.asname or alias.name] = target
+        _REEXPORTS[package.path] = exports
+    return _REEXPORTS[package.path]
+
+
 def imports_of(path: Path, modules: dict[str, Module], current: str | None = None) -> set[str]:
-    """Internal modules imported by a file (lazy imports and literal
-    ``importlib.import_module`` calls included; parents implied)."""
+    """Internal modules imported by a file (lazy imports, literal
+    ``importlib.import_module`` calls and names re-exported by a package
+    ``__init__`` included; parents implied)."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     is_package = path.name == "__init__.py"
     found: set[str] = set()
@@ -153,19 +185,15 @@ def imports_of(path: Path, modules: dict[str, Module], current: str | None = Non
                 if (hit := _resolve(alias.name, modules)) is not None:
                     found.add(hit)
         elif isinstance(node, ast.ImportFrom):
-            if node.level and current is not None:
-                base = current.split(".")
-                if not is_package:
-                    base = base[:-1]
-                if node.level > 1:
-                    base = base[: -(node.level - 1)]
-                full = ".".join([*base, node.module] if node.module else base)
-            else:
-                full = node.module or ""
+            full = _from_target(node, current, is_package)
             for alias in node.names:
                 hit = _resolve(f"{full}.{alias.name}", modules) or _resolve(full, modules)
-                if hit is not None:
-                    found.add(hit)
+                if hit is None:
+                    continue
+                found.add(hit)
+                if hit == full and modules[hit].path.name == "__init__.py":
+                    if (source := reexports(modules[hit], modules).get(alias.name)) is not None:
+                        found.add(source)
         elif isinstance(node, ast.Call) and node.args:
             func = node.func
             called = getattr(func, "attr", None) or getattr(func, "id", None)

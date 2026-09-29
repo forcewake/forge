@@ -18,38 +18,78 @@ TREE = {
 }
 
 
-def _rows(root):
+def _run(root) -> dict[str, dict[str, str]]:
+    (root / ledger.LEDGER).parent.mkdir(parents=True, exist_ok=True)
+    assert ledger.main(["--root", str(root)]) == 0
     with (root / ledger.LEDGER).open(encoding="utf-8", newline="") as handle:
         return {row["file"]: row for row in csv.DictReader(handle)}
 
 
+def _curate(root, file: str, **values: str) -> None:
+    path = root / ledger.LEDGER
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row["file"] == file:
+            row.update(values)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ledger.FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def test_default_dispositions(tmp_path):
-    root = write_tree(tmp_path, TREE)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    assert ledger.main(["--root", str(root)]) == 0
-    rows = _rows(root)
+    rows = _run(write_tree(tmp_path, TREE))
     assert rows["tests/test_core.py"]["disposition"] == "keep"
     assert rows["tests/test_only.py"]["disposition"] == "drop-with-code"
+    assert rows["tests/test_only.py"]["phase"] == "P1"
     assert rows["tests/test_only.py"]["tests"] == "1"
 
 
-def test_curated_columns_survive_regeneration(tmp_path):
-    root = write_tree(tmp_path, TREE)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    ledger.main(["--root", str(root)])
-    rows = list(_rows(root).values())
-    rows[0].update(disposition="port-engine", phase="P3", note="owner decision")
-    with (root / ledger.LEDGER).open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ledger.FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    ledger.main(["--root", str(root)])
-    kept = _rows(root)[rows[0]["file"]]
-    assert (kept["disposition"], kept["phase"], kept["note"]) == (
-        "port-engine",
-        "P3",
-        "owner decision",
+def test_planned_deletions_drive_drop_phase_and_deleted_by(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/main.py": "from forge import core\nfrom forge.integrations import azure\n",
+        "src/forge/config.py": "",
+        "src/forge/integrations/__init__.py": "",
+        "src/forge/integrations/azure.py": "",
+        "tests/test_azure.py": "from forge import config\nfrom forge.integrations import azure\n",
+        "tests/test_mixed.py": "from forge import core\nfrom forge.integrations import azure\n",
+    }
+    rows = _run(write_tree(tmp_path, tree))
+    azure = rows["tests/test_azure.py"]
+    assert (azure["disposition"], azure["phase"], azure["deleted_by"]) == (
+        "drop-with-code",
+        "P1-11",
+        "P1-11",
     )
+    mixed = rows["tests/test_mixed.py"]
+    assert (mixed["disposition"], mixed["deleted_by"]) == ("keep", "P1-11")
+    assert mixed["note"] == "partly deleted: review"
+
+
+def test_port_rules(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/runs/__init__.py": "",
+        "src/forge/runs/service.py": "",
+        "src/forge/gitlab/__init__.py": "",
+        "src/forge/gitlab/client.py": "",
+        "src/forge/gitlab/schemas.py": "",
+        "src/forge/main.py": (
+            "from forge import core\nfrom forge.runs import service\n"
+            "from forge.gitlab import client, schemas\n"
+        ),
+        "tests/test_service.py": "from forge.runs import service\n",
+        "tests/test_client.py": "from forge.gitlab import client\n",
+        "tests/test_schema.py": "from forge.gitlab import schemas\n",
+        "tests/production_entry/test_trace.py": "from forge import core\n",
+    }
+    rows = _run(write_tree(tmp_path, tree))
+    assert rows["tests/test_service.py"]["disposition"] == "port-engine"
+    assert rows["tests/production_entry/test_trace.py"]["disposition"] == "port-engine"
+    assert rows["tests/test_client.py"]["disposition"] == "port-adapter"
+    assert rows["tests/test_schema.py"]["disposition"] == "keep"
 
 
 def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
@@ -62,13 +102,10 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
         "tests/test_doctor.py": "from forge import doctor\n",
         "tests/test_cli.py": "from forge import cli\n",
         "tests/test_pinned.py": "from forge import pinned\n",
-        "tests/invariants/registry.py": 'EVIDENCE = frozenset(("tests/test_only.py",))\n',
+        "tests/invariants/registry.py": 'INVARIANT_FILES = frozenset({"tests/test_only.py"})\n',
         "docs/reference/edge-cases.md": "| EC-01 | a | b | c | `tests/test_pinned.py::test_x` |\n",
     }
-    root = write_tree(tmp_path, tree)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    assert ledger.main(["--root", str(root)]) == 0
-    rows = _rows(root)
+    rows = _run(write_tree(tmp_path, tree))
     names = (
         "tests/test_doctor.py",
         "tests/test_cli.py",
@@ -78,3 +115,30 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
     assert {name: rows[name]["disposition"] for name in names} == dict.fromkeys(names, "keep")
     assert rows["tests/test_only.py"]["note"] == "invariant evidence"
     assert rows["tests/test_pinned.py"]["note"] == "edge-case pin"
+
+
+def test_curated_columns_survive_regeneration(tmp_path):
+    root = write_tree(tmp_path, TREE)
+    _run(root)
+    _curate(root, "tests/test_core.py", disposition="port-engine", phase="P3", note="owner")
+    kept = _run(root)["tests/test_core.py"]
+    assert (kept["disposition"], kept["phase"], kept["note"]) == ("port-engine", "P3", "owner")
+
+
+def test_warnings_for_vanished_and_protected_drop_rows(tmp_path, capsys):
+    tree = {**TREE, "tests/invariants/registry.py": 'INVARIANT_FILES = {"tests/test_only.py"}\n'}
+    root = write_tree(tmp_path, tree)
+    _run(root)
+    _curate(root, "tests/test_only.py", disposition="drop-obsolete")
+    _curate(root, "tests/test_core.py", note="owner decision")
+    (root / "tests/test_core.py").unlink()
+    _run(root)
+    err = capsys.readouterr().err
+    assert "tests/test_only.py is invariant evidence but marked drop-obsolete" in err
+    assert "tests/test_core.py vanished" in err
+
+
+def test_the_csv_uses_lf_line_endings(tmp_path):
+    root = write_tree(tmp_path, TREE)
+    _run(root)
+    assert b"\r\n" not in (root / ledger.LEDGER).read_bytes()

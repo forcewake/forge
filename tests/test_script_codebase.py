@@ -133,3 +133,21 @@ def test_declared_roots_that_do_not_exist_are_reported(tmp_path):
     assert "forge.main" not in reach.missing_roots
     assert "forge.migrate" in reach.missing_roots
     assert "forge_lane" not in reach.missing_roots
+
+
+def test_names_re_exported_by_a_package_resolve_to_their_module(tmp_path):
+    root = write_tree(
+        tmp_path,
+        {
+            "src/forge/__init__.py": "",
+            "src/forge/runs/__init__.py": (
+                "from forge.runs.service import RunService\nfrom .spec import Spec as FrozenSpec\n"
+            ),
+            "src/forge/runs/service.py": "class RunService: ...\n",
+            "src/forge/runs/spec.py": "class Spec: ...\n",
+            "tests/test_x.py": "from forge.runs import FrozenSpec, RunService\n",
+        },
+    )
+    modules = cb.discover_modules(root)
+    imported = cb.imports_of(root / "tests/test_x.py", modules)
+    assert {"forge.runs", "forge.runs.service", "forge.runs.spec"} <= imported

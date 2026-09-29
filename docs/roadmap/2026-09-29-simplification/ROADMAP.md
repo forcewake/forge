@@ -244,13 +244,13 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 - **Goal:** every test file has a fate before code is deleted.
 - **Work:**
   - `scripts/build_test_ledger.py` generates `test-ledger.csv` with columns
-    `file, tests, loc, imports_runtime, imports_tests_only, area,
-    disposition, phase, note`.
+    `file, tests, loc, imports_runtime, imports_tests_only, deleted_by,
+    area, disposition, phase, note`.
   - `disposition` ∈ {keep, port-engine, port-adapter, drop-with-code,
     drop-obsolete} is pre-filled by rule and then curated.
-- **Done when:** all 288 test files (`tests/**/test*.py`, nested suites
-  included) have a disposition, and the owner has reviewed the `drop-*`
-  rows.
+- **Done when:** all test files (`tests/**/test*.py`, nested suites included)
+  have a disposition, and the owner has reviewed every `drop-*` row and every
+  row noted "partly deleted: review".
 - **Depends:** P0-10
 - **Size:** M
 
