@@ -343,6 +343,8 @@ index 7b15d94..ad6708c 100644
 +    (stub / "python").write_text(f'#!/bin/sh\nexec "{python}" "$@"\n')
 +    (stub / "python").chmod((stub / "python").stat().st_mode | stat.S_IEXEC)
      return {"STUB": str(stub), "PYTHON": str(python)}
+ 
+ 
 ```
 
 - [ ] **Step 3: Run the file, with and without the venv on `PATH`**
@@ -1445,6 +1447,7 @@ index 08693c6..436ca03 100644
 +
      # LiteLLM proxy
      LITELLM_URL: str = "http://litellm:4000"
+ 
 ```
 
 - [ ] **Step 4: Fail closed when GitLab ingress is unconfigured**
@@ -3126,6 +3129,7 @@ index 9bb6413..ffe1754 100644
 +   WARN or FAIL; that is expected for a pure-dev clone. What must pass: unit suite
     and lint. If the user provides a `.env`, `forge doctor` should go fully
     green (`--project <id>` adds target-project checks).
+ 
 ```
 
 - [ ] **Step 4: Check that no stale numbers remain**
