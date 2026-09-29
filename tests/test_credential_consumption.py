@@ -340,7 +340,7 @@ class TestRegistryMultiWorkerContract:
         }
         phase = tmp_path / "worker-first-view.json"
         marker = tmp_path / "revoked.marker"
-        ttl = 1.0
+        ttl = 2.0
         watcher = subprocess.Popen(
             [
                 sys.executable,
@@ -362,8 +362,11 @@ class TestRegistryMultiWorkerContract:
             while not phase.is_file():
                 assert time.monotonic() < deadline, "worker never reported its first view"
                 time.sleep(0.02)
-            # Worker B holds the live generation; worker A revokes.
-            assert _worker(path, "revoke") == {"revoked": True}
+            # Worker B holds the live generation; worker A (this process)
+            # revokes in-process, so B's TTL window is not spent on starting
+            # another interpreter, which under load alone can exceed the TTL.
+            registry = ConcurrentCredentialRegistry(path=path, ttl_seconds=ttl)
+            assert registry.revoke(SUBJECT, "anthropic-gateway", revoked_by="ops@two-proc")
             marker.touch()
             stdout, stderr = watcher.communicate(timeout=120)
             assert watcher.returncode == 0, stderr
