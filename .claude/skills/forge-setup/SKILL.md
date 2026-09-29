@@ -9,14 +9,16 @@ description: Set up the forge dev environment from a fresh clone and verify it w
    If missing, install uv via the official installer; use the system Python
    3.13+ (pyenv/homebrew acceptable).
 2. `uv sync` from the repository root.
-3. Verify: `set -o pipefail && .venv/bin/python -m pytest -q` — expect ~815
-   passed, 1 skipped, 3 xfailed (xfails are pinned upstream defects; never
-   unpin them casually).
-4. Lint: `.venv/bin/ruff format . && .venv/bin/ruff check src tests`.
-5. Final gate: `uv run python -m forge.doctor` — exit code 0. Without a
-   `.env`, the service checks (gitlab/redis/database/litellm) may WARN or
-   FAIL; that is expected for a pure-dev clone. What must pass: unit suite
-   and lint. If the user provides a `.env`, `forge doctor` should go fully
-   green (`--project <id>` adds target-project checks).
+3. Verify: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"` — the
+   default tier must pass with zero failures (counts change as the
+   simplification program deletes code; `docs/reference/testing.md` explains
+   the tiers). xfails are pinned upstream defects; never unpin them casually.
+4. Lint: `.venv/bin/ruff format . && .venv/bin/ruff check .`, then the
+   guardrails: `uv run lint-imports && uv run python scripts/ratchet.py`.
+5. Final gate: `uv run python -m forge.doctor`. With a `.env` it must exit 0
+   (`--project <id>` adds target-project checks). Without one, doctor prints a
+   single FAIL line for the missing settings (for example `GITLAB_URL`) and
+   exits 1; that is expected for a pure-dev clone, where what must pass is the
+   default tier, lint and the guardrails.
 
 Report: test counts, lint status, doctor output. Do not commit anything.

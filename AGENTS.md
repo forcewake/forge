@@ -18,7 +18,7 @@ pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
 capabilities and platform permissions, never by prompts
 ([ADR-0003](docs/adr/0003-no-merge-is-enforceable.md)).
 
-## Operator surface (v0.11)
+## Operator surface
 
 The provider-neutral operator commands are `/implement` `/go` `/cancel`
 `/retry` `/status` `/why-blocked` `/reconcile` `/security` — one table of
@@ -53,8 +53,9 @@ annotated in `.env.example`):
 
 ## Non-negotiable rules for agents
 
-1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q`,
-   then `ruff format . && ruff check src tests`. Never commit with a red suite.
+1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"`
+   (add `-m slow` for lifecycle changes), then `ruff format . && ruff check .`.
+   Never commit with a red suite.
 2. **Secrets never enter the repo or the conversation record.** `.env` is
    gitignored; tokens live in GitLab CI variables. If the user pastes a
    token, use it for the task, never echo it into files, commits, or tests.
@@ -65,23 +66,70 @@ annotated in `.env.example`):
    an ADR amendment instead of silently diverging.
 5. Prefer the smallest change that satisfies the request; match the code's
    existing style; add regression tests for every bug you fix.
+6. **Follow the simplification program** ([ADR-0035](docs/adr/0035-simplification-program.md)):
+   [DESIGN](docs/roadmap/2026-09-29-simplification/DESIGN.md) is the target architecture and
+   [ROADMAP](docs/roadmap/2026-09-29-simplification/ROADMAP.md) lists the work items. One task
+   per PR, about 500 net lines at most (pure deletions are exempt); fill in the PR template.
+7. **The guardrails are gates** (the CI `lint` job runs them):
+   - `uv run lint-imports` checks the import contracts in `pyproject.toml`;
+   - `uv run python scripts/ratchet.py`: oversized code may only shrink, new files stay
+     within 600 lines and new functions within 80. After shrinking or deleting oversized
+     code, run `uv run python scripts/ratchet.py --update` and commit
+     `scripts/ratchet-baseline.json`; `--update --accept <path>` is only for a reviewed
+     move of existing oversized code;
+   - `uv run python scripts/prose_lint.py --base origin/main`: added code carries no
+     review, backlog or issue ids (history lives in git and ADRs). A line that must keep
+     a matching literal, such as the colour `#009966`, carries the marker
+     `prose-lint: allow`.
+8. **Never weaken the Invariant Suite** (`tests/invariants/registry.py`, DESIGN §4):
+   removing or skipping evidence for I1–I8 needs an ADR.
+9. **Deleted code keeps its lessons.** Before a module is deleted or rewritten, its rows
+   in the [edge-case register](docs/reference/edge-cases.md) must still hold: port the
+   pinning tests and repoint the rows in the same PR, or retire a row that no longer
+   applies. A test file is deleted only when its row in
+   [`test-ledger.csv`](docs/roadmap/2026-09-29-simplification/test-ledger.csv) says so.
 
 ## Repo map
 
 ```
 src/forge/
-  gateway/     webhook endpoint + routing (/implement, /go, /cancel)
-  worker/      Redis task queue + worker loop + reconciler boot
-  runs/        RunService lifecycle, ci_harness/builtin backends, repair loop,
-               CI quality contract, reconciler
-  durable/     controller: transitions, gates (consume-once), outbox, leases
+  main.py, api_*.py  the FastAPI app and its operator, lane-control and checkpoint APIs
+  config.py    settings (see .env.example)
+  gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
+  worker/      Redis task queue, worker loop, step claims, reconciler boot
+  durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
+               budgets
+  runs/        RunService per provider (service.py, github_service.py, azure_service.py),
+               RunSpec, publisher (the only repository writer), CI verification, repair
+               loop, revival, reconciler
+  adaptive/    the largest package: discovery and planning, operator control,
+               checkpoints, credential broker, usage and budgets, publication saga,
+               SDK lane drivers
   repository/  ChangeSet (ADR-0001) + ChangesetWriter (Commits API)
+  gitlab/, integrations/
+               provider clients: GitLab; GitHub App and Azure DevOps
+  execution/   lane executors on GitHub Actions and Azure Pipelines
+  harnesses/   lane scripts, prompts and MCP config rendered for the target's CI
+  harness_entry.py, lane_driver.py
+               the lane side: CLI and SDK drivers inside the target's CI
   factory/     LLM planner / implementer / reviewer (LiteLLM HTTP)
-  orchestrator/ legacy reactive flows (review, pipeline debug, chat)
+  context/     context assembly, diff and log parsing, redaction
+  reactive/    durable review and CI-debug bots on the step lane
+  findings/    security findings and /security triage
+  mcp_server/  forge's MCP server (token-scoped tools)
+  orchestrator/, flows/, agents/, mcp_client/
+               legacy GitLab reactive bot: review, pipeline debug, chat
+  release_*.py, profile_qualification.py
+               release gates
   doctor.py    environment verification (this is your setup oracle)
-ci/templates/  harness CI jobs (claude-code, opencode, grok) + event filters
-tests/         2600+ tests; fixtures/fake_gitlab.py is the GitLab fake
-docs/adr/      architecture decisions (read 0001-0027 before redesigning)
+ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
+scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
+               release tooling
+tests/         tiered (docs/reference/testing.md); tests/invariants/ is the Invariant
+               Suite; fixtures/fake_gitlab.py is the GitLab fake
+docs/adr/      architecture decisions (start with 0003, 0005, 0016, 0026, 0035)
+docs/roadmap/2026-09-29-simplification/
+               DESIGN, ROADMAP, metrics and the test ledger
 ```
 
 ## Environment setup (dev)
@@ -89,11 +137,16 @@ docs/adr/      architecture decisions (read 0001-0027 before redesigning)
 ```bash
 uv sync                      # Python 3.13+, deps incl. dev
 set -o pipefail
-.venv/bin/python -m pytest -q # must be green before any commit
-.venv/bin/ruff format . && .venv/bin/ruff check src tests
+.venv/bin/python -m pytest -q -m "not slow"   # default tier; must be green before any commit
+.venv/bin/python -m pytest -q -m slow         # real processes (production_entry, fi_os)
+.venv/bin/ruff format . && .venv/bin/ruff check .
+uv run lint-imports && uv run python scripts/ratchet.py
+uv run python scripts/prose_lint.py --base origin/main
 ```
 
-No database or services are needed for the unit suite (fakes only).
+The default tier needs no database or services (fakes only); the slow tier
+needs `redis-server` on `PATH`. [docs/reference/testing.md](docs/reference/testing.md)
+explains the tiers and how to run the Invariant Suite.
 
 ## Verification oracle
 
@@ -124,30 +177,41 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
 
 ## Known gotchas (learned the hard way)
 
-- **zsh does not word-split unquoted variables** — never `for x in $VAR`
-  over multi-line command output; use `while IFS= read -r` loops.
-- **pytest piped to tail hides exit codes** — always `set -o pipefail` first.
+The [edge-case register](docs/reference/edge-cases.md) lists every gotcha with
+the test or reference that pins it; the IDs below are its rows. Read a row
+before removing a guard that looks redundant.
+
+- **zsh does not word-split unquoted variables** (OP-04) — never
+  `for x in $VAR` over multi-line command output; use `while IFS= read -r`
+  loops.
+- **pytest piped to tail hides exit codes** (OP-05) — always
+  `set -o pipefail` first.
 - GitLab CE 18.x Commits API **400s if `start_branch` is present** and the
-  branch exists — `ensure_branch` owns creation; the writer never passes it.
-- Claude Code on z.ai: model ids need the `[1m]` suffix for the 1M window
-  (bare `glm-5.3-flash` is treated as 200k).
-- Harness CLIs in CI must install their **platform binary explicitly**
-  (npm optionalDependencies flake → silent futex hang). See the grok
-  template's before_script for the pattern.
-- Long-lived AI streams from some runner networks crawl (226s vs 2s via a
-  proxy on a fast path). The harness templates support
+  branch exists (EC-01) — `ensure_branch` owns creation; the writer never
+  passes it.
+- Claude Code on z.ai (OP-01): model ids need the `[1m]` suffix for the 1M
+  window (bare `glm-5.3-flash` is treated as 200k).
+- Harness CLIs in CI must install their **platform binary explicitly**,
+  pinned to the wrapper's version (EC-02, EC-03: npm optionalDependencies
+  flake → silent futex hang). See the grok template's before_script for the
+  pattern.
+- Long-lived AI streams from some runner networks crawl (OP-06: 226s vs 2s
+  via a proxy on a fast path). The harness templates support
   `FORGE_HARNESS_HTTPS_PROXY`.
 - Redis `forge:worker:<id>` heartbeat keys persist ~30s after a worker
-  dies — `/metrics` `workers_active` lags; check logs, not just metrics.
+  dies (OP-02) — `/metrics` `workers_active` lags; check logs, not just
+  metrics.
 - DLQ (`forge:tasks:dead`) holds exhausted *tasks*; run-level outcomes live
-  in Postgres `flow_runs`. A DLQ entry is not a stuck run by itself.
+  in Postgres `flow_runs` (OP-07). A DLQ entry is not a stuck run by itself.
 - Full run triage recipe: [.claude/skills/forge-debug-run/SKILL.md](.claude/skills/forge-debug-run/SKILL.md).
 
 ## Where work stands
 
-Milestones M0–M4 are complete (durable run loop, real LLM agents,
-ci_harness backends, harness repair, failure-injection drills, release
-engineering); the current state of the factory and its history live in the
-[CHANGELOG](CHANGELOG.md) and [docs/README.md](docs/README.md). The live
-lab (`/implement` → branch → green CI → Draft MR → `ready_for_human`) is
-the definition of done for any lifecycle change.
+The shipped factory and its history live in the [CHANGELOG](CHANGELOG.md)
+and [docs/README.md](docs/README.md). The current work is the simplification
+program ([ADR-0035](docs/adr/0035-simplification-program.md)):
+[DESIGN](docs/roadmap/2026-09-29-simplification/DESIGN.md) is the target,
+[ROADMAP](docs/roadmap/2026-09-29-simplification/ROADMAP.md) the phased task
+list and [metrics.md](docs/roadmap/2026-09-29-simplification/metrics.md) the
+measured progress. The live lab (`/implement` → branch → green CI → Draft
+MR → `ready_for_human`) is the definition of done for any lifecycle change.

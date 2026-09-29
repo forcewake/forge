@@ -100,9 +100,10 @@ Examples: `src/forge/durable/budgets.py`,
 
 ## 10. Evidence
 
-The test suite has 2601 tests. It has two failure-injection suites, one
-differential suite that compares the patch engine with `git apply`, and
-one conformance suite that runs the same checks on three providers.
+The test suite has two failure-injection suites, one differential suite
+that compares the patch engine with `git apply`, and one conformance suite
+that runs the same checks on three providers. The Invariant Suite ties each
+core guarantee to the tests that prove it ([testing](reference/testing.md)).
 
 ## 11. How to try
 
