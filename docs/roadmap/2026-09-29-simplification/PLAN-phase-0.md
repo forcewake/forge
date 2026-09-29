@@ -811,9 +811,9 @@ Then add this job right before the `integration` job:
 
 ```yaml
   # The slow tier: real processes and services (tests/production_entry,
-  # tests/test_failure_injection_os.py). Kept off the pull-request path;
-  # pg_gate still runs the required production-entry selection on every
-  # pull request, but only this job fails on the leaked-process check.
+  # tests/test_failure_injection_os.py). Not run on pull requests, except the
+  # files the Invariant Suite registers (the invariants job) and pg_gate's
+  # production-entry selection; pg_gate ignores the leaked-process check.
   tests-slow:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -919,12 +919,18 @@ from tests.invariants.registry import INVARIANTS
 REPO = Path(__file__).resolve().parents[2]
 
 
-def test_i1_to_i8_are_all_registered():
-    assert {f"I{n}" for n in range(1, 9)} <= {inv.ident for inv in INVARIANTS}
+def test_i1_to_i8_and_the_self_trigger_rule_are_registered():
+    required = {f"I{n}" for n in range(1, 9)} | {"SELF-TRIGGER"}
+    assert required <= {inv.ident for inv in INVARIANTS}
 
 
 def test_every_invariant_names_evidence():
     assert all(inv.files for inv in INVARIANTS)
+
+
+def test_registered_paths_are_clean_and_repo_relative():
+    paths = [f for inv in INVARIANTS for f in inv.files]
+    assert [f for f in paths if f != Path(f).as_posix() or not f.startswith("tests/")] == []
 
 
 def test_every_registered_file_exists():
@@ -948,6 +954,11 @@ Each invariant names the test files that prove it. The collection hook in
 ``tests/conftest.py`` marks every test in these files, and every test under
 ``tests/invariants/``, with ``invariant``. ``test_registry_integrity``
 fails when a listed file disappears, so evidence cannot vanish silently.
+
+One registry rather than one module per invariant: most evidence already
+lives in focused test files. ``tests/test_failure_injection_os.py`` is not
+listed: it needs real workers and Redis and runs nightly in the
+``integration-os`` job, while the ``invariants`` job fails on any skip.
 """
 
 from __future__ import annotations
@@ -1036,8 +1047,8 @@ if __name__ == "__main__":
 ```python
 """I1 — the bot never merges (ADR-0003).
 
-Two mechanical checks: no provider client or writer contains a merge API
-call, and every lane template disables push and grants no write access.
+Two mechanical checks: no source file contains a merge API call, and every
+lane template disables push and holds no write credential.
 """
 
 from __future__ import annotations
@@ -1046,23 +1057,67 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-PROVIDER_SOURCES = (
-    "src/forge/gitlab",
-    "src/forge/integrations",
-    "src/forge/repository",
-    "src/forge/providers",
-)
-MERGE_PATTERNS = (
-    re.compile(r"/merge_requests/[^\"'\s]*/merge\b"),  # GitLab: accept a merge request
-    re.compile(r"\bmerge_when_pipeline_succeeds\b"),
-    re.compile(r"\bauto_merge\b"),
-    re.compile(r"/pulls/[^\"'\s]*/merge\b"),  # GitHub REST: merge a pull request
-    re.compile(r"\bmergePullRequest\b"),
-    re.compile(r"\benablePullRequestAutoMerge\b"),
-    re.compile(r"\bautoCompleteSetBy\b"),  # Azure DevOps auto-complete
-    re.compile(r"\bcompletionOptions\b"),
+
+# Each merge API, with one sample of how code would call it.
+MERGE_APIS: dict[str, tuple[str, str]] = {
+    "GitLab: accept a merge request": (
+        r"/merge_requests/[^\"'\s]*/merge\b",
+        'await self._put(f"/projects/{pid}/merge_requests/{iid}/merge")',
+    ),
+    "any REST path ending in /merge": (r"/merge[\"'?]", 'await self._put(f"{mr_path}/merge")'),
+    "GitLab: merge when the pipeline succeeds": (
+        r"\bmerge_when_pipeline_succeeds\b",
+        '{"merge_when_pipeline_succeeds": True}',
+    ),
+    "GitLab: merge trains": (
+        r"/merge_trains\b",
+        'f"/projects/{pid}/merge_trains/merge_requests/1"',
+    ),
+    "GitLab GraphQL: accept a merge request": (
+        r"\bmergeRequestAccept\b",
+        "mutation { mergeRequestAccept(input: $input) { errors } }",
+    ),
+    "auto-merge flags": (r"\bauto_merge\b|\bautoMerge\b", '{"auto_merge": True}'),
+    "GitHub REST: merge a pull request": (
+        r"/pulls/[^\"'\s]*/merge\b",
+        'await self._put(f"/repos/{repo}/pulls/{number}/merge")',
+    ),
+    "GitHub REST: merge a branch": (r"/merges\b", 'await self._post(f"/repos/{repo}/merges")'),
+    "GitHub GraphQL: merge a pull request": (
+        r"\bmergePullRequest\b",
+        "mutation { mergePullRequest(input: $input) { clientMutationId } }",
+    ),
+    "GitHub GraphQL: enable auto-merge": (
+        r"\benablePullRequestAutoMerge\b",
+        "mutation { enablePullRequestAutoMerge(input: $input) { clientMutationId } }",
+    ),
+    "GitHub GraphQL: merge a branch": (
+        r"\bmergeBranch\b",
+        "mutation { mergeBranch(input: $input) { clientMutationId } }",
+    ),
+    "GitHub GraphQL: merge queue": (
+        r"\benqueuePullRequest\b",
+        "mutation { enqueuePullRequest(input: $input) { clientMutationId } }",
+    ),
+    "Azure DevOps: auto-complete": (r"\bautoCompleteSetBy\b", '{"autoCompleteSetBy": {"id": me}}'),
+    "Azure DevOps: completion options": (
+        r"\bcompletionOptions\b",
+        '{"completionOptions": {"deleteSourceBranch": True}}',
+    ),
+    "Azure DevOps: complete a pull request": (
+        r"[\"']status[\"']\s*:\s*[\"']completed[\"']",
+        'await self._patch(pr_url, json={"status": "completed"})',
+    ),
+}
+PATTERNS = {name: re.compile(pattern) for name, (pattern, _) in MERGE_APIS.items()}
+NOT_MERGES = (
+    'f"/projects/{pid}/merge_requests/{iid}/notes"',
+    "await gitlab.list_merge_requests(project_id)",
+    'f"/projects/{pid}/merge_requests/{iid}/merge_ref"',
+    '{"merge_request_iid": iid, "status": "in_progress"}',
 )
 LANE_TEMPLATES = sorted(
     [
@@ -1072,55 +1127,65 @@ LANE_TEMPLATES = sorted(
     ]
 )
 GITHUB_TEMPLATES = [p for p in LANE_TEMPLATES if "github" in p.name or p.parent.name == "workflows"]
+AZURE_TEMPLATES = [p for p in LANE_TEMPLATES if p.name.endswith(".azure-pipelines.yml")]
+READ_ONLY = {"read", "none"}
 
 
-def _provider_files() -> list[Path]:
-    return sorted(
-        path
-        for base in PROVIDER_SOURCES
-        if (REPO / base).is_dir()
-        for path in (REPO / base).rglob("*.py")
-    )
+def _source_files() -> list[Path]:
+    return sorted(p for p in (REPO / "src").rglob("*.py") if "__pycache__" not in p.parts)
 
 
 def _rel(path: Path) -> str:
     return path.relative_to(REPO).as_posix()
 
 
-def test_the_scanner_recognises_merge_calls():
-    samples = (
-        'await self._put(f"/projects/{pid}/merge_requests/{iid}/merge")',
-        'await self._put(f"/repos/{repo}/pulls/{number}/merge")',
-        "mutation { mergePullRequest(input: $input) { clientMutationId } }",
-    )
-    assert all(any(p.search(s) for p in MERGE_PATTERNS) for s in samples)
+@pytest.mark.parametrize("name", sorted(MERGE_APIS))
+def test_each_pattern_recognises_its_merge_call(name: str):
+    assert PATTERNS[name].search(MERGE_APIS[name][1])
 
 
-@pytest.mark.parametrize("path", _provider_files(), ids=_rel)
-def test_provider_code_contains_no_merge_call(path: Path):
+@pytest.mark.parametrize("sample", NOT_MERGES)
+def test_ordinary_merge_request_calls_are_not_flagged(sample: str):
+    assert [name for name, p in PATTERNS.items() if p.search(sample)] == []
+
+
+@pytest.mark.parametrize("path", _source_files(), ids=_rel)
+def test_source_contains_no_merge_call(path: Path):
     text = path.read_text(encoding="utf-8")
-    hits = [p.pattern for p in MERGE_PATTERNS if p.search(text)]
+    hits = [name for name, pattern in PATTERNS.items() if pattern.search(text)]
     assert hits == [], f"{_rel(path)} uses a merge API: {hits}"
 
 
 @pytest.mark.parametrize("path", LANE_TEMPLATES, ids=_rel)
-def test_lane_template_disables_push_and_grants_no_write(path: Path):
-    text = path.read_text(encoding="utf-8")
-    assert "git remote set-url --push origin FORBIDDEN" in text
-    assert not re.search(r"contents:\s*write", text)
+def test_lane_template_disables_push(path: Path):
+    assert "git remote set-url --push origin FORBIDDEN" in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("path", GITHUB_TEMPLATES, ids=_rel)
-def test_github_lane_does_not_persist_checkout_credentials(path: Path):
-    assert "persist-credentials: false" in path.read_text(encoding="utf-8")
+def test_github_lane_token_is_read_only(path: Path):
+    text = path.read_text(encoding="utf-8")
+    assert "persist-credentials: false" in text
+    doc = yaml.safe_load(text)
+    for name, job in doc["jobs"].items():
+        permissions = job.get("permissions", doc.get("permissions"))
+        assert isinstance(permissions, dict), f"job {name} does not pin its token permissions"
+        assert set(permissions.values()) <= READ_ONLY, f"job {name}: {permissions}"
+
+
+@pytest.mark.parametrize("path", AZURE_TEMPLATES, ids=_rel)
+def test_azure_lane_holds_no_access_token(path: Path):
+    text = path.read_text(encoding="utf-8")
+    assert "persistCredentials: false" in text
+    assert "System.AccessToken" not in text
 ```
 
 - [ ] **Step 5: Run the invariants package**
 
 Run: `uv run pytest -q tests/invariants`
-Expected: `32 passed`. This is characterization: the current code complies.
-`test_the_scanner_recognises_merge_calls` proves that the scanner is not
-vacuous.
+Expected: `288 passed`. This is characterization: the current code complies.
+`test_each_pattern_recognises_its_merge_call` proves that no pattern is
+vacuous, and `test_ordinary_merge_request_calls_are_not_flagged` guards
+against false positives.
 
 - [ ] **Step 6: Mark invariant tests by path — failing test first**
 
@@ -1289,6 +1354,7 @@ Add before the `integration` job:
 
 ```yaml
   # ADR-0035 / DESIGN §4: the Invariant Suite (I1-I8) must execute, never skip.
+  # The registry selects the files; every test in them runs.
   invariants:
     runs-on: ubuntu-latest
     services:
@@ -1305,15 +1371,6 @@ Add before the `integration` job:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
@@ -1327,21 +1384,22 @@ Add before the `integration` job:
 
       - name: Invariant Suite
         run: >-
-          uv run pytest -q -m invariant --junitxml=invariants.xml
+          uv run pytest -q --junitxml=invariants.xml
           $(uv run python -m tests.invariants.registry)
 
       - name: Every invariant test executed
         run: uv run python scripts/assert_no_skips.py invariants.xml
 ```
 
-The suite is selected **by file** through `python -m tests.invariants.registry`.
-With `-m invariant` alone, unrelated modules that skip at import time (for
-example `tests/test_failure_injection_os.py`) would show up as skips.
+The suite is selected **by file** through `python -m tests.invariants.registry`,
+without a `-m` filter, so every test in a registered file runs. A marker
+filter could only drop tests silently, because deselected tests never appear
+in the JUnit report. The `invariant` marker is for local selection.
 
 - [ ] **Step 11: Run the suite locally**
 
-Run: `uv run pytest -q -m invariant --junitxml=/tmp/inv.xml $(uv run python -m tests.invariants.registry)`
-Expected without Postgres: about `475 passed, 3 skipped`. The skips are the
+Run: `uv run pytest -q --junitxml=/tmp/inv.xml $(uv run python -m tests.invariants.registry)`
+Expected without Postgres: about `731 passed, 3 skipped`. The skips are the
 `FORGE_PG_TEST_URL`-gated tests.
 
 Run: `uv run python scripts/assert_no_skips.py /tmp/inv.xml`
@@ -3300,6 +3358,13 @@ Expected: the tag exists before any Phase 1 deletion lands.
     workflow (YAGNI).
   - The ledger script is `build_test_ledger.py`, so pytest can never
     collect a script named `test_*`.
+  - The Invariant Suite is one registry (`tests/invariants/registry.py`)
+    over existing focused test files, not one module per invariant, and I6
+    is proven by the existing production-entry race test rather than a new
+    in-process variant.
+  - `tests/test_failure_injection_os.py` is not registered for I7: it needs
+    real workers and Redis and runs nightly in `integration-os`, while the
+    `invariants` job fails on any skip.
 - **Consistency.** Script names, CLI flags, marker names and file paths are
   identical in every task. `tests/_scripts.py` is created in Task 6, before
   its first use in Tasks 9–14.
