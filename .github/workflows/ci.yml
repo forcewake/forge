@@ -38,6 +38,9 @@ jobs:
       - name: Import contracts
         run: uv run lint-imports
 
+      - name: Size ratchet (oversized code may only shrink)
+        run: uv run python scripts/ratchet.py
+
       # R38-03 (#304): refuse database-archive artifacts (PGDMP magic, pg_dump
       # extensions, archives containing dump members) in the tracked tree
       # outside the reviewed synthetic-fixture allowlist, and validate the
