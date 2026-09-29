@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from forge.repository.changeset import BUILTIN_WRITE_PROFILES
@@ -17,11 +17,31 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # GitLab connection
-    GITLAB_URL: str
-    GITLAB_TOKEN: SecretStr
-    GITLAB_WEBHOOK_SECRET: SecretStr
+    # GitLab connection. Required while FORGE_GITLAB_ENABLED is true (the
+    # default); a GitHub-only deployment sets FORGE_GITLAB_ENABLED=false.
+    FORGE_GITLAB_ENABLED: bool = True
+    GITLAB_URL: str = ""
+    GITLAB_TOKEN: SecretStr = SecretStr("")
+    GITLAB_WEBHOOK_SECRET: SecretStr = SecretStr("")
     FORGE_BOT_USERNAME: str = "forge-bot"
+
+    @model_validator(mode="after")
+    def _require_gitlab_settings_when_enabled(self) -> Settings:
+        if self.FORGE_GITLAB_ENABLED:
+            missing = [
+                name
+                for name, value in (
+                    ("GITLAB_URL", self.GITLAB_URL),
+                    ("GITLAB_TOKEN", self.GITLAB_TOKEN.get_secret_value()),
+                    ("GITLAB_WEBHOOK_SECRET", self.GITLAB_WEBHOOK_SECRET.get_secret_value()),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    f"{', '.join(missing)} must be set while FORGE_GITLAB_ENABLED is true"
+                )
+        return self
 
     # LiteLLM proxy
     LITELLM_URL: str = "http://litellm:4000"

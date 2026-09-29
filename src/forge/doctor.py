@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from forge.config import Settings
 from forge.gitlab.client import GitLabClient, GitLabAPIError
@@ -95,6 +96,23 @@ async def check_bot_token(settings: Settings) -> CheckResult:
         )
     except Exception as exc:  # noqa: BLE001
         return _result("forge.bot_token", False, "", _short(exc))
+
+
+async def check_gitlab_identity(settings: Settings) -> list[CheckResult]:
+    """The GitLab token checks, or one warning when GitLab is disabled."""
+    if not getattr(settings, "FORGE_GITLAB_ENABLED", True):
+        return [CheckResult("gitlab.token", WARN, "GitLab disabled (FORGE_GITLAB_ENABLED=false)")]
+    return [await check_gitlab(settings), await check_bot_token(settings)]
+
+
+def settings_failures(exc: ValidationError) -> list[CheckResult]:
+    """One FAIL line per invalid or missing setting, never a traceback."""
+    results = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"])
+        name = f"settings.{location}" if location else "settings"
+        results.append(CheckResult(name, FAIL, error["msg"]))
+    return results
 
 
 async def check_redis(settings: Settings) -> CheckResult:
@@ -1028,8 +1046,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     results = [
         CheckResult("python.version", PASS, f"{sys.version_info.major}.{sys.version_info.minor}")
     ]
-    results.append(await check_gitlab(settings))
-    results.append(await check_bot_token(settings))
+    results.extend(await check_gitlab_identity(settings))
     results.append(await check_redis(settings))
     results.append(await check_database(settings))
     results.append(await check_litellm(settings))
@@ -1100,8 +1117,12 @@ def main(argv: list[str] | None = None) -> int:
         # Offline mode: the support matrix owns its own exit verdict.
         return _support_matrix_mode(args.json)
 
-    settings = Settings()  # type: ignore[call-arg]
-    results = asyncio.run(run_checks(settings, args.project))
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except ValidationError as exc:
+        results = settings_failures(exc)
+    else:
+        results = asyncio.run(run_checks(settings, args.project))
     failed = any(r.status == FAIL for r in results)
 
     if args.json:
