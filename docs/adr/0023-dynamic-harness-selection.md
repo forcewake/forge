@@ -1,5 +1,7 @@
 # ADR-0023: Task-aware harness selection (frozen chain, gate-approved)
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-15), grounded in
 [research/harness-selection.md](../research/harness-selection.md)
 Context: today the implementer harness is pinned per project

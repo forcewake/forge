@@ -1,5 +1,7 @@
 # ADR-0034: The execution-ownership map — one owner per mature authority decision, callers verified
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-24) · map refreshed R41-17 (2026-09-27, issue #372)
 · refreshed R42-16 (2026-09-28, issue #389)
 

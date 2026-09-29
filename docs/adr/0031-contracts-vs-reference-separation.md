@@ -1,5 +1,7 @@
 # ADR-0031: Contracts vs reference — separating reusable product contracts from reference scenarios
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-24)
 
 Context: review `4af6b33`, item R37-19 (issue #300). The R36 session

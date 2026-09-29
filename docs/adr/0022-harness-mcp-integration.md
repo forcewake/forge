@@ -1,5 +1,7 @@
 # ADR-0022: MCP server provisioning for harness lanes
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-15)
 Context: forge's implementer harnesses (Claude Code, Grok Build, opencode,
 GitHub Copilot CLI) run headless in ephemeral CI lanes. Coding agents are

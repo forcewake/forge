@@ -1,5 +1,7 @@
 # ADR-0027: Lifecycle consolidation, incrementally — one lifecycle, not three copies of the factory
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (incremental) (2026-09-17)
 
 Context: review finding R27 — the GitLab, GitHub and Azure DevOps lanes

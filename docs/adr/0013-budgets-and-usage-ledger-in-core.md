@@ -1,5 +1,7 @@
 # 0013 — Budgets and the usage ledger are part of the core
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 - **Status:** Accepted
 - **Date:** 2026-09-12
 

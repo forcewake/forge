@@ -1,5 +1,7 @@
 # ADR-0025: Collapsible structured lane traces
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-16)
 Context: the lane job log is the human's window into what the coding agent
 is doing — and a raw NDJSON stream is unreadable (the first dogfood run

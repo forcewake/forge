@@ -1,5 +1,7 @@
 # ADR-0020: GitHub Actions execution adapter and agent UX
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-14)
 Context: closes Stage E3 — the GitHub slice had no runner (builtin ran
 inside the forge worker) and no human gate. Implements the execution side

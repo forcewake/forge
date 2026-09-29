@@ -1,5 +1,7 @@
 # ADR-0019: Source/execution adapters; GitHub App vertical slice
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-13)
 Context: review findings F27, F31, F32; decision to add GitHub **in this
 repository** (modular monolith, one release train), after the safety and

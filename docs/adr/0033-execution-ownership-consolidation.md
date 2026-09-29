@@ -1,5 +1,7 @@
 # ADR-0033: Execution-ownership consolidation — six decision owners, one closure matrix
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-24)
 
 Context: review `6df4020`, item Q39-17 (issue #336). Previous:

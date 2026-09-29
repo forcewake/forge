@@ -1,5 +1,7 @@
 # ADR-0030: Authority-boundary ownership — the six owners, the registry, and the mechanical fence
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-23)
 
 Context: review `16339c2`, item R36-20 (issue #279) — the review's own

@@ -1,5 +1,7 @@
 # 0015. Pluggable implementer backends; coding harnesses execute in project CI
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 - Status: Accepted
 - Date: 2026-09-12
 - Context: M2 — real implementer

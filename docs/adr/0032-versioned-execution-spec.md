@@ -1,5 +1,7 @@
 # ADR-0032: The versioned execution spec — one pinned contract for every lane template
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-24)
 
 Context: review `59ba869`, item R38-17 (issue #318). Previous:

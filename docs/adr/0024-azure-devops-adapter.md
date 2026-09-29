@@ -1,5 +1,7 @@
 # ADR-0024: Azure DevOps as the third source + execution adapter
 
+> **Superseded on main by [ADR-0035](0035-simplification-program.md)** (2026-09-29). It remains valid on `release/0.42.x`.
+
 Status: accepted (2026-09-15)
 Context: forge runs at full parity on GitLab CE and GitHub
 ([ADR-0019](0019-source-execution-adapters.md)). Azure DevOps (Services and

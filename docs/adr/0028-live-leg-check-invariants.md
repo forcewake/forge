@@ -1,5 +1,7 @@
 # ADR-0028: Live-leg-check invariants — DB-arbitrated Draft-MR uniqueness, identity-first AzDO dispatch, authored-marker self-trigger guard
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-20)
 Context: the live leg-check campaign (GitLab CE, GitHub and Azure DevOps
 driven end-to-end against real instances on 2026-09-20) surfaced three

@@ -1,5 +1,7 @@
 # ADR-0029: Composition boundaries — the five names, the owner map, and the matrix that records what may compose with what
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (types + ADR + compat fixtures only — no service rewiring in this slice) (2026-09-23)
 
 Context: review finding R32-24 — "what may compose with what" is

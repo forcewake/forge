@@ -1,5 +1,7 @@
 # 0002 — GitLab CI is the execution environment, but security comes from explicit execution profiles
 
+> **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 - **Status:** Accepted
 - **Date:** 2026-09-12
 

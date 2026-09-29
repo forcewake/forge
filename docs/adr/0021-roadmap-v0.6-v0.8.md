@@ -1,5 +1,7 @@
 # ADR-0021: Roadmap consolidation v0.6–v0.8 — trust surface, complex workloads, MCP
 
+> **Superseded by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
+
 Status: accepted (2026-09-14)
 Context: four research passes (docs/research/: ci-security-surface,
 complex-projects, mcp-surface, github-reactive) against the coverage audit
