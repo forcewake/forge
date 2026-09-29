@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
-import time
 
 import pytest
 
 from tests import _hygiene
 
 needs_pgrep = pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep is unavailable")
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 
 
 def test_process_heavy_suites_are_slow():
@@ -25,10 +26,12 @@ def test_ordinary_tests_have_no_tier():
 
 
 @needs_pgrep
-def test_a_running_child_is_killed_and_reported():
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+def test_a_running_child_is_killed_and_reported_with_its_command():
+    child = subprocess.Popen(SLEEPER)
     try:
-        assert child.pid in _hygiene.reap_and_kill_leaks()
+        leaked = _hygiene.reap_and_kill_leaks(only={child.pid})
+        assert list(leaked) == [child.pid]
+        assert "time.sleep(60)" in leaked[child.pid]
         assert child.poll() is not None
     finally:
         if child.poll() is None:
@@ -39,6 +42,17 @@ def test_a_running_child_is_killed_and_reported():
 @needs_pgrep
 def test_a_finished_child_is_reaped_not_reported():
     child = subprocess.Popen([sys.executable, "-c", "pass"])
-    time.sleep(1.0)  # let it exit without being waited on (a zombie)
-    assert child.pid not in _hygiene.reap_and_kill_leaks()
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)  # exited, not yet reaped
+    assert _hygiene.reap_and_kill_leaks(only={child.pid}) == {}
     child.wait(timeout=10)
+
+
+@needs_pgrep
+def test_children_outside_the_filter_are_left_alone():
+    bystander = subprocess.Popen(SLEEPER)
+    try:
+        assert _hygiene.reap_and_kill_leaks(only=set()) == {}
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)

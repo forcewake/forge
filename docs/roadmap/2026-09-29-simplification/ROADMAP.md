@@ -102,6 +102,7 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
   - Document how to find and kill leftovers from older runs in
     `docs/reference/testing.md`.
   - Known gap, follow-up: `redis-server` (started by `tests/production_entry/test_durable_ingress.py`) and the `python -m forge.worker` processes of `tests/fi_os/worker.py` are not guarded yet. Wrap them in a guarded launcher (or pass a lifeline pipe) before relying on local runs of those suites.
+  - Known gap, follow-up: `scripts/pg_gate.py` records pytest's return code but decides from JUnit outcomes only, so it does not fail on the leaked-process check; enforce it there.
 - **Done when:** a full run leaves zero forge test processes, verified by
   `ps` in a CI step.
 - **Depends:** —

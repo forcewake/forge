@@ -163,12 +163,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(tier)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Fail the run when a test leaked a running child process."""
+    """After fixture teardown, kill leaked child processes; fail an otherwise green run."""
     leaked = _hygiene.reap_and_kill_leaks()
-    if leaked:
-        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-        message = f"test hygiene: killed leaked child processes {leaked}"
-        if reporter is not None:
-            reporter.write_line(message, red=True)
+    if not leaked:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_sep("!", "test hygiene: killed leaked child processes", red=True)
+        for pid, command in leaked.items():
+            reporter.write_line(f"  {pid} {command}", red=True)
+    if session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED

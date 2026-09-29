@@ -134,14 +134,19 @@ jobs:
         run: uv sync
 
       - name: Run tests (default tier)
-        run: uv run pytest -q -m "not slow"
+        run: uv run pytest -q -m "not slow" --durations=30
 
   # The slow tier: real processes and services (tests/production_entry,
-  # tests/fi_os). Kept off the pull-request path; pg_gate still runs the
-  # required production-entry selection on every pull request.
+  # tests/test_failure_injection_os.py). Kept off the pull-request path;
+  # pg_gate still runs the required production-entry selection on every
+  # pull request, but only this job fails on the leaked-process check.
   tests-slow:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
       - name: Install redis-server (the durable-ingress matrix spawns the real binary)
         run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
@@ -149,6 +154,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync
