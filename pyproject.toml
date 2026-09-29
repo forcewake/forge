@@ -36,7 +36,7 @@ dev = [
     # Stubs for the `yaml` import in forge.config — keeps mypy clean without
     # per-module ignore comments (blocking typecheck, F29).
     "types-PyYAML>=6.0.12",
-    "import-linter==2.1",
+    "import-linter==2.15",
 ]
 
 [project.optional-dependencies]
@@ -104,22 +104,28 @@ filterwarnings = [
 testpaths = ["tests"]
 
 # ADR-0035 guardrail: mechanical import boundaries. The ignore lists record
-# existing debt and may only shrink (ROADMAP P0-07).
+# existing debt and may only shrink (ROADMAP P0-07;
+# tests/test_import_contract_debt.py counts them).
 [tool.importlinter]
 root_package = "forge"
 
 [[tool.importlinter.contracts]]
-name = "durable does not import the run services, adaptive, gateway or integrations"
+name = "durable does not import runs, adaptive, gateway or integrations"
 type = "forbidden"
 source_modules = ["forge.durable"]
 forbidden_modules = ["forge.runs", "forge.adaptive", "forge.gateway", "forge.integrations"]
+# Lazy imports inside durable/budgets.py functions. Each entry covers every
+# import between the two modules, and importing forge.runs.candidate loads
+# forge.runs (RunService) at runtime.
 ignore_imports = [
     "forge.durable.budgets -> forge.adaptive.usage_ingestion",
     "forge.durable.budgets -> forge.runs.candidate",
 ]
 
 [[tool.importlinter.contracts]]
-name = "harnesses do not import the provider lifecycle services"
+name = "harnesses do not import forge.runs"
 type = "forbidden"
 source_modules = ["forge.harnesses"]
-forbidden_modules = ["forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service"]
+# The whole package: forge/runs/__init__.py loads RunService, which imports
+# forge.harnesses, so any runs import from here would create a cycle.
+forbidden_modules = ["forge.runs"]

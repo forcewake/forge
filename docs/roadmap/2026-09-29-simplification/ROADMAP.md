@@ -150,16 +150,17 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 ### P0-07 Add import contracts (ratchet mode)
 - **Goal:** mechanical boundaries that later phases tighten.
 - **Work:**
-  - Add `import-linter` to the dev group and a `.importlinter`. Initial
-    contracts:
+  - Add `import-linter` to the dev group and a `[tool.importlinter]`
+    section in `pyproject.toml`. Initial contracts:
     - `forge.durable` must not import `forge.runs`, `forge.adaptive`,
       `forge.gateway` or `forge.integrations`;
-    - `forge.harnesses` must not import `forge.runs.service*`.
+    - `forge.harnesses` must not import `forge.runs`.
 
     P2-01 adds the contracts for the new packages.
-  - Existing violations go into `ignore_imports` with a counter that may
+  - Existing violations go into `ignore_imports`;
+    `tests/test_import_contract_debt.py` counts them, and the count may
     only shrink.
-  - Add a CI job `imports`.
+  - Run `lint-imports` in the CI `lint` job.
 - **Done when:** CI enforces the contracts, and the ignore list is
   committed.
 - **Depends:** —
@@ -342,9 +343,10 @@ run last so that they do not churn code about to be deleted.
 - **Goal:** one boundary mechanism.
 - **Work:**
   - Translate the enforceable rules of `adaptive/boundary_registry.py`
-    and `tests/test_architecture_boundaries.py` into `.importlinter`
-    contracts. Examples: only the publisher module imports provider write
-    paths; only the admission module acquires leases.
+    and `tests/test_architecture_boundaries.py` into contracts in
+    `[tool.importlinter]` in `pyproject.toml`. Examples: only the publisher
+    module imports provider write paths; only the admission module acquires
+    leases.
   - Delete the registry and its test.
   - Rules that cannot be expressed as imports are listed in the PR for
     the owner to drop or keep as focused tests.
