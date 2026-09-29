@@ -68,7 +68,7 @@ output.
 | `src/forge/config.py`, `src/forge/gateway/validator.py`, `src/forge/gateway/router.py`, `src/forge/doctor.py`, `.env.example`, `docs/getting-started/github.md` | modified | Optional GitLab; ingress closed when off or unconfigured; doctor never raises |
 | `tests/test_settings_gitlab_optional.py`, `tests/test_doctor_settings.py` | new tests | The above |
 | `pyproject.toml`, `uv.lock` | modified | Markers, dev deps, import-linter contracts |
-| `scripts/_codebase.py`, `scripts/metrics.py`, `tests/test_script_metrics.py` | new | Shared analysis; metrics |
+| `scripts/_codebase.py`, `scripts/metrics.py`, `tests/test_script_metrics.py`, `tests/test_script_codebase.py` | new | Shared analysis; metrics |
 | `docs/roadmap/2026-09-29-simplification/{metrics.md,metrics-history.json}` | generated | Measured history |
 | `scripts/ratchet.py`, `scripts/ratchet-baseline.json`, `tests/test_script_ratchet.py` | new | Size ratchet |
 | `scripts/prose_lint.py`, `tests/test_script_prose_lint.py` | new | Prose lint |
@@ -1975,7 +1975,7 @@ git commit -m "build: import-linter contracts as a CI gate (ratchet mode)" -m "C
 ### Task 9: Shared analysis and the metrics script (ROADMAP P0-10)
 
 **Files:**
-- Create: `scripts/_codebase.py`, `scripts/metrics.py`, `tests/test_script_metrics.py`
+- Create: `scripts/_codebase.py`, `scripts/metrics.py`, `tests/test_script_metrics.py`, `tests/test_script_codebase.py`
 - Generate: `docs/roadmap/2026-09-29-simplification/metrics-history.json`, the measured block in `metrics.md`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1986,6 +1986,8 @@ git commit -m "build: import-linter contracts as a CI gate (ratchet mode)" -m "C
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from tests._scripts import load_script, write_tree
 
@@ -2026,6 +2028,52 @@ def test_write_appends_history_and_regenerates_one_block(tmp_path):
     assert text.count(metrics.BEGIN) == 1
     assert "| `src/forge` lines | 10 | 8 |" in text
     assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 2
+
+
+def test_breakdown_adds_up_and_the_lane_package_is_counted_separately(tmp_path):
+    tree = {**TREE, "packages/forge-lane/src/forge_lane/__init__.py": "A = 1\nB = 2\n"}
+    snapshot = metrics.measure(write_tree(tmp_path, tree))
+    parts = ("runtime_lines", "tooling_only_lines", "tests_only_lines", "unreached_lines")
+    assert sum(snapshot[key] for key in parts) == snapshot["src_lines"]
+    assert snapshot["forge_lane_lines"] == 2
+
+
+def test_who_imports_leaves_out_the_target_package_itself(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/pkg/__init__.py": "from forge.pkg import a\n",
+        "src/forge/pkg/a.py": "",
+        "src/forge/user.py": "from forge import pkg\n",
+    }
+    assert metrics.who_imports(write_tree(tmp_path, tree), "forge.pkg") == ["forge.user"]
+
+
+def test_write_is_idempotent_per_commit_and_refuses_broken_markers(tmp_path):
+    root = write_tree(tmp_path, {metrics.METRICS_FILE.as_posix(): "# Metrics\n"})
+    metrics.write(root, {"date": "2026-09-30", "sha": "abc1234", "src_lines": 10})
+    metrics.write(root, {"date": "2026-09-30", "sha": "abc1234", "src_lines": 9})
+    assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 1
+    assert "| `src/forge` lines | 9 |" in (root / metrics.METRICS_FILE).read_text()
+    (root / metrics.METRICS_FILE).write_text(f"# Metrics\n{metrics.BEGIN}\n")
+    with pytest.raises(ValueError):
+        metrics.write(root, {"date": "2026-10-01", "sha": "def5678", "src_lines": 8})
+    assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 1
+
+
+def test_the_sha_is_unknown_without_git(tmp_path, monkeypatch):
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(metrics.subprocess, "run", no_git)
+    assert metrics._git_sha(tmp_path) == "unknown"
+
+
+def test_suite_seconds_reads_a_pytest_junit_report(tmp_path):
+    report = tmp_path / "report.xml"
+    report.write_text(
+        '<testsuites name="pytest tests"><testsuite name="pytest" time="12.5"/></testsuites>'
+    )
+    assert metrics._suite_seconds(report) == 12.5
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -2033,13 +2081,156 @@ def test_write_appends_history_and_regenerates_one_block(tmp_path):
 Run: `uv run pytest -q tests/test_script_metrics.py`
 Expected: `ModuleNotFoundError: No module named 'metrics'`.
 
+- [ ] **Step 2b: Write the failing tests for the shared analysis**
+
+```python
+"""scripts/_codebase.py: the static analysis shared by the program's scripts."""
+
+from __future__ import annotations
+
+import pytest
+
+from tests._scripts import load_script, write_tree
+
+cb = load_script("_codebase")
+
+PACKAGE = {
+    "src/forge/__init__.py": "",
+    "src/forge/top.py": "X = 1\n",
+    "src/forge/pkg/__init__.py": "from . import sibling\nfrom .. import top\n",
+    "src/forge/pkg/sibling.py": "Y = 1\n",
+    "src/forge/pkg/deep.py": "",
+    "src/forge/pkg/other.py": "",
+    "src/forge/pkg/mod.py": (
+        "import importlib\n"
+        "from .sibling import Y\n"
+        "from ..top import X\n"
+        "def lazy():\n"
+        "    from forge.pkg import deep\n"
+        "    return importlib.import_module('forge.pkg.other')\n"
+    ),
+}
+
+
+@pytest.fixture()
+def modules(tmp_path):
+    return cb.discover_modules(write_tree(tmp_path, PACKAGE))
+
+
+def test_package_level_relative_imports_resolve_with_parents(modules):
+    imported = cb.imports_of(modules["forge.pkg"].path, modules, "forge.pkg")
+    assert imported == {"forge", "forge.pkg", "forge.pkg.sibling", "forge.top"}
+
+
+def test_module_level_relative_lazy_and_literal_dynamic_imports(modules):
+    imported = cb.imports_of(modules["forge.pkg.mod"].path, modules, "forge.pkg.mod")
+    assert {"forge.pkg.sibling", "forge.top", "forge.pkg.deep", "forge.pkg.other"} <= imported
+
+
+def test_function_sizes_cover_nested_conditional_and_duplicate_definitions(tmp_path):
+    source = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        return 1\n"
+        "    return inner\n"
+        "class A:\n"
+        "    class B:\n"
+        "        def m(self):\n"
+        "            return 2\n"
+        "    @property\n"
+        "    def p(self):\n"
+        "        return 3\n"
+        "    @p.setter\n"
+        "    def p(self, value):\n"
+        "        pass\n"
+        "if True:\n"
+        "    def guarded():\n"
+        "        pass\n"
+        "try:\n"
+        "    def in_try():\n"
+        "        pass\n"
+        "except ImportError:\n"
+        "    def in_try():\n"
+        "        pass\n"
+    )
+    path = write_tree(tmp_path, {"m.py": source}) / "m.py"
+    sizes = {size.qualname: size.lines for size in cb.function_sizes(path)}
+    assert sizes == {
+        "outer": 4,
+        "outer.inner": 2,
+        "A.B.m": 2,
+        "A.p": 2,
+        "A.p#2": 2,
+        "guarded": 2,
+        "in_try": 2,
+        "in_try#2": 2,
+    }
+
+
+def test_syntax_errors_name_the_file(tmp_path):
+    path = write_tree(tmp_path, {"broken.py": "def f(:\n"}) / "broken.py"
+    with pytest.raises(SyntaxError) as caught:
+        cb.function_sizes(path)
+    assert caught.value.filename == str(path)
+
+
+def test_prose_lines_count_comments_and_docstrings(tmp_path):
+    source = '"""Module doc\nsecond line."""\n# a comment\nx = 1  # trailing\n'
+    source += 'def f():\n    """One line."""\n'
+    path = write_tree(tmp_path, {"m.py": source}) / "m.py"
+    assert cb.prose_lines(path) == 5
+
+
+@pytest.mark.parametrize(
+    ("text", "hits"),
+    [
+        ("# R42-16: the parity rule", 1),
+        ("# Q35-09, NXT-10, NEXT-05 and AT-08", 4),
+        ("# fixed in #377", 1),
+        ("# as agreed in review `9e8d6c6`", 1),
+        ("# ADR-0035 decides this", 0),
+        ('url = "https://example.test/page#123"', 0),
+        ('html = "&#123;"', 0),
+        ('color = "#abc"', 0),
+    ],
+)
+def test_review_reference_pattern(text: str, hits: int):
+    assert len(cb.REVIEW_REF.findall(text)) == hits
+
+
+def test_console_scripts_are_tooling_roots(tmp_path):
+    root = write_tree(
+        tmp_path,
+        {
+            "pyproject.toml": '[project]\nname = "x"\n[project.scripts]\nforge = "forge.cli:main"\n',
+            "src/forge/__init__.py": "",
+            "src/forge/cli.py": "import importlib\n",
+            "tests/test_cli.py": "from forge import cli\n",
+        },
+    )
+    reach = cb.classify(root, cb.discover_modules(root))
+    assert "forge.cli" in reach.tooling_only
+    assert "forge.cli" not in reach.tests_only
+
+
+def test_declared_roots_that_do_not_exist_are_reported(tmp_path):
+    root = write_tree(tmp_path, {"src/forge/__init__.py": "", "src/forge/main.py": ""})
+    reach = cb.classify(root, cb.discover_modules(root))
+    assert "forge.main" not in reach.missing_roots
+    assert "forge.migrate" in reach.missing_roots
+    assert "forge_lane" not in reach.missing_roots
+```
+
+Run: `uv run pytest -q tests/test_script_codebase.py`
+Expected: `ModuleNotFoundError: No module named '_codebase'`.
+
 - [ ] **Step 3: Create the shared analysis module**
 
 ```python
 """Shared static analysis of the forge source tree (stdlib only).
 
 Used by ``scripts/metrics.py``, ``scripts/ratchet.py`` and
-``scripts/test_ledger.py``. Everything here reads files; nothing imports
+``scripts/build_test_ledger.py``. Everything here reads files; nothing imports
 forge, so the scripts run without the project environment.
 """
 
@@ -2049,6 +2240,7 @@ import ast
 import io
 import re
 import tokenize
+import tomllib
 from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -2056,6 +2248,8 @@ from pathlib import Path
 
 CONTROL_PLANE_ROOTS = ("forge.main", "forge.worker.__main__", "forge.worker", "forge.migrate")
 LANE_ROOTS = ("forge.harness_entry", "forge.lane_driver", "forge.candidate_collector", "forge_lane")
+# Declared roots that do not exist yet; their absence is expected.
+FUTURE_ROOTS = frozenset({"forge_lane"})
 TOOLING_ROOTS = (
     "forge.doctor",
     "forge.release_manifest",
@@ -2063,7 +2257,14 @@ TOOLING_ROOTS = (
     "forge.profile_qualification",
     "forge.capability_manifest",
 )
-REVIEW_REF = re.compile(r"\b[RQ]\d{2}-\d{2}\b|(?<![\w/&])#\d{3,}\b")
+# History that belongs in git and ADRs, not in code: review, backlog and
+# acceptance item ids, issue references and "review <sha>". Short forms such as
+# R17 or A12 are too ambiguous to count, so this is a lower bound.
+REVIEW_REF = re.compile(
+    r"\b(?:[RQ]\d{2}-\d{2}|NE?XT-\d{2,3}|AT-\d{2})\b"
+    r"|(?<![\w/&])#\d{3,}\b"
+    r"|\b[Rr]eview\s+`?[0-9a-f]{7,40}\b"
+)
 ADR_REF = re.compile(r"\bADR-\d{4}\b")
 
 
@@ -2120,7 +2321,7 @@ def discover_modules(root: Path) -> dict[str, Module]:
 
 def function_sizes(path: Path) -> list[FunctionSize]:
     """Every function and method, nested ones included, with a unique qualname."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     sizes: list[FunctionSize] = []
     seen: dict[str, int] = {}
 
@@ -2151,7 +2352,7 @@ def prose_lines(path: Path) -> int:
         if tok.type == tokenize.COMMENT
     )
     docstrings = 0
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(ast.parse(source, filename=str(path))):
         if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             doc = ast.get_docstring(node, clean=False)
             if doc:
@@ -2172,7 +2373,7 @@ def _resolve(name: str, modules: dict[str, Module]) -> str | None:
 def imports_of(path: Path, modules: dict[str, Module], current: str | None = None) -> set[str]:
     """Internal modules imported by a file (lazy imports and literal
     ``importlib.import_module`` calls included; parents implied)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     is_package = path.name == "__init__.py"
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -2234,6 +2435,20 @@ def roots_from_files(files: Iterable[Path], modules: dict[str, Module]) -> set[s
     return roots
 
 
+def console_script_modules(root: Path) -> set[str]:
+    """Modules behind ``[project.scripts]`` in the root and workspace packages."""
+    found: set[str] = set()
+    for pyproject in [
+        root / "pyproject.toml",
+        *sorted((root / "packages").glob("*/pyproject.toml")),
+    ]:
+        if pyproject.is_file():
+            config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            scripts = config.get("project", {}).get("scripts", {})
+            found |= {target.split(":", 1)[0] for target in scripts.values()}
+    return found
+
+
 @dataclass(frozen=True)
 class Reachability:
     runtime: set[str]
@@ -2241,6 +2456,7 @@ class Reachability:
     tooling_only: set[str]
     tests_only: set[str]
     unreached: set[str]
+    missing_roots: tuple[str, ...] = ()
 
 
 def classify(root: Path, modules: dict[str, Module]) -> Reachability:
@@ -2248,13 +2464,16 @@ def classify(root: Path, modules: dict[str, Module]) -> Reachability:
     control = reachable(CONTROL_PLANE_ROOTS, graph)
     lane = reachable(LANE_ROOTS, graph)
     runtime = control | lane
+    tooling_roots = {*TOOLING_ROOTS, *console_script_modules(root)}
     script_roots = roots_from_files((root / "scripts").glob("*.py"), modules)
     tools_roots = roots_from_files((root / "tools").rglob("*.py"), modules)
-    tooling = reachable((*TOOLING_ROOTS, *script_roots, *tools_roots), graph) - runtime
+    tooling = reachable((*tooling_roots, *script_roots, *tools_roots), graph) - runtime
     test_roots = roots_from_files((root / "tests").rglob("*.py"), modules)
     tests_only = reachable(test_roots, graph) - runtime - tooling
     unreached = set(modules) - runtime - tooling - tests_only
-    return Reachability(runtime, lane, tooling, tests_only, unreached)
+    declared = (*CONTROL_PLANE_ROOTS, *LANE_ROOTS, *sorted(tooling_roots))
+    missing = tuple(r for r in declared if r not in modules and r not in FUTURE_ROOTS)
+    return Reachability(runtime, lane, tooling, tests_only, unreached, missing)
 
 
 def total_lines(names: Iterable[str], modules: dict[str, Module]) -> int:
@@ -2301,7 +2520,10 @@ ROWS: tuple[tuple[str, str], ...] = (
     ("runtime_lines", "Runtime-reachable lines"),
     ("tooling_only_lines", "Tooling-only lines"),
     ("tests_only_lines", "Test-only lines"),
+    ("unreached_lines", "Unreached lines"),
     ("lane_reachable_lines", "Lines reachable from lane entry points"),
+    ("forge_lane_lines", "`forge-lane` lines"),
+    ("missing_roots", "Declared entry points not found"),
     ("largest_file", "Largest file"),
     ("functions_over_80", "Functions > 80 lines"),
     ("functions_over_100", "Functions > 100 lines"),
@@ -2316,12 +2538,15 @@ ROWS: tuple[tuple[str, str], ...] = (
 
 
 def _git_sha(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
     return result.stdout.strip() or "unknown"
 
 
@@ -2329,7 +2554,7 @@ def _suite_seconds(junit: Path | None) -> float | None:
     if junit is None:
         return None
     root = ET.parse(junit).getroot()
-    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
     return round(sum(float(s.get("time", "0")) for s in suites), 1)
 
 
@@ -2345,9 +2570,15 @@ def _docs_words(root: Path) -> int:
     )
 
 
+def _in_package(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
+
+
 def measure(root: Path, junit: Path | None = None) -> dict[str, object]:
     modules = cb.discover_modules(root)
-    forge_modules = {n: m for n, m in modules.items() if n == "forge" or n.startswith("forge.")}
+    forge_modules = {n: m for n, m in modules.items() if _in_package(n, "forge")}
+    forge_names = set(forge_modules)
+    lane_package = {n for n in modules if _in_package(n, "forge_lane")}
     reach = cb.classify(root, modules)
     sizes = [
         size.lines for module in forge_modules.values() for size in cb.function_sizes(module.path)
@@ -2361,10 +2592,13 @@ def measure(root: Path, junit: Path | None = None) -> dict[str, object]:
         "sha": _git_sha(root),
         "src_lines": src_lines,
         "modules": len(forge_modules),
-        "runtime_lines": cb.total_lines(reach.runtime, modules),
-        "tooling_only_lines": cb.total_lines(reach.tooling_only, modules),
-        "tests_only_lines": cb.total_lines(reach.tests_only, modules),
-        "lane_reachable_lines": cb.total_lines(reach.lane, modules),
+        "runtime_lines": cb.total_lines(reach.runtime & forge_names, modules),
+        "tooling_only_lines": cb.total_lines(reach.tooling_only & forge_names, modules),
+        "tests_only_lines": cb.total_lines(reach.tests_only & forge_names, modules),
+        "unreached_lines": cb.total_lines(reach.unreached & forge_names, modules),
+        "lane_reachable_lines": cb.total_lines(reach.lane & forge_names, modules),
+        "forge_lane_lines": cb.total_lines(lane_package, modules),
+        "missing_roots": ", ".join(reach.missing_roots) or "none",
         "largest_file": f"{largest.lines} ({largest.path.relative_to(root)})",
         "functions_over_80": sum(1 for n in sizes if n > 80),
         "functions_over_100": sum(1 for n in sizes if n > 100),
@@ -2390,24 +2624,31 @@ def render_history(history: list[dict[str, object]], last: int = 8) -> str:
 
 
 def write(root: Path, snapshot: dict[str, object]) -> None:
-    history_path = root / HISTORY_FILE
-    history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
-    history.append(snapshot)
-    history_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     metrics_path = root / METRICS_FILE
     text = metrics_path.read_text(encoding="utf-8")
+    if (BEGIN in text) != (END in text):
+        raise ValueError(f"{METRICS_FILE}: unbalanced {BEGIN} / {END} markers")
+    history_path = root / HISTORY_FILE
+    history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
+    if history and history[-1].get("sha") == snapshot.get("sha"):
+        history[-1] = snapshot  # re-measuring the same commit replaces its entry
+    else:
+        history.append(snapshot)
     block = f"{BEGIN}\n{render_history(history)}\n{END}"
     if BEGIN in text:
         text = re.sub(re.escape(BEGIN) + ".*?" + re.escape(END), lambda _: block, text, flags=re.S)
     else:
         text = text.rstrip() + "\n\n## Measured history\n\n" + block + "\n"
+    history_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     metrics_path.write_text(text, encoding="utf-8")
 
 
 def who_imports(root: Path, target: str) -> list[str]:
     modules = cb.discover_modules(root)
     graph = cb.import_graph(modules)
-    return sorted(name for name, deps in graph.items() if target in deps)
+    return sorted(
+        name for name, deps in graph.items() if target in deps and not _in_package(name, target)
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2421,6 +2662,11 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(who_imports(args.root, args.who_imports)))
         return 0
     snapshot = measure(args.root, args.junit)
+    if snapshot["missing_roots"] != "none":
+        print(
+            f"metrics: declared entry points not found: {snapshot['missing_roots']}",
+            file=sys.stderr,
+        )
     if args.write:
         write(args.root, snapshot)
     print(json.dumps(snapshot, indent=2))
@@ -2433,8 +2679,8 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run the tests again**
 
-Run: `uv run pytest -q tests/test_script_metrics.py`
-Expected: `3 passed`.
+Run: `uv run pytest -q tests/test_script_metrics.py tests/test_script_codebase.py`
+Expected: `23 passed`.
 
 - [ ] **Step 6: Reproduce the DESIGN §2 baseline**
 
@@ -2446,17 +2692,22 @@ Expected, measured at `330b200` before Task 7:
 | `modules` | 248 |
 | `src_lines` | 190,383 |
 | `runtime_lines` | 137,820 |
-| `tooling_only_lines` | 33,082 |
-| `tests_only_lines` | 19,481 |
+| `tooling_only_lines` | 33,155 |
+| `tests_only_lines` | 19,408 |
+| `unreached_lines` | 0 |
 | `lane_reachable_lines` | 132,772 |
+| `forge_lane_lines` | 0 |
+| `missing_roots` | none |
 | `functions_over_100` | 234 |
 | `functions_over_200` | 56 |
 | `prose_share` | 28% |
 | `direct_dependencies` | 14 |
 
-After Task 7, `src_lines` is about 54 higher. Line and module counts must
-be within ±1% of the baseline. `review_refs` and `adr_refs` are new, split
-metrics, so they have no baseline to match.
+After Task 7, `src_lines` is about 54 higher (runtime +26, tooling +28).
+Line and module counts must be within ±1% of the baseline. The console
+command `forge.cli` counts as tooling, which is why these numbers differ from
+the first draft of DESIGN §2 by 73 lines. `review_refs` (3,216) and
+`adr_refs` (705) are unchanged by Task 7.
 
 - [ ] **Step 7: Record the first measured snapshot**
 
@@ -2468,7 +2719,7 @@ Expected: `metrics-history.json` is created, and `metrics.md` gains a
 - [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/_codebase.py scripts/metrics.py tests/test_script_metrics.py docs/roadmap/2026-09-29-simplification/metrics.md docs/roadmap/2026-09-29-simplification/metrics-history.json
+git add scripts/_codebase.py scripts/metrics.py tests/test_script_metrics.py tests/test_script_codebase.py docs/roadmap/2026-09-29-simplification/metrics.md docs/roadmap/2026-09-29-simplification/metrics-history.json
 git commit -m "tools: metrics script and the first measured snapshot" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
