@@ -3206,7 +3206,7 @@ git commit -m "ci: diff coverage of at least 85% on changed lines" -m "Co-author
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-"""scripts/prose_lint.py: no review or issue archaeology in added source lines."""
+"""scripts/prose_lint.py: no review, backlog or issue archaeology in added source lines."""
 
 from __future__ import annotations
 
@@ -3217,17 +3217,18 @@ prose_lint = load_script("prose_lint")
 DIFF = """diff --git a/src/forge/x.py b/src/forge/x.py
 --- a/src/forge/x.py
 +++ b/src/forge/x.py
-@@ -10,0 +11,4 @@
+@@ -10,0 +11,5 @@
 +# R42-16: the parity rule
 +x = 1  # see ADR-0035
 +# fixed in #377
 +# as agreed in review `9e8d6c6`
++# carried over from NXT-10
 """
 
 
-def test_review_ids_issue_refs_and_review_shas_are_rejected():
+def test_review_backlog_and_issue_references_are_rejected():
     found = prose_lint.violations(DIFF)
-    assert [item.split(":")[1] for item in found] == ["11", "13", "14"]
+    assert [item.split(":")[1] for item in found] == ["11", "13", "14", "15"]
 
 
 def test_adr_references_are_allowed():
@@ -3252,12 +3253,14 @@ Expected: `ModuleNotFoundError: No module named 'prose_lint'`.
 - [ ] **Step 3: Create the lint**
 
 ```python
-"""Reject review, issue and commit archaeology in added source lines.
+"""Reject review, backlog and issue archaeology in added source lines.
 
 History belongs in git and ADRs, not in code comments. The check reads the
-lines added under ``src/`` and ``packages/`` since ``--base`` and rejects:
+lines added under ``src/`` and ``packages/`` since ``--base`` and rejects
+what ``_codebase.REVIEW_REF`` matches:
 
-- review item ids such as ``R42-16`` or ``Q35-09``;
+- review, backlog and acceptance item ids such as ``R42-16``, ``Q35-09``,
+  ``NXT-10``, ``NEXT-05`` or ``AT-08``;
 - issue references such as ``#377``;
 - "review <sha>" references.
 
@@ -3276,11 +3279,8 @@ import subprocess
 import sys
 from collections.abc import Iterator
 
-PATTERNS = (
-    re.compile(r"\b[RQ]\d{2}-\d{2}\b"),
-    re.compile(r"(?<![\w/&])#\d{3,}\b"),
-    re.compile(r"\breview\s+`?[0-9a-f]{7,40}\b", re.IGNORECASE),
-)
+import _codebase as cb
+
 PATHS = ("src", "packages")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -3301,11 +3301,11 @@ def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
 
 
 def violations(diff: str) -> list[str]:
-    found = []
-    for path, lineno, text in added_lines(diff):
-        if any(pattern.search(text) for pattern in PATTERNS):
-            found.append(f"{path}:{lineno}: {text.strip()}")
-    return found
+    return [
+        f"{path}:{lineno}: {text.strip()}"
+        for path, lineno, text in added_lines(diff)
+        if cb.REVIEW_REF.search(text)
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
