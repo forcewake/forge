@@ -8,6 +8,7 @@ Runbooks for running forge against a GitLab CE instance. Start with
 | [Project onboarding and doctor](../getting-started/gitlab.md) | Execution-profile approval, bot identity and permissions, webhook, CI variables, harness template include, `doctor` gates | Written (v0.1.0) |
 | [Backup and restore](backup-restore.md) | Postgres dumps, what is (and is not) in a backup, restore order, reconciler behavior after restore | Written (v0.1.0) |
 | [Upgrade](upgrade.md) | Migrations before code, deploy/rollback ordering between app and worker, mixed-version rules | Written (v0.1.0) |
+| [Maintenance line 0.42.x](maintenance-0.42.md) | ADR-0035: the release/0.42.x branch (Azure DevOps, pre-simplification architecture), creating it, backports, 0.42.N releases, recovering removed code | Written |
 | [Token rotation](token-rotation.md) | Bot PAT, webhook secret, model keys — rotation clocks and no-lost-run order | Written (v0.1.0) |
 | [Credential consumption](credential-consumption.md) | R38-04: the consumer receipt join at the runner boundary, rotation semantics, the registry's multi-worker TTL contract, the strict/compat policy matrix and presence-version honesty | Written |
 | [Audit and log retention](audit-retention.md) | What is kept where, retention defaults, pruning commands, no-secrets rule | Written (v0.1.0) |

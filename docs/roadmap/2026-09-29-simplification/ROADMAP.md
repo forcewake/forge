@@ -70,7 +70,7 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 - **Goal:** Azure users and rollbacks have a home before anything is
   deleted.
 - **Work:**
-  - Create `release/0.42.x` from tag `v0.42.0` and the tag
+  - Create `release/0.42.x` from `7ed64ba` (the `v0.42.0` tag plus its release evidence and pins), cherry-pick the `release/**` CI trigger onto it, and create the tag
     `pre-simplification` on the last pre-deletion commit.
   - Write `docs/operations/maintenance-0.42.md`: security fixes only, Azure
     is supported there, and backports follow the normal CI.
