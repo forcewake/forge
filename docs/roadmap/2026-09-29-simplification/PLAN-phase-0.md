@@ -2730,19 +2730,24 @@ git commit -m "tools: metrics script and the first measured snapshot" -m "Co-aut
 - Modify: `.github/workflows/ci.yml` (lint step)
 
 Rule: files over 600 lines and functions over 80 lines are recorded debt
-that may only shrink. Everything else must stay within those limits. Only
+that may only shrink, and shrinking is locked in: when debt shrinks, the PR
+runs `--update` and commits the lower baseline. Everything else must stay
+within those limits. `--update --accept PATH` records oversized code that was
+moved or renamed, and never raises an existing number. Only
 `forge/ports.py`, `forge/engine/effects.py` and `forge/api/app.py` may name
 `WritePort`; this check is active from Phase 3 on.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-"""scripts/ratchet.py: oversized code may only shrink; new code stays small."""
+"""scripts/ratchet.py: oversized code may only shrink, and shrinking is locked in."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from tests._scripts import load_script, write_tree
 
@@ -2763,11 +2768,15 @@ def _init(root: Path) -> None:
     assert ratchet.main(["--root", str(root), "--init"]) == 0
 
 
+def _check(root: Path) -> int:
+    return ratchet.main(["--root", str(root)])
+
+
 def test_small_code_needs_no_baseline_entry(tmp_path):
     root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
     _init(root)
     assert _baseline(root) == {"files": {}, "functions": {}}
-    assert ratchet.main(["--root", str(root)]) == 0
+    assert _check(root) == 0
 
 
 def test_oversized_function_is_recorded_and_may_not_grow(tmp_path, capsys):
@@ -2775,24 +2784,55 @@ def test_oversized_function_is_recorded_and_may_not_grow(tmp_path, capsys):
     _init(root)
     assert _baseline(root)["functions"] == {"src/forge/m.py::big": 90}
     (root / "src/forge/m.py").write_text(_function("big", 91))
-    assert ratchet.main(["--root", str(root)]) == 1
-    assert "src/forge/m.py::big grew: 91 lines (allowed 90)" in capsys.readouterr().out
+    assert _check(root) == 1
+    out = capsys.readouterr().out
+    assert "src/forge/m.py::big (line 1) grew to 91 lines (allowed 90)" in out
+    assert "--accept" not in out
 
 
 def test_new_function_over_the_limit_fails(tmp_path, capsys):
     root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
     _init(root)
     (root / "src/forge/n.py").write_text(_function("huge", 81))
-    assert ratchet.main(["--root", str(root)]) == 1
-    out = capsys.readouterr().out
-    assert "src/forge/n.py::huge exceeds the limit: 81 lines (allowed 80)" in out
+    assert _check(root) == 1
+    assert "src/forge/n.py::huge (line 1) has 81 lines (limit 80)" in capsys.readouterr().out
+
+
+def test_new_file_over_the_limit_fails(tmp_path, capsys):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
+    _init(root)
+    (root / "src/forge/big.py").write_text("x = 1\n" * 601)
+    assert _check(root) == 1
+    assert "file src/forge/big.py has 601 lines (limit 600)" in capsys.readouterr().out
+
+
+def test_workspace_packages_are_checked(tmp_path, capsys):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
+    _init(root)
+    lane = root / "packages/forge-lane/src/forge_lane/run.py"
+    lane.parent.mkdir(parents=True)
+    lane.write_text(_function("huge", 81))
+    assert _check(root) == 1
+    assert "packages/forge-lane/src/forge_lane/run.py::huge" in capsys.readouterr().out
 
 
 def test_small_function_may_grow_up_to_the_limit(tmp_path):
     root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
     _init(root)
     (root / "src/forge/m.py").write_text(_function("f", 80))
-    assert ratchet.main(["--root", str(root)]) == 0
+    assert _check(root) == 0
+
+
+def test_shrinking_is_locked_in(tmp_path, capsys):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("big", 120)})
+    _init(root)
+    (root / "src/forge/m.py").write_text(_function("big", 90))
+    assert _check(root) == 1
+    assert "the baseline is stale" in capsys.readouterr().out
+    assert ratchet.main(["--root", str(root), "--update"]) == 0
+    assert _check(root) == 0
+    (root / "src/forge/m.py").write_text(_function("big", 120))
+    assert _check(root) == 1
 
 
 def test_update_lowers_shrunk_debt_and_drops_repaid_entries(tmp_path):
@@ -2803,14 +2843,42 @@ def test_update_lowers_shrunk_debt_and_drops_repaid_entries(tmp_path):
     assert _baseline(root)["functions"] == {"src/forge/m.py::a": 100}
 
 
-def test_accept_records_a_reviewed_move(tmp_path):
+def test_accept_records_a_reviewed_move(tmp_path, capsys):
     root = write_tree(tmp_path, {"src/forge/old.py": _function("big", 90)})
     _init(root)
     (root / "src/forge/old.py").unlink()
     (root / "src/forge/new.py").write_text(_function("big", 90))
-    assert ratchet.main(["--root", str(root)]) == 1
-    assert ratchet.main(["--root", str(root), "--update", "--accept", "src/forge/new.py"]) == 0
-    assert ratchet.main(["--root", str(root)]) == 0
+    assert _check(root) == 1
+    moved = str(root / "src/forge/new.py")
+    assert ratchet.main(["--root", str(root), "--update", "--accept", moved]) == 0
+    assert "accepted src/forge/new.py::big (90 lines)" in capsys.readouterr().out
+    assert _baseline(root)["functions"] == {"src/forge/new.py::big": 90}
+    assert _check(root) == 0
+
+
+def test_accept_never_raises_existing_debt(tmp_path, capsys):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("big", 90)})
+    _init(root)
+    (root / "src/forge/m.py").write_text(_function("big", 150))
+    assert ratchet.main(["--root", str(root), "--update", "--accept", "src/forge/m.py"]) == 2
+    assert "nothing new to accept in src/forge/m.py" in capsys.readouterr().out
+    assert _baseline(root)["functions"] == {"src/forge/m.py::big": 90}
+
+
+def test_accept_requires_update(tmp_path):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("f", 10)})
+    _init(root)
+    with pytest.raises(SystemExit):
+        ratchet.main(["--root", str(root), "--accept", "src/forge/m.py"])
+
+
+def test_init_refuses_to_overwrite_the_baseline(tmp_path):
+    root = write_tree(tmp_path, {"src/forge/m.py": _function("big", 90)})
+    _init(root)
+    (root / "src/forge/m.py").write_text(_function("big", 150))
+    assert ratchet.main(["--root", str(root), "--init"]) == 2
+    assert _baseline(root)["functions"] == {"src/forge/m.py::big": 90}
+    assert ratchet.main(["--root", str(root), "--init", "--force"]) == 0
 
 
 def test_only_the_effects_layer_may_name_the_write_port(tmp_path, capsys):
@@ -2819,14 +2887,14 @@ def test_only_the_effects_layer_may_name_the_write_port(tmp_path, capsys):
         {
             "src/forge/ports.py": "class WritePort: ...\n",
             "src/forge/engine/effects.py": "from forge.ports import WritePort\n",
-            "src/forge/engine/handlers.py": "from forge.ports import WritePort\n",
+            "src/forge/engine/handlers.py": "import os\nfrom forge.ports import WritePort\n",
         },
     )
     _init(root)
-    assert ratchet.main(["--root", str(root)]) == 1
+    assert _check(root) == 1
     out = capsys.readouterr().out
-    assert "src/forge/engine/handlers.py names WritePort" in out
-    assert "effects.py names WritePort" not in out
+    assert "src/forge/engine/handlers.py:2 names WritePort" in out
+    assert "effects.py:1 names WritePort" not in out
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -2837,21 +2905,22 @@ Expected: `ModuleNotFoundError: No module named 'ratchet'`.
 - [ ] **Step 3: Create the ratchet**
 
 ```python
-"""Size ratchet: oversized code may only shrink; new code stays small.
+"""Size ratchet: oversized code may only shrink, and shrinking is locked in.
 
-``scripts/ratchet-baseline.json`` lists only the current debt: files over
-600 lines and functions over 80 lines under ``src/`` and
-``packages/*/src/``. The check fails when:
+``scripts/ratchet-baseline.json`` lists the current debt: files over 600
+lines and functions over 80 lines under ``src/`` and ``packages/*/src/``.
+The check fails when:
 
 - a listed file or function grew beyond its recorded size;
 - any other file exceeds 600 lines, or any other function exceeds 80 lines;
+- the baseline is stale: debt shrank or disappeared and was not recorded;
 - a module other than the allowed three names ``WritePort``
   (DESIGN §6.1: only the effects layer ever holds the write port).
 
 Usage::
 
     uv run python scripts/ratchet.py                  # check (CI)
-    uv run python scripts/ratchet.py --update         # lower entries that shrank
+    uv run python scripts/ratchet.py --update         # record shrunk or repaid debt
     uv run python scripts/ratchet.py --update --accept src/forge/project_config.py
                                                       # record a reviewed move of oversized code
     uv run python scripts/ratchet.py --init           # write the first baseline
@@ -2871,20 +2940,25 @@ BASELINE_NAME = "scripts/ratchet-baseline.json"
 LIMITS = {"files": 600, "functions": 80}
 WRITE_PORT = re.compile(r"\bWritePort\b")
 WRITE_PORT_ALLOWED = ("forge/ports.py", "forge/engine/effects.py", "forge/api/app.py")
+COMMAND = "uv run python scripts/ratchet.py"
 
 Sizes = dict[str, dict[str, int]]
 
 
-def measure(root: Path) -> Sizes:
+def measure(root: Path) -> tuple[Sizes, dict[str, int]]:
+    """Current sizes, and the line where each function starts."""
     files: dict[str, int] = {}
     functions: dict[str, int] = {}
+    starts: dict[str, int] = {}
     for src_dir in cb.source_dirs(root):
         for path in cb.iter_python_files(src_dir):
             rel = path.relative_to(root).as_posix()
             files[rel] = cb.count_lines(path)
             for size in cb.function_sizes(path):
-                functions[f"{rel}::{size.qualname}"] = size.lines
-    return {"files": files, "functions": functions}
+                key = f"{rel}::{size.qualname}"
+                functions[key] = size.lines
+                starts[key] = size.lineno
+    return {"files": files, "functions": functions}, starts
 
 
 def debt(current: Sizes) -> Sizes:
@@ -2894,19 +2968,12 @@ def debt(current: Sizes) -> Sizes:
     }
 
 
-def check(current: Sizes, baseline: Sizes) -> list[str]:
-    problems: list[str] = []
-    for kind, limit in LIMITS.items():
-        for key, lines in sorted(current[kind].items()):
-            allowed = baseline[kind].get(key, limit)
-            if lines > allowed:
-                what = "grew" if key in baseline[kind] else "exceeds the limit"
-                problems.append(f"{kind[:-1]} {key} {what}: {lines} lines (allowed {allowed})")
-    return problems
-
-
 def update(current: Sizes, baseline: Sizes, accept: tuple[str, ...] = ()) -> Sizes:
-    """Lower shrunk entries, drop repaid or vanished ones, record accepted moves."""
+    """Lower shrunk debt, drop repaid or vanished debt, and record accepted new keys.
+
+    ``accept`` only adds keys that are not in the baseline yet (code that was
+    moved or renamed); it never raises an existing number.
+    """
     updated: Sizes = {kind: {} for kind in LIMITS}
     for kind, limit in LIMITS.items():
         for key, old in baseline[kind].items():
@@ -2914,9 +2981,34 @@ def update(current: Sizes, baseline: Sizes, accept: tuple[str, ...] = ()) -> Siz
             if new > limit:
                 updated[kind][key] = new
         for key, lines in current[kind].items():
-            if key.split("::", 1)[0] in accept and lines > limit:
+            if key.split("::", 1)[0] in accept and key not in baseline[kind] and lines > limit:
                 updated[kind][key] = lines
     return updated
+
+
+def check(current: Sizes, baseline: Sizes, starts: dict[str, int]) -> list[str]:
+    problems: list[str] = []
+    for kind, limit in LIMITS.items():
+        for key, lines in sorted(current[kind].items()):
+            where = f"{kind[:-1]} {key}" + (f" (line {starts[key]})" if key in starts else "")
+            if key in baseline[kind]:
+                if lines > baseline[kind][key]:
+                    problems.append(
+                        f"{where} grew to {lines} lines (allowed {baseline[kind][key]}): "
+                        "shrink it back or split it"
+                    )
+            elif lines > limit:
+                path = key.split("::", 1)[0]
+                problems.append(
+                    f"{where} has {lines} lines (limit {limit}): split it; for a reviewed move "
+                    f"of existing debt run '{COMMAND} --update --accept {path}'"
+                )
+    if update(current, baseline) != baseline:
+        problems.append(
+            f"the baseline is stale because debt shrank: run '{COMMAND} --update' "
+            f"and commit {BASELINE_NAME}"
+        )
+    return problems
 
 
 def write_port_violations(root: Path) -> list[str]:
@@ -2925,38 +3017,89 @@ def write_port_violations(root: Path) -> list[str]:
         for path in cb.iter_python_files(src_dir):
             if path.relative_to(src_dir).as_posix() in WRITE_PORT_ALLOWED:
                 continue
-            if WRITE_PORT.search(path.read_text(encoding="utf-8")):
-                problems.append(f"{path.relative_to(root)} names WritePort (only effects may)")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for number, line in enumerate(lines, 1):
+                if WRITE_PORT.search(line):
+                    problems.append(
+                        f"{path.relative_to(root).as_posix()}:{number} names WritePort: "
+                        "only engine/effects.py may hold the write port (use ctx.effects)"
+                    )
+                    break
     return problems
+
+
+def _normalise(root: Path, raw: str) -> str:
+    path = Path(raw)
+    if path.is_absolute():
+        path = path.resolve().relative_to(root.resolve())
+    return path.as_posix()
 
 
 def _save(path: Path, sizes: Sizes) -> None:
     path.write_text(json.dumps(sizes, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _run_update(root: Path, current: Sizes, baseline: Sizes, raw_accept: list[str]) -> int:
+    try:
+        accept = tuple(_normalise(root, raw) for raw in raw_accept)
+    except ValueError as exc:
+        print(f"ratchet: {exc}")
+        return 2
+    updated = update(current, baseline, accept)
+    added = {
+        key: lines
+        for kind in LIMITS
+        for key, lines in updated[kind].items()
+        if key not in baseline[kind]
+    }
+    idle = [path for path in accept if not any(k.split("::", 1)[0] == path for k in added)]
+    if idle:
+        print(f"ratchet: nothing new to accept in {', '.join(idle)}; nothing was written")
+        return 2
+    for key, lines in sorted(added.items()):
+        print(f"ratchet: accepted {key} ({lines} lines)")
+    _save(root / BASELINE_NAME, updated)
+    print("ratchet: baseline updated")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--root", type=Path, default=cb.repo_root())
-    parser.add_argument("--init", action="store_true")
-    parser.add_argument("--update", action="store_true")
-    parser.add_argument("--accept", action="append", default=[], metavar="PATH")
+    parser.add_argument("--init", action="store_true", help="write the first baseline")
+    parser.add_argument("--force", action="store_true", help="with --init: overwrite")
+    parser.add_argument("--update", action="store_true", help="record shrunk or repaid debt")
+    parser.add_argument(
+        "--accept",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="with --update: record new oversized code in PATH (a reviewed move)",
+    )
     args = parser.parse_args(argv)
+    if args.accept and not args.update:
+        parser.error("--accept requires --update")
+    if args.force and not args.init:
+        parser.error("--force requires --init")
     baseline_path = args.root / BASELINE_NAME
-    current = measure(args.root)
+    current, starts = measure(args.root)
     if args.init:
+        if baseline_path.exists() and not args.force:
+            print(f"ratchet: {BASELINE_NAME} exists; --init would forgive all growth (--force)")
+            return 2
         _save(baseline_path, debt(current))
         print(f"ratchet: baseline written to {BASELINE_NAME}")
         return 0
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     if args.update:
-        _save(baseline_path, update(current, baseline, tuple(args.accept)))
-        print("ratchet: baseline updated")
-        return 0
-    problems = check(current, baseline) + write_port_violations(args.root)
+        return _run_update(args.root, current, baseline, args.accept)
+    problems = check(current, baseline, starts) + write_port_violations(args.root)
     for problem in problems:
         print(f"ratchet: {problem}")
     if problems:
-        print("ratchet: FAILED — split the code, or --update --accept PATH for a reviewed move")
+        print("ratchet: FAILED")
         return 1
     debt_now = debt(current)
     print(
@@ -2973,7 +3116,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests again**
 
 Run: `uv run pytest -q tests/test_script_ratchet.py`
-Expected: `7 passed`.
+Expected: `13 passed`.
 
 - [ ] **Step 5: Record the baseline and check it**
 
@@ -3797,6 +3940,9 @@ Expected: the tag exists before any Phase 1 deletion lands.
   - The import contracts run in the `lint` job, not a separate `imports`
     job, and a test (`tests/test_import_contract_debt.py`) is the
     shrink-only counter for their ignore list.
+  - The size ratchet also fails on a stale baseline, so shrinking is locked
+    in; `--accept` only records new keys, and `--init` refuses to overwrite
+    a baseline without `--force`.
   - The Invariant Suite is one registry (`tests/invariants/registry.py`)
     over existing focused test files, not one module per invariant, and I6
     is proven by the existing production-entry race test rather than a new
