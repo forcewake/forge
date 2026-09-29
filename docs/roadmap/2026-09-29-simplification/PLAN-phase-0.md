@@ -2219,6 +2219,24 @@ def test_declared_roots_that_do_not_exist_are_reported(tmp_path):
     assert "forge.main" not in reach.missing_roots
     assert "forge.migrate" in reach.missing_roots
     assert "forge_lane" not in reach.missing_roots
+
+
+def test_names_re_exported_by_a_package_resolve_to_their_module(tmp_path):
+    root = write_tree(
+        tmp_path,
+        {
+            "src/forge/__init__.py": "",
+            "src/forge/runs/__init__.py": (
+                "from forge.runs.service import RunService\nfrom .spec import Spec as FrozenSpec\n"
+            ),
+            "src/forge/runs/service.py": "class RunService: ...\n",
+            "src/forge/runs/spec.py": "class Spec: ...\n",
+            "tests/test_x.py": "from forge.runs import FrozenSpec, RunService\n",
+        },
+    )
+    modules = cb.discover_modules(root)
+    imported = cb.imports_of(root / "tests/test_x.py", modules)
+    assert {"forge.runs", "forge.runs.service", "forge.runs.spec"} <= imported
 ```
 
 Run: `uv run pytest -q tests/test_script_codebase.py`
@@ -2370,9 +2388,41 @@ def _resolve(name: str, modules: dict[str, Module]) -> str | None:
     return None
 
 
+def _from_target(node: ast.ImportFrom, current: str | None, is_package: bool) -> str:
+    """The absolute module named by a ``from ... import`` statement."""
+    if not (node.level and current is not None):
+        return node.module or ""
+    base = current.split(".")
+    if not is_package:
+        base = base[:-1]
+    if node.level > 1:
+        base = base[: -(node.level - 1)]
+    return ".".join([*base, node.module] if node.module else base)
+
+
+_REEXPORTS: dict[Path, dict[str, str]] = {}
+
+
+def reexports(package: Module, modules: dict[str, Module]) -> dict[str, str]:
+    """Names a package ``__init__`` imports at top level, mapped to their module."""
+    if package.path not in _REEXPORTS:
+        tree = ast.parse(package.path.read_text(encoding="utf-8"), filename=str(package.path))
+        exports: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                full = _from_target(node, package.name, is_package=True)
+                for alias in node.names:
+                    target = _resolve(f"{full}.{alias.name}", modules) or _resolve(full, modules)
+                    if target is not None and target != package.name:
+                        exports[alias.asname or alias.name] = target
+        _REEXPORTS[package.path] = exports
+    return _REEXPORTS[package.path]
+
+
 def imports_of(path: Path, modules: dict[str, Module], current: str | None = None) -> set[str]:
-    """Internal modules imported by a file (lazy imports and literal
-    ``importlib.import_module`` calls included; parents implied)."""
+    """Internal modules imported by a file (lazy imports, literal
+    ``importlib.import_module`` calls and names re-exported by a package
+    ``__init__`` included; parents implied)."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     is_package = path.name == "__init__.py"
     found: set[str] = set()
@@ -2382,19 +2432,15 @@ def imports_of(path: Path, modules: dict[str, Module], current: str | None = Non
                 if (hit := _resolve(alias.name, modules)) is not None:
                     found.add(hit)
         elif isinstance(node, ast.ImportFrom):
-            if node.level and current is not None:
-                base = current.split(".")
-                if not is_package:
-                    base = base[:-1]
-                if node.level > 1:
-                    base = base[: -(node.level - 1)]
-                full = ".".join([*base, node.module] if node.module else base)
-            else:
-                full = node.module or ""
+            full = _from_target(node, current, is_package)
             for alias in node.names:
                 hit = _resolve(f"{full}.{alias.name}", modules) or _resolve(full, modules)
-                if hit is not None:
-                    found.add(hit)
+                if hit is None:
+                    continue
+                found.add(hit)
+                if hit == full and modules[hit].path.name == "__init__.py":
+                    if (source := reexports(modules[hit], modules).get(alias.name)) is not None:
+                        found.add(source)
         elif isinstance(node, ast.Call) and node.args:
             func = node.func
             called = getattr(func, "attr", None) or getattr(func, "id", None)
@@ -2680,7 +2726,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests again**
 
 Run: `uv run pytest -q tests/test_script_metrics.py tests/test_script_codebase.py`
-Expected: `23 passed`.
+Expected: `24 passed`.
 
 - [ ] **Step 6: Reproduce the DESIGN §2 baseline**
 
@@ -3648,38 +3694,78 @@ TREE = {
 }
 
 
-def _rows(root):
+def _run(root) -> dict[str, dict[str, str]]:
+    (root / ledger.LEDGER).parent.mkdir(parents=True, exist_ok=True)
+    assert ledger.main(["--root", str(root)]) == 0
     with (root / ledger.LEDGER).open(encoding="utf-8", newline="") as handle:
         return {row["file"]: row for row in csv.DictReader(handle)}
 
 
+def _curate(root, file: str, **values: str) -> None:
+    path = root / ledger.LEDGER
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row["file"] == file:
+            row.update(values)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ledger.FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def test_default_dispositions(tmp_path):
-    root = write_tree(tmp_path, TREE)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    assert ledger.main(["--root", str(root)]) == 0
-    rows = _rows(root)
+    rows = _run(write_tree(tmp_path, TREE))
     assert rows["tests/test_core.py"]["disposition"] == "keep"
     assert rows["tests/test_only.py"]["disposition"] == "drop-with-code"
+    assert rows["tests/test_only.py"]["phase"] == "P1"
     assert rows["tests/test_only.py"]["tests"] == "1"
 
 
-def test_curated_columns_survive_regeneration(tmp_path):
-    root = write_tree(tmp_path, TREE)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    ledger.main(["--root", str(root)])
-    rows = list(_rows(root).values())
-    rows[0].update(disposition="port-engine", phase="P3", note="owner decision")
-    with (root / ledger.LEDGER).open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ledger.FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    ledger.main(["--root", str(root)])
-    kept = _rows(root)[rows[0]["file"]]
-    assert (kept["disposition"], kept["phase"], kept["note"]) == (
-        "port-engine",
-        "P3",
-        "owner decision",
+def test_planned_deletions_drive_drop_phase_and_deleted_by(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/main.py": "from forge import core\nfrom forge.integrations import azure\n",
+        "src/forge/config.py": "",
+        "src/forge/integrations/__init__.py": "",
+        "src/forge/integrations/azure.py": "",
+        "tests/test_azure.py": "from forge import config\nfrom forge.integrations import azure\n",
+        "tests/test_mixed.py": "from forge import core\nfrom forge.integrations import azure\n",
+    }
+    rows = _run(write_tree(tmp_path, tree))
+    azure = rows["tests/test_azure.py"]
+    assert (azure["disposition"], azure["phase"], azure["deleted_by"]) == (
+        "drop-with-code",
+        "P1-11",
+        "P1-11",
     )
+    mixed = rows["tests/test_mixed.py"]
+    assert (mixed["disposition"], mixed["deleted_by"]) == ("keep", "P1-11")
+    assert mixed["note"] == "partly deleted: review"
+
+
+def test_port_rules(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/runs/__init__.py": "",
+        "src/forge/runs/service.py": "",
+        "src/forge/gitlab/__init__.py": "",
+        "src/forge/gitlab/client.py": "",
+        "src/forge/gitlab/schemas.py": "",
+        "src/forge/main.py": (
+            "from forge import core\nfrom forge.runs import service\n"
+            "from forge.gitlab import client, schemas\n"
+        ),
+        "tests/test_service.py": "from forge.runs import service\n",
+        "tests/test_client.py": "from forge.gitlab import client\n",
+        "tests/test_schema.py": "from forge.gitlab import schemas\n",
+        "tests/production_entry/test_trace.py": "from forge import core\n",
+    }
+    rows = _run(write_tree(tmp_path, tree))
+    assert rows["tests/test_service.py"]["disposition"] == "port-engine"
+    assert rows["tests/production_entry/test_trace.py"]["disposition"] == "port-engine"
+    assert rows["tests/test_client.py"]["disposition"] == "port-adapter"
+    assert rows["tests/test_schema.py"]["disposition"] == "keep"
 
 
 def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
@@ -3692,13 +3778,10 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
         "tests/test_doctor.py": "from forge import doctor\n",
         "tests/test_cli.py": "from forge import cli\n",
         "tests/test_pinned.py": "from forge import pinned\n",
-        "tests/invariants/registry.py": 'EVIDENCE = frozenset(("tests/test_only.py",))\n',
+        "tests/invariants/registry.py": 'INVARIANT_FILES = frozenset({"tests/test_only.py"})\n',
         "docs/reference/edge-cases.md": "| EC-01 | a | b | c | `tests/test_pinned.py::test_x` |\n",
     }
-    root = write_tree(tmp_path, tree)
-    (root / ledger.LEDGER).parent.mkdir(parents=True)
-    assert ledger.main(["--root", str(root)]) == 0
-    rows = _rows(root)
+    rows = _run(write_tree(tmp_path, tree))
     names = (
         "tests/test_doctor.py",
         "tests/test_cli.py",
@@ -3708,6 +3791,33 @@ def test_kept_tooling_and_protected_evidence_are_not_dropped(tmp_path):
     assert {name: rows[name]["disposition"] for name in names} == dict.fromkeys(names, "keep")
     assert rows["tests/test_only.py"]["note"] == "invariant evidence"
     assert rows["tests/test_pinned.py"]["note"] == "edge-case pin"
+
+
+def test_curated_columns_survive_regeneration(tmp_path):
+    root = write_tree(tmp_path, TREE)
+    _run(root)
+    _curate(root, "tests/test_core.py", disposition="port-engine", phase="P3", note="owner")
+    kept = _run(root)["tests/test_core.py"]
+    assert (kept["disposition"], kept["phase"], kept["note"]) == ("port-engine", "P3", "owner")
+
+
+def test_warnings_for_vanished_and_protected_drop_rows(tmp_path, capsys):
+    tree = {**TREE, "tests/invariants/registry.py": 'INVARIANT_FILES = {"tests/test_only.py"}\n'}
+    root = write_tree(tmp_path, tree)
+    _run(root)
+    _curate(root, "tests/test_only.py", disposition="drop-obsolete")
+    _curate(root, "tests/test_core.py", note="owner decision")
+    (root / "tests/test_core.py").unlink()
+    _run(root)
+    err = capsys.readouterr().err
+    assert "tests/test_only.py is invariant evidence but marked drop-obsolete" in err
+    assert "tests/test_core.py vanished" in err
+
+
+def test_the_csv_uses_lf_line_endings(tmp_path):
+    root = write_tree(tmp_path, TREE)
+    _run(root)
+    assert b"\r\n" not in (root / ledger.LEDGER).read_bytes()
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -3720,18 +3830,28 @@ Expected: `ModuleNotFoundError: No module named 'build_test_ledger'`.
 ```python
 """Generate the test disposition ledger (ROADMAP P0-13).
 
-One row per test file under ``tests/``. The measured columns are recomputed
-on every run; the curated columns (``disposition``, ``phase``, ``note``)
-are preserved for files already in the ledger.
+One row per test file under ``tests/``. Measured columns are recomputed on
+every run; the curated columns (``disposition``, ``phase``, ``note``)
+survive regeneration.
 
-The default disposition never drops a file that is invariant evidence
-(``tests/invariants/registry.py``) or an edge-case pin
-(``docs/reference/edge-cases.md``), nor a test of tooling that stays
-(``forge.doctor`` and the ``[project.scripts]`` commands).
+Default dispositions, a starting point for the owner:
+
+- ``drop-with-code``: everything the test is about (its imports minus shared
+  models and config) is deleted in Phase 1 (``PLANNED_DELETIONS``) or is
+  reached only by tests or by tooling that goes; ``phase`` names the tasks;
+- ``port-engine``: the test drives a lifecycle service or a production entry;
+- ``port-adapter``: the test drives a provider client;
+- ``keep``: everything else.
+
+Invariant evidence and edge-case pins are never ``drop-*`` by default and
+carry a note. ``deleted_by`` lists the Phase 1 tasks whose deletions a test
+imports; a row that imports deleted code without defaulting to drop gets the
+note "partly deleted: review". Warnings on stderr name
+curated rows whose file vanished and protected rows marked ``drop-*``.
 
 Usage::
 
-    uv run python scripts/build_test_ledger.py      # writes docs/roadmap/2026-09-29-simplification/test-ledger.csv
+    uv run python scripts/build_test_ledger.py
 """
 
 from __future__ import annotations
@@ -3740,6 +3860,7 @@ import argparse
 import ast
 import csv
 import re
+import runpy
 import sys
 from pathlib import Path
 
@@ -3752,18 +3873,142 @@ FIELDS = (
     "loc",
     "imports_runtime",
     "imports_tests_only",
+    "deleted_by",
     "area",
     "disposition",
     "phase",
     "note",
 )
-SERVICES = ("forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service")
-PROVIDER_CLIENTS = ("forge.gitlab", "forge.integrations", "forge.repository.writer")
 CURATED = ("disposition", "phase", "note")
+SERVICES = ("forge.runs.service", "forge.runs.github_service")
+PROVIDER_CLIENTS = (
+    "forge.gitlab.client",
+    "forge.integrations.github",
+    "forge.integrations.github_flow",
+    "forge.repository.writer",
+)
+# Imported by many tests without being what they test.
+SHARED = (
+    "forge.config",
+    "forge.database",
+    "forge.models",
+    "forge.durable.models",
+    "forge.adaptive.models",
+    "forge.runs.spec",
+    "forge.gitlab.schemas",
+    "forge.gitlab.events",
+    "forge.utils",
+)
 KEPT_TOOLING_ROOTS = ("forge.doctor",)
+# Module (or package) -> the ROADMAP Phase 1 task that deletes it.
+PLANNED_DELETIONS: dict[str, str] = {
+    **dict.fromkeys(
+        (
+            "forge.adaptive.publication_saga",
+            "forge.adaptive.saga_durable",
+            "forge.adaptive.saga_native",
+            "forge.adaptive.two_writer_qualification",
+        ),
+        "P1-02",
+    ),
+    **dict.fromkeys(
+        (
+            "forge.adaptive.workpackage_service",
+            "forge.adaptive.runtime",
+            "forge.adaptive.compat",
+            "forge.adaptive.compat_fixtures",
+            "forge.adaptive.dedup",
+            "forge.adaptive.snapshots",
+            "forge.adaptive.impact",
+            "forge.adaptive.project_map",
+            "forge.adaptive.read_guards",
+            "forge.adaptive.benchmark",
+            "forge.adaptive.system_manifest",
+            "forge.adaptive.system_verification",
+            "forge.adaptive.executed_evidence",
+            "forge.adaptive.independent_checks",
+            "forge.adaptive.verification_executor",
+            "forge.adaptive.dotnet_recipe",
+            "forge.runs.conformance",
+        ),
+        "P1-03",
+    ),
+    "forge.adaptive.reference": "P1-04",
+    "forge.adaptive.boundary_registry": "P1-05",
+    "forge.adaptive.closure_matrix": "P1-06",
+    **dict.fromkeys(
+        (
+            "forge.release_manifest",
+            "forge.release_promotion",
+            "forge.profile_qualification",
+            "forge.capability_manifest",
+            "forge.adaptive.ops_drills",
+            "forge.adaptive.delivery_economics",
+            "forge.adaptive.research_cohort",
+            "forge.adaptive.research_cohort_live",
+            "forge.adaptive.pilot",
+            "forge.adaptive.pilot_ladder",
+            "forge.adaptive.checkpoint_migration",
+            "forge.adaptive.steering_causality",
+            "forge.adaptive.discovery_profile",
+            "forge.adaptive.discovery_authority",
+            "forge.adaptive.support_matrix",
+        ),
+        "P1-07",
+    ),
+    "forge.factory.implementer": "P1-10",
+    **dict.fromkeys(
+        (
+            "forge.runs.azure_service",
+            "forge.integrations.azure",
+            "forge.gateway.azure_webhook",
+            "forge.reactive.azure_review",
+            "forge.reactive.azure_ci_debug",
+        ),
+        "P1-11",
+    ),
+    **dict.fromkeys(
+        (
+            "forge.orchestrator",
+            "forge.flows",
+            "forge.agents",
+            "forge.llm",
+            "forge.mcp_client",
+            "forge.context.engine",
+            "forge.context.diff_parser",
+            "forge.context.log_parser",
+            "forge.context.security_report",
+            "forge.context.token_counter",
+        ),
+        "P1-12",
+    ),
+    **dict.fromkeys(("forge.reactive.ci_debug", "forge.findings", "forge.mcp_server"), "P1-13"),
+    **dict.fromkeys(
+        (
+            "forge.adaptive.support_bundle",
+            "forge.adaptive.audit_export",
+            "forge.adaptive.delivery_measurement",
+            "forge.adaptive.delivery_metrics",
+            "forge.adaptive.qualification",
+            "forge.adaptive.ops_limits",
+        ),
+        "P1-15",
+    ),
+}
 INVARIANT_REGISTRY = Path("tests/invariants/registry.py")
 EDGE_CASE_REGISTER = Path("docs/reference/edge-cases.md")
-PINNED_FILE = re.compile(r"`(tests/[^`:]+\.py)(?:::[^`]*)?`")
+PIN_ROW = re.compile(r"^\| EC-\d{2} \|(?P<rest>.*)\|$")
+PIN = re.compile(r"`([^`]+)`")
+
+
+def _within(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == p or name.startswith(p + ".") for p in prefixes)
+
+
+def deleted_by(name: str) -> str | None:
+    """The Phase 1 task that deletes ``name``, if any."""
+    owners = [p for p in PLANNED_DELETIONS if name == p or name.startswith(p + ".")]
+    return PLANNED_DELETIONS[max(owners, key=len)] if owners else None
 
 
 def count_tests(path: Path) -> int:
@@ -3784,46 +4029,49 @@ def area(rel: str) -> str:
 
 
 def protected_files(root: Path) -> dict[str, str]:
-    """Test files that are invariant evidence or edge-case pins, with the reason."""
-    found: dict[str, str] = {}
+    """Test files that are invariant evidence or edge-case pins, with the reasons."""
+    reasons: dict[str, list[str]] = {}
     registry = root / INVARIANT_REGISTRY
     if registry.is_file():
-        tree = ast.parse(registry.read_text(encoding="utf-8"), filename=str(registry))
-        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
-            for node in ast.walk(call):
-                value = node.value if isinstance(node, ast.Constant) else None
-                if isinstance(value, str) and value.startswith("tests/") and value.endswith(".py"):
-                    found.setdefault(value, "invariant evidence")
+        for rel in runpy.run_path(str(registry)).get("INVARIANT_FILES", ()):
+            reasons.setdefault(rel, []).append("invariant evidence")
     register = root / EDGE_CASE_REGISTER
     if register.is_file():
-        for rel in PINNED_FILE.findall(register.read_text(encoding="utf-8")):
-            found.setdefault(rel, "edge-case pin")
-    return found
+        for line in register.read_text(encoding="utf-8").splitlines():
+            if match := PIN_ROW.match(line.rstrip()):
+                for pin in PIN.findall(match["rest"].rsplit("|", 1)[-1]):
+                    reasons.setdefault(pin.split("::", 1)[0], []).append("edge-case pin")
+    return {rel: "; ".join(dict.fromkeys(why)) for rel, why in reasons.items()}
 
 
 def default_disposition(rel: str, imported: set[str], droppable: set[str]) -> tuple[str, str]:
-    """A starting point for the owner to curate — never the final word.
-
-    ``imported`` holds leaf modules only (packages are excluded), so a test
-    that imports nothing but code that is going away is recognised.
-    """
-    if imported and imported <= droppable:
-        return "drop-with-code", "P1"
-    if any(name.startswith(SERVICES) for name in imported) or "production_entry" in rel:
+    """A starting point for the owner to curate — never the final word."""
+    about = {m for m in imported if not _within(m, SHARED)} or imported
+    if about and about <= droppable:
+        tasks = sorted({task for m in about if (task := deleted_by(m))})
+        return "drop-with-code", ",".join(tasks) or "P1"
+    if any(_within(m, SERVICES) for m in imported) or "production_entry" in rel:
         return "port-engine", "P3"
-    if any(name.startswith(PROVIDER_CLIENTS) for name in imported):
+    if any(_within(m, PROVIDER_CLIENTS) for m in imported):
         return "port-adapter", "P3"
     return "keep", "-"
 
 
-def build_rows(root: Path, previous: dict[str, dict[str, str]]) -> list[dict[str, str]]:
+def _droppable(root: Path, modules: dict[str, cb.Module], reach: cb.Reachability) -> set[str]:
+    planned = {name for name in modules if deleted_by(name)}
+    kept_roots = {*KEPT_TOOLING_ROOTS, *cb.console_script_modules(root)}
+    kept = cb.reachable(kept_roots, cb.import_graph(modules)) - planned
+    return planned | reach.tests_only | (reach.tooling_only - kept)
+
+
+def build_rows(
+    root: Path, previous: dict[str, dict[str, str]]
+) -> tuple[list[dict[str, str]], list[str]]:
     modules = cb.discover_modules(root)
     reach = cb.classify(root, modules)
-    kept_roots = {*KEPT_TOOLING_ROOTS, *cb.console_script_modules(root)}
-    kept = cb.reachable(kept_roots, cb.import_graph(modules))
-    droppable = reach.tests_only | (reach.tooling_only - kept)
+    droppable = _droppable(root, modules, reach)
     protected = protected_files(root)
-    rows = []
+    rows, warnings = [], []
     for path in sorted((root / "tests").rglob("test*.py")):
         if "__pycache__" in path.parts:
             continue
@@ -3834,24 +4082,36 @@ def build_rows(root: Path, previous: dict[str, dict[str, str]]) -> list[dict[str
             if m.startswith("forge") and modules[m].path.name != "__init__.py"
         }
         disposition, phase = default_disposition(rel, imported, droppable)
-        note = protected.get(rel, "")
-        if note and disposition.startswith("drop"):
+        reason = protected.get(rel, "")
+        if reason and disposition.startswith("drop"):
             disposition, phase = "keep", "-"
+        deleted = ",".join(sorted({t for m in imported if (t := deleted_by(m))}))
+        review = "partly deleted: review" if deleted and not disposition.startswith("drop") else ""
         row = {
             "file": rel,
             "tests": str(count_tests(path)),
             "loc": str(cb.count_lines(path)),
             "imports_runtime": str(bool(imported & reach.runtime)).lower(),
             "imports_tests_only": str(bool(imported & reach.tests_only)).lower(),
+            "deleted_by": deleted,
             "area": area(rel),
             "disposition": disposition,
             "phase": phase,
-            "note": note,
+            "note": "; ".join(filter(None, (reason, review))),
         }
         if rel in previous:
             row.update({key: previous[rel][key] for key in CURATED})
+            row["note"] = row["note"] or "; ".join(filter(None, (reason, review)))
+        if reason and row["disposition"].startswith("drop"):
+            warnings.append(f"{rel} is {reason} but marked {row['disposition']}")
         rows.append(row)
-    return rows
+    current = {row["file"] for row in rows}
+    for rel, old in sorted(previous.items()):
+        if rel not in current:
+            warnings.append(
+                f"{rel} vanished; its row ({old['disposition']}: {old['note']}) is dropped"
+            )
+    return rows, warnings
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3863,11 +4123,13 @@ def main(argv: list[str] | None = None) -> int:
     if target.exists():
         with target.open(encoding="utf-8", newline="") as handle:
             previous = {row["file"]: row for row in csv.DictReader(handle)}
-    rows = build_rows(args.root, previous)
+    rows, warnings = build_rows(args.root, previous)
     with target.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=FIELDS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    for warning in warnings:
+        print(f"test-ledger: warning: {warning}", file=sys.stderr)
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["disposition"]] = counts.get(row["disposition"], 0) + 1
@@ -3882,21 +4144,23 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests again**
 
 Run: `uv run pytest -q tests/test_script_build_test_ledger.py`
-Expected: `3 passed`.
+Expected: `7 passed`.
 
 - [ ] **Step 5: Generate the ledger**
 
 Run: `uv run python scripts/build_test_ledger.py`
-Expected: about `test-ledger: 303 files → … {'port-adapter': 45, 'keep': ~186,
-'port-engine': 49, 'drop-with-code': 23}`. Invariant evidence and edge-case
-pins carry a note and are never `drop-*` by default. The exact counts depend
-on the tests added by Tasks 1–13.
+Expected: about `test-ledger: 303 files → … {'port-adapter': 21, 'keep': 167,
+'port-engine': 60, 'drop-with-code': 55}`; 125 rows have a `deleted_by`
+value and 70 carry the note "partly deleted: review". Invariant evidence and
+edge-case pins are never `drop-*` by default. The exact counts depend on the
+tests added by Tasks 1–13.
 
 - [ ] **Step 6: Owner review (human step)**
 
-The owner reviews every `drop-with-code` row and records the decision in
-the `note` column. Re-running the generator keeps `disposition`, `phase` and
-`note`.
+The owner reviews every `drop-*` row and every row noted "partly deleted:
+review", and records the decision in `disposition`, `phase` and `note`.
+Re-running the generator keeps those three columns and warns about protected
+rows marked `drop-*` and about curated rows whose file vanished.
 
 - [ ] **Step 7: Commit**
 
