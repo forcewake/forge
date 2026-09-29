@@ -1866,12 +1866,13 @@ git commit -m "feat(config): GitLab settings optional behind FORGE_GITLAB_ENABLE
 ### Task 8: Import contracts (ROADMAP P0-07)
 
 **Files:**
+- Create: `tests/test_import_contract_debt.py`
 - Modify: `pyproject.toml` (dev dependency, `[tool.importlinter]`), `uv.lock`, `.github/workflows/ci.yml` (lint step)
 
 - [ ] **Step 1: Add the tool**
 
-Run: `uv add --dev "import-linter==2.1"`
-Expected: `pyproject.toml` lists `"import-linter==2.1"` under
+Run: `uv add --dev "import-linter==2.15"`
+Expected: `pyproject.toml` lists `"import-linter==2.15"` under
 `[dependency-groups] dev`, and `uv.lock` is updated.
 
 - [ ] **Step 2: Add the contracts at the end of `pyproject.toml`**
@@ -1879,30 +1880,64 @@ Expected: `pyproject.toml` lists `"import-linter==2.1"` under
 ```toml
 
 # ADR-0035 guardrail: mechanical import boundaries. The ignore lists record
-# existing debt and may only shrink (ROADMAP P0-07).
+# existing debt and may only shrink (ROADMAP P0-07;
+# tests/test_import_contract_debt.py counts them).
 [tool.importlinter]
 root_package = "forge"
 
 [[tool.importlinter.contracts]]
-name = "durable does not import the run services, adaptive, gateway or integrations"
+name = "durable does not import runs, adaptive, gateway or integrations"
 type = "forbidden"
 source_modules = ["forge.durable"]
 forbidden_modules = ["forge.runs", "forge.adaptive", "forge.gateway", "forge.integrations"]
+# Lazy imports inside durable/budgets.py functions. Each entry covers every
+# import between the two modules, and importing forge.runs.candidate loads
+# forge.runs (RunService) at runtime.
 ignore_imports = [
     "forge.durable.budgets -> forge.adaptive.usage_ingestion",
     "forge.durable.budgets -> forge.runs.candidate",
 ]
 
 [[tool.importlinter.contracts]]
-name = "harnesses do not import the provider lifecycle services"
+name = "harnesses do not import forge.runs"
 type = "forbidden"
 source_modules = ["forge.harnesses"]
-forbidden_modules = ["forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service"]
+# The whole package: forge/runs/__init__.py loads RunService, which imports
+# forge.harnesses, so any runs import from here would create a cycle.
+forbidden_modules = ["forge.runs"]
 ```
 
 The two `ignore_imports` entries are the only current violations: lazy
-imports in `durable/budgets.py` at lines 1362 and 1437. They may only
-disappear, never grow.
+imports in `durable/budgets.py` at lines 1362 and 1437. The harnesses
+contract forbids all of `forge.runs`, because `forge/runs/__init__.py`
+loads `RunService`, which imports `forge.harnesses`.
+
+- [ ] **Step 2b: Count the debt**
+
+The ignore list may only shrink. Create `tests/test_import_contract_debt.py`:
+
+```python
+"""The import-contract debt (``ignore_imports``) may only shrink (ROADMAP P0-07)."""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+# Lower this when an entry is removed. Raising it needs an ADR.
+MAX_IGNORED_IMPORTS = 2
+
+
+def test_ignored_imports_only_shrink():
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    contracts = config["tool"]["importlinter"]["contracts"]
+    ignored = [entry for contract in contracts for entry in contract.get("ignore_imports", [])]
+    assert len(ignored) <= MAX_IGNORED_IMPORTS, ignored
+```
+
+Run: `uv run pytest -q tests/test_import_contract_debt.py`
+Expected: `1 passed`.
 
 - [ ] **Step 3: Run the contracts**
 
@@ -1916,6 +1951,11 @@ Temporarily delete the first `ignore_imports` entry and run
 `forge.durable.budgets -> forge.adaptive.usage_ingestion (l.1362)`. Restore
 the entry.
 
+Then temporarily append `from forge.runs import candidate  # noqa: F401` to
+`src/forge/harnesses/mcp.py` and run `uv run lint-imports`. Expected: the
+harnesses contract is `BROKEN`. Restore the file with
+`git checkout -- src/forge/harnesses/mcp.py`.
+
 - [ ] **Step 5: Add the CI step**
 
 In the `lint` job, after `Ruff format check`, add:
@@ -1928,7 +1968,7 @@ In the `lint` job, after `Ruff format check`, add:
 - [ ] **Step 6: Commit**
 
 ```bash
-git add pyproject.toml uv.lock .github/workflows/ci.yml
+git add pyproject.toml uv.lock .github/workflows/ci.yml tests/test_import_contract_debt.py
 git commit -m "build: import-linter contracts as a CI gate (ratchet mode)" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
@@ -3503,6 +3543,9 @@ Expected: the tag exists before any Phase 1 deletion lands.
     workflow (YAGNI).
   - The ledger script is `build_test_ledger.py`, so pytest can never
     collect a script named `test_*`.
+  - The import contracts run in the `lint` job, not a separate `imports`
+    job, and a test (`tests/test_import_contract_debt.py`) is the
+    shrink-only counter for their ignore list.
   - The Invariant Suite is one registry (`tests/invariants/registry.py`)
     over existing focused test files, not one module per invariant, and I6
     is proven by the existing production-entry race test rather than a new
