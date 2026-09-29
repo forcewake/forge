@@ -20,7 +20,12 @@ def test_every_invariant_names_evidence():
 
 def test_registered_paths_are_clean_and_repo_relative():
     paths = [f for inv in INVARIANTS for f in inv.files]
-    assert [f for f in paths if f != Path(f).as_posix() or not f.startswith("tests/")] == []
+    unclean = [
+        f
+        for f in paths
+        if f != Path(f).as_posix() or not f.startswith("tests/") or ".." in Path(f).parts
+    ]
+    assert unclean == []
 
 
 def test_every_registered_file_exists():

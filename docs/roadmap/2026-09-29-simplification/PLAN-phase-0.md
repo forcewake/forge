@@ -849,7 +849,7 @@ Then add this job right before the `integration` job:
 | --- | --- | --- |
 | `uv run pytest -q -m "not slow"` | The default tier: fast, hermetic | Every pull request and push (`test` job, Python 3.13 and 3.14) |
 | `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and `release/**`, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
-| `uv run pytest -q -m invariant $(uv run python -m tests.invariants.registry)` | The Invariant Suite I1–I8 | Every pull request (`invariants` job, with Postgres) |
+| `uv run pytest -q $(uv run python -m tests.invariants.registry)` | The Invariant Suite I1–I8 | Every pull request (`invariants` job, with Postgres) |
 | `uv run pytest -q` | Everything | Locally, before large changes |
 
 Tiers are assigned by path in `tests/_hygiene.py`; the invariant files are
@@ -930,7 +930,12 @@ def test_every_invariant_names_evidence():
 
 def test_registered_paths_are_clean_and_repo_relative():
     paths = [f for inv in INVARIANTS for f in inv.files]
-    assert [f for f in paths if f != Path(f).as_posix() or not f.startswith("tests/")] == []
+    unclean = [
+        f
+        for f in paths
+        if f != Path(f).as_posix() or not f.startswith("tests/") or ".." in Path(f).parts
+    ]
+    assert unclean == []
 
 
 def test_every_registered_file_exists():
@@ -1054,7 +1059,9 @@ lane template disables push and holds no write credential.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -1067,7 +1074,10 @@ MERGE_APIS: dict[str, tuple[str, str]] = {
         r"/merge_requests/[^\"'\s]*/merge\b",
         'await self._put(f"/projects/{pid}/merge_requests/{iid}/merge")',
     ),
-    "any REST path ending in /merge": (r"/merge[\"'?]", 'await self._put(f"{mr_path}/merge")'),
+    "any REST path ending in /merge": (
+        r"(?m)^(?!.*\brefs/).*?/merge[\"'?]",
+        'await self._put(f"{mr_path}/merge")',
+    ),
     "GitLab: merge when the pipeline succeeds": (
         r"\bmerge_when_pipeline_succeeds\b",
         '{"merge_when_pipeline_succeeds": True}',
@@ -1080,7 +1090,8 @@ MERGE_APIS: dict[str, tuple[str, str]] = {
         r"\bmergeRequestAccept\b",
         "mutation { mergeRequestAccept(input: $input) { errors } }",
     ),
-    "auto-merge flags": (r"\bauto_merge\b|\bautoMerge\b", '{"auto_merge": True}'),
+    "REST auto-merge flag": (r"\bauto_merge\b", '{"auto_merge": True}'),
+    "auto-merge flag (DESIGN §4 spelling)": (r"\bautoMerge\b", '{"autoMerge": True}'),
     "GitHub REST: merge a pull request": (
         r"/pulls/[^\"'\s]*/merge\b",
         'await self._put(f"/repos/{repo}/pulls/{number}/merge")',
@@ -1109,15 +1120,32 @@ MERGE_APIS: dict[str, tuple[str, str]] = {
     ),
     "Azure DevOps: complete a pull request": (
         r"[\"']status[\"']\s*:\s*[\"']completed[\"']",
-        'await self._patch(pr_url, json={"status": "completed"})',
+        'await self._patch(f"{repo}/pullRequests/{pr}", json={"status": "completed"})',
+    ),
+    "CLI: merge a pull or merge request": (
+        r"\b(?:gh\s+pr|glab\s+mr)\s+merge\b|[\"'](?:pr|mr)[\"']\s*,\s*[\"']merge[\"']",
+        'subprocess.run(["gh", "pr", "merge", str(number)])',
+    ),
+    "CLI: complete an Azure DevOps pull request": (
+        r"--auto-complete\b|--status[\"']?(?:\s*,\s*[\"']|\s+)completed\b",
+        'run(["az", "repos", "pr", "update", "--status", "completed"])',
     ),
 }
 PATTERNS = {name: re.compile(pattern) for name, (pattern, _) in MERGE_APIS.items()}
+# A pattern listed here only counts in files that also match the context:
+# "status": "completed" is also the normal state of check runs and builds.
+CONTEXT = {"Azure DevOps: complete a pull request": re.compile(r"(?i)pullrequests")}
+# Reviewed exceptions: (path, API name) -> why it is not a merge. Never reword
+# code to dodge a pattern; add an entry here instead.
+ALLOWED: dict[tuple[str, str], str] = {}
 NOT_MERGES = (
     'f"/projects/{pid}/merge_requests/{iid}/notes"',
     "await gitlab.list_merge_requests(project_id)",
     'f"/projects/{pid}/merge_requests/{iid}/merge_ref"',
     '{"merge_request_iid": iid, "status": "in_progress"}',
+    '{"name": "ci", "status": "completed", "conclusion": "success"}',
+    'source_branch = f"refs/pull/{number}/merge"',
+    're.fullmatch(r"refs/merge-requests/(\\d+)/merge", ref)',
 )
 LANE_TEMPLATES = sorted(
     [
@@ -1131,8 +1159,30 @@ AZURE_TEMPLATES = [p for p in LANE_TEMPLATES if p.name.endswith(".azure-pipeline
 READ_ONLY = {"read", "none"}
 
 
+def merge_apis_in(text: str) -> list[str]:
+    return [
+        name
+        for name, pattern in PATTERNS.items()
+        if pattern.search(text) and (name not in CONTEXT or CONTEXT[name].search(text))
+    ]
+
+
+def _mappings(node: Any) -> Iterator[dict[str, Any]]:
+    """Every mapping in a parsed YAML document, depth first."""
+    if isinstance(node, dict):
+        yield node
+        node = list(node.values())
+    if isinstance(node, list):
+        for child in node:
+            yield from _mappings(child)
+
+
 def _source_files() -> list[Path]:
-    return sorted(p for p in (REPO / "src").rglob("*.py") if "__pycache__" not in p.parts)
+    return sorted(
+        p
+        for p in (REPO / "src").rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc", ".pyo"}
+    )
 
 
 def _rel(path: Path) -> str:
@@ -1141,18 +1191,18 @@ def _rel(path: Path) -> str:
 
 @pytest.mark.parametrize("name", sorted(MERGE_APIS))
 def test_each_pattern_recognises_its_merge_call(name: str):
-    assert PATTERNS[name].search(MERGE_APIS[name][1])
+    assert name in merge_apis_in(MERGE_APIS[name][1])
 
 
 @pytest.mark.parametrize("sample", NOT_MERGES)
 def test_ordinary_merge_request_calls_are_not_flagged(sample: str):
-    assert [name for name, p in PATTERNS.items() if p.search(sample)] == []
+    assert merge_apis_in(sample) == []
 
 
 @pytest.mark.parametrize("path", _source_files(), ids=_rel)
 def test_source_contains_no_merge_call(path: Path):
-    text = path.read_text(encoding="utf-8")
-    hits = [name for name, pattern in PATTERNS.items() if pattern.search(text)]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    hits = [name for name in merge_apis_in(text) if (_rel(path), name) not in ALLOWED]
     assert hits == [], f"{_rel(path)} uses a merge API: {hits}"
 
 
@@ -1163,11 +1213,16 @@ def test_lane_template_disables_push(path: Path):
 
 @pytest.mark.parametrize("path", GITHUB_TEMPLATES, ids=_rel)
 def test_github_lane_token_is_read_only(path: Path):
-    text = path.read_text(encoding="utf-8")
-    assert "persist-credentials: false" in text
-    doc = yaml.safe_load(text)
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    checkouts = [
+        m for m in _mappings(doc) if str(m.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert checkouts, "no actions/checkout step found"
+    assert all((m.get("with") or {}).get("persist-credentials") is False for m in checkouts)
     for name, job in doc["jobs"].items():
         permissions = job.get("permissions", doc.get("permissions"))
+        if permissions == "read-all":
+            continue
         assert isinstance(permissions, dict), f"job {name} does not pin its token permissions"
         assert set(permissions.values()) <= READ_ONLY, f"job {name}: {permissions}"
 
@@ -1175,14 +1230,16 @@ def test_github_lane_token_is_read_only(path: Path):
 @pytest.mark.parametrize("path", AZURE_TEMPLATES, ids=_rel)
 def test_azure_lane_holds_no_access_token(path: Path):
     text = path.read_text(encoding="utf-8")
-    assert "persistCredentials: false" in text
-    assert "System.AccessToken" not in text
+    checkouts = [m for m in _mappings(yaml.safe_load(text)) if "checkout" in m]
+    assert checkouts, "no checkout step found"
+    assert all(m.get("persistCredentials") is False for m in checkouts)
+    assert not re.search(r"system[._]accesstoken", text, re.IGNORECASE)
 ```
 
 - [ ] **Step 5: Run the invariants package**
 
 Run: `uv run pytest -q tests/invariants`
-Expected: `288 passed`. This is characterization: the current code complies.
+Expected: `307 passed`. This is characterization: the current code complies.
 `test_each_pattern_recognises_its_merge_call` proves that no pattern is
 vacuous, and `test_ordinary_merge_request_calls_are_not_flagged` guards
 against false positives.
@@ -1399,7 +1456,7 @@ in the JUnit report. The `invariant` marker is for local selection.
 - [ ] **Step 11: Run the suite locally**
 
 Run: `uv run pytest -q --junitxml=/tmp/inv.xml $(uv run python -m tests.invariants.registry)`
-Expected without Postgres: about `731 passed, 3 skipped`. The skips are the
+Expected without Postgres: about `750 passed, 3 skipped`. The skips are the
 `FORGE_PG_TEST_URL`-gated tests.
 
 Run: `uv run python scripts/assert_no_skips.py /tmp/inv.xml`

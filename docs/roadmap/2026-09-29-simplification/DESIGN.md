@@ -74,9 +74,10 @@ Non-goals:
 
 ## 4. Non-negotiable invariants
 
-Each invariant becomes a module in `tests/invariants/` with marker
-`invariant`. The job is required in CI from Phase 0 and must stay green
-through every phase.
+Each invariant is registered in `tests/invariants/registry.py` with the test
+files that prove it, and every test in those files is marked `invariant`.
+The `invariants` CI job is required from Phase 0 and must stay green through
+every phase.
 
 | # | Invariant | Current evidence | Target home |
 | --- | --- | --- | --- |

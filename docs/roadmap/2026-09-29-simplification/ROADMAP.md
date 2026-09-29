@@ -130,28 +130,20 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 ### P0-06 Build the Invariant Suite
 - **Goal:** I1–I8 and the self-trigger rule are named and required.
 - **Work:**
-  - Create `tests/invariants/` with one module per invariant (listed
-    below). Each module holds new focused tests or thin wrappers that run
-    the strongest existing tests; see DESIGN §4.
+  - Register every invariant in `tests/invariants/registry.py` with the
+    test files that prove it (see DESIGN §4). The strongest evidence
+    already lives in focused test files, so the suite is one registry over
+    them plus one new module, `tests/invariants/test_i1_no_merge.py`: a
+    static scan of all of `src/` for merge APIs, and checks that every lane
+    template disables push and holds no write credential.
+  - `tests/invariants/test_registry_integrity.py` fails when a registered
+    file disappears.
   - Add a required CI job `invariants` with a Postgres service. It selects
     the registered files, `pytest $(python -m tests.invariants.registry)`,
     and fails on any skip (`scripts/assert_no_skips.py`).
-
-  | Module | Content |
-  | --- | --- |
-  | `test_i1_no_merge.py` | New static scan: provider clients and lane templates contain no merge endpoints or mutations; templates disable push |
-  | `test_i2_single_write_path.py` | `test_publication_boundary.py` cases |
-  | `test_i3_intent_before_effect.py` | Publication-intent recovery cases |
-  | `test_i4_consume_once_approval.py` | Gate consumption, spec digests, approved-input proof |
-  | `test_i5_budget.py` | Reserve before spend, idempotent receipts, unknown ≠ 0, closing partition |
-  | `test_i6_one_draft.py` | A fast in-process variant of the concurrent publication race |
-  | `test_i7_crash_safety.py` | Coroutine failure injection on the publication and dispatch steps |
-  | `test_i8_candidate_bound_verification.py` | Staleness when the head moves |
-  | `test_self_trigger_guard.py` | Bot-authored notes are never commands |
-
-- **Done when:** the job is required on `main`, and each module fails when
-  its invariant is broken. Show this with a local mutation, noted in the
-  PR description.
+- **Done when:** the job is required on `main`, and each registered file
+  fails when its invariant is broken. Show this with a local mutation,
+  noted in the PR description.
 - **Depends:** P0-05
 - **Size:** L
 
