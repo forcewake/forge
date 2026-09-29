@@ -4,6 +4,11 @@ Each invariant names the test files that prove it. The collection hook in
 ``tests/conftest.py`` marks every test in these files, and every test under
 ``tests/invariants/``, with ``invariant``. ``test_registry_integrity``
 fails when a listed file disappears, so evidence cannot vanish silently.
+
+One registry rather than one module per invariant: most evidence already
+lives in focused test files. ``tests/test_failure_injection_os.py`` is not
+listed: it needs real workers and Redis and runs nightly in the
+``integration-os`` job, while the ``invariants`` job fails on any skip.
 """
 
 from __future__ import annotations

@@ -137,9 +137,9 @@ jobs:
         run: uv run pytest -q -m "not slow" --durations=30
 
   # The slow tier: real processes and services (tests/production_entry,
-  # tests/test_failure_injection_os.py). Kept off the pull-request path;
-  # pg_gate still runs the required production-entry selection on every
-  # pull request, but only this job fails on the leaked-process check.
+  # tests/test_failure_injection_os.py). Not run on pull requests, except the
+  # files the Invariant Suite registers (the invariants job) and pg_gate's
+  # production-entry selection; pg_gate ignores the leaked-process check.
   tests-slow:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -164,6 +164,7 @@ jobs:
         run: uv run pytest -q -m slow
 
   # ADR-0035 / DESIGN §4: the Invariant Suite (I1-I8) must execute, never skip.
+  # The registry selects the files; every test in them runs.
   invariants:
     runs-on: ubuntu-latest
     services:
@@ -180,15 +181,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
@@ -202,7 +194,7 @@ jobs:
 
       - name: Invariant Suite
         run: >-
-          uv run pytest -q -m invariant --junitxml=invariants.xml
+          uv run pytest -q --junitxml=invariants.xml
           $(uv run python -m tests.invariants.registry)
 
       - name: Every invariant test executed

@@ -133,10 +133,9 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
   - Create `tests/invariants/` with one module per invariant (listed
     below). Each module holds new focused tests or thin wrappers that run
     the strongest existing tests; see DESIGN §4.
-  - Add a required CI job `invariants` with Postgres and Redis services.
-    It selects the registered files, `pytest -m invariant $(python -m
-    tests.invariants.registry)`, and fails on any skip
-    (`scripts/assert_no_skips.py`).
+  - Add a required CI job `invariants` with a Postgres service. It selects
+    the registered files, `pytest $(python -m tests.invariants.registry)`,
+    and fails on any skip (`scripts/assert_no_skips.py`).
 
   | Module | Content |
   | --- | --- |
