@@ -42,11 +42,19 @@ Start at the [main README](../README.md); this index maps the docs tree.
 [forge is developed through forge](reference/dogfooding.md): the loop, what
 is wired on this repo, and the ground rules.
 
+## Roadmap
+
+| Doc | Covers |
+|---|---|
+| [Simplification program — design](roadmap/2026-09-29-simplification/DESIGN.md) | [ADR-0035](adr/0035-simplification-program.md): subtract → separate → unify → productize; target architecture, invariants I1–I8, scope for 1.0 |
+| [Simplification program — roadmap](roadmap/2026-09-29-simplification/ROADMAP.md) | phase-by-phase task breakdown with acceptance criteria |
+| [Simplification program — metrics](roadmap/2026-09-29-simplification/metrics.md) | measured baseline and per-phase targets |
+
 ## Reference
 
 | Tree | Covers |
 |---|---|
-| [ADR](adr/) | architecture decisions 0000–0027 (the "why") |
+| [ADR](adr/) | architecture decisions 0000–0035 (the "why") |
 | [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md), [patch application vs git apply](research/patch-application.md), [remote effect reconciliation](research/remote-effect-reconciliation.md), [Actions artifacts & usage receipts](research/actions-artifacts-usage.md), [schema upgrade gates](research/schema-upgrade-gates.md) |
 | [Specs](specs/) | stage briefs and contracts the milestones were built from |
 | [Security](security/threat-model.md) | the threat model |

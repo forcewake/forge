@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — simplification program design (ADR-0035, proposed)
+
+- `docs/adr/0035-simplification-program.md`: the strangler program
+  subtract → separate → unify → productize. It covers the non-negotiable
+  invariants I1–I8, the scope for 1.0 (GitHub primary, GitLab second,
+  Azure DevOps on `release/0.42.x`) and the ADR impact table.
+- `docs/roadmap/2026-09-29-simplification/`:
+  - `DESIGN.md`: target architecture (`forge-protocol`, `forge-lane`, one
+    lifecycle engine over provider ports, the `effects` layer, lane
+    protocol v1 with OIDC, budgets through gateway keys) and the test and
+    guardrail strategy;
+  - `ROADMAP.md`: 75 tasks across five phases, each with acceptance
+    criteria;
+  - `ports-inventory.md`;
+  - `metrics.md`, the measured baseline.
+- `docs/README.md`: roadmap index; ADR range corrected to 0000–0035.
+
 ### Added — the 9e8d6c6 review, R42-04 applied to itself: the FINAL candidate re-qualified (#377 follow-up)
 
 The first v0.42.0 candidate (wheel `e7b48d42…`/image `98ea9031…`) was
