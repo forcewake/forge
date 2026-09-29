@@ -111,8 +111,15 @@ def settings_failures(exc: ValidationError) -> list[CheckResult]:
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"])
         name = f"settings.{location}" if location else "settings"
-        results.append(CheckResult(name, FAIL, error["msg"]))
+        results.append(CheckResult(name, FAIL, error["msg"].removeprefix("Value error, ")))
     return results
+
+
+async def check_gitlab_project(settings: Settings, project_id: int) -> list[CheckResult]:
+    """Target-project checks, or one failure when GitLab is disabled."""
+    if not getattr(settings, "FORGE_GITLAB_ENABLED", True):
+        return [CheckResult("project", FAIL, "--project needs GitLab; FORGE_GITLAB_ENABLED=false")]
+    return await check_project(settings, project_id)
 
 
 async def check_redis(settings: Settings) -> CheckResult:
@@ -1060,7 +1067,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     # earlier ordering guarantees stay untouched.
     results.extend(await check_checkpoint_authority(settings))
     if project_id is not None:
-        results.extend(await check_project(settings, project_id))
+        results.extend(await check_gitlab_project(settings, project_id))
     # NXT-02: offline honesty check, appended last so existing ordering
     # guarantees (python.version, gitlab.token first) are untouched.
     results.append(check_capabilities())

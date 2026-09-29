@@ -18,9 +18,9 @@ def validate_webhook_token(
     expected_secret: str,
     x_gitlab_token: str | None = Header(None),
 ) -> str:
-    """Raise 503 if GitLab ingress is unconfigured, 401 if the token is missing or wrong."""
+    """Raise 503 if GitLab ingress is off or unconfigured, 401 if the token is missing or wrong."""
     if not expected_secret:
-        raise HTTPException(status_code=503, detail="GitLab ingress is not configured")
+        raise HTTPException(status_code=503, detail="GitLab ingress is disabled or not configured")
     if x_gitlab_token is None:
         raise HTTPException(status_code=401, detail="Missing X-Gitlab-Token header")
     if not hmac.compare_digest(x_gitlab_token, expected_secret):

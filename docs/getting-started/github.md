@@ -57,6 +57,7 @@ Add to forge's environment (`.env` / container env):
 
 ```bash
 FORGE_GITHUB_ENABLED=true
+FORGE_GITLAB_ENABLED=false                       # GitHub-only: no GITLAB_* settings needed
 FORGE_GITHUB_WEBHOOK_SECRET=<same value as the App webhook secret>
 FORGE_GITHUB_APP_ID=<client id or app id>
 FORGE_GITHUB_PRIVATE_KEY=/path/to/app.pem        # PEM text or a file path

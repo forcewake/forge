@@ -15,7 +15,10 @@ from forge.repository.changeset import BUILTIN_WRITE_PROFILES
 class Settings(BaseSettings):
     """Core settings loaded from environment / .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a validation error must never echo a token.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     # GitLab connection. Required while FORGE_GITLAB_ENABLED is true (the
     # default); a GitHub-only deployment sets FORGE_GITLAB_ENABLED=false.

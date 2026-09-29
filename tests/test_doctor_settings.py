@@ -32,9 +32,17 @@ def test_missing_settings_in_json(empty_env, capsys):
     assert report["status"] == "failed"
     assert report["checks"][0]["name"] == "settings"
     assert "GITLAB_URL" in report["checks"][0]["detail"]
+    assert not report["checks"][0]["detail"].startswith("Value error")
 
 
 async def test_disabled_gitlab_is_a_warning_not_a_network_call(empty_env):
     empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
     results = await doctor.check_gitlab_identity(Settings())
     assert [(r.name, r.status) for r in results] == [("gitlab.token", doctor.WARN)]
+
+
+async def test_project_checks_refuse_when_gitlab_is_disabled(empty_env):
+    empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
+    results = await doctor.check_gitlab_project(Settings(), 68)
+    assert [(r.name, r.status) for r in results] == [("project", doctor.FAIL)]
+    assert "FORGE_GITLAB_ENABLED=false" in results[0].detail

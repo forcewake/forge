@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from forge.config import Settings
+from forge.database import reset_engine
 from forge.gateway.validator import validate_webhook_token
+from forge.main import create_app
 
 GITLAB_ENV = ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGE_GITLAB_ENABLED")
 
@@ -51,3 +54,28 @@ def test_configured_gitlab_ingress_still_checks_the_token():
     with pytest.raises(HTTPException) as caught:
         validate_webhook_token("s3cret", "wrong")
     assert caught.value.status_code == 401
+
+
+def test_settings_errors_never_echo_secret_values(clean_env):
+    with pytest.raises(ValidationError) as caught:
+        Settings(GITLAB_URL="https://gitlab.test", GITLAB_TOKEN="glpat-do-not-print")
+    assert "glpat-do-not-print" not in str(caught.value)
+
+
+async def test_disabled_gitlab_ingress_refuses_even_a_matching_token(test_settings):
+    settings = test_settings.model_copy(update={"FORGE_GITLAB_ENABLED": False})
+    token = settings.GITLAB_WEBHOOK_SECRET.get_secret_value()
+    reset_engine()
+    app = create_app(settings=settings)
+    try:
+        async with app.router.lifespan_context(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/webhook",
+                    headers={"X-Gitlab-Token": token, "X-Gitlab-Event": "Note Hook"},
+                    json={},
+                )
+    finally:
+        reset_engine()
+    assert response.status_code == 503

@@ -774,8 +774,9 @@ async def webhook(
 ) -> dict[str, Any]:
     """Accept GitLab webhook events."""
     settings = request.app.state.settings
+    gitlab_enabled = getattr(settings, "FORGE_GITLAB_ENABLED", True)
     validate_webhook_token(
-        expected_secret=settings.GITLAB_WEBHOOK_SECRET.get_secret_value(),
+        expected_secret=settings.GITLAB_WEBHOOK_SECRET.get_secret_value() if gitlab_enabled else "",
         x_gitlab_token=x_gitlab_token,
     )
 
