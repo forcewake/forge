@@ -1,15 +1,17 @@
 """Reject review, backlog and issue archaeology in added source lines.
 
 History belongs in git and ADRs, not in code comments. The check reads the
-lines added under ``src/`` and ``packages/`` since ``--base`` and rejects
-what ``_codebase.REVIEW_REF`` matches:
+lines added under ``src/`` and ``packages/*/src/`` since ``--base`` and
+rejects what ``_codebase.REVIEW_REF`` matches:
 
 - review, backlog and acceptance item ids such as ``R42-16``, ``Q35-09``,
   ``NXT-10``, ``NEXT-05`` or ``AT-08``;
 - issue references such as ``#377``;
 - "review <sha>" references.
 
-``ADR-0035`` style references are allowed.
+``ADR-0035`` style references are allowed. Moved code counts as added, so a
+move is when its references go. A line that must keep a matching literal,
+such as the colour ``#009966``, carries the marker ``prose-lint: allow``.
 
 Usage::
 
@@ -26,22 +28,33 @@ from collections.abc import Iterator
 
 import _codebase as cb
 
-PATHS = ("src", "packages")
+PATHS = ("src", ":(glob)packages/*/src/**")
+DIFF_OPTIONS = (
+    "--unified=0",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--find-renames",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+ALLOW = "prose-lint: allow"
 
 
 def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
-    path = ""
-    lineno = 0
-    for line in diff.splitlines():
-        if line.startswith("+++ "):
+    path, lineno, in_header = "", 0, False
+    for line in diff.split("\n"):
+        if line.startswith("diff --git "):
+            path, in_header = "", True
+        elif in_header and line.startswith("+++ "):
             path = line[6:] if line.startswith("+++ b/") else ""
         elif match := HUNK.match(line):
-            lineno = int(match.group(1))
-        elif line.startswith("+") and path:
+            lineno, in_header = int(match.group(1)), False
+        elif not in_header and line.startswith("+") and path:
             yield path, lineno, line[1:]
             lineno += 1
-        elif not line.startswith("-"):
+        elif not in_header and line.startswith(" "):
             lineno += 1
 
 
@@ -49,8 +62,12 @@ def violations(diff: str) -> list[str]:
     return [
         f"{path}:{lineno}: {text.strip()}"
         for path, lineno, text in added_lines(diff)
-        if cb.REVIEW_REF.search(text)
+        if cb.REVIEW_REF.search(text) and ALLOW not in text
     ]
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,13 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base.strip("0"):
         print("prose-lint: no base ref, nothing to check")
         return 0
-    diff = subprocess.run(
-        ["git", "diff", "--unified=0", "--no-color", f"{args.base}...HEAD", "--", *PATHS],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    found = violations(diff)
+    if _git("rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}").returncode:
+        print(f"prose-lint: base {args.base} is not in this checkout (force-push?); skipped")
+        return 0
+    done = _git("diff", *DIFF_OPTIONS, f"{args.base}...HEAD", "--", *PATHS)
+    if done.returncode:
+        print(f"prose-lint: git diff failed: {done.stderr.strip()}")
+        return 2
+    found = violations(done.stdout)
     for item in found:
         print(f"prose-lint: {item}")
     if found:

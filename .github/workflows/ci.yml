@@ -46,7 +46,7 @@ jobs:
       - name: Prose lint (added lines)
         run: >-
           uv run python scripts/prose_lint.py
-          --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+          --base "${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}"
 
       # R38-03 (#304): refuse database-archive artifacts (PGDMP magic, pg_dump
       # extensions, archives containing dump members) in the tracked tree
