@@ -133,8 +133,28 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run tests
-        run: uv run pytest -q
+      - name: Run tests (default tier)
+        run: uv run pytest -q -m "not slow"
+
+  # The slow tier: real processes and services (tests/production_entry,
+  # tests/fi_os). Kept off the pull-request path; pg_gate still runs the
+  # required production-entry selection on every pull request.
+  tests-slow:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install redis-server (the durable-ingress matrix spawns the real binary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests (slow tier)
+        run: uv run pytest -q -m slow
 
   # Real-Postgres integration stage (F29): the ADR-0017 failure-injection
   # exit bar (tests/test_failure_injection.py) runs only when

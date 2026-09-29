@@ -88,6 +88,8 @@ asyncio_mode = "auto"
 # selectable with `-m production_entry` without a pytest warning.
 markers = [
     "production_entry: Q35-09 production-entry invariant traces (AT-01..AT-06 at the process/DB level)",
+    "slow: spawns real processes or services; the default CI job runs -m 'not slow'",
+    "invariant: evidence for the non-negotiable invariants I1-I8 (DESIGN §4); run with -m invariant",
 ]
 # B14: the suite runs warning-clean except ONE known upstream artifact —
 # aiosqlite's worker thread finalizes its anyio memory stream after the

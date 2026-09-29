@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from forge.config import Settings
 from forge.database import reset_engine
 from forge.main import create_app
+from tests import _hygiene
 
 # Suppress debug logs from libraries whose background threads can write to
 # stderr after pytest has already torn down the stream, causing
@@ -153,3 +154,21 @@ async def client(app) -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark tiers by path: ``slow`` (real processes) and ``invariant`` (DESIGN §4)."""
+    for item in items:
+        for tier in sorted(_hygiene.tiers_for(item.nodeid)):
+            item.add_marker(tier)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail the run when a test leaked a running child process."""
+    leaked = _hygiene.reap_and_kill_leaks()
+    if leaked:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        message = f"test hygiene: killed leaked child processes {leaked}"
+        if reporter is not None:
+            reporter.write_line(message, red=True)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
