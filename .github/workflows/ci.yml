@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
   # Nightly: runs everything, including the manual-only integration-os job
   # below. Push/PR runs never touch it — real OS-process failure injection
