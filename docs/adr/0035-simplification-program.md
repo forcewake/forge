@@ -1,6 +1,6 @@
 # 0035 — Simplification program: one lifecycle engine, a separate lane, fewer moving parts
 
-- **Status:** Proposed. It becomes Accepted when the owner approves the written design.
+- **Status:** Accepted (2026-09-29, owner approval of the written design)
 - **Date:** 2026-09-29
 - **Design:** [docs/roadmap/2026-09-29-simplification/DESIGN.md](../roadmap/2026-09-29-simplification/DESIGN.md)
 - **Roadmap:** [docs/roadmap/2026-09-29-simplification/ROADMAP.md](../roadmap/2026-09-29-simplification/ROADMAP.md)

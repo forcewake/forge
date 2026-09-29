@@ -1,6 +1,6 @@
 # forge simplification program — design
 
-- **Status:** Proposed. It becomes Accepted together with
+- **Status:** Accepted (2026-09-29), together with
   [ADR-0035](../../adr/0035-simplification-program.md).
 - **Date:** 2026-09-29
 - **Baseline:** `main` at `7ed64ba` (v0.42.0)

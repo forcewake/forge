@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — simplification program design (ADR-0035, proposed)
+### Added — simplification program design (ADR-0035, accepted)
 
 - `docs/adr/0035-simplification-program.md`: the strangler program
   subtract → separate → unify → productize. It covers the non-negotiable

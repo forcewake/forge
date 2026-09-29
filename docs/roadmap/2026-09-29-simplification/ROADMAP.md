@@ -53,7 +53,7 @@ gantt
 ### P0-01 Accept ADR-0035 and mark the affected ADRs
 - **Goal:** make the program binding under AGENTS.md rule 4.
 - **Work:**
-  - Set ADR-0035 to Accepted.
+  - ADR-0035 is already Accepted (2026-09-29).
   - Add a status line to each affected ADR:
     - "Superseded by ADR-0035": 0019, 0021, 0027, 0029, 0030, 0031, 0033, 0034;
     - "Amended by ADR-0035": 0002, 0013, 0015, 0020, 0022, 0023, 0025, 0028, 0032;
