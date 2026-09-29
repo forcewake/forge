@@ -65,7 +65,7 @@ output.
 | `tests/invariants/{__init__,registry,test_registry_integrity,test_i1_no_merge}.py` | new | The Invariant Suite |
 | `tests/_scripts.py` | new test helper | Import `scripts/*.py` in tests |
 | `scripts/assert_no_skips.py`, `tests/test_script_assert_no_skips.py` | new | An invariant run must not skip |
-| `src/forge/config.py`, `src/forge/gateway/validator.py`, `src/forge/doctor.py`, `.env.example` | modified | Optional GitLab; fail-closed ingress; doctor never raises |
+| `src/forge/config.py`, `src/forge/gateway/validator.py`, `src/forge/gateway/router.py`, `src/forge/doctor.py`, `.env.example`, `docs/getting-started/github.md` | modified | Optional GitLab; ingress closed when off or unconfigured; doctor never raises |
 | `tests/test_settings_gitlab_optional.py`, `tests/test_doctor_settings.py` | new tests | The above |
 | `pyproject.toml`, `uv.lock` | modified | Markers, dev deps, import-linter contracts |
 | `scripts/_codebase.py`, `scripts/metrics.py`, `tests/test_script_metrics.py` | new | Shared analysis; metrics |
@@ -2414,7 +2414,7 @@ Expected, measured at `330b200` before Task 7:
 | `prose_share` | 28% |
 | `direct_dependencies` | 14 |
 
-After Task 7, `src_lines` is about 43 higher. Line and module counts must
+After Task 7, `src_lines` is about 54 higher. Line and module counts must
 be within ±1% of the baseline. `review_refs` and `adr_refs` are new, split
 metrics, so they have no baseline to match.
 
@@ -2748,8 +2748,8 @@ Add before the `integration` job:
 - [ ] **Step 3: Try it locally on this branch**
 
 Run: `uv run pytest -q -m "not slow" --cov=forge --cov-report=xml && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=85`
-Expected: diff-cover reports the Task 7 lines in `config.py`, `validator.py`
-and `doctor.py` as covered, at or above 85%. Do not commit `coverage.xml`.
+Expected: diff-cover reports the Task 7 lines in `config.py`, `validator.py`,
+`router.py` and `doctor.py` as covered, at or above 85%. Do not commit `coverage.xml`.
 
 - [ ] **Step 4: Commit**
 
