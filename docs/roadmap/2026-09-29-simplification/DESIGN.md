@@ -40,13 +40,13 @@ product deployable after each one:
 | --- | --- | --- |
 | `src/forge` | 248 modules, 190,383 lines | `wc -l` |
 | Runtime-reachable code (control plane plus lane entry points) | 201 modules, 137,820 lines | Static import closure from `forge.main`, `forge.worker`, `forge.migrate`, `forge.harness_entry`, `forge.lane_driver` and `forge.candidate_collector`; lazy imports included |
-| Reached only by tooling (doctor, release modules, `scripts/`) | 20 modules, 33,082 lines (26,036 in `adaptive/`) | Same analysis |
-| Reached only by tests | 27 modules, 19,481 lines | Same analysis. Examples: `adaptive.publication_saga`, `saga_durable`, `saga_native`, `two_writer_qualification`, `workpackage_service`, `runtime`, `boundary_registry`, `closure_matrix`, `verification_executor`, `dotnet_recipe`, `reference/*` |
+| Reached only by tooling (doctor, the `forge` console command, release modules, `scripts/`) | 21 modules, 33,155 lines (26,036 in `adaptive/`) | Same analysis; `[project.scripts]` modules count as tooling roots |
+| Reached only by tests | 26 modules, 19,408 lines | Same analysis. Examples: `adaptive.publication_saga`, `saga_durable`, `saga_native`, `two_writer_qualification`, `workpackage_service`, `runtime`, `boundary_registry`, `closure_matrix`, `verification_executor`, `dotnet_recipe`, `reference/*` |
 | Code reachable from the lane entry points | 187 modules, 132,772 lines | `lane_driver` imports `adaptive.wiring`; `harness_entry` imports `runs.execution_profile` |
 | Lifecycle services | `service.py` 11,433, `github_service.py` 8,350, `azure_service.py` 6,110 lines | `wc -l` |
 | Functions longer than 100, 200 and 400 lines | 234, 56 and 8 | AST |
 | Longest functions | `service._advance_harness` 701, `github_service._advance_harness` 669, `harness_entry.main` 553, `azure_service._advance_harness` 401 | AST |
-| Prose share of source lines | ~28%, with 2,558 review, issue and ADR references | Tokenizer plus docstrings |
+| Prose share of source lines | ~28%; at least 3,216 review, backlog and issue references and 705 ADR references | Tokenizer plus docstrings; the `scripts/_codebase.py` patterns |
 | Most-changed files (commits) | `github_service` 76, `service` 72, `harness_entry` 47, `azure_service` 42 | `git log` |
 | Tests | 9,275 passed, 8 failed, 75 skipped, 16.5 minutes on macOS | Full `pytest`. All 8 failures assume `python` on `PATH` (`tests/test_lane_install_contract.py`) |
 | Test hygiene | Orphaned `fake_native_server.py` and `durable_ingress_server.py` processes, up to about 5 days old, from earlier runs | `ps` |

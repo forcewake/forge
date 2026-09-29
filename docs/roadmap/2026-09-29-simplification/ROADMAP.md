@@ -313,7 +313,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-03 Remove the test-only adaptive modules
-- **Goal:** delete the rest of the 19.5K test-only lines.
+- **Goal:** delete the rest of the 19.4K test-only lines.
 - **Work:**
   - Delete `workpackage_service`, `runtime`, `compat`, `compat_fixtures`,
     `dedup`, `snapshots`, `impact`, `project_map`, `read_guards`,

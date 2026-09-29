@@ -14,7 +14,7 @@ now slows every change:
 
 - **About 28% of `src/` is not on a runtime path.** A static import analysis
   from the control-plane and lane entry points shows 33K lines reached only
-  by release and qualification tooling, and 19.5K lines reached only by
+  by release and qualification tooling, and 19.4K lines reached only by
   tests. Examples of test-only code: the publication saga, the work-package
   service and the reference twins.
 - **The run lifecycle exists three times.** `runs/service.py` (GitLab,
@@ -29,8 +29,9 @@ now slows every change:
 - **The lane is not separable.** The lane entry points, which run in the
   customer's CI, import 132K lines of control-plane code.
 - **Prose and process dominate.** About 28% of source lines are comments
-  and docstrings, with 2,558 review, issue and ADR references. The docs
-  contain about 319K words. Each release re-runs a qualification ceremony.
+  and docstrings, with at least 3,216 review, backlog and issue references
+  and 705 ADR references. The docs contain about 319K words. Each release
+  re-runs a qualification ceremony.
 
 ## Decision
 

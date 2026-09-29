@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests._scripts import load_script, write_tree
 
 metrics = load_script("metrics")
@@ -43,3 +45,49 @@ def test_write_appends_history_and_regenerates_one_block(tmp_path):
     assert text.count(metrics.BEGIN) == 1
     assert "| `src/forge` lines | 10 | 8 |" in text
     assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 2
+
+
+def test_breakdown_adds_up_and_the_lane_package_is_counted_separately(tmp_path):
+    tree = {**TREE, "packages/forge-lane/src/forge_lane/__init__.py": "A = 1\nB = 2\n"}
+    snapshot = metrics.measure(write_tree(tmp_path, tree))
+    parts = ("runtime_lines", "tooling_only_lines", "tests_only_lines", "unreached_lines")
+    assert sum(snapshot[key] for key in parts) == snapshot["src_lines"]
+    assert snapshot["forge_lane_lines"] == 2
+
+
+def test_who_imports_leaves_out_the_target_package_itself(tmp_path):
+    tree = {
+        **TREE,
+        "src/forge/pkg/__init__.py": "from forge.pkg import a\n",
+        "src/forge/pkg/a.py": "",
+        "src/forge/user.py": "from forge import pkg\n",
+    }
+    assert metrics.who_imports(write_tree(tmp_path, tree), "forge.pkg") == ["forge.user"]
+
+
+def test_write_is_idempotent_per_commit_and_refuses_broken_markers(tmp_path):
+    root = write_tree(tmp_path, {metrics.METRICS_FILE.as_posix(): "# Metrics\n"})
+    metrics.write(root, {"date": "2026-09-30", "sha": "abc1234", "src_lines": 10})
+    metrics.write(root, {"date": "2026-09-30", "sha": "abc1234", "src_lines": 9})
+    assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 1
+    assert "| `src/forge` lines | 9 |" in (root / metrics.METRICS_FILE).read_text()
+    (root / metrics.METRICS_FILE).write_text(f"# Metrics\n{metrics.BEGIN}\n")
+    with pytest.raises(ValueError):
+        metrics.write(root, {"date": "2026-10-01", "sha": "def5678", "src_lines": 8})
+    assert len(json.loads((root / metrics.HISTORY_FILE).read_text())) == 1
+
+
+def test_the_sha_is_unknown_without_git(tmp_path, monkeypatch):
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(metrics.subprocess, "run", no_git)
+    assert metrics._git_sha(tmp_path) == "unknown"
+
+
+def test_suite_seconds_reads_a_pytest_junit_report(tmp_path):
+    report = tmp_path / "report.xml"
+    report.write_text(
+        '<testsuites name="pytest tests"><testsuite name="pytest" time="12.5"/></testsuites>'
+    )
+    assert metrics._suite_seconds(report) == 12.5

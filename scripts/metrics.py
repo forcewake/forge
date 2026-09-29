@@ -35,7 +35,10 @@ ROWS: tuple[tuple[str, str], ...] = (
     ("runtime_lines", "Runtime-reachable lines"),
     ("tooling_only_lines", "Tooling-only lines"),
     ("tests_only_lines", "Test-only lines"),
+    ("unreached_lines", "Unreached lines"),
     ("lane_reachable_lines", "Lines reachable from lane entry points"),
+    ("forge_lane_lines", "`forge-lane` lines"),
+    ("missing_roots", "Declared entry points not found"),
     ("largest_file", "Largest file"),
     ("functions_over_80", "Functions > 80 lines"),
     ("functions_over_100", "Functions > 100 lines"),
@@ -50,12 +53,15 @@ ROWS: tuple[tuple[str, str], ...] = (
 
 
 def _git_sha(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
     return result.stdout.strip() or "unknown"
 
 
@@ -63,7 +69,7 @@ def _suite_seconds(junit: Path | None) -> float | None:
     if junit is None:
         return None
     root = ET.parse(junit).getroot()
-    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
     return round(sum(float(s.get("time", "0")) for s in suites), 1)
 
 
@@ -79,9 +85,15 @@ def _docs_words(root: Path) -> int:
     )
 
 
+def _in_package(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
+
+
 def measure(root: Path, junit: Path | None = None) -> dict[str, object]:
     modules = cb.discover_modules(root)
-    forge_modules = {n: m for n, m in modules.items() if n == "forge" or n.startswith("forge.")}
+    forge_modules = {n: m for n, m in modules.items() if _in_package(n, "forge")}
+    forge_names = set(forge_modules)
+    lane_package = {n for n in modules if _in_package(n, "forge_lane")}
     reach = cb.classify(root, modules)
     sizes = [
         size.lines for module in forge_modules.values() for size in cb.function_sizes(module.path)
@@ -95,10 +107,13 @@ def measure(root: Path, junit: Path | None = None) -> dict[str, object]:
         "sha": _git_sha(root),
         "src_lines": src_lines,
         "modules": len(forge_modules),
-        "runtime_lines": cb.total_lines(reach.runtime, modules),
-        "tooling_only_lines": cb.total_lines(reach.tooling_only, modules),
-        "tests_only_lines": cb.total_lines(reach.tests_only, modules),
-        "lane_reachable_lines": cb.total_lines(reach.lane, modules),
+        "runtime_lines": cb.total_lines(reach.runtime & forge_names, modules),
+        "tooling_only_lines": cb.total_lines(reach.tooling_only & forge_names, modules),
+        "tests_only_lines": cb.total_lines(reach.tests_only & forge_names, modules),
+        "unreached_lines": cb.total_lines(reach.unreached & forge_names, modules),
+        "lane_reachable_lines": cb.total_lines(reach.lane & forge_names, modules),
+        "forge_lane_lines": cb.total_lines(lane_package, modules),
+        "missing_roots": ", ".join(reach.missing_roots) or "none",
         "largest_file": f"{largest.lines} ({largest.path.relative_to(root)})",
         "functions_over_80": sum(1 for n in sizes if n > 80),
         "functions_over_100": sum(1 for n in sizes if n > 100),
@@ -124,24 +139,31 @@ def render_history(history: list[dict[str, object]], last: int = 8) -> str:
 
 
 def write(root: Path, snapshot: dict[str, object]) -> None:
-    history_path = root / HISTORY_FILE
-    history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
-    history.append(snapshot)
-    history_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     metrics_path = root / METRICS_FILE
     text = metrics_path.read_text(encoding="utf-8")
+    if (BEGIN in text) != (END in text):
+        raise ValueError(f"{METRICS_FILE}: unbalanced {BEGIN} / {END} markers")
+    history_path = root / HISTORY_FILE
+    history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
+    if history and history[-1].get("sha") == snapshot.get("sha"):
+        history[-1] = snapshot  # re-measuring the same commit replaces its entry
+    else:
+        history.append(snapshot)
     block = f"{BEGIN}\n{render_history(history)}\n{END}"
     if BEGIN in text:
         text = re.sub(re.escape(BEGIN) + ".*?" + re.escape(END), lambda _: block, text, flags=re.S)
     else:
         text = text.rstrip() + "\n\n## Measured history\n\n" + block + "\n"
+    history_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     metrics_path.write_text(text, encoding="utf-8")
 
 
 def who_imports(root: Path, target: str) -> list[str]:
     modules = cb.discover_modules(root)
     graph = cb.import_graph(modules)
-    return sorted(name for name, deps in graph.items() if target in deps)
+    return sorted(
+        name for name, deps in graph.items() if target in deps and not _in_package(name, target)
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(who_imports(args.root, args.who_imports)))
         return 0
     snapshot = measure(args.root, args.junit)
+    if snapshot["missing_roots"] != "none":
+        print(
+            f"metrics: declared entry points not found: {snapshot['missing_roots']}",
+            file=sys.stderr,
+        )
     if args.write:
         write(args.root, snapshot)
     print(json.dumps(snapshot, indent=2))

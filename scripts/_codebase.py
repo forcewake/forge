@@ -1,7 +1,7 @@
 """Shared static analysis of the forge source tree (stdlib only).
 
 Used by ``scripts/metrics.py``, ``scripts/ratchet.py`` and
-``scripts/test_ledger.py``. Everything here reads files; nothing imports
+``scripts/build_test_ledger.py``. Everything here reads files; nothing imports
 forge, so the scripts run without the project environment.
 """
 
@@ -11,6 +11,7 @@ import ast
 import io
 import re
 import tokenize
+import tomllib
 from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from pathlib import Path
 
 CONTROL_PLANE_ROOTS = ("forge.main", "forge.worker.__main__", "forge.worker", "forge.migrate")
 LANE_ROOTS = ("forge.harness_entry", "forge.lane_driver", "forge.candidate_collector", "forge_lane")
+# Declared roots that do not exist yet; their absence is expected.
+FUTURE_ROOTS = frozenset({"forge_lane"})
 TOOLING_ROOTS = (
     "forge.doctor",
     "forge.release_manifest",
@@ -25,7 +28,14 @@ TOOLING_ROOTS = (
     "forge.profile_qualification",
     "forge.capability_manifest",
 )
-REVIEW_REF = re.compile(r"\b[RQ]\d{2}-\d{2}\b|(?<![\w/&])#\d{3,}\b")
+# History that belongs in git and ADRs, not in code: review, backlog and
+# acceptance item ids, issue references and "review <sha>". Short forms such as
+# R17 or A12 are too ambiguous to count, so this is a lower bound.
+REVIEW_REF = re.compile(
+    r"\b(?:[RQ]\d{2}-\d{2}|NE?XT-\d{2,3}|AT-\d{2})\b"
+    r"|(?<![\w/&])#\d{3,}\b"
+    r"|\b[Rr]eview\s+`?[0-9a-f]{7,40}\b"
+)
 ADR_REF = re.compile(r"\bADR-\d{4}\b")
 
 
@@ -82,7 +92,7 @@ def discover_modules(root: Path) -> dict[str, Module]:
 
 def function_sizes(path: Path) -> list[FunctionSize]:
     """Every function and method, nested ones included, with a unique qualname."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     sizes: list[FunctionSize] = []
     seen: dict[str, int] = {}
 
@@ -113,7 +123,7 @@ def prose_lines(path: Path) -> int:
         if tok.type == tokenize.COMMENT
     )
     docstrings = 0
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(ast.parse(source, filename=str(path))):
         if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             doc = ast.get_docstring(node, clean=False)
             if doc:
@@ -134,7 +144,7 @@ def _resolve(name: str, modules: dict[str, Module]) -> str | None:
 def imports_of(path: Path, modules: dict[str, Module], current: str | None = None) -> set[str]:
     """Internal modules imported by a file (lazy imports and literal
     ``importlib.import_module`` calls included; parents implied)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     is_package = path.name == "__init__.py"
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -196,6 +206,20 @@ def roots_from_files(files: Iterable[Path], modules: dict[str, Module]) -> set[s
     return roots
 
 
+def console_script_modules(root: Path) -> set[str]:
+    """Modules behind ``[project.scripts]`` in the root and workspace packages."""
+    found: set[str] = set()
+    for pyproject in [
+        root / "pyproject.toml",
+        *sorted((root / "packages").glob("*/pyproject.toml")),
+    ]:
+        if pyproject.is_file():
+            config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            scripts = config.get("project", {}).get("scripts", {})
+            found |= {target.split(":", 1)[0] for target in scripts.values()}
+    return found
+
+
 @dataclass(frozen=True)
 class Reachability:
     runtime: set[str]
@@ -203,6 +227,7 @@ class Reachability:
     tooling_only: set[str]
     tests_only: set[str]
     unreached: set[str]
+    missing_roots: tuple[str, ...] = ()
 
 
 def classify(root: Path, modules: dict[str, Module]) -> Reachability:
@@ -210,13 +235,16 @@ def classify(root: Path, modules: dict[str, Module]) -> Reachability:
     control = reachable(CONTROL_PLANE_ROOTS, graph)
     lane = reachable(LANE_ROOTS, graph)
     runtime = control | lane
+    tooling_roots = {*TOOLING_ROOTS, *console_script_modules(root)}
     script_roots = roots_from_files((root / "scripts").glob("*.py"), modules)
     tools_roots = roots_from_files((root / "tools").rglob("*.py"), modules)
-    tooling = reachable((*TOOLING_ROOTS, *script_roots, *tools_roots), graph) - runtime
+    tooling = reachable((*tooling_roots, *script_roots, *tools_roots), graph) - runtime
     test_roots = roots_from_files((root / "tests").rglob("*.py"), modules)
     tests_only = reachable(test_roots, graph) - runtime - tooling
     unreached = set(modules) - runtime - tooling - tests_only
-    return Reachability(runtime, lane, tooling, tests_only, unreached)
+    declared = (*CONTROL_PLANE_ROOTS, *LANE_ROOTS, *sorted(tooling_roots))
+    missing = tuple(r for r in declared if r not in modules and r not in FUTURE_ROOTS)
+    return Reachability(runtime, lane, tooling, tests_only, unreached, missing)
 
 
 def total_lines(names: Iterable[str], modules: dict[str, Module]) -> int:
