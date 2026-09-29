@@ -574,10 +574,16 @@ git commit -m "test: helper processes exit when the pytest process that spawned 
 - Create: `tests/_hygiene.py`, `tests/test_hygiene.py`, `docs/reference/testing.md`
 - Modify: `tests/conftest.py`, `pyproject.toml` (markers), `.github/workflows/ci.yml` (test job, new `tests-slow` job)
 
-Design note: there is no `addopts = -m "not slow"`. Scripts such as
-`scripts/pg_gate.py` invoke pytest with explicit selections, and an
-`addopts` filter would silently deselect them. CI passes `-m` explicitly
-instead.
+Design notes:
+
+- There is no `addopts = -m "not slow"`. Scripts such as
+  `scripts/pg_gate.py` invoke pytest with explicit selections, and an
+  `addopts` filter would silently deselect them. CI passes `-m` explicitly
+  instead.
+- The leak check runs after fixture teardown (`trylast=True`), reports the
+  command lines of what it kills, and only turns an otherwise green run
+  red; interrupted or failed runs keep their exit code.
+- The unit tests pass `only=` so they never kill another test's children.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -586,16 +592,17 @@ instead.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
-import time
 
 import pytest
 
 from tests import _hygiene
 
 needs_pgrep = pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep is unavailable")
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 
 
 def test_process_heavy_suites_are_slow():
@@ -609,10 +616,12 @@ def test_ordinary_tests_have_no_tier():
 
 
 @needs_pgrep
-def test_a_running_child_is_killed_and_reported():
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+def test_a_running_child_is_killed_and_reported_with_its_command():
+    child = subprocess.Popen(SLEEPER)
     try:
-        assert child.pid in _hygiene.reap_and_kill_leaks()
+        leaked = _hygiene.reap_and_kill_leaks(only={child.pid})
+        assert list(leaked) == [child.pid]
+        assert "time.sleep(60)" in leaked[child.pid]
         assert child.poll() is not None
     finally:
         if child.poll() is None:
@@ -623,9 +632,20 @@ def test_a_running_child_is_killed_and_reported():
 @needs_pgrep
 def test_a_finished_child_is_reaped_not_reported():
     child = subprocess.Popen([sys.executable, "-c", "pass"])
-    time.sleep(1.0)  # let it exit without being waited on (a zombie)
-    assert child.pid not in _hygiene.reap_and_kill_leaks()
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)  # exited, not yet reaped
+    assert _hygiene.reap_and_kill_leaks(only={child.pid}) == {}
     child.wait(timeout=10)
+
+
+@needs_pgrep
+def test_children_outside_the_filter_are_left_alone():
+    bystander = subprocess.Popen(SLEEPER)
+    try:
+        assert _hygiene.reap_and_kill_leaks(only=set()) == {}
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -640,10 +660,12 @@ Expected: collection error `cannot import name '_hygiene' from 'tests'`.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import subprocess
+from collections.abc import Collection
 
 SLOW_PREFIXES = ("tests/production_entry/", "tests/fi_os/")
 SLOW_FILES = frozenset({"tests/test_failure_injection_os.py"})
@@ -659,6 +681,7 @@ def tiers_for(nodeid: str) -> set[str]:
 
 
 def child_pids(pid: int | None = None) -> list[int]:
+    """Direct children of ``pid`` (default: this process); empty without ``pgrep``."""
     if shutil.which("pgrep") is None:
         return []
     result = subprocess.run(
@@ -667,31 +690,55 @@ def child_pids(pid: int | None = None) -> list[int]:
     return [int(p) for p in result.stdout.split()]
 
 
-def reap_and_kill_leaks() -> list[int]:
-    """Reap finished children; kill, reap and return the ones still running."""
-    leaked = []
+def command_lines(pids: Collection[int]) -> dict[int, str]:
+    """``pid → command line`` for running processes, read before anything is killed."""
+    if not pids:
+        return {}
+    result = subprocess.run(
+        ["ps", "-o", "pid=,args=", "-p", ",".join(str(p) for p in pids)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    lines = (line.strip().split(maxsplit=1) for line in result.stdout.splitlines())
+    return {int(parts[0]): (parts[1] if len(parts) > 1 else "") for parts in lines if parts}
+
+
+def reap_and_kill_leaks(only: Collection[int] | None = None) -> dict[int, str]:
+    """Reap finished children; kill and reap the running ones.
+
+    Returns ``pid → command line`` of the killed processes. ``only`` limits the
+    check to those pids, so a unit test never touches another test's children.
+    """
+    running = []
     for pid in child_pids():
+        if only is not None and pid not in only:
+            continue
         try:
             finished, _ = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             continue
         if finished == 0:
-            leaked.append(pid)
+            running.append(pid)
+    leaked = command_lines(running)
+    for pid in running:
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
+        leaked.setdefault(pid, "")
     return leaked
 ```
 
 - [ ] **Step 4: Run the tests again**
 
 Run: `uv run pytest -q tests/test_hygiene.py`
-Expected: `4 passed`.
+Expected: `5 passed`.
 
 - [ ] **Step 5: Wire the hooks into `tests/conftest.py`**
 
 ```diff
 diff --git a/tests/conftest.py b/tests/conftest.py
-index 109b67f..b35688f 100644
+index 109b67f..a440666 100644
 --- a/tests/conftest.py
 +++ b/tests/conftest.py
 @@ -8,6 +8,7 @@ from pydantic import SecretStr
@@ -702,7 +749,7 @@ index 109b67f..b35688f 100644
  
  # Suppress debug logs from libraries whose background threads can write to
  # stderr after pytest has already torn down the stream, causing
-@@ -153,3 +154,21 @@ async def client(app) -> AsyncClient:
+@@ -153,3 +154,26 @@ async def client(app) -> AsyncClient:
      transport = ASGITransport(app=app)
      async with AsyncClient(transport=transport, base_url="http://test") as ac:
          yield ac
@@ -715,14 +762,19 @@ index 109b67f..b35688f 100644
 +            item.add_marker(tier)
 +
 +
++@pytest.hookimpl(trylast=True)
 +def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-+    """Fail the run when a test leaked a running child process."""
++    """After fixture teardown, kill leaked child processes; fail an otherwise green run."""
 +    leaked = _hygiene.reap_and_kill_leaks()
-+    if leaked:
-+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-+        message = f"test hygiene: killed leaked child processes {leaked}"
-+        if reporter is not None:
-+            reporter.write_line(message, red=True)
++    if not leaked:
++        return
++    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
++    if reporter is not None:
++        reporter.write_line("")
++        reporter.write_sep("!", "test hygiene: killed leaked child processes", red=True)
++        for pid, command in leaked.items():
++            reporter.write_line(f"  {pid} {command}", red=True)
++    if session.exitstatus == pytest.ExitCode.OK:
 +        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 ```
 
@@ -752,18 +804,23 @@ In `.github/workflows/ci.yml`, change the `test` job's last step to:
 
 ```yaml
       - name: Run tests (default tier)
-        run: uv run pytest -q -m "not slow"
+        run: uv run pytest -q -m "not slow" --durations=30
 ```
 
 Then add this job right before the `integration` job:
 
 ```yaml
   # The slow tier: real processes and services (tests/production_entry,
-  # tests/fi_os). Kept off the pull-request path; pg_gate still runs the
-  # required production-entry selection on every pull request.
+  # tests/test_failure_injection_os.py). Kept off the pull-request path;
+  # pg_gate still runs the required production-entry selection on every
+  # pull request, but only this job fails on the leaked-process check.
   tests-slow:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
       - name: Install redis-server (the durable-ingress matrix spawns the real binary)
         run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
@@ -771,6 +828,8 @@ Then add this job right before the `integration` job:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync
@@ -788,13 +847,15 @@ Then add this job right before the `integration` job:
 
 | Command | What runs | Where |
 | --- | --- | --- |
-| `uv run pytest -q -m "not slow"` | The default tier: fast, hermetic | Every pull request (`test` job) |
-| `uv run pytest -q -m slow` | Real processes and services (`tests/production_entry`, `tests/fi_os`) | `main` and nightly (`tests-slow` job) |
+| `uv run pytest -q -m "not slow"` | The default tier: fast, hermetic | Every pull request and push (`test` job, Python 3.13 and 3.14) |
+| `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and `release/**`, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
 | `uv run pytest -q -m invariant $(uv run python -m tests.invariants.registry)` | The Invariant Suite I1–I8 | Every pull request (`invariants` job, with Postgres) |
 | `uv run pytest -q` | Everything | Locally, before large changes |
 
 Tiers are assigned by path in `tests/_hygiene.py`; the invariant files are
-listed in `tests/invariants/registry.py`.
+listed in `tests/invariants/registry.py`. On pull requests the
+production-entry suites also run inside `scripts/pg_gate.py` (the
+`integration` job).
 
 ## Subprocess hygiene
 
@@ -803,23 +864,33 @@ guards back this up:
 
 - helper scripts under `tests/production_entry/` call
   `orphan_guard.install()`, so they exit when pytest dies abruptly;
-- `pytest_sessionfinish` fails the run if a child process of pytest is
-  still running at the end.
+- after fixture teardown, `pytest_sessionfinish` kills every direct child
+  of pytest that is still running, prints its command line and fails an
+  otherwise green run. It needs `pgrep`; without it the check is skipped.
 
-Leftovers from older runs (before these guards) can be found and stopped:
+Known gaps (ROADMAP P0-04):
+
+- `scripts/pg_gate.py` does not fail on the leaked-process check yet, so a
+  leak in the production-entry suites is caught after merge, by
+  `tests-slow`;
+- `redis-server` and the `python -m forge.worker` processes started by
+  the slow suites are not guarded against an abrupt pytest exit.
+
+Leftovers from older runs can be found and stopped:
 
 ```bash
-pgrep -fl "tests/production_entry/(fake_native_server|durable_ingress_server|production_matrix_worker)"
-kill <pid>   # for each pid listed above
+pgrep -fl "tests/production_entry/"   # macOS; on Linux use pgrep -af
+kill <pid>                            # for each pid listed above
 ```
 ````
 
 - [ ] **Step 10: Run the default tier once**
 
-Run: `set -o pipefail && uv run pytest -q -m "not slow" | tail -3`
-Expected: no failures. There is no `test hygiene: killed leaked child
-processes` line; if one appears, the listed pid names a fixture that did not
-stop its subprocess, and that must be fixed first.
+Run: `set -o pipefail && uv run pytest -q -m "not slow" --durations=30 2>&1 | tail -40`
+Expected: no failures (validated: `9155 passed, 38 skipped, 189 deselected`
+in about 530 s), and no `test hygiene: killed leaked child processes` block.
+If one appears, its command lines name the processes a fixture did not stop;
+fix that fixture first.
 
 - [ ] **Step 11: Commit**
 
@@ -1085,7 +1156,7 @@ In `tiers_for`, before `return tiers`, add:
 ```
 
 Run: `uv run pytest -q tests/test_hygiene.py`
-Expected: `5 passed`.
+Expected: `6 passed`.
 
 - [ ] **Step 8: The skip guard — failing tests first**
 
