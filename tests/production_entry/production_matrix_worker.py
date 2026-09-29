@@ -436,6 +436,9 @@ async def _run(args, settings, ready_file: Path) -> None:  # noqa: ANN001
 
 
 def main() -> int:
+    import orphan_guard  # sibling module: this file runs as a script
+
+    orphan_guard.install()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ready-file", required=True)
     parser.add_argument("--db-url", required=True, help="the shared durable database URL")

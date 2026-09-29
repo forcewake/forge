@@ -213,6 +213,9 @@ def _emit(frame: dict) -> None:
 
 
 def main(argv: list[str]) -> int:
+    import orphan_guard  # sibling module: this file runs as a script
+
+    orphan_guard.install()
     if argv and argv[0] == "app-server":
         return run_app_server()
     if "--once" in argv:

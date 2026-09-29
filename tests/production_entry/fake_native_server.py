@@ -1101,6 +1101,9 @@ def make_gitlab_handler(state: GitLabState) -> type[BaseHTTPRequestHandler]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import orphan_guard  # sibling module: this file runs as a script
+
+    orphan_guard.install()
     parser = argparse.ArgumentParser(description="The production-entry fake native server")
     parser.add_argument("--ready-file", required=True, help="where the chosen port is written")
     parser.add_argument(
