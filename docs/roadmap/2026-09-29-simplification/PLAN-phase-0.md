@@ -3210,20 +3210,25 @@ git commit -m "ci: diff coverage of at least 85% on changed lines" -m "Co-author
 
 from __future__ import annotations
 
+import subprocess
+
+import pytest
+
 from tests._scripts import load_script
 
 prose_lint = load_script("prose_lint")
 
-DIFF = """diff --git a/src/forge/x.py b/src/forge/x.py
---- a/src/forge/x.py
-+++ b/src/forge/x.py
-@@ -10,0 +11,5 @@
-+# R42-16: the parity rule
-+x = 1  # see ADR-0035
-+# fixed in #377
-+# as agreed in review `9e8d6c6`
-+# carried over from NXT-10
-"""
+HEADER = (
+    "diff --git a/src/forge/x.py b/src/forge/x.py\n--- a/src/forge/x.py\n+++ b/src/forge/x.py\n"
+)
+DIFF = (
+    HEADER + "@@ -10,0 +11,5 @@\n"
+    "+# R42-16: the parity rule\n"
+    "+x = 1  # see ADR-0035\n"
+    "+# fixed in #377\n"
+    "+# as agreed in review `9e8d6c6`\n"
+    "+# carried over from NXT-10\n"
+)
 
 
 def test_review_backlog_and_issue_references_are_rejected():
@@ -3236,13 +3241,65 @@ def test_adr_references_are_allowed():
 
 
 def test_removed_lines_are_ignored():
-    diff = "+++ b/src/forge/x.py\n@@ -3,1 +2,0 @@\n-# R42-16 old comment\n"
+    assert prose_lint.violations(HEADER + "@@ -3,1 +2,0 @@\n-# R42-16 old comment\n") == []
+
+
+def test_line_numbers_ignore_no_newline_markers():
+    diff = HEADER + "@@ -1 +1,2 @@\n-x = 1\n\\ No newline at end of file\n+x = 1\n+# R42-16\n"
+    assert [item.split(":")[1] for item in prose_lint.violations(diff)] == ["2"]
+
+
+def test_the_allow_marker_keeps_a_literal():
+    diff = HEADER + '@@ -0,0 +1 @@\n+COLOUR = "#009966"  # prose-lint: allow\n'
     assert prose_lint.violations(diff) == []
 
 
 def test_a_missing_or_zero_base_is_a_no_op():
     assert prose_lint.main(["--base", ""]) == 0
     assert prose_lint.main(["--base", "0" * 40]) == 0
+
+
+def _git(repo, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+@pytest.fixture()
+def repo(tmp_path, monkeypatch):
+    _git(tmp_path, "init", "-q", "-b", "main")
+    for key, value in (
+        ("user.email", "lint@example.test"),
+        ("user.name", "lint"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", "/dev/null"),
+    ):
+        _git(tmp_path, "config", key, value)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/m.py").write_text("x = 1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _change(repo, text: str) -> None:
+    (repo / "src/m.py").write_text(text)
+    _git(repo, "commit", "-q", "-am", "change")
+
+
+def test_a_clean_change_passes(repo):
+    _change(repo, "x = 1\ny = 2  # see ADR-0035\n")
+    assert prose_lint.main(["--base", "HEAD~1"]) == 0
+
+
+def test_an_added_review_id_fails(repo, capsys):
+    _change(repo, "x = 1\n# R42-16 parity\n")
+    assert prose_lint.main(["--base", "HEAD~1"]) == 1
+    assert "src/m.py:2: # R42-16 parity" in capsys.readouterr().out
+
+
+def test_an_unknown_base_is_reported_not_raised(repo, capsys):
+    assert prose_lint.main(["--base", "1234567890abcdef1234567890abcdef12345678"]) == 0
+    assert "is not in this checkout" in capsys.readouterr().out
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -3256,15 +3313,17 @@ Expected: `ModuleNotFoundError: No module named 'prose_lint'`.
 """Reject review, backlog and issue archaeology in added source lines.
 
 History belongs in git and ADRs, not in code comments. The check reads the
-lines added under ``src/`` and ``packages/`` since ``--base`` and rejects
-what ``_codebase.REVIEW_REF`` matches:
+lines added under ``src/`` and ``packages/*/src/`` since ``--base`` and
+rejects what ``_codebase.REVIEW_REF`` matches:
 
 - review, backlog and acceptance item ids such as ``R42-16``, ``Q35-09``,
   ``NXT-10``, ``NEXT-05`` or ``AT-08``;
 - issue references such as ``#377``;
 - "review <sha>" references.
 
-``ADR-0035`` style references are allowed.
+``ADR-0035`` style references are allowed. Moved code counts as added, so a
+move is when its references go. A line that must keep a matching literal,
+such as the colour ``#009966``, carries the marker ``prose-lint: allow``.
 
 Usage::
 
@@ -3281,22 +3340,33 @@ from collections.abc import Iterator
 
 import _codebase as cb
 
-PATHS = ("src", "packages")
+PATHS = ("src", ":(glob)packages/*/src/**")
+DIFF_OPTIONS = (
+    "--unified=0",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--find-renames",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+ALLOW = "prose-lint: allow"
 
 
 def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
-    path = ""
-    lineno = 0
-    for line in diff.splitlines():
-        if line.startswith("+++ "):
+    path, lineno, in_header = "", 0, False
+    for line in diff.split("\n"):
+        if line.startswith("diff --git "):
+            path, in_header = "", True
+        elif in_header and line.startswith("+++ "):
             path = line[6:] if line.startswith("+++ b/") else ""
         elif match := HUNK.match(line):
-            lineno = int(match.group(1))
-        elif line.startswith("+") and path:
+            lineno, in_header = int(match.group(1)), False
+        elif not in_header and line.startswith("+") and path:
             yield path, lineno, line[1:]
             lineno += 1
-        elif not line.startswith("-"):
+        elif not in_header and line.startswith(" "):
             lineno += 1
 
 
@@ -3304,8 +3374,12 @@ def violations(diff: str) -> list[str]:
     return [
         f"{path}:{lineno}: {text.strip()}"
         for path, lineno, text in added_lines(diff)
-        if cb.REVIEW_REF.search(text)
+        if cb.REVIEW_REF.search(text) and ALLOW not in text
     ]
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3315,13 +3389,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base.strip("0"):
         print("prose-lint: no base ref, nothing to check")
         return 0
-    diff = subprocess.run(
-        ["git", "diff", "--unified=0", "--no-color", f"{args.base}...HEAD", "--", *PATHS],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    found = violations(diff)
+    if _git("rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}").returncode:
+        print(f"prose-lint: base {args.base} is not in this checkout (force-push?); skipped")
+        return 0
+    done = _git("diff", *DIFF_OPTIONS, f"{args.base}...HEAD", "--", *PATHS)
+    if done.returncode:
+        print(f"prose-lint: git diff failed: {done.stderr.strip()}")
+        return 2
+    found = violations(done.stdout)
     for item in found:
         print(f"prose-lint: {item}")
     if found:
@@ -3338,7 +3413,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests and the lint on this branch**
 
 Run: `uv run pytest -q tests/test_script_prose_lint.py`
-Expected: `4 passed`.
+Expected: `9 passed`.
 
 Run: `uv run python scripts/prose_lint.py --base origin/main`
 Expected: `prose-lint: ok`. The Phase 0 changes add no review ids.
@@ -3359,7 +3434,7 @@ The `lint` job's checkout needs full history, and the step goes after
       - name: Prose lint (added lines)
         run: >-
           uv run python scripts/prose_lint.py
-          --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+          --base "${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}"
 ```
 
 - [ ] **Step 6: Commit**
@@ -3948,6 +4023,9 @@ Expected: the tag exists before any Phase 1 deletion lands.
   - The size ratchet also fails on a stale baseline, so shrinking is locked
     in; `--accept` only records new keys, and `--init` refuses to overwrite
     a baseline without `--force`.
+  - The prose lint diffs pull requests against `HEAD^1` (the exact base of
+    the merge commit) and skips a base that is not in the checkout, such as
+    after a force-push.
   - The Invariant Suite is one registry (`tests/invariants/registry.py`)
     over existing focused test files, not one module per invariant, and I6
     is proven by the existing production-entry race test rather than a new
