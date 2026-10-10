@@ -4291,12 +4291,14 @@ git commit -m "tools: the test disposition ledger" -m "Co-authored-by: Copilot A
 
 **Files:**
 - Create: `.github/pull_request_template.md`
-- Modify: `AGENTS.md`, `.claude/skills/forge-setup/SKILL.md`, `docs/overview.md`
+- Modify: `AGENTS.md`, `.claude/skills/forge-setup/SKILL.md`, `docs/overview.md`,
+  `docs/reference/onboarding-prompt.md`
 
 - [ ] **Step 1: Create the PR template**
 
 The metric names are the keys that `scripts/metrics.py` prints, so the
-table is filled in by copying.
+table is filled in by copying. `SELF-TRIGGER` is the registry's name for the
+self-trigger rule.
 
 ```markdown
 ## What and why
@@ -4306,7 +4308,7 @@ table is filled in by copying.
 ## Invariants (DESIGN §4)
 
 - [ ] No invariant touched
-- [ ] Touched: <!-- I1–I8 --> — evidence: <!-- test ids -->
+- [ ] Touched: <!-- I1–I8 or SELF-TRIGGER --> — evidence: <!-- test ids -->
 
 ## Metrics delta (`uv run python scripts/metrics.py`)
 
@@ -4324,7 +4326,7 @@ table is filled in by copying.
 ## Test ledger and edge-case register
 
 - `test-ledger.csv` rows changed: <!-- file → disposition, or "none" -->
-- `docs/reference/edge-cases.md` rows repointed or retired: <!-- ids, or "none" -->
+- `docs/reference/edge-cases.md` rows added, repointed or retired: <!-- ids, or "none" -->
 
 ## Size and scope
 
@@ -4334,16 +4336,17 @@ table is filled in by copying.
 
 - [ ] **Step 2: Update AGENTS.md**
 
-The repo map omitted `adaptive/`, the largest package, and most provider
-and lane modules. The rewrite makes it match `src/forge`, aligns the
-commands with the CI `lint` job (`ruff check .`), adds the program rules
-6–9, labels each gotcha with its edge-case register row and points "Where
-work stands" at DESIGN, ROADMAP and metrics. It adds no new counts: a
-count goes stale with the first Phase 1 deletion.
+The repo map omitted `adaptive/`, the largest package, most provider and
+lane modules and the persistence layer. The rewrite covers them, marks the
+one live module in the legacy `orchestrator/`, aligns the commands with the
+CI `lint` job (`ruff check .`), adds the program rules 6–9, labels each
+gotcha with its edge-case register row and points "Where work stands" at
+DESIGN, ROADMAP and metrics. It adds no new counts: a count goes stale with
+the first Phase 1 deletion.
 
 ````diff
 diff --git a/AGENTS.md b/AGENTS.md
-index e4a2938..0db7d15 100644
+index e4a2938..3456759 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -18,7 +18,7 @@ pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
@@ -4362,12 +4365,12 @@ index e4a2938..0db7d15 100644
 -1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q`,
 -   then `ruff format . && ruff check src tests`. Never commit with a red suite.
 +1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"`
-+   (add `-m slow` for lifecycle changes), then `ruff format . && ruff check .`.
-+   Never commit with a red suite.
++   (for lifecycle changes also run `.venv/bin/python -m pytest -q -m slow`), then
++   `.venv/bin/ruff format . && .venv/bin/ruff check .`. Never commit with a red suite.
  2. **Secrets never enter the repo or the conversation record.** `.env` is
     gitignored; tokens live in GitLab CI variables. If the user pastes a
     token, use it for the task, never echo it into files, commits, or tests.
-@@ -65,23 +66,70 @@ annotated in `.env.example`):
+@@ -65,23 +66,78 @@ annotated in `.env.example`):
     an ADR amendment instead of silently diverging.
  5. Prefer the smallest change that satisfies the request; match the code's
     existing style; add regression tests for every bug you fix.
@@ -4382,15 +4385,17 @@ index e4a2938..0db7d15 100644
 +     code, run `uv run python scripts/ratchet.py --update` and commit
 +     `scripts/ratchet-baseline.json`; `--update --accept <path>` is only for a reviewed
 +     move of existing oversized code;
-+   - `uv run python scripts/prose_lint.py --base origin/main`: added code carries no
-+     review, backlog or issue ids (history lives in git and ADRs). A line that must keep
-+     a matching literal, such as the colour `#009966`, carries the marker
-+     `prose-lint: allow`.
++   - `uv run python scripts/prose_lint.py --base origin/main`: added lines under `src/`
++     and `packages/*/src/` carry no review, backlog or issue ids (history lives in git and
++     ADRs). It reads commits, so run it after committing. A line that must keep a matching
++     literal, such as the colour `#009966`, carries the marker `prose-lint: allow`.
 +8. **Never weaken the Invariant Suite** (`tests/invariants/registry.py`, DESIGN §4):
-+   removing or skipping evidence for I1–I8 needs an ADR.
-+9. **Deleted code keeps its lessons.** Before a module is deleted or rewritten, its rows
-+   in the [edge-case register](docs/reference/edge-cases.md) must still hold: port the
-+   pinning tests and repoint the rows in the same PR, or retire a row that no longer
++   removing or skipping evidence for I1–I8 or the self-trigger rule (ADR-0028) needs an
++   ADR.
++9. **Deleted code keeps its lessons.** Before a module is deleted or rewritten, every
++   gotcha it carries must be a row in the [edge-case register](docs/reference/edge-cases.md)
++   (add the missing ones with their pinning tests), and its rows must still hold: port
++   the pinning tests and repoint the rows in the same PR, or retire a row that no longer
 +   applies. A test file is deleted only when its row in
 +   [`test-ledger.csv`](docs/roadmap/2026-09-29-simplification/test-ledger.csv) says so.
  
@@ -4405,6 +4410,9 @@ index e4a2938..0db7d15 100644
 -  durable/     controller: transitions, gates (consume-once), outbox, leases
 +  main.py, api_*.py  the FastAPI app and its operator, lane-control and checkpoint APIs
 +  config.py    settings (see .env.example)
++  database.py, migrate.py, models/
++               engine and sessions, schema check, `python -m forge.migrate`, the
++               declarative Base
 +  gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
 +  worker/      Redis task queue, worker loop, step claims, reconciler boot
 +  durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
@@ -4428,6 +4436,8 @@ index e4a2938..0db7d15 100644
 +  reactive/    durable review and CI-debug bots on the step lane
 +  findings/    security findings and /security triage
 +  mcp_server/  forge's MCP server (token-scoped tools)
++  orchestrator/project_config.py
++               the project's .forge.yml reader, used by every RunService (P1-01 moves it)
 +  orchestrator/, flows/, agents/, mcp_client/
 +               legacy GitLab reactive bot: review, pipeline debug, chat
 +  release_*.py, profile_qualification.py
@@ -4436,18 +4446,19 @@ index e4a2938..0db7d15 100644
 -ci/templates/  harness CI jobs (claude-code, opencode, grok) + event filters
 -tests/         2600+ tests; fixtures/fake_gitlab.py is the GitLab fake
 -docs/adr/      architecture decisions (read 0001-0027 before redesigning)
++alembic/       schema migrations
 +ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
 +scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
 +               release tooling
-+tests/         tiered (docs/reference/testing.md); tests/invariants/ is the Invariant
-+               Suite; fixtures/fake_gitlab.py is the GitLab fake
++tests/         tiered (docs/reference/testing.md); tests/invariants/registry.py lists the
++               Invariant Suite files; fixtures/fake_gitlab.py is the GitLab fake
 +docs/adr/      architecture decisions (start with 0003, 0005, 0016, 0026, 0035)
 +docs/roadmap/2026-09-29-simplification/
 +               DESIGN, ROADMAP, metrics and the test ledger
  ```
  
  ## Environment setup (dev)
-@@ -89,11 +137,16 @@ docs/adr/      architecture decisions (read 0001-0027 before redesigning)
+@@ -89,11 +145,16 @@ docs/adr/      architecture decisions (read 0001-0027 before redesigning)
  ```bash
  uv sync                      # Python 3.13+, deps incl. dev
  set -o pipefail
@@ -4467,16 +4478,17 @@ index e4a2938..0db7d15 100644
  
  ## Verification oracle
  
-@@ -124,30 +177,41 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
+@@ -124,30 +185,42 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
  
  ## Known gotchas (learned the hard way)
  
 -- **zsh does not word-split unquoted variables** — never `for x in $VAR`
 -  over multi-line command output; use `while IFS= read -r` loops.
 -- **pytest piped to tail hides exit codes** — always `set -o pipefail` first.
-+The [edge-case register](docs/reference/edge-cases.md) lists every gotcha with
-+the test or reference that pins it; the IDs below are its rows. Read a row
-+before removing a guard that looks redundant.
++The [edge-case register](docs/reference/edge-cases.md) records each known gotcha
++with the test or reference that pins it; the IDs below are its rows. Read a row
++before removing a guard that looks redundant, and add a row when you learn a
++new one.
 +
 +- **zsh does not word-split unquoted variables** (OP-04) — never
 +  `for x in $VAR` over multi-line command output; use `while IFS= read -r`
@@ -4501,7 +4513,7 @@ index e4a2938..0db7d15 100644
 +  flake → silent futex hang). See the grok template's before_script for the
 +  pattern.
 +- Long-lived AI streams from some runner networks crawl (OP-06: 226s vs 2s
-+  via a proxy on a fast path). The harness templates support
++  via a proxy on a fast path). The grok template supports
    `FORGE_HARNESS_HTTPS_PROXY`.
  - Redis `forge:worker:<id>` heartbeat keys persist ~30s after a worker
 -  dies — `/metrics` `workers_active` lags; check logs, not just metrics.
@@ -4532,9 +4544,11 @@ index e4a2938..0db7d15 100644
 
 - [ ] **Step 3: Update the forge-setup skill**
 
+No test is marked `xfail` any more, so the skill stops mentioning xfails.
+
 ```diff
 diff --git a/.claude/skills/forge-setup/SKILL.md b/.claude/skills/forge-setup/SKILL.md
-index 9bb6413..696eee0 100644
+index 9bb6413..e516ced 100644
 --- a/.claude/skills/forge-setup/SKILL.md
 +++ b/.claude/skills/forge-setup/SKILL.md
 @@ -9,14 +9,16 @@ description: Set up the forge dev environment from a fresh clone and verify it w
@@ -4553,7 +4567,7 @@ index 9bb6413..696eee0 100644
 +3. Verify: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"` — the
 +   default tier must pass with zero failures (counts change as the
 +   simplification program deletes code; `docs/reference/testing.md` explains
-+   the tiers). xfails are pinned upstream defects; never unpin them casually.
++   the tiers).
 +4. Lint: `.venv/bin/ruff format . && .venv/bin/ruff check .`, then the
 +   guardrails: `uv run lint-imports && uv run python scripts/ratchet.py`.
 +5. Final gate: `uv run python -m forge.doctor`. With a `.env` it must exit 0
@@ -4588,19 +4602,65 @@ index c6a8d5d..21dce64 100644
  
 ```
 
-- [ ] **Step 5: Check that no stale numbers remain**
+- [ ] **Step 5: Align the onboarding prompt**
 
-Run: `grep -n "2600+\|0001-0027\|~815\|2601\|v0\.11" AGENTS.md .claude/skills/forge-setup/SKILL.md docs/README.md docs/overview.md`
+AGENTS.md links this prompt first, and the prompt calls AGENTS.md its
+authoritative guide, so the two must agree on the commands and on what
+`forge doctor` reports without a `.env`.
+
+```diff
+diff --git a/docs/reference/onboarding-prompt.md b/docs/reference/onboarding-prompt.md
+index a406642..a4b35b1 100644
+--- a/docs/reference/onboarding-prompt.md
++++ b/docs/reference/onboarding-prompt.md
+@@ -12,21 +12,23 @@ before doing anything. Then:
+ 
+ 1. **Environment.** Ensure Python 3.13+ and [uv](https://docs.astral.sh/uv/)
+    are available. Run `uv sync` to install dependencies.
+-2. **Verify the unit suite.** `set -o pipefail && .venv/bin/python -m pytest -q`
+-   must pass with zero failures (xfails are expected and pinned; do not
+-   "fix" them). If anything fails, stop and report — do not patch tests to
+-   make them pass.
+-3. **Lint.** `.venv/bin/ruff format . && .venv/bin/ruff check src tests`
+-   must be clean.
++2. **Verify the default test tier.**
++   `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"` must pass
++   with zero failures. If anything fails, stop and report — do not patch
++   tests to make them pass.
++3. **Lint.** `.venv/bin/ruff format . && .venv/bin/ruff check .` must be
++   clean, and `uv run lint-imports && uv run python scripts/ratchet.py` must
++   pass.
+ 4. **Optional — integration lab.** Only if the user asked for the full lab
+    (podman + a reachable GitLab CE instance), follow
+    `.claude/skills/forge-lab/SKILL.md`. Secrets (a GitLab token and a model
+    API key) must come from the user — never invent, guess, or commit them.
+    With the lab up, run the harness smoke as described in the skill.
+ 5. **Report.** Finish with: versions installed, test counts, lint status,
+-   and the output of `uv run python -m forge.doctor` (exit code 0 expected
+-   for steps 1–3; lab checks only if step 4 was performed). List anything
+-   you could not complete and why.
++   and the output of `uv run python -m forge.doctor`. Without a `.env` it
++   prints one FAIL line for the missing settings and exits 1, which is
++   expected for steps 1–3; with a `.env` and the lab from step 4 it must
++   exit 0. List anything you could not complete and why.
+ 
+ Rules: never commit unless asked; never touch `.env` contents in ways that
+ persist secrets outside the machine; the bot never merges, and you never
+```
+
+- [ ] **Step 6: Check that no stale numbers or commands remain**
+
+Run: `grep -n "2600+\|0001-0027\|~815\|2601\|v0\.11\|xfail\|ruff check src tests" AGENTS.md .claude/skills/forge-setup/SKILL.md docs/README.md docs/overview.md docs/reference/onboarding-prompt.md`
 Expected: no output.
 
 Run: `uv run pytest -q tests/test_edge_case_register.py`
 Expected: every test passes; the operational rows of the register point at
 `AGENTS.md`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add .github/pull_request_template.md AGENTS.md .claude/skills/forge-setup/SKILL.md docs/overview.md
+git add .github/pull_request_template.md AGENTS.md .claude/skills/forge-setup/SKILL.md docs/overview.md docs/reference/onboarding-prompt.md
 git commit -m "docs: PR template and the agent working agreement for the simplification program" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
@@ -4694,8 +4754,9 @@ Expected: the tag exists before any Phase 1 deletion lands.
   - `tests/test_failure_injection_os.py` is not registered for I7: it needs
     real workers and Redis and runs nightly in `integration-os`, while the
     `invariants` job fails on any skip.
-  - Task 15 also removes the stale test count from `docs/overview.md`;
-    P0-14 names only AGENTS.md, but it is the same stale-count class.
+  - Task 15 also removes the stale test counts from `docs/overview.md` and
+    the forge-setup skill, and aligns the onboarding prompt with them; P0-14
+    names only AGENTS.md, but they are the same stale-count class.
 - **Consistency.** Script names, CLI flags, marker names and file paths are
   identical in every task. `tests/_scripts.py` is created in Task 6, before
   its first use in Tasks 9–14.
