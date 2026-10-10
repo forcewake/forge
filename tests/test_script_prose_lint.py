@@ -89,6 +89,14 @@ def test_an_added_review_id_fails(repo, capsys):
     assert "src/m.py:2: # R42-16 parity" in capsys.readouterr().out
 
 
+def test_a_moved_file_counts_as_added(repo, capsys):
+    _change(repo, "x = 1\n# R42-16 parity\n")
+    _git(repo, "mv", "src/m.py", "src/n.py")
+    _git(repo, "commit", "-q", "-m", "move")
+    assert prose_lint.main(["--base", "HEAD~1"]) == 1
+    assert "src/n.py:2: # R42-16 parity" in capsys.readouterr().out
+
+
 def test_an_unknown_base_is_reported_not_raised(repo, capsys):
     assert prose_lint.main(["--base", "1234567890abcdef1234567890abcdef12345678"]) == 0
     assert "is not in this checkout" in capsys.readouterr().out

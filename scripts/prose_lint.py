@@ -34,7 +34,7 @@ DIFF_OPTIONS = (
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
-    "--find-renames",
+    "--no-renames",
     "--src-prefix=a/",
     "--dst-prefix=b/",
 )
