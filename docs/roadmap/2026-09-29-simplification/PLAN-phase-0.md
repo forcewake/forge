@@ -848,7 +848,7 @@ Then add this job right before the `integration` job:
 | Command | What runs | Where |
 | --- | --- | --- |
 | `uv run pytest -q -m "not slow"` | The default tier: fast, hermetic | Every pull request and push (`test` job, Python 3.13 and 3.14) |
-| `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and `release/**`, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
+| `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and to release branches cut after Phase 0, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
 | `uv run pytest -q $(uv run python -m tests.invariants.registry)` | The Invariant Suite I1–I8 | Every pull request (`invariants` job, with Postgres) |
 | `uv run pytest -q` | Everything | Locally, before large changes |
 
@@ -856,6 +856,18 @@ Tiers are assigned by path in `tests/_hygiene.py`; the invariant files are
 listed in `tests/invariants/registry.py`. On pull requests the
 production-entry suites also run inside `scripts/pg_gate.py` (the
 `integration` job).
+
+## Diff coverage
+
+On pull requests the `coverage` job runs the default tier with coverage of
+`src/forge` and `scripts/`, and `diff-cover` requires at least 85% of the
+changed lines to be covered. Code that runs only in a subprocess is not
+measured. To check before pushing:
+
+```bash
+uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml
+uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=85
+```
 
 ## Subprocess hygiene
 
@@ -912,11 +924,29 @@ git commit -m "test: slow and default tiers; fail the session on leaked child pr
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from tests.invariants.registry import INVARIANTS
 
 REPO = Path(__file__).resolve().parents[2]
+FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def collected_tests(path: Path) -> list[str]:
+    """What pytest collects from a file: ``test*`` functions and ``Test*`` class methods."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    bodies = [tree.body] + [
+        node.body
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test")
+    ]
+    return [
+        node.name
+        for body in bodies
+        for node in body
+        if isinstance(node, FUNCTIONS) and node.name.startswith("test")
+    ]
 
 
 def test_i1_to_i8_and_the_self_trigger_rule_are_registered():
@@ -941,6 +971,21 @@ def test_registered_paths_are_clean_and_repo_relative():
 def test_every_registered_file_exists():
     missing = [f for inv in INVARIANTS for f in inv.files if not (REPO / f).is_file()]
     assert missing == []
+
+
+def test_every_registered_file_defines_tests():
+    empty = [f for inv in INVARIANTS for f in inv.files if not collected_tests(REPO / f)]
+    assert empty == []
+
+
+def test_a_file_without_collectable_tests_is_caught(tmp_path):
+    path = tmp_path / "test_empty.py"
+    path.write_text(
+        "def helper():\n    pass\n\n\nclass Helper:\n    def test_x(self):\n        pass\n"
+    )
+    assert collected_tests(path) == []
+    path.write_text("class TestX:\n    async def test_x(self):\n        pass\n")
+    assert collected_tests(path) == ["test_x"]
 ```
 
 Also create an empty `tests/invariants/__init__.py`.
@@ -1239,7 +1284,7 @@ def test_azure_lane_holds_no_access_token(path: Path):
 - [ ] **Step 5: Run the invariants package**
 
 Run: `uv run pytest -q tests/invariants`
-Expected: `307 passed`. This is characterization: the current code complies.
+Expected: `309 passed`. This is characterization: the current code complies.
 `test_each_pattern_recognises_its_merge_call` proves that no pattern is
 vacuous, and `test_ordinary_merge_request_calls_are_not_flagged` guards
 against false positives.
@@ -1456,7 +1501,7 @@ in the JUnit report. The `invariant` marker is for local selection.
 - [ ] **Step 11: Run the suite locally**
 
 Run: `uv run pytest -q --junitxml=/tmp/inv.xml $(uv run python -m tests.invariants.registry)`
-Expected without Postgres: about `795 passed, 3 skipped`. The skips are the
+Expected without Postgres: about `797 passed, 3 skipped`. The skips are the
 `FORGE_PG_TEST_URL`-gated tests.
 
 Run: `uv run python scripts/assert_no_skips.py /tmp/inv.xml`
@@ -3362,6 +3407,14 @@ def test_an_added_review_id_fails(repo, capsys):
     assert "src/m.py:2: # R42-16 parity" in capsys.readouterr().out
 
 
+def test_a_moved_file_counts_as_added(repo, capsys):
+    _change(repo, "x = 1\n# R42-16 parity\n")
+    _git(repo, "mv", "src/m.py", "src/n.py")
+    _git(repo, "commit", "-q", "-m", "move")
+    assert prose_lint.main(["--base", "HEAD~1"]) == 1
+    assert "src/n.py:2: # R42-16 parity" in capsys.readouterr().out
+
+
 def test_an_unknown_base_is_reported_not_raised(repo, capsys):
     assert prose_lint.main(["--base", "1234567890abcdef1234567890abcdef12345678"]) == 0
     assert "is not in this checkout" in capsys.readouterr().out
@@ -3411,7 +3464,7 @@ DIFF_OPTIONS = (
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
-    "--find-renames",
+    "--no-renames",
     "--src-prefix=a/",
     "--dst-prefix=b/",
 )
@@ -3478,7 +3531,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests and the lint on this branch**
 
 Run: `uv run pytest -q tests/test_script_prose_lint.py`
-Expected: `9 passed`.
+Expected: `10 passed`.
 
 Run: `uv run python scripts/prose_lint.py --base origin/main`
 Expected: `prose-lint: ok`. The Phase 0 changes add no review ids.
@@ -4337,16 +4390,17 @@ self-trigger rule.
 - [ ] **Step 2: Update AGENTS.md**
 
 The repo map omitted `adaptive/`, the largest package, most provider and
-lane modules and the persistence layer. The rewrite covers them, marks the
-one live module in the legacy `orchestrator/`, aligns the commands with the
-CI `lint` job (`ruff check .`), adds the program rules 6–9, labels each
-gotcha with its edge-case register row and points "Where work stands" at
-DESIGN, ROADMAP and metrics. It adds no new counts: a count goes stale with
-the first Phase 1 deletion.
+lane modules and the persistence layer. The rewrite covers them. It marks
+`orchestrator/project_config.py`, which every RunService still reads, and
+the agents in `agents/` that CI debug and `/security` triage still use. It
+aligns the commands with the CI `lint` job (`ruff check .`), adds the
+program rules 6–9, labels each gotcha with its edge-case register row and
+points "Where work stands" at DESIGN, ROADMAP and metrics. It adds no new
+counts: a count goes stale with the first Phase 1 deletion.
 
 ````diff
 diff --git a/AGENTS.md b/AGENTS.md
-index e4a2938..3456759 100644
+index e4a2938..e7acf71 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -18,7 +18,7 @@ pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
@@ -4370,7 +4424,7 @@ index e4a2938..3456759 100644
  2. **Secrets never enter the repo or the conversation record.** `.env` is
     gitignored; tokens live in GitLab CI variables. If the user pastes a
     token, use it for the task, never echo it into files, commits, or tests.
-@@ -65,23 +66,78 @@ annotated in `.env.example`):
+@@ -65,23 +66,80 @@ annotated in `.env.example`):
     an ADR amendment instead of silently diverging.
  5. Prefer the smallest change that satisfies the request; match the code's
     existing style; add regression tests for every bug you fix.
@@ -4412,7 +4466,7 @@ index e4a2938..3456759 100644
 +  config.py    settings (see .env.example)
 +  database.py, migrate.py, models/
 +               engine and sessions, schema check, `python -m forge.migrate`, the
-+               declarative Base
++               declarative Base and the legacy bot's tables
 +  gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
 +  worker/      Redis task queue, worker loop, step claims, reconciler boot
 +  durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
@@ -4438,14 +4492,16 @@ index e4a2938..3456759 100644
 +  mcp_server/  forge's MCP server (token-scoped tools)
 +  orchestrator/project_config.py
 +               the project's .forge.yml reader, used by every RunService (P1-01 moves it)
-+  orchestrator/, flows/, agents/, mcp_client/
-+               legacy GitLab reactive bot: review, pipeline debug, chat
++  orchestrator/, flows/, agents/, mcp_client/, stores/
++               legacy GitLab reactive bot: review, pipeline debug, chat; agents/ also
++               holds the LLM agents that reactive/ CI debug and findings/ triage use
 +  release_*.py, profile_qualification.py
 +               release gates
    doctor.py    environment verification (this is your setup oracle)
 -ci/templates/  harness CI jobs (claude-code, opencode, grok) + event filters
 -tests/         2600+ tests; fixtures/fake_gitlab.py is the GitLab fake
 -docs/adr/      architecture decisions (read 0001-0027 before redesigning)
++agents/        YAML agent definitions (FORGE_AGENTS_DIR) and the legacy flows in flows/
 +alembic/       schema migrations
 +ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
 +scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
@@ -4458,7 +4514,7 @@ index e4a2938..3456759 100644
  ```
  
  ## Environment setup (dev)
-@@ -89,11 +145,16 @@ docs/adr/      architecture decisions (read 0001-0027 before redesigning)
+@@ -89,11 +147,16 @@ docs/adr/      architecture decisions (read 0001-0027 before redesigning)
  ```bash
  uv sync                      # Python 3.13+, deps incl. dev
  set -o pipefail
@@ -4478,7 +4534,7 @@ index e4a2938..3456759 100644
  
  ## Verification oracle
  
-@@ -124,30 +185,42 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
+@@ -124,30 +187,42 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
  
  ## Known gotchas (learned the hard way)
  
@@ -4610,10 +4666,20 @@ authoritative guide, so the two must agree on the commands and on what
 
 ```diff
 diff --git a/docs/reference/onboarding-prompt.md b/docs/reference/onboarding-prompt.md
-index a406642..a4b35b1 100644
+index a406642..09d21fe 100644
 --- a/docs/reference/onboarding-prompt.md
 +++ b/docs/reference/onboarding-prompt.md
-@@ -12,21 +12,23 @@ before doing anything. Then:
+@@ -2,7 +2,8 @@
+ 
+ Paste this to your coding agent (Claude Code, opencode, Grok Build, Codex,
+ ...) in a fresh clone of the repository. It is safe to run: every step is
+-local, and the verification gate is `forge doctor`.
++local. The default test tier, lint and the guardrails are the gate;
++`forge doctor` then reports what the environment still lacks.
+ 
+ ---
+ 
+@@ -12,21 +13,23 @@ before doing anything. Then:
  
  1. **Environment.** Ensure Python 3.13+ and [uv](https://docs.astral.sh/uv/)
     are available. Run `uv sync` to install dependencies.
@@ -4673,7 +4739,7 @@ git commit -m "docs: PR template and the agent working agreement for the simplif
 
 ```bash
 set -o pipefail
-uv run ruff format --check . && uv run ruff check src tests scripts
+uv run ruff format --check . && uv run ruff check .
 uv run lint-imports
 uv run python scripts/ratchet.py
 uv run python scripts/prose_lint.py --base origin/main
@@ -4703,8 +4769,10 @@ Expected: `none`.
 
 - [ ] **Step 4: Mark Phase 0 done in the roadmap**
 
-In `ROADMAP.md`, under `## Phase 0`, add the line
-`**Status:** done (<date>, <merge sha>); exit criteria recorded in metrics.md.`
+In `ROADMAP.md`, under `## Phase 0`, add a status line with the date, the
+measured commit and the exit criteria that only the owner can close (the
+`release/0.42.x` branch, the `pre-simplification` tag, the ledger review
+and making the new CI jobs required).
 
 - [ ] **Step 5: Commit and open the PR**
 
@@ -4734,8 +4802,9 @@ Expected: the tag exists before any Phase 1 deletion lands.
     explicit selections of `scripts/pg_gate.py`.
   - `FORGE_GITLAB_ENABLED` replaces a `FORGE_PROVIDERS` list, matching the
     existing `FORGE_GITHUB_ENABLED` and `FORGE_AZDO_ENABLED` flags.
-  - Metrics are recorded at phase gates with `--write`, not by a weekly
-    workflow (YAGNI).
+  - There is no scheduled metrics workflow (YAGNI): the owner runs
+    `scripts/metrics.py` weekly, and `--write` records a snapshot at each
+    phase gate.
   - The ledger script is `build_test_ledger.py`, so pytest can never
     collect a script named `test_*`.
   - The import contracts run in the `lint` job, not a separate `imports`
@@ -4754,9 +4823,73 @@ Expected: the tag exists before any Phase 1 deletion lands.
   - `tests/test_failure_injection_os.py` is not registered for I7: it needs
     real workers and Redis and runs nightly in `integration-os`, while the
     `invariants` job fails on any skip.
+  - Subprocess hygiene (P0-04) is an orphan guard inside the helper
+    scripts plus a session-end check of pytest's direct children, not
+    process groups with recorded pgids: the guard also covers a pytest
+    killed with SIGKILL, when no teardown or `atexit` handler runs.
+  - Diff coverage covers every changed line in `src/forge` and
+    `scripts/`, not only new modules: `diff-cover` has no notion of a new
+    module, and a changed line in an old module deserves a test too.
   - Task 15 also removes the stale test counts from `docs/overview.md` and
-    the forge-setup skill, and aligns the onboarding prompt with them; P0-14
-    names only AGENTS.md, but they are the same stale-count class.
+    the forge-setup skill (P0-14 names only AGENTS.md, but they are the same
+    stale-count class), and aligns `docs/reference/onboarding-prompt.md`
+    with the new commands and doctor behaviour, because AGENTS.md links it
+    first and it calls AGENTS.md its authoritative guide.
 - **Consistency.** Script names, CLI flags, marker names and file paths are
   identical in every task. `tests/_scripts.py` is created in Task 6, before
   its first use in Tasks 9–14.
+
+## Follow-ups
+
+Found by the task reviews and the Phase 0 exit run. None blocks Phase 1,
+and each fits in one small PR.
+
+- **Default-tier time.** The exit run took 543 s on a MacBook against the
+  480 s target (Task 16 Step 2). The heaviest files were
+  `tests/test_lane_driver.py` (68 s), `tests/test_verification_executor.py`
+  (56 s) and `tests/test_resource_lifecycle.py` (47 s). Moving the
+  process-spawning ones to `SLOW_FILES` in `tests/_hygiene.py` meets the
+  target, at the price of running them only after merge.
+- **Process hygiene.**
+  - `scripts/pg_gate.py` ignores the leaked-process check, and
+    `redis-server` and the `python -m forge.worker` processes of the slow
+    suites are not orphan-guarded (the known gaps of ROADMAP P0-04).
+  - `tests-slow` has no Postgres, so its Postgres-only tests skip there;
+    they still run in the `integration` job.
+  - `_hygiene.command_lines` raises when `ps` is missing, while a missing
+    `pgrep` skips the check. Multiprocessing helpers could be reported as
+    leaks. macOS `pgrep` does not list zombies, which weakens
+    `test_a_finished_child_is_reaped_not_reported` there.
+  - The leftover-process `pgrep` in `docs/reference/testing.md` also
+    matches other checkouts.
+- **Lane wrapper (Task 3).** Quote the interpreter path in the `python`
+  wrapper with `shlex.quote`, and guard the venv probe.
+- **ADR banners (Task 1).** The banner test checks the start of the banner
+  line; it could compare the whole line.
+- **GitLab flag (Task 7).** The worker and the MCP server still build a
+  GitLab client when `FORGE_GITLAB_ENABLED=false`; a fail-fast client
+  factory would make that explicit. The Azure guide and `.env.example`
+  could say "GitHub- or Azure-only", and the 503 test could also check the
+  response detail. `.env.example` ships the placeholder
+  `GITLAB_WEBHOOK_SECRET=change-me-to-a-random-string`; the settings
+  validator could reject it.
+- **Analysis (Tasks 9 and 14).** `scripts/_codebase.py` resolves package
+  re-exports but not star imports.
+- **Coverage (Task 11).** Measure `patch = subprocess` in the coverage
+  configuration and either enable it or keep the blind spot documented;
+  omit the live-only scripts from `--cov=scripts`; pass the base ref to
+  `diff-cover` through an environment variable; write its report to the
+  job summary.
+- **Docs.**
+  - README's "9,283 tests" is the v0.42.0 count; refresh or drop it at the
+    next release.
+  - `.claude/skills/forge-onboard-project/SKILL.md` and
+    `docs/harnesses/claude-code.md` present `FORGE_HARNESS_HTTPS_PROXY` as
+    working beyond the grok template.
+  - `docs/README.md` links 16 `research/*.md` files without their date
+    prefixes.
+- **CI evidence.** The new jobs (`invariants`, `tests-slow`, `coverage` and
+  the lint gates) have not run on GitHub yet. Run them on a pull request,
+  and `tests-slow` through `workflow_dispatch`, before relying on them.
+  `TestRealPostgresRaces` in `tests/test_budget_amendment.py` runs in CI
+  for the first time in the `invariants` job.
