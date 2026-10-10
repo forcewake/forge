@@ -5,7 +5,7 @@
 | Command | What runs | Where |
 | --- | --- | --- |
 | `uv run pytest -q -m "not slow"` | The default tier: fast, hermetic | Every pull request and push (`test` job, Python 3.13 and 3.14) |
-| `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and `release/**`, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
+| `uv run pytest -q -m slow` | Real processes and services: `tests/production_entry/` and `tests/test_failure_injection_os.py` (which drives `tests/fi_os/`) | Pushes to `main` and to release branches cut after Phase 0, nightly and manual runs (`tests-slow` job, Python 3.13 and 3.14) |
 | `uv run pytest -q $(uv run python -m tests.invariants.registry)` | The Invariant Suite I1–I8 | Every pull request (`invariants` job, with Postgres) |
 | `uv run pytest -q` | Everything | Locally, before large changes |
 
@@ -13,6 +13,18 @@ Tiers are assigned by path in `tests/_hygiene.py`; the invariant files are
 listed in `tests/invariants/registry.py`. On pull requests the
 production-entry suites also run inside `scripts/pg_gate.py` (the
 `integration` job).
+
+## Diff coverage
+
+On pull requests the `coverage` job runs the default tier with coverage of
+`src/forge` and `scripts/`, and `diff-cover` requires at least 85% of the
+changed lines to be covered. Code that runs only in a subprocess is not
+measured. To check before pushing:
+
+```bash
+uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml
+uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=85
+```
 
 ## Subprocess hygiene
 

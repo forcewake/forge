@@ -93,18 +93,19 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 - **Goal:** no orphaned `fake_native_server.py`, `durable_ingress_server.py`,
   worker or `redis-server` processes.
 - **Work:**
-  - A shared fixture helper in `tests/production_entry/conftest.py` and
-    `tests/fi_os/` starts every child with `start_new_session=True`,
-    records its pgid, and kills the group (SIGTERM, then SIGKILL after 5s)
-    in teardown and `atexit`.
-  - A session-finish hook fails the run if any recorded pgid is still
-    alive.
+  - Helper scripts under `tests/production_entry/` call
+    `orphan_guard.install()`, so they exit as soon as the pytest process
+    that started them dies, even when it is killed with SIGKILL.
+  - After fixture teardown, a session-finish hook (`tests/_hygiene.py`)
+    kills every direct child of pytest that is still running, prints its
+    command line and fails an otherwise green run.
   - Document how to find and kill leftovers from older runs in
     `docs/reference/testing.md`.
   - Known gap, follow-up: `redis-server` (started by `tests/production_entry/test_durable_ingress.py`) and the `python -m forge.worker` processes of `tests/fi_os/worker.py` are not guarded yet. Wrap them in a guarded launcher (or pass a lifeline pipe) before relying on local runs of those suites.
   - Known gap, follow-up: `scripts/pg_gate.py` records pytest's return code but decides from JUnit outcomes only, so it does not fail on the leaked-process check; enforce it there.
-- **Done when:** a full run leaves zero forge test processes, verified by
-  `ps` in a CI step.
+- **Done when:** a killed pytest leaves no guarded helper behind
+  (`tests/test_orphan_guard.py`), and a run that leaks a child process
+  fails (`tests/test_hygiene.py`).
 - **Depends:** —
 - **Size:** M
 
@@ -178,7 +179,7 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
     and `api/app.py` names `WritePort` (DESIGN §6.1). This check is active
     once `ports.py` exists.
   - Add a diff-coverage gate: `coverage` plus `diff-cover`, at least 85%
-    on new and changed lines of new modules.
+    of the changed lines in `src/forge` and `scripts/`.
 - **Done when:** CI enforces it, and a synthetic growth PR fails.
 - **Depends:** —
 - **Size:** M
@@ -492,7 +493,9 @@ run last so that they do not churn code about to be deleted.
 - **Done when:** no importers remain, `main.py` and `worker/app.py` no
   longer construct `AgentRegistry`, `FlowLoader`, `FlowRunner` or
   `Orchestrator`, and the tests are green.
-- **Depends:** P1-01
+- **Depends:** P1-01; P1-11 and P1-13, which delete the last importers of
+  `forge.agents` outside the legacy (`reactive/azure_ci_debug.py`,
+  `reactive/ci_debug.py`, `findings/triage.py`)
 - **Size:** L
 
 ### P1-13 Remove the deferred features
@@ -506,7 +509,7 @@ run last so that they do not churn code about to be deleted.
   - Update `docs/operations/operator-commands.md`.
 - **Done when:** the features are gone, the refusal is tested and the docs
   are updated.
-- **Depends:** P1-12
+- **Depends:** —
 - **Size:** M
 
 ### P1-14 Dependency diet

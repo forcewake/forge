@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Phase 0 guardrails (ADR-0035)
+
+- `FORGE_GITLAB_ENABLED` (default `true`). Set to `false`, the GitLab
+  settings become optional and `/webhook` answers 503, so a GitHub- or
+  Azure-only install needs no placeholder GitLab values.
+- With GitLab enabled, a blank `GITLAB_URL`, `GITLAB_TOKEN` or
+  `GITLAB_WEBHOOK_SECRET` now stops startup; blank values were accepted
+  before. `/webhook` answers 503 when the webhook secret is empty, where
+  it used to accept a request with an empty `X-Gitlab-Token`.
+- `forge doctor` reports missing or invalid settings as FAIL lines instead
+  of raising, and settings errors no longer echo input values.
+- Development guardrails run in CI: test tiers (`-m slow`), the Invariant
+  Suite, import contracts, a size ratchet, a prose lint and diff coverage.
+  See `AGENTS.md` and `docs/reference/testing.md`.
+
 ### Added — simplification program design (ADR-0035, accepted)
 
 - `docs/adr/0035-simplification-program.md`: the strangler program

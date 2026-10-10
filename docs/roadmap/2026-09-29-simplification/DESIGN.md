@@ -748,7 +748,7 @@ Rules:
     grow, and new files and functions must be within the limits;
   - `scripts/prose_lint.py`: added lines contain no review or issue IDs;
   - `deptry`;
-  - diff coverage ≥ 85% on new modules;
+  - diff coverage ≥ 85% on changed lines;
   - `scripts/ast_equivalence.py` for PRs labelled `prose-diet`: the AST
     without docstrings is identical before and after.
 - **ADRs** are one page, written only when a boundary changes, and state
