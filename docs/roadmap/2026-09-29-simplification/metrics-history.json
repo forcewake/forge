@@ -21,5 +21,28 @@
     "direct_dependencies": 14,
     "docs_words": 353272,
     "suite_seconds": null
+  },
+  {
+    "date": "2026-10-11",
+    "sha": "69d9ac7",
+    "src_lines": 190437,
+    "modules": 248,
+    "runtime_lines": 137846,
+    "tooling_only_lines": 33183,
+    "tests_only_lines": 19408,
+    "unreached_lines": 0,
+    "lane_reachable_lines": 132798,
+    "forge_lane_lines": 0,
+    "missing_roots": "none",
+    "largest_file": "11433 (src/forge/runs/service.py)",
+    "functions_over_80": 322,
+    "functions_over_100": 234,
+    "functions_over_200": 56,
+    "prose_share": "28%",
+    "review_refs": 3216,
+    "adr_refs": 705,
+    "direct_dependencies": 14,
+    "docs_words": 360811,
+    "suite_seconds": 542.8
   }
 ]

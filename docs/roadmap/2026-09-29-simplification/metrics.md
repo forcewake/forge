@@ -23,25 +23,25 @@ below was measured by hand with the method described in DESIGN §2.
 ## Measured history
 
 <!-- metrics:begin -->
-| Metric | 2026-09-29 (`8397c5d`) |
-| --- | --- |
-| `src/forge` lines | 190437 |
-| Modules | 248 |
-| Runtime-reachable lines | 137846 |
-| Tooling-only lines | 33183 |
-| Test-only lines | 19408 |
-| Unreached lines | 0 |
-| Lines reachable from lane entry points | 132798 |
-| `forge-lane` lines | 0 |
-| Declared entry points not found | none |
-| Largest file | 11433 (src/forge/runs/service.py) |
-| Functions > 80 lines | 322 |
-| Functions > 100 lines | 234 |
-| Functions > 200 lines | 56 |
-| Prose share in `src` | 28% |
-| Review and issue references in `src` | 3216 |
-| ADR references in `src` | 705 |
-| Direct runtime dependencies | 14 |
-| Markdown words under `docs/` | 353272 |
-| Default suite seconds | — |
+| Metric | 2026-09-29 (`8397c5d`) | 2026-10-11 (`69d9ac7`) |
+| --- | --- | --- |
+| `src/forge` lines | 190437 | 190437 |
+| Modules | 248 | 248 |
+| Runtime-reachable lines | 137846 | 137846 |
+| Tooling-only lines | 33183 | 33183 |
+| Test-only lines | 19408 | 19408 |
+| Unreached lines | 0 | 0 |
+| Lines reachable from lane entry points | 132798 | 132798 |
+| `forge-lane` lines | 0 | 0 |
+| Declared entry points not found | none | none |
+| Largest file | 11433 (src/forge/runs/service.py) | 11433 (src/forge/runs/service.py) |
+| Functions > 80 lines | 322 | 322 |
+| Functions > 100 lines | 234 | 234 |
+| Functions > 200 lines | 56 | 56 |
+| Prose share in `src` | 28% | 28% |
+| Review and issue references in `src` | 3216 | 3216 |
+| ADR references in `src` | 705 | 705 |
+| Direct runtime dependencies | 14 | 14 |
+| Markdown words under `docs/` | 353272 | 360811 |
+| Default suite seconds | — | 542.8 |
 <!-- metrics:end -->

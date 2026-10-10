@@ -42,6 +42,14 @@ gantt
 
 The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 
+**Status:** code complete on 2026-10-11, measured at `69d9ac7` (see
+[metrics.md](metrics.md)). Open exit criteria, for the owner: push
+`release/0.42.x`, tag `pre-simplification`, review `test-ledger.csv`, and
+make the new CI jobs required once they have run green on a pull request,
+which also proves the default suite hermetic on Linux. The default tier
+takes 543 s against the 480 s target; see the plan's
+[follow-ups](PLAN-phase-0.md#follow-ups).
+
 **Exit criteria:**
 
 - ADR-0035 is accepted.
