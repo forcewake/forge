@@ -224,5 +224,7 @@ program ([ADR-0035](docs/adr/0035-simplification-program.md)):
 [DESIGN](docs/roadmap/2026-09-29-simplification/DESIGN.md) is the target,
 [ROADMAP](docs/roadmap/2026-09-29-simplification/ROADMAP.md) the phased task
 list and [metrics.md](docs/roadmap/2026-09-29-simplification/metrics.md) the
-measured progress. The live lab (`/implement` → branch → green CI → Draft
-MR → `ready_for_human`) is the definition of done for any lifecycle change.
+measured progress. An agent picking up the program starts with the
+[handoff](docs/roadmap/2026-09-29-simplification/HANDOFF.md). The live lab
+(`/implement` → branch → green CI → Draft MR → `ready_for_human`) is the
+definition of done for any lifecycle change.

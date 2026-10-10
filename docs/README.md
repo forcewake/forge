@@ -50,6 +50,7 @@ is wired on this repo, and the ground rules.
 | [Simplification program — roadmap](roadmap/2026-09-29-simplification/ROADMAP.md) | phase-by-phase task breakdown with acceptance criteria |
 | [Simplification program — metrics](roadmap/2026-09-29-simplification/metrics.md) | measured baseline and per-phase targets |
 | [Phase 0 implementation plan](roadmap/2026-09-29-simplification/PLAN-phase-0.md) | 16 test-first tasks: guardrails, invariants, ratchet, metrics |
+| [Simplification program — handoff](roadmap/2026-09-29-simplification/HANDOFF.md) | where the program stands, what to do next, how to work, and a kickoff prompt for the next agent |
 
 ## Reference
 
