@@ -96,16 +96,18 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
   - Helper scripts under `tests/production_entry/` call
     `orphan_guard.install()`, so they exit as soon as the pytest process
     that started them dies, even when it is killed with SIGKILL.
-  - After fixture teardown, a session-finish hook (`tests/_hygiene.py`)
-    kills every direct child of pytest that is still running, prints its
-    command line and fails an otherwise green run.
+  - After fixture teardown, the `pytest_sessionfinish` hook in
+    `tests/conftest.py` (helpers in `tests/_hygiene.py`) kills every direct
+    child of pytest that is still running, prints its command line and
+    fails an otherwise green run.
   - Document how to find and kill leftovers from older runs in
     `docs/reference/testing.md`.
   - Known gap, follow-up: `redis-server` (started by `tests/production_entry/test_durable_ingress.py`) and the `python -m forge.worker` processes of `tests/fi_os/worker.py` are not guarded yet. Wrap them in a guarded launcher (or pass a lifeline pipe) before relying on local runs of those suites.
   - Known gap, follow-up: `scripts/pg_gate.py` records pytest's return code but decides from JUnit outcomes only, so it does not fail on the leaked-process check; enforce it there.
 - **Done when:** a killed pytest leaves no guarded helper behind
-  (`tests/test_orphan_guard.py`), and a run that leaks a child process
-  fails (`tests/test_hygiene.py`).
+  (`tests/test_orphan_guard.py`), leaked children are killed and reported
+  (`tests/test_hygiene.py`), and the session hook fails a run that leaked
+  one.
 - **Depends:** —
 - **Size:** M
 
@@ -294,7 +296,9 @@ run last so that they do not churn code about to be deleted.
   (`service.py:214`, `github_service.py:209`, `azure_service.py:143`),
   `runs/revival.py`, `adaptive/system_context.py`, `doctor.py`,
   `mcp_client/manager.py`, `orchestrator/orchestrator.py`,
-  `flows/runner.py` and `findings/triage.py`. No behavior change.
+  `flows/runner.py` and `findings/triage.py`. No behavior change. The
+  prose lint counts the moved file as added, so drop its review
+  references in the same PR.
 - **Done when:** nothing imports `forge.orchestrator.project_config`, and
   the tests are green.
 - **Depends:** P0
@@ -509,7 +513,8 @@ run last so that they do not churn code about to be deleted.
   - Update `docs/operations/operator-commands.md`.
 - **Done when:** the features are gone, the refusal is tested and the docs
   are updated.
-- **Depends:** —
+- **Depends:** P1-11 (`reactive/azure_ci_debug.py` imports
+  `reactive/ci_debug.py`)
 - **Size:** M
 
 ### P1-14 Dependency diet

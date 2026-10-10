@@ -840,6 +840,9 @@ Then add this job right before the `integration` job:
 
 - [ ] **Step 9: Document the tiers**
 
+The guide is written in its final form, so it already describes the
+`invariants` job (Task 6) and the `coverage` job (Task 11).
+
 ````markdown
 # Testing forge
 
@@ -4803,8 +4806,7 @@ Expected: the tag exists before any Phase 1 deletion lands.
   - `FORGE_GITLAB_ENABLED` replaces a `FORGE_PROVIDERS` list, matching the
     existing `FORGE_GITHUB_ENABLED` and `FORGE_AZDO_ENABLED` flags.
   - There is no scheduled metrics workflow (YAGNI): the owner runs
-    `scripts/metrics.py` weekly, and `--write` records a snapshot at each
-    phase gate.
+    `scripts/metrics.py --write` by hand, weekly and at every phase gate.
   - The ledger script is `build_test_ledger.py`, so pytest can never
     collect a script named `test_*`.
   - The import contracts run in the `lint` job, not a separate `imports`
@@ -4862,6 +4864,9 @@ and each fits in one small PR.
     `test_a_finished_child_is_reaped_not_reported` there.
   - The leftover-process `pgrep` in `docs/reference/testing.md` also
     matches other checkouts.
+  - No test pins the session hook end to end: run pytest in a subprocess
+    over a test that leaks a sleeper, and assert exit code 1 and the leak
+    banner.
 - **Lane wrapper (Task 3).** Quote the interpreter path in the `python`
   wrapper with `shlex.quote`, and guard the venv probe.
 - **ADR banners (Task 1).** The banner test checks the start of the banner

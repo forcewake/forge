@@ -720,8 +720,8 @@ Rules:
   ends). Slow tests are marked `slow` and run nightly and on `main`.
 - Tests are hermetic:
   - use `sys.executable` shims instead of `python` on `PATH`;
-  - start subprocesses in their own process group, kill them at teardown,
-    and fail the session if any child survives;
+  - stop subprocesses at teardown, make helper processes exit when pytest
+    dies, and fail the session if any child survives;
   - never use the network.
 - The **test disposition ledger** (`test-ledger.csv`, created in Phase 0)
   records for every current test file: keep, port (to engine scenarios or
