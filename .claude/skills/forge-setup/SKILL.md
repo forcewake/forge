@@ -12,7 +12,7 @@ description: Set up the forge dev environment from a fresh clone and verify it w
 3. Verify: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"` — the
    default tier must pass with zero failures (counts change as the
    simplification program deletes code; `docs/reference/testing.md` explains
-   the tiers). xfails are pinned upstream defects; never unpin them casually.
+   the tiers).
 4. Lint: `.venv/bin/ruff format . && .venv/bin/ruff check .`, then the
    guardrails: `uv run lint-imports && uv run python scripts/ratchet.py`.
 5. Final gate: `uv run python -m forge.doctor`. With a `.env` it must exit 0

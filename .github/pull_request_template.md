@@ -5,7 +5,7 @@
 ## Invariants (DESIGN §4)
 
 - [ ] No invariant touched
-- [ ] Touched: <!-- I1–I8 --> — evidence: <!-- test ids -->
+- [ ] Touched: <!-- I1–I8 or SELF-TRIGGER --> — evidence: <!-- test ids -->
 
 ## Metrics delta (`uv run python scripts/metrics.py`)
 
@@ -23,7 +23,7 @@
 ## Test ledger and edge-case register
 
 - `test-ledger.csv` rows changed: <!-- file → disposition, or "none" -->
-- `docs/reference/edge-cases.md` rows repointed or retired: <!-- ids, or "none" -->
+- `docs/reference/edge-cases.md` rows added, repointed or retired: <!-- ids, or "none" -->
 
 ## Size and scope
 

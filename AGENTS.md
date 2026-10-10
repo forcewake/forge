@@ -54,8 +54,8 @@ annotated in `.env.example`):
 ## Non-negotiable rules for agents
 
 1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"`
-   (add `-m slow` for lifecycle changes), then `ruff format . && ruff check .`.
-   Never commit with a red suite.
+   (for lifecycle changes also run `.venv/bin/python -m pytest -q -m slow`), then
+   `.venv/bin/ruff format . && .venv/bin/ruff check .`. Never commit with a red suite.
 2. **Secrets never enter the repo or the conversation record.** `.env` is
    gitignored; tokens live in GitLab CI variables. If the user pastes a
    token, use it for the task, never echo it into files, commits, or tests.
@@ -77,15 +77,17 @@ annotated in `.env.example`):
      code, run `uv run python scripts/ratchet.py --update` and commit
      `scripts/ratchet-baseline.json`; `--update --accept <path>` is only for a reviewed
      move of existing oversized code;
-   - `uv run python scripts/prose_lint.py --base origin/main`: added code carries no
-     review, backlog or issue ids (history lives in git and ADRs). A line that must keep
-     a matching literal, such as the colour `#009966`, carries the marker
-     `prose-lint: allow`.
+   - `uv run python scripts/prose_lint.py --base origin/main`: added lines under `src/`
+     and `packages/*/src/` carry no review, backlog or issue ids (history lives in git and
+     ADRs). It reads commits, so run it after committing. A line that must keep a matching
+     literal, such as the colour `#009966`, carries the marker `prose-lint: allow`.
 8. **Never weaken the Invariant Suite** (`tests/invariants/registry.py`, DESIGN §4):
-   removing or skipping evidence for I1–I8 needs an ADR.
-9. **Deleted code keeps its lessons.** Before a module is deleted or rewritten, its rows
-   in the [edge-case register](docs/reference/edge-cases.md) must still hold: port the
-   pinning tests and repoint the rows in the same PR, or retire a row that no longer
+   removing or skipping evidence for I1–I8 or the self-trigger rule (ADR-0028) needs an
+   ADR.
+9. **Deleted code keeps its lessons.** Before a module is deleted or rewritten, every
+   gotcha it carries must be a row in the [edge-case register](docs/reference/edge-cases.md)
+   (add the missing ones with their pinning tests), and its rows must still hold: port
+   the pinning tests and repoint the rows in the same PR, or retire a row that no longer
    applies. A test file is deleted only when its row in
    [`test-ledger.csv`](docs/roadmap/2026-09-29-simplification/test-ledger.csv) says so.
 
@@ -95,6 +97,9 @@ annotated in `.env.example`):
 src/forge/
   main.py, api_*.py  the FastAPI app and its operator, lane-control and checkpoint APIs
   config.py    settings (see .env.example)
+  database.py, migrate.py, models/
+               engine and sessions, schema check, `python -m forge.migrate`, the
+               declarative Base
   gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
   worker/      Redis task queue, worker loop, step claims, reconciler boot
   durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
@@ -117,16 +122,19 @@ src/forge/
   reactive/    durable review and CI-debug bots on the step lane
   findings/    security findings and /security triage
   mcp_server/  forge's MCP server (token-scoped tools)
+  orchestrator/project_config.py
+               the project's .forge.yml reader, used by every RunService (P1-01 moves it)
   orchestrator/, flows/, agents/, mcp_client/
                legacy GitLab reactive bot: review, pipeline debug, chat
   release_*.py, profile_qualification.py
                release gates
   doctor.py    environment verification (this is your setup oracle)
+alembic/       schema migrations
 ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
 scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
                release tooling
-tests/         tiered (docs/reference/testing.md); tests/invariants/ is the Invariant
-               Suite; fixtures/fake_gitlab.py is the GitLab fake
+tests/         tiered (docs/reference/testing.md); tests/invariants/registry.py lists the
+               Invariant Suite files; fixtures/fake_gitlab.py is the GitLab fake
 docs/adr/      architecture decisions (start with 0003, 0005, 0016, 0026, 0035)
 docs/roadmap/2026-09-29-simplification/
                DESIGN, ROADMAP, metrics and the test ledger
@@ -177,9 +185,10 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
 
 ## Known gotchas (learned the hard way)
 
-The [edge-case register](docs/reference/edge-cases.md) lists every gotcha with
-the test or reference that pins it; the IDs below are its rows. Read a row
-before removing a guard that looks redundant.
+The [edge-case register](docs/reference/edge-cases.md) records each known gotcha
+with the test or reference that pins it; the IDs below are its rows. Read a row
+before removing a guard that looks redundant, and add a row when you learn a
+new one.
 
 - **zsh does not word-split unquoted variables** (OP-04) — never
   `for x in $VAR` over multi-line command output; use `while IFS= read -r`
@@ -196,7 +205,7 @@ before removing a guard that looks redundant.
   flake → silent futex hang). See the grok template's before_script for the
   pattern.
 - Long-lived AI streams from some runner networks crawl (OP-06: 226s vs 2s
-  via a proxy on a fast path). The harness templates support
+  via a proxy on a fast path). The grok template supports
   `FORGE_HARNESS_HTTPS_PROXY`.
 - Redis `forge:worker:<id>` heartbeat keys persist ~30s after a worker
   dies (OP-02) — `/metrics` `workers_active` lags; check logs, not just
