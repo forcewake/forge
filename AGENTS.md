@@ -99,7 +99,7 @@ src/forge/
   config.py    settings (see .env.example)
   database.py, migrate.py, models/
                engine and sessions, schema check, `python -m forge.migrate`, the
-               declarative Base
+               declarative Base and the legacy bot's tables
   gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
   worker/      Redis task queue, worker loop, step claims, reconciler boot
   durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
@@ -124,11 +124,13 @@ src/forge/
   mcp_server/  forge's MCP server (token-scoped tools)
   orchestrator/project_config.py
                the project's .forge.yml reader, used by every RunService (P1-01 moves it)
-  orchestrator/, flows/, agents/, mcp_client/
-               legacy GitLab reactive bot: review, pipeline debug, chat
+  orchestrator/, flows/, agents/, mcp_client/, stores/
+               legacy GitLab reactive bot: review, pipeline debug, chat; agents/ also
+               holds the LLM agents that reactive/ CI debug and findings/ triage use
   release_*.py, profile_qualification.py
                release gates
   doctor.py    environment verification (this is your setup oracle)
+agents/        YAML agent definitions (FORGE_AGENTS_DIR) and the legacy flows in flows/
 alembic/       schema migrations
 ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
 scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and

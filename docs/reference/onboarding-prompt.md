@@ -2,7 +2,8 @@
 
 Paste this to your coding agent (Claude Code, opencode, Grok Build, Codex,
 ...) in a fresh clone of the repository. It is safe to run: every step is
-local, and the verification gate is `forge doctor`.
+local. The default test tier, lint and the guardrails are the gate;
+`forge doctor` then reports what the environment still lacks.
 
 ---
 
