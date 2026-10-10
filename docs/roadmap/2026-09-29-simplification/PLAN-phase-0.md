@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status:** executed; Phase 0 closed at `bf06fd6`. This plan is now a
-> record: its code blocks match the files as of that commit, and later
-> changes are not synced back. [HANDOFF.md](HANDOFF.md) says what comes next.
+> **Status:** executed; Phase 0 is code complete at `bf06fd6`, and its exit
+> criteria that need GitHub and the owner are open (the Phase 0 **Status**
+> line in [ROADMAP.md](ROADMAP.md)). This plan is now a record: its code
+> blocks match the files as of that commit, and later changes are not
+> synced back. [HANDOFF.md](HANDOFF.md) says what comes next.
 
 **Goal:** Install the guardrails of the simplification program (ADR-0035,
 ROADMAP Phase 0): hermetic test tiers, the Invariant Suite, import
