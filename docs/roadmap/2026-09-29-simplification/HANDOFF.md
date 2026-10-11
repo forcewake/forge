@@ -113,10 +113,11 @@ planning documents, then the commits of each task, interleaved with
   `tests/test_budget_amendment.py` runs in CI for the first time, in the
   `invariants` job.
 - **The nightly run on GitHub was already red.** Every scheduled `ci.yml`
-  run on `7ed64ba` from 2026-09-30 to 2026-10-10 failed. `integration-os`
-  and `release-canary` fail every night (maintenance-0.42.md notes both),
-  and some nights `integration` or `test (3.14)` failed too. The push run
-  on `7ed64ba` was green. Compare a failure with these before blaming
+  run on `7ed64ba`, from 2026-09-29 to 2026-10-10, failed:
+  `integration-os` and `release-canary` every night (maintenance-0.42.md
+  notes both), `test (3.14)` on 2026-10-05 and 2026-10-06, and
+  `integration` (its `pg_gate` step) on 2026-09-29 only. The push run on
+  `7ed64ba` was green. Compare a failure with these before blaming
   Phase 0.
 - **Phase 0 Done when checks that need GitHub** (ROADMAP):
   - the lane-install tests pass on Linux CI (P0-03);
@@ -150,7 +151,8 @@ planning documents, then the commits of each task, interleaved with
   - `tests/test_lane_install_contract.py` (60 tests) is marked to be
     dropped with P1-07, but it also covers the install route and identity.
     Decide whether to port or drop it before P1-07.
-  - The legacy tables that P1-12 leaves unused (see the task notes).
+  - What happens to `stores/` and the legacy models that P1-12 leaves
+    unused (see the task notes).
 
 ## What to do next
 
@@ -181,12 +183,15 @@ planning documents, then the commits of each task, interleaved with
    done by their **Done when**:
    - P1-01 and P1-10 need all of Phase 0;
    - P1-02 needs the owner's ledger review (P0-13);
-   - P1-05 needs CI enforcing the contracts (P0-07).
+   - P1-05 needs CI enforcing the contracts (P0-07);
+   - P1-08 needs `tests-slow` green on `main` and `invariants` required
+     (P0-05, P0-06);
+   - P1-11 needs `release/0.42.x` green and the tag (P0-02).
 
    Deletions start only after the `pre-simplification` tag exists.
 3. **Execute Phase 1 one ROADMAP task per pull request** (P1-03 and P1-16
-   take several, as their Work says), in an order that respects every
-   **Depends** line, for example:
+   take several, as their **Work** and **Size** lines say), in an order
+   that respects every **Depends** line, for example:
    P1-01, P1-02, P1-03, P1-04, P1-06, P1-05, P1-10, P1-11, P1-13, P1-12,
    P1-14, P1-08, P1-07, P1-09, P1-15, P1-16, P1-17, P1-18.
 4. **Record each finished task where the next agent looks.** In its pull
@@ -230,11 +235,15 @@ planning documents, then the commits of each task, interleaved with
     changes; do not make them.
   - After deleting, regenerate the ledger and run `ratchet.py --update`:
     shrunk debt must be recorded.
-  - Check the register rows whose **Code** column points at the deleted
-    code, then run the Invariant Suite.
+  - Check the register rows whose **Code** or **Reference** column points
+    at the deleted code, then run the Invariant Suite.
 - **P1-02 and P1-05 touch test files the ledger keeps.**
-  - `tests/test_saga_durable.py` (`keep`) and `tests/test_saga_native.py`
-    (`port-adapter`) import modules that P1-02 deletes.
+  - `tests/test_saga_durable.py`, `tests/test_adaptive_two_writer.py` and
+    `tests/test_system_verification.py` (`keep`),
+    `tests/test_saga_native.py` (`port-adapter`), and
+    `tests/production_entry/test_two_writer_durable.py` and
+    `tests/production_entry/test_two_writer_native.py` (`port-engine`)
+    import modules that P1-02 deletes.
   - P1-05's Work deletes `tests/test_architecture_boundaries.py`, which
     the ledger marks `keep`.
 
@@ -247,8 +256,14 @@ planning documents, then the commits of each task, interleaved with
   - keeps the program's own scripts (`_codebase.py`, `metrics.py`,
     `ratchet.py`, `prose_lint.py`, `assert_no_skips.py`,
     `build_test_ledger.py`);
-  - deletes `generate_template_pins.py` and `gate_conformance.py`, which
-    two `lint` steps run, so those steps go in the same change;
+  - deletes `generate_template_pins.py` and `gate_conformance.py`. P1-08,
+    which lands first, removes the `lint` steps that run them;
+  - deletes the four release modules that `TOOLING_ROOTS` in
+    `scripts/_codebase.py` lists. Remove them from that list in the same
+    change, or `metrics.py` reports them as missing entry points;
+  - deletes `scripts/run_review_loop_qualification.py`, the reference of
+    register row OP-03. Repoint or retire the row in the same change, or
+    `tests/test_edge_case_register.py` fails;
   - needs the owner's decision on `test_lane_install_contract.py`.
 - **P1-08** rewrites `release.yml` and simplifies CI. Keep every Phase 0
   gate.
@@ -256,13 +271,12 @@ planning documents, then the commits of each task, interleaved with
   yet. Register the gotchas of the Azure code first (AGENTS.md rule 9),
   then move the Azure-only rows to **Retired** with the reason.
 - **P1-12** runs after P1-11 and P1-13, which delete the last non-legacy
-  importers of `forge.agents`. Its task text does not mention `stores/` or
-  the legacy models `AgentRun`, `Conversation` and `ReviewState`, which
-  lose their last users with `orchestrator/`. Settle their tables with the
-  owner:
-  - DESIGN §14 allows breaking the lab schema;
-  - DESIGN §10 keeps the schema unchanged in Phase 1, so that 0.43.0 rolls
-    back by redeploying 0.42.0;
+  importers of `forge.agents`. `stores/` and the legacy models
+  `AgentRun`, `Conversation` and `ReviewState` lose their last users with
+  `orchestrator/`; decide their code with the owner. Their tables stay:
+  - DESIGN §14 allows breaking the lab schema, but DESIGN §10 keeps the
+    schema unchanged in Phase 1, so that 0.43.0 rolls back by redeploying
+    0.42.0;
   - §6.10 drops the legacy tables only after P3-20.
 - **P1-16** needs `scripts/ast_equivalence.py`, which does not exist yet,
   for the `prose-diet` pull requests.
@@ -307,7 +321,7 @@ planning documents, then the commits of each task, interleaved with
 | Prose lint | `uv run python scripts/prose_lint.py --base origin/main`, after committing | An added line under `src/` carries a review, backlog or issue id | Remove the reference; use `prose-lint: allow` only for a literal that must match |
 | Invariant Suite | `.venv/bin/python -m pytest -q $(uv run python -m tests.invariants.registry)` | A failure; in CI, also any skip | Fix the code; removing or skipping evidence needs an ADR (AGENTS.md rule 8) |
 | Diff coverage | See [testing.md](../../reference/testing.md) | Less than 85% of the changed lines are covered | Add tests |
-| The rest of the `lint` job | `uv run python scripts/gate_public_artifacts.py`, `uv run python scripts/generate_template_pins.py --exact-composition` and `uv run python scripts/gate_conformance.py --report <a file outside the repository>` | A tracked database archive, a release-composition mismatch, or a lane template that fails the conformance checks | Fix the cause. P1-07 retires the last two |
+| The rest of the `lint` job | `uv run python scripts/gate_public_artifacts.py`, `uv run python scripts/generate_template_pins.py --exact-composition` and `uv run python scripts/gate_conformance.py --report <a file outside the repository>` | A tracked database archive, a release-composition mismatch, or a lane template that fails the conformance checks | Fix the cause. P1-08 removes the last two from CI; P1-07 deletes their scripts |
 
 The ledger is not a gate, but its measured columns drift when tests
 change. Regenerate it with `uv run python scripts/build_test_ledger.py` and
@@ -435,8 +449,8 @@ Then:
    to P1-06 in the format of PLAN-phase-0.md, running every code block in
    a scratch worktree first. Ask the owner to approve it. Execute a task
    only when its Depends lines are met; for this batch that means Phase 0
-   green and required on GitHub, the pre-simplification tag, and the
-   owner's ledger review.
+   green and required on GitHub, release/0.42.x pushed and green, the
+   pre-simplification tag, and the owner's ledger review.
 
 Rules: one ROADMAP task per pull request; run the gates before every
 commit, and the prose lint right after it; never push, merge, tag or change
