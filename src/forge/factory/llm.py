@@ -1,23 +1,4 @@
-"""Thin LiteLLM-proxy HTTP client for the factory agents (ADR-0014).
-
-The reactive (Codeward-imported) agents keep going through Agno; the factory
-agents (planner, implementer, reviewer) deliberately do not: structured output
-through agno proved unreliable with GLM on the live review, so this module is
-a plain ``httpx`` client against the LiteLLM proxy's OpenAI-compatible
-``/v1/chat/completions`` endpoint. No agno, no litellm-python import.
-
-Every call — successes, HTTP failures, invalid JSON, cancellations — is
-recorded in the durable ``llm_calls`` ledger (ADR-0013). Unknown usage stays
-``NULL``, never zero: zero would silently falsify totals.
-
-Token budgets are enforced two ways: each consumer truncates its input
-to its own ``MAX_INPUT_CHARS`` before calling :meth:`LLMClient.complete`
-(deterministically, via :func:`truncate_chars`), and a run-level budget
-handle (:class:`forge.durable.budgets.BudgetGuard`, ADR-0018 §5) reserves
-calls/tokens before dispatch and reconciles the provider's real usage
-afterwards — a refused reservation raises ``LLMError("budget_exhausted")``
-without any HTTP request.
-"""
+"""Bound and account for model requests through the configured gateway."""
 
 from __future__ import annotations
 
@@ -79,12 +60,7 @@ def truncate_chars(text: str, limit: int) -> str:
 
 
 def parse_json(text: str) -> dict:
-    """Parse a JSON object out of a model response.
-
-    Strips Markdown code fences, then extracts the first balanced ``{...}``
-    block (string- and escape-aware) and ``json.loads`` it. Raises
-    :class:`LLMResponseError` on any failure — never returns a guess.
-    """
+    """Parse a JSON object out of a model response."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         # Drop the opening fence line (```json) and a trailing fence.
@@ -140,11 +116,7 @@ async def record_llm_call(
     duration_ms: int | None = None,
     error: str | None = None,
 ) -> None:
-    """Write one ``llm_calls`` ledger row (ADR-0013).
-
-    Best-effort: a ledger write failure is logged, never allowed to corrupt
-    the caller's outcome (the run state machine stays authoritative).
-    """
+    """Write one ``llm_calls`` ledger row (ADR-0013)."""
     try:
         async with session_factory() as session:
             session.add(
@@ -167,16 +139,7 @@ async def record_llm_call(
 
 
 class LLMClient:
-    """Async httpx client for the LiteLLM proxy's chat-completions endpoint.
-
-    With an optional *budget* handle (:class:`forge.durable.budgets.BudgetGuard`)
-    every completion is budget-enforced (ADR-0018 §5): a hold for one call and
-    the ``max_tokens`` estimate is reserved BEFORE the provider is contacted —
-    a refusal raises :class:`LLMError` ``"budget_exhausted"`` without any HTTP
-    request — and the provider's real usage reconciles the hold afterwards.
-    A dispatch that fails or is cancelled still consumes its call (the
-    provider may have processed it) with unknown tokens.
-    """
+    """Async httpx client for the LiteLLM proxy's chat-completions endpoint."""
 
     def __init__(
         self,
@@ -222,18 +185,7 @@ class LLMClient:
         json_mode: bool = False,
         max_tokens: int = 4096,
     ) -> LLMResult:
-        """One chat completion against the proxy tier.
-
-        With ``json_mode`` the request carries ``response_format``; if the
-        proxy/provider rejects it with 400 the call retries once without it,
-        asking for raw JSON in the system prompt. The response text of a
-        ``json_mode`` call is validated with :func:`parse_json` before the
-        call counts as successful.
-
-        With a budget handle the call is reserved first (1 call + a
-        ``max_tokens`` token estimate); a refused reservation raises
-        :class:`LLMError` ``"budget_exhausted"`` before any HTTP request.
-        """
+        """One chat completion against the proxy tier."""
         started = time.monotonic()
         reservation = await self._reserve_for_call(
             tier=tier, role=role, flow_run_id=flow_run_id, max_tokens=max_tokens, started=started
@@ -247,8 +199,8 @@ class LLMClient:
                 max_tokens=max_tokens,
             )
         except asyncio.CancelledError:
-            # The request may still have been processed provider-side: the
-            # call is consumed, the token actuals stay unknown (never zero).
+            # The request may still have been processed provider-side: the call is consumed,
+            # the token actuals stay unknown (never zero).
             await self._reconcile_dispatch(reservation, None, None)
             await self._journal(
                 flow_run_id, role, tier, "cancelled", None, None, started, _CANCELLED
@@ -273,8 +225,6 @@ class LLMClient:
         await self._journal(flow_run_id, role, tier, "ok", *usage, started, None)
         return LLMResult(text=text, input_tokens=usage[0], output_tokens=usage[1])
 
-    # ------------------------------------------------------------------
-
     async def _reserve_for_call(
         self,
         *,
@@ -284,12 +234,7 @@ class LLMClient:
         max_tokens: int,
         started: float,
     ) -> Reservation | None:
-        """The pre-dispatch budget hold, or ``None`` when unrestricted.
-
-        A refused reservation never reaches the provider: it is journaled as a
-        failed row (unknown usage — nothing was spent) and
-        ``LLMError("budget_exhausted")`` is raised.
-        """
+        """The pre-dispatch budget hold, or ``None`` when unrestricted."""
         if self._budget is None:
             return None
         reservation = await self._budget.reserve(calls=1, tokens=max_tokens)
@@ -306,13 +251,7 @@ class LLMClient:
         input_tokens: int | None,
         output_tokens: int | None,
     ) -> None:
-        """Settle the hold against actuals; best-effort, never raises.
-
-        The known usage parts sum to the token actual; unknown parts add
-        nothing (unknown is never counted as zero). A reconciliation failure
-        is logged and swallowed — the ledger-write posture of
-        :func:`record_llm_call`: the call outcome stays authoritative.
-        """
+        """Settle the hold against actuals; best-effort, never raises."""
         if self._budget is None or reservation is None:
             return
         known = [value for value in (input_tokens, output_tokens) if isinstance(value, int)]
@@ -334,14 +273,8 @@ class LLMClient:
         json_mode: bool,
         max_tokens: int,
     ) -> tuple[str, tuple[int | None, int | None]]:
-        """Send the request(s); return ``(content, (input_tokens, output_tokens))``.
-
-        Raises :class:`LLMError` on transport/protocol failures and
-        :class:`LLMResponseError` when the body has no usable content.
-        """
+        """Send the request(s); return ``(content, (input_tokens, output_tokens))``."""
         # The proxy resolves the bare tier name ("fast"/"strong"/"code").
-        # The openai/ prefix seen in forge.llm.provider is a litellm-python
-        # client detail — over raw HTTP the prefixed name 400s.
         payload: dict[str, Any] = {
             "model": tier,
             "messages": [
@@ -409,8 +342,8 @@ class LLMClient:
             self._session_factory,
             flow_run_id=flow_run_id,
             role=role,
-            # The ledger stores the tier as configured; the openai/ prefix is
-            # a wire detail of the proxy.
+            # The ledger stores the tier as configured; the openai/ prefix is a wire detail
+            # of the proxy.
             model=tier,
             status=status,
             input_tokens=input_tokens,

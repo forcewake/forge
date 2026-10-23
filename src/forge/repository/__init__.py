@@ -1,13 +1,4 @@
-"""Repository write surface: ChangeSet contract + GitLab changeset writer.
-
-Public surface:
-
-- :class:`forge.repository.changeset.ChangeSet` / ``Change`` / ``Operation``,
-  :func:`materialize` and :func:`validate_changeset` — the trusted ADR-0001
-  write contract (strict JSON draft -> materialized, validated ChangeSet).
-- :class:`forge.repository.writer.ChangesetWriter` — journaled, reconcilable
-  commits via the GitLab Commits API (ADR-0005).
-"""
+"""Validated repository changes and the journaled writer API."""
 
 from forge.repository.changeset import (
     BUILTIN_WRITE_PROFILES,

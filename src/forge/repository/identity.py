@@ -1,4 +1,4 @@
-"""The canonical repository identity contract."""
+"""Canonical repository identity independent of display spelling."""
 
 from __future__ import annotations
 
@@ -15,12 +15,7 @@ class RepositoryIdentity:
     display: str = ""
 
     def cache_key(self, ref: str, path: str) -> tuple[str, str, str, str, str]:
-        """The authority-cache key: identity + requested ref + config path.
-
-        The requested REF is part of the key — a different ref is a
-        different authority snapshot, never a cache hit (probe P02 of the
-        44cdae review).
-        """
+        """The authority-cache key: identity + requested ref + config path."""
         return (self.tenant, self.provider, self.native_id, ref, path)
 
     def __str__(self) -> str:  # pragma: no cover — display helper
@@ -28,18 +23,7 @@ class RepositoryIdentity:
 
 
 def repository_identity(reader: object, project_id: int | None = None) -> RepositoryIdentity | None:
-    """The reader's canonical identity via its PUBLIC ``identity()``.
-
-    Adapters implement ``identity() -> RepositoryIdentity``; this resolver
-    never probes private attributes (the 44cdae helper's failure mode).
-    Repository-bound readers take no arguments; project-scoped clients
-    (GitLab) take the project id — passed through when given, and a
-    TypeError from the no-arg probe of a project-scoped client is the
-    signal to retry qualified (never a crash).
-    ``None`` = the adapter has not adopted the contract yet — the caller
-    must fall back to a FULLY QUALIFIED legacy key (type + repr-stable
-    fields), never a bare project id.
-    """
+    """The reader's canonical identity via its PUBLIC ``identity``."""
     method = getattr(reader, "identity", None)
     if not callable(method):
         return None

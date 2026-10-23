@@ -1,11 +1,4 @@
-"""LLM reviewer agent (ADR-0004/0008): readonly review of the candidate diff.
-
-Strictly read-only: the reviewer receives the candidate diff (via
-``compare_commits`` between the approved base snapshot and the candidate) plus
-the issue title and plan summary — never write tools, never the writer, never
-a way to change anything. Its verdict is recorded with the SHA it reviewed
-(ADR-0008: the review approves a *specific* SHA).
-"""
+"""Review the exact candidate under the configured model and budget."""
 
 from __future__ import annotations
 
@@ -24,11 +17,8 @@ logger = logging.getLogger(__name__)
 #: The strong tier: review quality gates ready_for_human.
 REVIEWER_TIER = "strong"
 
-#: The reviewer model is stochastic (LIVE: glm returned prose instead of
-#: JSON on 2 of 4 review calls, blocking otherwise-green runs at
-#: ``review_failed``). One bounded re-ask — same prompt, same contract,
-#: every attempt journaled to ``llm_calls`` — is honest; weakening the
-#: verdict because the model had a bad sample is not (ADR-0008).
+#: The reviewer model is stochastic (LIVE: glm returned prose instead of JSON on 2 of 4
+#: review calls, blocking otherwise-green runs at ``review_failed``).
 REVIEW_ATTEMPTS = 2
 
 
@@ -40,14 +30,7 @@ async def review_with_retry(
     parse: Any,
     flow_run_id: str | None = None,
 ) -> Any:
-    """Run the review call, re-asking once when the output won't parse.
-
-    *parse* is a callable turning the model text into the verdict; only
-    :class:`LLMResponseError` (an unusable response — invalid JSON in JSON
-    mode, unparseable or wrong-shape output) triggers a retry, from the
-    call itself or from *parse*; real API/network failures propagate
-    immediately.
-    """
+    """Run the review call, re-asking once when the output won't parse."""
     last_error: LLMResponseError | None = None
     for attempt in range(1, REVIEW_ATTEMPTS + 1):
         try:
@@ -145,8 +128,6 @@ class LLMReviewer:
             parse=self._parse,
             flow_run_id=flow_run_id,
         )
-
-    # ------------------------------------------------------------------
 
     async def _candidate_diff(
         self,

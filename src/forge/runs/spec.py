@@ -1,21 +1,4 @@
-"""The executable RunSpec (R04; ADR-0018 §1, contracts-v0.2 "RunSpec").
-
-The RunSpec is not just a digest of what was approved — it IS the approved
-input. Everything a post-approval leg needs to execute the run is frozen into
-one canonical JSON document at plan acceptance: the task text, the plan
-artifact, the model route, the tool/path policy, the verification contract,
-the numeric budgets and the backend/driver. The pending decision binds the
-document's digest; ``/go`` approves exactly those bytes. Consumption legs read
-this document through :func:`load_verified_spec`, which re-computes the
-canonical digest on EVERY read — a missing, tampered or legacy spec raises
-:class:`SpecInvalid` and the run parks ``blocked(spec_invalid)``. There is no
-silent fallback to live settings, ever.
-
-Provider-neutral by construction (contracts-v0.2): the type knows nothing
-about GitLab or GitHub — the subject is (provider, project id,
-issue id) and the GitLab/GitHub services freeze and consume it with
-their own readers.
-"""
+"""Freeze the approved input, execution policy and digest used by the lane."""
 
 from __future__ import annotations
 
@@ -24,45 +7,31 @@ import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-#: Schema version of the EXECUTABLE RunSpec document (v3): adds the frozen
-#: task text, the plan artifact, the model route and the verification
-#: contract to the v2 shape. v1/v2 documents carry digests only — they are
-#: not executable and a verified read refuses them (fail closed).
-#: R13 keeps v3: the numeric budget ceilings (``max_calls``/``max_tokens``/
-#: ``wallclock_s``/``enforcement``) are ADDITIVE optional members of the
-#: ``budgets`` block — :meth:`ExecutableRunSpec.from_document` is tolerant of
-#: their absence, so pre-R13 v3 documents still parse unchanged.
+#: Schema version of the EXECUTABLE RunSpec document (v3): adds the frozen task text, the
+#: plan artifact, the model route and the verification contract to the v2 shape. v1/v2
+#: documents carry digests only — they are not executable and a verified read refuses them
+#: (fail closed). keeps v3: the numeric budget ceilings (``max_calls``/``max_tokens``/
+#: ``wallclock_s``/``enforcement``) are ADDITIVE optional members of the ``budgets`` block
+#: —:meth:`ExecutableRunSpec.from_document` is tolerant of their absence, so pre- v3
+#: documents still parse unchanged.
 EXECUTABLE_SPEC_SCHEMA_VERSION = 3
 
-#: Honest budget enforcement levels (R13 §4), frozen with the ceilings:
-#: ``full`` remains readable for historical execution documents;
-#: ``partial`` describes current CI lanes:
-#: only the wall clock and the episode count are enforced forge-side, the
-#: harness's own model calls are never intercepted, so call/token ceilings
-#: are reconciled after the fact and never claimed as enforced.
+#: Honest budget enforcement levels ( §4), frozen with the ceilings: ``full`` remains
+#: readable for historical execution documents; ``partial`` describes current CI lanes: only
+#: the wall clock and the episode count are enforced forge-side, the harness's own model
+#: calls are never intercepted, so call/token ceilings are reconciled after the fact and
+#: never claimed as enforced.
 BUDGET_ENFORCEMENT_LEVELS = ("full", "partial")
 
 _DIGEST_LEN = 64
 
 
 class SpecInvalid(Exception):
-    """A stored RunSpec is missing, tampered with, legacy or unreadable.
-
-    Raised by every verified read; the caller parks the run
-    ``blocked(spec_invalid)`` — never falls back to live configuration.
-    """
+    """A stored RunSpec is missing, tampered with, legacy or unreadable."""
 
 
 class SpecLegacy(SpecInvalid):
-    """A stored RunSpec predates the executable schema (A02 legacy policy).
-
-    A v1/v2 row (created before the freeze carried executable content) is
-    never re-interpreted as v3 on a later dispatch: the run parks
-    ``blocked(spec_legacy: re-approval required)`` — the honest policy,
-    because the approver never saw the full v3 input (task text, plan
-    artifact, model route, budgets). Subclassing :class:`SpecInvalid` keeps
-    every generic ``except SpecInvalid`` caller fail-closed.
-    """
+    """A stored RunSpec predates the executable schema ( legacy policy)."""
 
 
 def canonical_json_digest(document: dict) -> str:
@@ -71,11 +40,7 @@ def canonical_json_digest(document: dict) -> str:
 
 
 def task_text_digest(title: str, description: str) -> str:
-    """sha256 over the issue text — the task snapshot digest (ADR-0018 §2).
-
-    The exact input the frozen task artifact carries, so a verified read can
-    re-derive the digest from the stored text and detect internal tampering.
-    """
+    """sha256 over the issue text — the task snapshot digest (ADR-0018 §2)."""
     return hashlib.sha256(f"{title or ''}\n{description or ''}".encode("utf-8")).hexdigest()
 
 
@@ -98,13 +63,7 @@ def _string_tuple(values: object, what: str) -> tuple[str, ...]:
 
 
 def _optional_limit(value: object, what: str) -> int | None:
-    """An optional numeric budget ceiling from a stored document (R13).
-
-    Additive-field tolerance: absence/``null`` → ``None`` (unlimited on that
-    axis — pre-R13 documents carry none of these keys). Anything else that is
-    not a positive int is a corrupt document: ``ValueError`` here becomes a
-    ``SpecInvalid`` at the caller, never a silent unlimited.
-    """
+    """An optional numeric budget ceiling from a stored document."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -114,12 +73,7 @@ def _optional_limit(value: object, what: str) -> int | None:
 
 @dataclass(frozen=True)
 class ExecutableRunSpec:
-    """The typed, immutable executable input of one run (R04, ADR-0018 §1).
-
-    Constructed only through :meth:`freeze` (plan-time capture) or
-    :meth:`from_document` (verified read); ``__post_init__`` validates every
-    field, so a malformed document cannot become an instance.
-    """
+    """The typed, immutable executable input of one run (ADR-0018 §1)."""
 
     schema_version: int
     # Subject (contracts-v0.2: connection_id, provider, repository_id, issue_id).
@@ -143,8 +97,8 @@ class ExecutableRunSpec:
     allowed_paths: tuple[str, ...]
     # Verification contract: the jobs a green pipeline must contain.
     required_jobs: tuple[str, ...]
-    # Numeric budgets: lifecycle limits (always present). The R13 enforceable
-    # ceilings ride at the end of the field order (defaulted — additive).
+    # Numeric budgets: lifecycle limits (always present). The enforceable ceilings ride at
+    # the end of the field order (defaulted — additive).
     commit_cycles: int
     harness_timeout: int
     # Backend / driver (ADR-0015/0023): the execution shape the gate approved.
@@ -155,39 +109,29 @@ class ExecutableRunSpec:
     harness_fallbacks: tuple[str, ...]
     budget_class: str
     selection_reason: str
-    # R13: the enforceable numeric ceilings resolved AT FREEZE TIME from the
-    # budget class's profile — ``None`` = unlimited on that axis;
-    # ``enforcement`` is the honest level the lane can actually deliver
-    # ("" = no numeric budget at all).
+    # the enforceable numeric ceilings resolved AT FREEZE TIME from the budget class's
+    # profile — ``None`` = unlimited on that axis; ``enforcement`` is the honest level the
+    # lane can actually deliver ("" = no numeric budget at all).
     budget_max_calls: int | None = None
     budget_max_tokens: int | None = None
     budget_wallclock_s: int | None = None
     budget_enforcement: str = ""
     harness_workflow: str = ""
     lane_pipeline_id: int | None = None
-    # B06 — the waiver set AT FREEZE TIME: every condition the verdict may
-    # lean on is frozen with the spec (a post-approval global waiver flip
-    # must not loosen an already-approved run's proof rules).
+    # B06 — the waiver set AT FREEZE TIME: every condition the verdict may lean on is frozen
+    # with the spec (a post-approval global waiver flip must not loosen an already-approved
+    # run's proof rules).
     waived_conclusions: tuple[str, ...] = ()
-    # A13: the frozen provenance of the project config the path scope came
-    # from — ``valid`` (``config_sha256`` pins the exact approved bytes) or
-    # ``confirmed_absent`` (the provider confirmed there is no config). A
-    # failed config read freezes NOTHING: the run parks
-    # ``blocked(config_…)`` instead. Restarts scope from THIS snapshot via
-    # ``allowed_paths`` — they never re-read the live config, so a config
-    # that later becomes unreadable can narrow... never widen.
+    # the frozen provenance of the project config the path scope came from — ``valid``
+    # (``config_sha256`` pins the exact approved bytes) or ``confirmed_absent`` (the
+    # provider confirmed there is no config).
     config_status: str = ""
     config_ref: str = ""
     config_sha256: str = ""
-    # A18: the frozen execution profile digest — sha256 over the canonical
-    # record :class:`forge.runs.execution_profile.ExecutionProfile` derived
-    # from the TARGET repo at freeze time (toolchain pins from its lock, the
-    # install strategy, the honest ci_contract, the lane capability axes).
-    # The gate approves exactly this execution contract; the lane echoes the
-    # digest of the profile it ACTUALLY ran into the candidate meta, so a
-    # drift between approved and executed is a comparable pair. Additive
-    # (defaulted, like the R13 ceilings): pre-A18 documents carry no key and
-    # parse unchanged.
+    # the frozen execution profile digest — sha256 over the canonical
+    # record :class:`forge.runs.execution_profile.ExecutionProfile` derived from the TARGET
+    # repo at freeze time (toolchain pins from its lock, the install strategy, the honest
+    # ci_contract, the lane capability axes).
     profile_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -236,8 +180,8 @@ class ExecutableRunSpec:
             )
         if not self.harness_driver.strip() or not self.target_branch.strip():
             raise SpecInvalid("spec harness driver and target branch must be non-empty")
-        # A13 config provenance: all-or-nothing, and the content digest only
-        # rides a ``valid`` read — an absent config has no bytes to pin.
+        # config provenance: all-or-nothing, and the content digest only rides a ``valid``
+        # read — an absent config has no bytes to pin.
         if self.config_status not in ("", "valid", "confirmed_absent"):
             raise SpecInvalid(
                 f"spec config_status must be '', 'valid' or 'confirmed_absent', "
@@ -251,12 +195,12 @@ class ExecutableRunSpec:
                 raise SpecInvalid("a valid config provenance must carry its read ref")
         if self.config_status == "confirmed_absent" and self.config_sha256:
             raise SpecInvalid("a confirmed-absent config has no content digest")
-        # A18: the profile digest is optional (pre-A18 documents) but never
-        # partially-formed — present, it must be the sha256 it claims.
+        # the profile digest is optional (pre- documents) but never partially-formed —
+        # present, it must be the sha256 it claims.
         if self.profile_digest:
             _digest_or_invalid(self.profile_digest, "profile_digest")
 
-    # -- construction ------------------------------------------------------
+    # -- construction
 
     @classmethod
     def freeze(
@@ -296,13 +240,7 @@ class ExecutableRunSpec:
         profile_digest: str = "",
         waived_conclusions: Iterable[str] = (),
     ) -> ExecutableRunSpec:
-        """Freeze the executable spec from plan-time values (F14, R04).
-
-        Called at plan acceptance — before the plan is published — so the
-        pending decision binds a digest over the exact bytes below. The task
-        digest is derived here from the captured text; construction validates
-        the result.
-        """
+        """Freeze the executable spec from plan-time values (F14,)."""
         return cls(
             schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
             provider=str(provider),
@@ -401,38 +339,27 @@ class ExecutableRunSpec:
                     if backend_config.get("lane_pipeline_id") is not None
                     else None
                 ),
-                # A13: optional additive section — pre-A13 documents carry
-                # none and parse with empty provenance; a malformed one is a
-                # corrupt spec (fail closed), never a silent drop.
+                # optional additive section — pre- documents carry none and parse with empty
+                # provenance; a malformed one is a corrupt spec (fail closed), never a
+                # silent drop.
                 config_status=str(_config_provenance(document).get("status") or "").strip(),
                 config_ref=str(_config_provenance(document).get("ref") or "").strip(),
                 config_sha256=str(_config_provenance(document).get("sha256") or "").strip().lower(),
-                # A18: same additive convention — the frozen execution
-                # profile digest (absent on pre-A18 documents).
+                # same additive convention — the frozen execution profile digest (absent on
+                # pre- documents).
                 profile_digest=str(_execution_profile(document).get("digest") or "")
                 .strip()
                 .lower(),
             )
         except (ValueError, TypeError) as exc:
-            # Numeric fields with non-numeric garbage etc. — still a corrupt
-            # spec, never a crash past the verified read.
+            # Numeric fields with non-numeric garbage etc. — still a corrupt spec, never a
+            # crash past the verified read.
             raise SpecInvalid(f"spec document is unreadable: {exc}") from exc
 
-    # -- views -------------------------------------------------------------
+    # -- views
 
     def to_document(self) -> dict:
-        """The canonical JSON document stored in ``run_specs`` (digest target).
-
-        ``allowed_paths`` is present only for scoped runs, and the R13 budget
-        ceilings/enforcement only when a finite profile was resolved — an
-        unscoped, unbudgeted document stays byte-identical to the pre-v0.7
-        shape convention. The A02 dispatch-contract keys
-        (``harness_workflow`` / ``lane_pipeline_id``) ride ``backend_config``
-        only for lane-dispatching runs, same additive convention. A13 adds
-        the ``project_config`` provenance section whenever a run's start
-        actually read the config (``valid`` or ``confirmed_absent`` — a
-        failed read never reaches the freeze).
-        """
+        """The canonical JSON document stored in ``run_specs`` (digest target)."""
         budgets_block: dict = {
             "commit_cycles": self.commit_cycles,
             "harness_timeout": self.harness_timeout,
@@ -489,18 +416,17 @@ class ExecutableRunSpec:
         }
         if self.allowed_paths:
             document["allowed_paths"] = list(self.allowed_paths)
-        # A13: the frozen config provenance rides its own additive section
-        # (absent on pre-A13 documents; the content digest only when a
-        # config was actually read and validated).
+        # the frozen config provenance rides its own additive section (absent on pre-
+        # documents; the content digest only when a config was actually read and validated).
         if self.config_status:
             document["project_config"] = {
                 "status": self.config_status,
                 "ref": self.config_ref,
                 **({"sha256": self.config_sha256} if self.config_sha256 else {}),
             }
-        # A18: the frozen execution profile digest rides its own additive
-        # section (absent on pre-A18 documents — the record itself lives in
-        # forge.runs.execution_profile; the spec pins its digest).
+        # the frozen execution profile digest rides its own additive section (absent on pre-
+        # documents — the record itself lives in forge.runs.execution_profile; the spec pins
+        # its digest).
         if self.profile_digest:
             document["execution_profile"] = {"digest": self.profile_digest}
         return document
@@ -519,11 +445,7 @@ def _section(document: dict, key: str) -> dict:
 
 
 def _config_provenance(document: dict) -> dict:
-    """The optional A13 ``project_config`` provenance section.
-
-    Absent → ``{}`` (pre-A13 documents parse unchanged); present but not
-    an object → a corrupt spec (``SpecInvalid``), never a silent drop.
-    """
+    """The optional ``project_config`` provenance section."""
     section = document.get("project_config")
     if section is None:
         return {}
@@ -533,11 +455,7 @@ def _config_provenance(document: dict) -> dict:
 
 
 def _execution_profile(document: dict) -> dict:
-    """The optional A18 ``execution_profile`` section (the digest wrapper).
-
-    Absent → ``{}`` (pre-A18 documents parse unchanged); present but not
-    an object → a corrupt spec (``SpecInvalid``), never a silent drop.
-    """
+    """The optional ``execution_profile`` section (the digest wrapper)."""
     section = document.get("execution_profile")
     if section is None:
         return {}
@@ -553,16 +471,7 @@ def load_verified_spec(
     run_spec_digest: str | None = None,
     schema_version: int | None = None,
 ) -> ExecutableRunSpec:
-    """The digest-verified typed view of a stored ``run_specs`` row (R04).
-
-    Every consumption read goes through here. Raises :class:`SpecInvalid` —
-    never falls back — when the row is missing, its stored digest does not
-    match the canonical JSON of its document (tampered/corrupt), or its
-    digest is not the one the gate froze into the run. A legacy (pre-v3)
-    row raises :class:`SpecLegacy` (an :class:`SpecInvalid` subclass, A02):
-    the run parks ``blocked(spec_legacy: re-approval required)`` — a spec
-    that predates the executable shape is never re-interpreted as v3.
-    """
+    """The digest-verified typed view of a stored ``run_specs`` row."""
     if not isinstance(document, dict):
         raise SpecInvalid("no spec document is stored for this run")
     if not digest:

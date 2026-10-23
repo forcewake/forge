@@ -1,11 +1,4 @@
-"""Durable webhook inbox (ADR-0005).
-
-GitLab delivers webhooks at-least-once. Ingestion is therefore idempotent:
-the caller derives a ``source_event_id`` (see :func:`build_source_event_id`)
-and :func:`ingest_event` inserts the row only if that identity has never been
-seen. Duplicate deliveries return the existing row with ``created=False`` and
-must not trigger side effects again.
-"""
+"""Deduplicate accepted provider events before scheduling their work."""
 
 from __future__ import annotations
 
@@ -26,13 +19,7 @@ def build_source_event_id(
     action: str,
     delivery_id: str,
 ) -> str:
-    """Derive the inbox identity for a GitLab webhook delivery.
-
-    sha256 over project id, object kind, object iid, the action (e.g. ``open``
-    / ``merge`` / a note identifier) and the GitLab delivery uniqueness (the
-    ``X-Gitlab-Event-UUID`` / hook delivery id). Two deliveries of the same
-    logical event produce the same id.
-    """
+    """Derive the inbox identity for a GitLab webhook delivery."""
     material = "|".join(
         (
             str(project_id),
@@ -53,17 +40,9 @@ async def ingest_event(
     event_type: str,
     payload: dict,
 ) -> tuple[EventInbox, bool]:
-    """Insert an inbox row unless *source_event_id* was already ingested.
-
-    Returns ``(row, created)``. The insert is the dedup arbiter (ADR-0017 §1):
-    ``INSERT ... ON CONFLICT DO NOTHING`` against the unique delivery key, so
-    a concurrent ingester racing in another transaction is resolved by the
-    index itself — no select-then-insert window, no savepoint. Duplicate
-    deliveries return the existing row with ``created=False``; the original
-    payload is preserved.
-    """
-    # ON CONFLICT DO NOTHING works identically on Postgres and SQLite (tests);
-    # the pg insert construct compiles to the same statement on both.
+    """Insert an inbox row unless *source_event_id* was already ingested."""
+    # ON CONFLICT DO NOTHING works identically on Postgres and SQLite (tests); the pg insert
+    # construct compiles to the same statement on both.
     result = await session.execute(
         pg_insert(EventInbox)
         .values(
@@ -74,8 +53,8 @@ async def ingest_event(
         )
         .on_conflict_do_nothing(index_elements=[EventInbox.source_event_id])
     )
-    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only
-    # type it on CursorResult, so access it via the runtime attr.
+    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only type it on
+    # CursorResult, so access it via the runtime attr.
     if result.rowcount == 1:  # type: ignore[attr-defined]
         row = (
             await session.execute(

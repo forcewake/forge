@@ -1,42 +1,4 @@
-"""Durable flow controller (ADR-0004, ADR-0005).
-
-A small, typed state machine over a SQLAlchemy ``AsyncSession``. It is
-DB-agnostic: the same code runs over sqlite (tests) and Postgres (production).
-
-Rules encoded here:
-
-- Every lifecycle transition is validated against ``ALLOWED_TRANSITIONS`` and
-  persisted by the caller's transaction; each transition writes exactly one
-  ``outbox`` row *in the same transaction* so the state change and its
-  announcement commit atomically (ADR-0005).
-- ``blocked`` / ``failed`` / ``cancelled`` may be entered from any
-  non-terminal state; terminal states (``ready_for_human``, ``blocked``,
-  ``failed``, ``cancelled``) have no outgoing transitions. The ONE
-  exception is the explicit revival edge (:meth:`Controller.revive_transition`):
-  a run parked ``blocked``/``failed`` may be walked back to ``proposing`` by
-  the operator (``/retry``) or by the Tier-1 auto-revive, never by the plain
-  graph.
-- External writes are journaled intent-first: ``record_action`` creates a
-  ``requested`` row before dispatch, ``complete_action`` records the outcome
-  exactly once (ADR-0005).
-- Worker leases are compared against their expiry (fencing): a different
-  owner cannot renew or take a live lease (ADR-0005).
-- ``transition_guarded`` is the versioned form of ``transition`` (R10): the
-  whole move happens in ONE conditional ``UPDATE ... WHERE status =
-  :expected [AND cancellation_generation = :gen]`` whose rowcount is the
-  arbitration — two concurrent actors with the same expectation produce
-  exactly one applied transition and one typed :class:`StaleClaimError`.
-  ``request_cancel`` bumps the run's cancellation generation in one
-  statement with ``cancel_requested``, giving every guard a single value to
-  compare (queue ownership implies effect ownership).
-- A04: the guarded CAS is THE write path. The plain :meth:`Controller.transition`
-  delegates to it (the pre-read only derives the expectation and names the
-  illegal-edge error; the WHERE still re-checks at write time), and the
-  revival edges (:meth:`Controller.revive_transition`,
-  :meth:`Controller.restart_plan_transition`) pin the terminal status they
-  read at start the same way — a stale owner's lifecycle write matches 0
-  rows and raises :class:`StaleClaimError` instead of overwriting.
-"""
+"""Advance durable run state under cancellation and worker-claim fences."""
 
 from __future__ import annotations
 
@@ -65,8 +27,8 @@ class FlowStatus(str, Enum):
     PROPOSING = "proposing"
     VALIDATING = "validating"
     COMMITTING = "committing"
-    #: ADR-0015: a ci_harness backend job is running in the target project's
-    #: CI. Worker-free and durable, like waiting_ci — the reconciler polls it.
+    #: ADR-0015: a ci_harness backend job is running in the target project's CI. Worker-free
+    #: and durable, like waiting_ci — the reconciler polls it.
     WAITING_HARNESS = "waiting_harness"
     ENSURING_DRAFT_MR = "ensuring_draft_mr"
     WAITING_CI = "waiting_ci"
@@ -97,14 +59,7 @@ _FROM_ANY_TERMINAL: frozenset[FlowStatus] = frozenset(
     }
 )
 
-#: The ADR-0004 transition graph. Branches of ``evaluating_ci``:
-#: repair loop re-enters ``proposing``, checks passed move on to ``reviewing``,
-#: infrastructure failure parks the run as ``blocked`` (with a reason).
-#: ADR-0015 adds the harness leg: a ci_harness backend parks the run in
-#: ``waiting_harness`` (from ``proposing`` after the harness job is started,
-#: or from ``committing`` on re-entry); a verified harness change moves it on
-#: to ``committing``, where the candidate sha is recorded — forge never
-#: commits on the harness's behalf.
+#: The ADR-0004 transition graph.
 ALLOWED_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
     FlowStatus.ACCEPTED: {FlowStatus.PREFLIGHT},
     FlowStatus.PREFLIGHT: {FlowStatus.PLANNING},
@@ -129,15 +84,9 @@ for _status in ALLOWED_TRANSITIONS:
         ALLOWED_TRANSITIONS[_status] = ALLOWED_TRANSITIONS[_status] | _FROM_ANY_TERMINAL
 
 
-#: The terminal-exit edges: the revival edge (Tier-1 auto-revive / Tier-2
-#: operator ``/retry`` → ``proposing``) and the A13 plan-restart edge
-#: (a PRE-GATE ``blocked(config_…)`` run → ``preflight``, fenced to runs
-#: that never froze a spec). Deliberately NOT part of ``ALLOWED_TRANSITIONS``
-#: — ``transition`` must never leave a terminal state on its own;
-#: :meth:`Controller.revive_transition` and
-#: :meth:`Controller.restart_plan_transition` are the explicit, journaled
-#: exceptions, and ``cancelled``/``ready_for_human`` are excluded from them
-#: on purpose (a revoked publication grant stays revoked).
+#: The terminal-exit edges: the revival edge (Tier-1 auto-revive / Tier-2 operator
+#: ``/retry`` → ``proposing``) and the plan-restart edge (a PRE-GATE ``blocked(config_…)``
+#: run → ``preflight``, fenced to runs that never froze a spec).
 _REVIVAL_SOURCES: frozenset[FlowStatus] = frozenset({FlowStatus.BLOCKED, FlowStatus.FAILED})
 
 
@@ -166,15 +115,7 @@ class StepRunNotFound(ControllerError):
 
 
 class StaleClaimError(ControllerError):
-    """A guarded mutation lost the arbitration (R10).
-
-    Raised by :meth:`Controller.transition_guarded` when the row no longer
-    matches the caller's expectation (status moved, or the cancellation
-    generation was bumped by a cancel): exactly one concurrent actor applies
-    its transition — this actor is the loser and must record superseded
-    evidence, never retry blindly. Carries the observed state for the
-    superseded-evidence record.
-    """
+    """A guarded mutation lost the arbitration."""
 
     def __init__(
         self,
@@ -193,11 +134,7 @@ class StaleClaimError(ControllerError):
 
 
 def as_aware_utc(value: datetime) -> datetime:
-    """Normalize *value* to timezone-aware UTC.
-
-    SQLite returns naive datetimes while Postgres (asyncpg) returns aware
-    ones; comparisons must work with both.
-    """
+    """Normalize *value* to timezone-aware UTC."""
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
@@ -213,12 +150,7 @@ def _coerce_status(value: FlowStatus | str) -> FlowStatus:
 def _coerce_expected(
     expected: FlowStatus | str | Collection[FlowStatus | str] | None,
 ) -> list[FlowStatus] | None:
-    """Normalize a guarded transition's expectation to a status list.
-
-    ``None`` means "derive from the stored row" (the WHERE still re-checks at
-    write time); a single status coerces to a one-element list; an empty
-    collection is a caller bug, not a match-nothing predicate.
-    """
+    """Normalize a guarded transition's expectation to a status list."""
     if expected is None:
         return None
     if isinstance(expected, (FlowStatus, str)):
@@ -236,18 +168,13 @@ _LEGAL_ACTION_OUTCOMES: frozenset[str] = frozenset({"succeeded", "failed", "unkn
 
 
 class Controller:
-    """Owns flow run lifecycle mutations on top of one ``AsyncSession``.
-
-    All methods flush into the caller's transaction; the caller decides when
-    to commit. Nothing here talks to GitLab or an LLM.
-    """
+    """Owns flow run lifecycle mutations on top of one ``AsyncSession``."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    # ------------------------------------------------------------------
     # Lifecycle transitions (ADR-0004)
-    # ------------------------------------------------------------------
+    #
 
     async def transition(
         self,
@@ -255,20 +182,7 @@ class Controller:
         to_status: FlowStatus | str,
         reason: str | None = None,
     ) -> FlowRun:
-        """Move the run to *to_status* and write one outbox row, atomically.
-
-        A04: the write is the guarded CAS — this entry derives the
-        expectation from a pre-read (kept so an illegal edge still fails with
-        the typed :class:`InvalidTransition` BEFORE any statement) and routes
-        through the SAME conditional
-        ``UPDATE ... WHERE status = :expected`` as
-        :meth:`transition_guarded`. The WHERE re-checks at write time, so a
-        concurrent actor that moved the row between the read and the write
-        makes this caller the stale loser: 0 rows match and
-        :class:`StaleClaimError` is raised instead of a silent overwrite
-        (P07). Raises :class:`RunNotFound` if the run does not exist and
-        :class:`InvalidTransition` if ADR-0004 does not allow the move.
-        """
+        """Move the run to *to_status* and write one outbox row, atomically."""
         target = _coerce_status(to_status)
         run = await self.session.get(FlowRun, run_id)
         if run is None:
@@ -312,37 +226,7 @@ class Controller:
         expected_cancellation_generation: int | None = None,
         reason: str | None = None,
     ) -> FlowRun:
-        """Versioned conditional transition (R10): the CAS IS the state machine.
-
-        The move happens in ONE statement::
-
-            UPDATE flow_runs SET status = :to, ...
-            WHERE id = :run_id
-              AND status IN (:expected...)          -- the version predicate
-              [AND cancellation_generation = :gen]  -- the cancel fence
-
-        so two concurrent actors holding the same expectation arbitrate at the
-        row: exactly one UPDATE matches, the loser matches 0 rows. The outbox
-        row is written in the same transaction as the applied UPDATE — the
-        announcement can never exist without the state change, and a stale
-        actor writes no announcement at all.
-
-        *expected_status* is the caller's belief about the current status
-        (one status, or several for the enter-from-anywhere edges);
-        ``None`` derives it from a read — still safe, because the WHERE
-        re-checks at write time. *expected_cancellation_generation* pins the
-        publication-grant generation: if a cancel bumped it since the caller
-        minted its :class:`~forge.durable.claims.ExecutionClaim`, the UPDATE
-        matches 0 rows.
-
-        Returns the refreshed run. Raises :class:`RunNotFound` when the run
-        does not exist, :class:`InvalidTransition` when the expected→target
-        edge is not in ADR-0004's graph, and :class:`StaleClaimError` when
-        the predicate matched 0 rows — the loser's signal to record
-        superseded evidence, never to retry blindly. Call on a session with
-        no pending changes to the run row: the Core UPDATE bypasses the ORM
-        unit of work on purpose (the rowcount is the whole decision).
-        """
+        """Versioned conditional transition: the CAS IS the state machine."""
         target = _coerce_status(to_status)
         expected = _coerce_expected(expected_status)
         if expected is None:
@@ -394,18 +278,7 @@ class Controller:
         expected_cancellation_generation: int | None,
         reason: str | None,
     ) -> FlowRun:
-        """The ONE conditional UPDATE behind every lifecycle mutation (R10/A04).
-
-        ``UPDATE flow_runs SET status = :to ... WHERE id = :run_id AND
-        status IN (:expected) [AND cancellation_generation = :gen]`` — the
-        rowcount is the arbitration: 0 rows means a concurrent actor moved
-        the row and this caller is the stale loser (typed
-        :class:`StaleClaimError` carrying the observed state; record
-        superseded evidence, never retry blindly). The Core UPDATE bypasses
-        the ORM unit of work on purpose; the instance is re-read and
-        refreshed afterwards so callers see the applied values on their own
-        session object.
-        """
+        """The ONE conditional UPDATE behind every lifecycle mutation."""
         predicate = (
             FlowRun.status == expected[0].value
             if len(expected) == 1
@@ -449,17 +322,7 @@ class Controller:
         return run
 
     async def request_cancel(self, run_id: str) -> int:
-        """Revoke the publication grant and bump the cancel generation (R10).
-
-        ONE statement sets ``cancel_requested`` and increments
-        ``cancellation_generation`` — the flag and the fence value can never
-        disagree, and every :class:`~forge.durable.claims.ExecutionClaim`
-        minted before this call is fenced out of publishing and guarded
-        transitions the moment it lands. Returns the NEW generation.
-        Raises :class:`RunNotFound` when the run does not exist. The terminal
-        ``cancelled`` transition stays the caller's; so does step
-        withdrawal (the service's cancel machinery owns both today).
-        """
+        """Revoke the publication grant and bump the cancel generation."""
         result = cast(
             CursorResult[Any],
             await self.session.execute(
@@ -489,19 +352,7 @@ class Controller:
         reason: str,
         authorized_by: str,
     ) -> FlowRun:
-        """Walk a ``blocked``/``failed`` run back to ``proposing`` — the revival edge.
-
-        The explicit, operator-authorized (``/retry``) or machine-journaled
-        (``auto_revive``) exception to "terminal states have no outgoing
-        transitions": same run id, same branch, same candidate history. The
-        outbox row carries ``authorized_by`` so the walk is auditable.
-        Raises :class:`InvalidTransition` for any other source status.
-        A04: the walk is the guarded CAS — the terminal status read at revive
-        start is the expectation, so two racing revivals (or a revival losing
-        to any other concurrent move) produce exactly one applied walk and
-        one typed :class:`StaleClaimError`; a stale operator's revive can
-        never reopen a run that moved on.
-        """
+        """Walk a ``blocked``/``failed`` run back to ``proposing`` — the revival edge."""
         run = await self.session.get(FlowRun, run_id)
         if run is None:
             raise RunNotFound(f"flow run {run_id!r} not found")
@@ -541,21 +392,7 @@ class Controller:
         reason: str,
         authorized_by: str,
     ) -> FlowRun:
-        """Walk a PRE-GATE ``blocked`` run back to ``preflight`` (A13).
-
-        The plan-restart edge — beside :meth:`revive_transition`, one of
-        only two walks out of a terminal status, and this one is fenced:
-        the run must never have frozen a RunSpec (``spec_digest`` empty —
-        the gate was never opened, nothing was approved). It exists for the
-        A13 config gate: a run parked ``blocked(config_…)`` before its
-        first paid call re-enters planning once the config read recovers,
-        exactly as a crashed ``/implement`` would. A post-freeze run can
-        only revive forward to ``proposing`` (:meth:`revive_transition`) —
-        an approved input is never re-planned past its gate. Journaled like
-        the revival edge; raises :class:`InvalidTransition` otherwise.
-        A04: same CAS discipline as the revival edge — the ``blocked``
-        status read at start is the write-time expectation.
-        """
+        """Walk a PRE-GATE ``blocked`` run back to ``preflight``."""
         run = await self.session.get(FlowRun, run_id)
         if run is None:
             raise RunNotFound(f"flow run {run_id!r} not found")
@@ -590,9 +427,8 @@ class Controller:
         await self.session.flush()
         return run
 
-    # ------------------------------------------------------------------
     # External action journal (ADR-0005: intent, then outcome)
-    # ------------------------------------------------------------------
+    #
 
     async def record_action(
         self,
@@ -601,11 +437,7 @@ class Controller:
         params_digest: str | None = None,
         correlation_id: str | None = None,
     ) -> int:
-        """Journal the *intent* to perform an external write.
-
-        Creates an ``action_log`` row with ``status='requested'`` and returns
-        its id. Call :meth:`complete_action` with the outcome afterwards.
-        """
+        """Journal the *intent* to perform an external write."""
         if flow_run_id is not None and await self.session.get(FlowRun, flow_run_id) is None:
             raise RunNotFound(f"flow run {flow_run_id!r} not found")
         action = ActionLog(
@@ -625,13 +457,7 @@ class Controller:
         status: ActionOutcome,
         remote_result: dict | None = None,
     ) -> ActionLog:
-        """Journal the *outcome* of a previously requested external write.
-
-        Only ``requested -> {succeeded, failed, unknown_outcome}`` is legal;
-        terminal rows are immutable. ``unknown_outcome`` means the HTTP call
-        timed out after possibly executing — reconcile before retrying
-        (ADR-0005).
-        """
+        """Journal the *outcome* of a previously requested external write."""
         action = await self.session.get(ActionLog, action_log_id)
         if action is None:
             raise ActionLogNotFound(f"action log {action_log_id} not found")
@@ -650,16 +476,11 @@ class Controller:
         await self.session.flush()
         return action
 
-    # ------------------------------------------------------------------
     # Worker leases (ADR-0005: atomic, renewed by heartbeat, fenced)
-    # ------------------------------------------------------------------
+    #
 
     async def acquire_lease(self, step_run_id: int, owner: str, seconds: int) -> bool:
-        """Take the lease on a step run for *owner*.
-
-        Fails (returns ``False``) when a different owner still holds a live
-        lease. A lease with no expiry is treated as expired.
-        """
+        """Take the lease on a step run for *owner*."""
         step = await self._get_step(step_run_id)
         if self._lease_is_live(step):
             return False
@@ -668,11 +489,7 @@ class Controller:
         return True
 
     async def renew_lease(self, step_run_id: int, owner: str, seconds: int) -> bool:
-        """Heartbeat-renew the lease of *owner* on a step run.
-
-        Fails (returns ``False``) when a different owner holds a live lease
-        (fencing). When the previous lease has expired, *owner* takes over.
-        """
+        """Heartbeat-renew the lease of *owner* on a step run."""
         step = await self._get_step(step_run_id)
         if step.lease_owner != owner and self._lease_is_live(step):
             return False
@@ -680,9 +497,7 @@ class Controller:
         await self.session.flush()
         return True
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
 
     async def _get_step(self, step_run_id: int) -> StepRun:
         step = await self.session.get(StepRun, step_run_id)

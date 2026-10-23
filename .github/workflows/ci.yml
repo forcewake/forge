@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, "release/**"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Nightly: runs everything, including the manual-only integration-os job
   # below. Push/PR runs never touch it — real OS-process failure injection
   # (worker subprocesses, SIGKILL drills) adds ~10 minutes and must not slow
@@ -52,6 +53,13 @@ jobs:
 
       - name: Size ratchet (oversized code may only shrink)
         run: uv run python scripts/ratchet.py
+
+      - name: Prose-only AST and directive equivalence
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'prose-diet')
+        run: >-
+          uv run python scripts/ast_equivalence.py
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
 
       - name: Prose lint (added lines)
         run: |

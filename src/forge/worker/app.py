@@ -39,14 +39,7 @@ async def _execute_run_command_task(
     *,
     owner: str,
 ) -> None:
-    """Execute a queued ``run_command`` task through the step runtime (ADR-0017).
-
-    The persisted StepRun is the authority; this Redis task is only the
-    wake-up. The step is claimed first (lease + fence), so a step worker can
-    never double-run the same command. When no step was persisted (legacy
-    producer) or the DB is unreachable, execution falls back to the direct
-    :func:`execute_run_command` path.
-    """
+    """Execute a queued ``run_command`` task through the step runtime (ADR-0017)."""
     source_event_id = str(metadata.get("source_event_id") or "")
     if source_event_id and session_factory is not None:
         try:
@@ -57,8 +50,8 @@ async def _execute_run_command_task(
         if known:
             claimed = await claim_command_step(session_factory, owner, source_event_id)
             if claimed is None:
-                # Not claimable (running / in backoff / done): the step
-                # runtime owns the command — skip, do not double-execute.
+                # Not claimable (running / in backoff / done): the step runtime owns the
+                # command — skip, do not double-execute.
                 logger.info(
                     "Run command step %s not claimable — left to the step runtime",
                     source_event_id[:12],
@@ -67,11 +60,9 @@ async def _execute_run_command_task(
             await execute_claimed_step(session_factory, settings, forge_config, claimed)
             return
         if known is False:
-            # The identity is known to this system but the step is not
-            # visible yet — the ingress transaction may still be committing
-            # or the step belongs to another deployment. The step runtime
-            # owns this command; executing directly here has already caused
-            # double execution (review-class bug, found live).
+            # The identity is known to this system but the step is not visible yet — the
+            # ingress transaction may still be committing or the step belongs to another
+            # deployment.
             logger.warning(
                 "No persisted step for %s yet — skipping direct execution", source_event_id[:12]
             )
@@ -196,7 +187,7 @@ async def main() -> None:
     worker_id = f"worker-{os.getpid()}-{uuid4().hex[:6]}"
     shutdown_event = asyncio.Event()
 
-    # Run reconciler (M1): polls waiting_ci runs for pipeline completion.
+    # Run reconciler: polls waiting_ci runs for pipeline completion.
     gitlab = GitLabClient(
         base_url=settings.GITLAB_URL,
         token=forge_token(settings),
@@ -222,9 +213,9 @@ async def main() -> None:
             # Windows doesn't support add_signal_handler
             signal.signal(sig, lambda *_: _signal_handler())
 
-    # Run worker, step runtime, reaper, heartbeat, and the run reconciler
-    # concurrently (ADR-0017: the step runtime owns run commands; the Redis
-    # queue carries only accelerators for persisted run commands).
+    # Run worker, step runtime, reaper, heartbeat, and the run reconciler concurrently
+    # (ADR-0017: the step runtime owns run commands; the Redis queue carries only
+    # accelerators for persisted run commands).
     try:
         await asyncio.gather(
             run_worker(
@@ -251,9 +242,9 @@ async def main() -> None:
                 interval_seconds=15,
                 shutdown_event=shutdown_event,
             ),
-            # R11: probe-and-resolve stranded publication intents — runs for
-            # every GitHub deployment (builtin lane included, unlike the
-            # harness reconciler which gates on the workflow setting).
+            # probe-and-resolve stranded publication intents — runs for every GitHub
+            # deployment (builtin lane included, unlike the harness reconciler which gates
+            # on the workflow setting).
             run_github_publication_intents_reconciler(
                 settings,
                 forge_config,

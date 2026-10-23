@@ -1,15 +1,4 @@
-"""GitLab write path: materialize a ChangeSet as a branch and commit.
-
-Commit the action and publication intent in one transaction before dispatch.
-A stable operation key travels in the commit message. Recovery probes for
-exactly one matching marker and expected parent before any new write.
-
-A negative read cannot establish that an in-flight GitLab commit will never
-land. Keep bounded, backed-off certainty windows; after the last negative
-probe, park unknown with operator guidance. Adopt a late matching commit.
-A foreign head is BranchDriftError and preserves the human commit; an
-inconclusive probe remains unknown. Never replace the key or blindly retry.
-"""
+"""Publish validated changes with intent, probe and native outcome reconciliation."""
 
 from __future__ import annotations
 
@@ -46,23 +35,21 @@ from forge.repository.changeset import ChangeSet, Operation
 
 logger = logging.getLogger(__name__)
 
-#: A full 40-hex SHA is the only start_ref that pins a frozen base; any
-#: branch/tag name is resolved by GitLab at branch-creation time and may
-#: have moved by the time the commit lands.
+#: A full 40-hex SHA is the only start_ref that pins a frozen base; any branch/tag name is
+#: resolved by GitLab at branch-creation time and may have moved by the time the commit
+#: lands.
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
-#: Backoff for an intent whose probe read failed — the recovery scanner
-#: retries after this, the inline leg never spins on it.
+#: Backoff for an intent whose probe read failed — the recovery scanner retries after this,
+#: the inline leg never spins on it.
 _PROBE_RETRY_SECONDS = 30
 
 
 class WriteOutcome(StrEnum):
     COMMITTED = "committed"
     UNKNOWN = "unknown_outcome"
-    #: A12: the recovery probe was negative and the intent parked in the
-    #: certainty window — NOT final. The caller must not park the run
-    #: terminal: the settle re-probe (the lane's recovery scanner) adopts a
-    #: late-landing commit or resolves the honest unknown at the window end.
+    #: the recovery probe was negative and the intent parked in the certainty window — NOT
+    #: final.
     SETTLING = "settling"
 
 
@@ -73,12 +60,7 @@ class WriteResult:
 
 
 class BranchDriftError(Exception):
-    """The branch head is not the pinned base at dispatch time.
-
-    Raised *before* any commit is attempted when the caller-supplied
-    ``expected_head`` does not match the live branch head; carries the
-    expected and actual OIDs.
-    """
+    """The branch head is not the pinned base at dispatch time."""
 
     def __init__(self, branch: str, expected: str, actual: str | None) -> None:
         self.branch = branch
@@ -134,13 +116,13 @@ class ChangesetWriter:
         self._gitlab = gitlab
         self._session_factory = session_factory
         self._project_id = project_id
-        #: A12 certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``): how long
-        #: a negative recovery probe parks the intent before its re-probe.
-        #: ``None`` = the intents-module default.
+        #: certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``): how long a negative recovery
+        #: probe parks the intent before its re-probe. ``None`` = the intents-module
+        #: default.
         self._settle_seconds = settle_seconds
-        #: Operation key stamped into the commit message of the current (or
-        #: last) apply() call: the open intent's key on recovery re-entry,
-        #: the fresh intent's key otherwise. Injectable for tests.
+        #: Operation key stamped into the commit message of the current (or last) apply
+        #: call: the open intent's key on recovery re-entry, the fresh intent's key
+        #: otherwise.
         self.operation_key: str | None = None
 
     async def apply(
@@ -157,36 +139,13 @@ class ChangesetWriter:
         commit_cycle: int = 1,
         content_digest: str | None = None,
     ) -> WriteResult:
-        """Ensure the branch exists, commit the ChangeSet, journal the outcome.
-
-        *start_ref* is passed through verbatim to :meth:`ensure_branch`: a
-        full 40-hex SHA pins a frozen base, while a branch/tag name is
-        resolved by GitLab when the factory branch is created and may have
-        moved. When *expected_head* is given, the live branch head is
-        fetched before dispatch and must equal it — else
-        :class:`BranchDriftError` and nothing is committed.
-
-        The publication INTENT (R11) is written in the same transaction as
-        the ``action_log`` row, strictly before the HTTP effect; its
-        ``operation_key`` — *operation_key* when supplied, else minted here
-        exactly once — is stamped into the commit message as
-        ``(forge-op:<key>)`` and reused by every retry of this intent. When
-        an OPEN intent already exists for this identity (a crashed or
-        stalled previous attempt), the remote is PROBED first: a landed
-        previous attempt is adopted, never duplicated (see the module
-        docstring). *repo*/*idempotency_scope*/*commit_cycle*/*
-        content_digest* are probe-correlation metadata; *repo* defaults to
-        the GitLab project id and the scope to ``cycle-<n>``.
-
-        Returns :class:`WriteResult`; on ``unknown_outcome`` the caller must
-        block the run (ADR-0005) — the commit may or may not exist.
-        """
+        """Ensure the branch exists, commit the ChangeSet, journal the outcome."""
         repo_identity = str(repo) if repo else str(self._project_id)
         scope = idempotency_scope or f"cycle-{commit_cycle}"
 
-        # The durable record of a previous attempt, if any — read BEFORE the
-        # drift guard so a landed-but-unjournaled commit is adopted, not
-        # misread as drift (the R11 live failure).
+        # The durable record of a previous attempt, if any — read BEFORE the drift guard so
+        # a landed-but-unjournaled commit is adopted, not misread as drift (the live
+        # failure).
         open_intent = await self._open_intent(
             flow_run_id, provider, repo_identity, cs.branch, scope
         )
@@ -203,16 +162,16 @@ class ChangesetWriter:
             logger.debug("start_ref %s is a full SHA — frozen base", start_ref)
         await self.ensure_branch(cs.branch, start_ref)
 
-        # One head fetch serves both guards: drift detection against
-        # expected_head (before anything is committed) and the expected
-        # parent OID reconciliation needs if the response is lost.
+        # One head fetch serves both guards: drift detection against expected_head (before
+        # anything is committed) and the expected parent OID reconciliation needs if the
+        # response is lost.
         branch_head = await self._branch_head(cs.branch)
         if expected_head is not None and branch_head != expected_head:
             raise BranchDriftError(cs.branch, expected_head, branch_head)
 
-        # (b) intent rows before dispatch (ADR-0005 + R11): the publication
-        # intent (stable operation key + expected parent) and the action
-        # journal commit TOGETHER, then — and only then — dispatch.
+        # (b) intent rows before dispatch (ADR-0005 +): the publication intent (stable
+        # operation key + expected parent) and the action journal commit TOGETHER, then —
+        # and only then — dispatch.
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(
@@ -261,14 +220,13 @@ class ChangesetWriter:
                 cs.branch,
                 _commit_actions(cs),
                 commit_message,
-                # Never pass start_branch: on GitLab CE 18.x the Commits API
-                # then tries to create the branch again and 400s with
-                # "already exists" — ensure_branch has already guaranteed
-                # the branch exists.
+                # Never pass start_branch: on GitLab CE 18.x the Commits API then tries to
+                # create the branch again and 400s with "already exists" — ensure_branch has
+                # already guaranteed the branch exists.
             )
         except (CommitOutcomeUnknown, RemoteProtocolError):
-            # A closed response channel can follow an accepted commit, just
-            # like a timeout. Probe the existing intent; never replay the POST.
+            # A closed response channel can follow an accepted commit, just like a timeout.
+            # Probe the existing intent; never replay the POST.
             return await self._resolve_unknown(action_id, intent_id, commit_intent)
         except GitLabAPIError as exc:
             await self._fail(action_id, intent_id, exc, commit_intent.expected_head)
@@ -276,9 +234,9 @@ class ChangesetWriter:
 
         sha = commit.get("id")
         if not isinstance(sha, str) or not sha:
-            # A committed response without a usable sha cannot be correlated
-            # with later CI evidence — resolve through the probe instead of
-            # propagating a None into the candidate history.
+            # A committed response without a usable sha cannot be correlated with later CI
+            # evidence — resolve through the probe instead of propagating a None into the
+            # candidate history.
             return await self._resolve_unknown(action_id, intent_id, commit_intent)
         meta = self._meta({"sha": sha}, commit_intent.expected_head)
         # Exact-SHA correlation: this is the sha all later CI evidence must match.
@@ -293,17 +251,7 @@ class ChangesetWriter:
         branch_head: str | None,
         expected_head: str | None,
     ) -> WriteResult:
-        """Reconcile a PREVIOUS attempt's open intent before any new dispatch.
-
-        The decision table (docs/research/2026-09-17-remote-effect-reconciliation.md):
-        exactly one marker+parent match ⇒ ADOPT (this process re-enters on
-        the landed commit, zero new writes); zero matches + head intact ⇒
-        the A12 certainty window (``probing``), and only a re-probe at the
-        window end — still negative on this CAS-less lane — parks
-        ``unknown``; zero matches + head moved ⇒ ``duplicated`` (drift —
-        never force); ≥2 matches or a failed probe read ⇒ conservative
-        unknown. Never a blind POST as reconciliation.
-        """
+        """Reconcile a PREVIOUS attempt's open intent before any new dispatch."""
         self.operation_key = intent.operation_key
         try:
             commits = await self._gitlab.list_commits(self._project_id, intent.target_ref)
@@ -366,8 +314,8 @@ class ChangesetWriter:
             return WriteResult(WriteOutcome.UNKNOWN, None)
 
         if verdict is ProbeVerdict.DUPLICATED:
-            # The ref moved away from this intent (someone else's push or a
-            # later repair cycle owns the head) — drift, never force.
+            # The ref moved away from this intent (someone else's push or a later repair
+            # cycle owns the head) — drift, never force.
             async with self._session_factory() as session:
                 await complete_intent(
                     session, intent.id, "duplicated", remote_result={"head": branch_head}
@@ -379,12 +327,8 @@ class ChangesetWriter:
                 branch_head or "",
             )
 
-        # A12 REDISPATCH: a negative probe proves nothing landed YET — it can
-        # never prove that no first effect is in flight. Route through the
-        # effect-certainty settle machine instead of re-dispatching on one
-        # read: the intent parks ``probing`` for a bounded window and the
-        # re-probe at the window end decides (late landing ⇒ adopt; still
-        # negative on this CAS-less lane ⇒ honest unknown).
+        # REDISPATCH: a negative probe proves nothing landed YET — it can never prove that
+        # no first effect is in flight.
         decision = await self._settle(intent)
         if decision is SettleDecision.WAIT:
             logger.warning(
@@ -409,10 +353,9 @@ class ChangesetWriter:
             return WriteResult(WriteOutcome.SETTLING, None)
 
         if decision is SettleDecision.PARK_UNKNOWN:
-            # The certainty window expired with consistently-negative probes
-            # on a provider with NO branch-wide CAS (GitLab): absence of an
-            # in-flight effect is unprovable — park blocked(unknown_outcome)
-            # with operator instructions. Never a re-dispatch off reads.
+            # The certainty window expired with consistently-negative probes on a provider
+            # with NO branch-wide CAS (GitLab): absence of an in-flight effect is unprovable
+            # — park blocked(unknown_outcome) with operator instructions.
             logger.warning(
                 "Certainty window exhausted for intent %s (marker %s) with negative probes "
                 "on a CAS-less provider — parking unknown_outcome for an operator",
@@ -440,13 +383,9 @@ class ChangesetWriter:
                 await session.commit()
             return WriteResult(WriteOutcome.UNKNOWN, None)
 
-        # SettleDecision.REDISPATCH — reachable ONLY for CAS-protected
-        # adapters (github): the certainty window expired
-        # still-negative and the release (``probing → dispatched``) already
-        # happened inside the settle machine. On this GitLab transport the
-        # guarantee table never says redispatch (no branch-wide CAS — the
-        # exhausted window parks unknown above). The bounded same-key
-        # re-dispatch below is the shared, attempt-capped shape.
+        # SettleDecision.REDISPATCH — reachable ONLY for CAS-protected adapters (github):
+        # the certainty window expired still-negative and the release (``probing →
+        # dispatched``) already happened inside the settle machine.
         if expected_head is not None and intent.expected_parent_oid != expected_head:
             raise BranchDriftError(intent.target_ref, expected_head, branch_head or "")
         if int(intent.attempt_count) >= int(intent.max_attempts):
@@ -490,12 +429,7 @@ class ChangesetWriter:
         )
 
     async def _settle(self, intent: PublicationIntent) -> SettleDecision:
-        """Run the A12 effect-certainty machine for a negative probe.
-
-        Own transaction: the enter/extend path persists the ``probing`` park
-        (status + window end + settle bookkeeping); the release path writes
-        ``probing → dispatched`` for a CAS-protected adapter.
-        """
+        """Run the effect-certainty machine for a negative probe."""
         async with self._session_factory() as session:
             decision = await settle_negative_probe(
                 session,
@@ -548,14 +482,7 @@ class ChangesetWriter:
                 await session.commit()
 
     async def ensure_branch(self, branch: str, start_ref: str) -> bool:
-        """Create the branch; tolerate 'already exists' (idempotent re-entry).
-
-        Public so the ci_harness backend can guarantee the factory branch
-        exists before triggering the harness pipeline (ADR-0015).
-
-        Returns True when this call created the branch, False when it
-        pre-existed (retry after crash).
-        """
+        """Create the branch; tolerate 'already exists' (idempotent re-entry)."""
         try:
             await self._gitlab.create_branch(self._project_id, branch, start_ref)
             return True
@@ -575,16 +502,7 @@ class ChangesetWriter:
     async def _resolve_unknown(
         self, action_id: int, intent_id: str, intent: _CommitIntent
     ) -> WriteResult:
-        """Reconcile a lost create-commit response by marker + parent.
-
-        A commit proves this attempt landed only when its message contains
-        this intent's exact ``(forge-op:...)`` marker AND its parent is the
-        branch head captured at intent time — the human message alone
-        repeats across repair cycles. Exactly one such commit resolves as
-        ``adopted`` (the response was lost, the probe proves the effect);
-        zero or several stay unknown — the run must block, not retry
-        (ADR-0005), and the intent row records ``unknown``.
-        """
+        """Reconcile a lost create-commit response by marker + parent."""
         marker = op_marker(intent.operation_key)
         logger.warning(
             "create_commit outcome unknown on branch %r — reconciling by marker %s + parent",
@@ -640,13 +558,7 @@ class ChangesetWriter:
         *,
         adopted: bool,
     ) -> None:
-        """Journal the success on BOTH rows in one transaction.
-
-        The intent records ``committed`` when this dispatch's own response
-        arrived and ``adopted`` when a probe found a previous attempt's
-        effect — the run advances identically on either (ADR-0005/R11
-        invariant 4), the distinction stays auditable.
-        """
+        """Journal the success on BOTH rows in one transaction."""
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.complete_action(action_id, "succeeded", meta)  # type: ignore[arg-type]

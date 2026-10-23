@@ -1,27 +1,4 @@
-"""PublicationIntent helpers: identity, state machine, the probe decision
-table (R11) and the effect-certainty settle machine (A12,
-docs/research/2026-09-17-remote-effect-reconciliation.md).
-
-The intent row is the durable ``Idempotency-Key`` forge cannot get from the
-git providers: minted once, persisted BEFORE the HTTP effect, and resolved
-AFTER an ambiguous outcome by PROBING the remote by identity — the
-``(forge-op:<key>)`` message marker (frozen contract, shared with the GitLab
-writer) plus the intent-time expected parent OID. This module is the single
-place that owns the key format, the marker format, the decision table and
-the per-adapter redispatch guarantee, so the GitLab writer and the
-GitHub DevOps lanes cannot drift.
-
-Nothing here talks to a provider: probes are performed by the callers (they
-own the clients) and classified through :func:`classify_probe` — the pure
-decision table, unit-tested in isolation. A NEGATIVE probe (zero marker
-hits, head intact) is *not* proof that no remote effect is pending (A12):
-the provider may have accepted the first request and be applying it slowly.
-The :func:`settle_negative_probe` machine turns that negative read into a
-bounded certainty window (``probing`` state, :data:`DEFAULT_SETTLE_WINDOW_SECONDS`
-with backoff) that must expire with the probe STILL negative before any
-redispatch — and, on providers with no branch-wide CAS, the window's
-exhaustion parks the intent ``unknown`` instead of ever re-dispatching.
-"""
+"""Record publication intent before effects and preserve unresolved outcomes."""
 
 from __future__ import annotations
 
@@ -36,24 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.durable.controller import as_aware_utc
 from forge.durable.models import PublicationIntent
 
-#: Open states — an intent whose effect may exist remotely but whose outcome
-#: is not durably recorded yet. Every retry of the publication REUSES the
-#: open intent's ``operation_key`` (same key forever) and probes before it
-#: ever re-posts. ``probing`` doubles as the A12 effect-certainty state: a
-#: negative probe parks the intent here for a bounded settle window instead
-#: of re-dispatching on the strength of one read.
+#: Open states — an intent whose effect may exist remotely but whose outcome is not durably
+#: recorded yet.
 OPEN_STATES: tuple[str, ...] = ("requested", "dispatched", "probing")
 
-#: Terminal states — no further transition is legal (mirrors ActionLog's
-#: terminal immutability).
+#: Terminal states — no further transition is legal (mirrors ActionLog's terminal
+#: immutability).
 TERMINAL_STATES: tuple[str, ...] = ("committed", "adopted", "duplicated", "unknown", "failed")
 
-#: Legal transitions (requested -> dispatched is the only exit of a fresh
-#: intent; probing is the A12 effect-certainty state — a negative probe's
-#: bounded settle window; dispatched -> dispatched is the bounded SAME-KEY
-#: re-dispatch after the certainty window expired with the probe still
-#: negative on a CAS-protected provider). Anything not listed raises
-#: :class:`InvalidIntentTransition`.
+#: Legal transitions (requested -> dispatched is the only exit of a fresh intent; probing is
+#: the effect-certainty state — a negative probe's bounded settle window; dispatched ->
+#: dispatched is the bounded SAME-KEY re-dispatch after the certainty window expired with
+#: the probe still negative on a CAS-protected provider).
 _LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     "requested": frozenset({"dispatched", "failed"}),
     "dispatched": frozenset(
@@ -69,38 +40,33 @@ class InvalidIntentTransition(Exception):
     """The intent row may not move to the requested state (terminal or no edge)."""
 
 
-# ---------------------------------------------------------------------------
-# A12: effect certainty — a negative probe is not proof of absence
-# ---------------------------------------------------------------------------
+# effect certainty — a negative probe is not proof of absence
+#
 
 #: The certainty window opened by the FIRST negative probe (config knob
 #: ``FORGE_PUBLISH_SETTLE_SECONDS``; lanes pass their configured value in).
-#: While it is open the intent stays ``probing`` and nothing is dispatched:
-#: the provider may have accepted the first request and be applying it
-#: slowly, and one negative read must never be called "safe to repeat".
 DEFAULT_SETTLE_WINDOW_SECONDS = 30
 
-#: Each still-negative window-end re-probe backs the next window off by this
-#: factor (30s → 60s → 120s …) — cheap reads, bounded growth.
+#: Each still-negative window-end re-probe backs the next window off by this factor (30s →
+#: 60s → 120s …) — cheap reads, bounded growth.
 SETTLE_BACKOFF_FACTOR = 2
 
-#: The certainty budget: after this many settle windows the negative reads
-#: are as good as absence gets on a provider without native preconditions,
-#: and the honest outcome is the conservative park (``PARK_UNKNOWN``).
+#: The certainty budget: after this many settle windows the negative reads are as good as
+#: absence gets on a provider without native preconditions, and the honest outcome is the
+#: conservative park (``PARK_UNKNOWN``).
 MAX_SETTLE_ROUNDS = 3
 
 CAS_PROTECTED_PROVIDERS: frozenset[str] = frozenset({"github"})
 
 
 class RedispatchGuarantee(StrEnum):
-    """What makes a same-key re-dispatch safe on this adapter (A12)."""
+    """What makes a same-key re-dispatch safe on this adapter."""
 
-    #: A branch-wide CAS write: the redispatch itself refuses a duplicate
-    #: (the slow first write would have moved the head).
+    #: A branch-wide CAS write: the redispatch itself refuses a duplicate (the slow first
+    #: write would have moved the head).
     CAS_PROTECTED = "cas_protected"
-    #: No native precondition: safety must be EARNED by the certainty
-    #: window, and even then only the park is honest when it expires
-    #: negative.
+    #: No native precondition: safety must be EARNED by the certainty window, and even then
+    #: only the park is honest when it expires negative.
     UNPROTECTED = "unprotected"
 
 
@@ -114,21 +80,20 @@ def redispatch_guarantee(provider: str) -> RedispatchGuarantee:
 class SettleDecision(StrEnum):
     """What :func:`settle_negative_probe` decided for a negative probe."""
 
-    #: The certainty window is open (or was just opened/extended) — no
-    #: dispatch; the re-probe happens at the window end.
+    #: The certainty window is open (or was just opened/extended) — no dispatch; the
+    #: re-probe happens at the window end.
     WAIT = "wait"
-    #: The window expired still-negative on a CAS-protected provider — the
-    #: same-key redispatch is inherently safe (the CAS refuses a duplicate).
+    #: The window expired still-negative on a CAS-protected provider — the same-key
+    #: redispatch is inherently safe (the CAS refuses a duplicate).
     REDISPATCH = "redispatch"
-    #: The window expired still-negative on a provider with no branch-wide
-    #: CAS — park blocked(unknown_outcome) with operator instructions; never
-    #: guess, never re-dispatch.
+    #: The window expired still-negative on a provider with no branch-wide CAS — park
+    #: blocked(unknown_outcome) with operator instructions; never guess, never re-dispatch.
     PARK_UNKNOWN = "park_unknown"
 
 
 @dataclass(frozen=True)
 class SettleState:
-    """The persisted A12 settle bookkeeping (``remote_result['settle']``)."""
+    """The persisted settle bookkeeping (``remote_result['settle']``)."""
 
     rounds: int = 0
     window_seconds: int = DEFAULT_SETTLE_WINDOW_SECONDS
@@ -176,12 +141,7 @@ def _parse_ts(value: object) -> datetime | None:
 
 
 def settle_expired(intent: PublicationIntent, *, now: datetime) -> bool:
-    """Whether *intent*'s certainty window has run out (re-probe is due).
-
-    The authoritative stamp is the row's ``next_probe_at`` — the same value
-    the recovery scanner's due gate reads, so every consumer agrees on when
-    the window ends. (The settle block's ``reprobe_at`` is informational.)
-    """
+    """Whether *intent*'s certainty window has run out (re-probe is due)."""
     if intent.status != "probing":
         return False
     return intent.next_probe_at is None or as_aware_utc(intent.next_probe_at) <= as_aware_utc(now)
@@ -204,28 +164,7 @@ async def settle_negative_probe(
     window_seconds: int = DEFAULT_SETTLE_WINDOW_SECONDS,
     max_rounds: int = MAX_SETTLE_ROUNDS,
 ) -> SettleDecision:
-    """The A12 machine for a REDISPATCH verdict — call it on every negative probe.
-
-    A negative probe (zero marker hits, head == expected parent) proves
-    nothing has landed *yet*; it cannot prove no first effect is in flight.
-    The decision ladder:
-
-    1. ``dispatched`` + negative → open the certainty window (``probing``,
-       ``next_probe_at`` = now + window) → :attr:`SettleDecision.WAIT`;
-    2. ``probing`` with the window still open → WAIT (the re-probe happens
-       at the window end, not hot);
-    3. ``probing`` expired still-negative with rounds left → extend the
-       window with backoff → WAIT;
-    4. ``probing`` expired still-negative, rounds exhausted →
-       :attr:`SettleDecision.REDISPATCH` on a CAS-protected provider (the
-       release writes ``probing → dispatched`` — the dispatch itself refuses
-       a duplicate) or :attr:`SettleDecision.PARK_UNKNOWN` otherwise (the
-       caller parks blocked(unknown_outcome) with operator instructions —
-       on GitLab absence of effect is unprovable during in-flight windows).
-
-    Flushes into the caller's transaction. The PARK_UNKNOWN write stays with
-    the caller (it owns the terminal ``remote_result``).
-    """
+    """The machine for a REDISPATCH verdict — call it on every negative probe."""
     now = as_aware_utc(now) if now is not None else datetime.now(timezone.utc)
     state = settle_state(intent)
     if intent.status == "dispatched":
@@ -243,9 +182,9 @@ async def settle_negative_probe(
             session, intent, rounds=state.rounds + 1, window_seconds=backed_off, now=now
         )
     if redispatch_guarantee(intent.provider) is RedispatchGuarantee.CAS_PROTECTED:
-        # The guarantee does the work: the redispatch carries expected_parent
-        # == the unchanged head, so a slow first write would move the head
-        # and the CAS would refuse the duplicate. Release the window.
+        # The guarantee does the work: the redispatch carries expected_parent == the
+        # unchanged head, so a slow first write would move the head and the CAS would refuse
+        # the duplicate.
         await mark_dispatched(session, intent.id)
         return SettleDecision.REDISPATCH
     return SettleDecision.PARK_UNKNOWN
@@ -279,23 +218,12 @@ async def _open_settle(
 
 
 def mint_operation_key() -> str:
-    """A fresh operation key — minted ONCE per intent, never per dispatch.
-
-    12 hex chars, the exact shape the GitLab writer has always stamped as
-    ``(forge-op:<key>)``. Retries MUST reuse the intent's key (this is the
-    R11 fix); only a genuinely new intent (new repair cycle, new content)
-    mints a new one.
-    """
+    """A fresh operation key — minted ONCE per intent, never per dispatch."""
     return uuid4().hex[:12]
 
 
 def op_marker(operation_key: str) -> str:
-    """The frozen commit-message marker contract: ``(forge-op:<key>)``.
-
-    Substring-matched by every provider probe (GitHub REST list-commits has
-    no trailer parsing, so a suffix works everywhere — research open
-    question §1 resolved as "suffix, frozen").
-    """
+    """The frozen commit-message marker contract: ``(forge-op:<key>)``."""
     return f"(forge-op:{operation_key})"
 
 
@@ -307,29 +235,23 @@ def message_with_marker(commit_message: str, operation_key: str) -> str:
 class ProbeVerdict(StrEnum):
     """What the remote probe proves about one intent (the decision table)."""
 
-    #: Exactly one commit with this intent's marker AND the expected parents:
-    #: this intent's effect landed — adopt it and advance the run.
+    #: Exactly one commit with this intent's marker AND the expected parents: this intent's
+    #: effect landed — adopt it and advance the run.
     ADOPT = "adopt"
-    #: Zero marker matches and the branch head still equals the expected
-    #: parent: nothing landed — safe to (re)dispatch with the SAME key.
+    #: Zero marker matches and the branch head still equals the expected parent: nothing
+    #: landed — safe to (re)dispatch with the SAME key.
     REDISPATCH = "redispatch"
-    #: Zero marker matches and the head moved (or the branch is gone):
-    #: someone else owns the ref now — never force, never adopt.
+    #: Zero marker matches and the head moved (or the branch is gone): someone else owns the
+    #: ref now — never force, never adopt.
     DUPLICATED = "duplicated"
-    #: Two or more marker/parent matches (a double write or a key bug) —
-    #: inconclusive; the run blocks on ``unknown_outcome``, never guesses.
+    #: Two or more marker/parent matches (a double write or a key bug) — inconclusive; the
+    #: run blocks on ``unknown_outcome``, never guesses.
     UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
 class ProbeObservation:
-    """The probe inputs, provider-shaped into one neutral tuple.
-
-    ``marker_hits`` are the SHAs of branch commits whose message contains
-    this intent's exact marker AND whose parent list equals the intent's
-    expectation (root commit ⇒ empty parents). ``head_oid`` is the branch's
-    current head; ``None`` means the branch has no commits (or is gone).
-    """
+    """The probe inputs, provider-shaped into one neutral tuple."""
 
     marker_hits: tuple[str, ...]
     head_oid: str | None
@@ -337,27 +259,14 @@ class ProbeObservation:
 
 
 def classify_probe(observation: ProbeObservation) -> ProbeVerdict:
-    """The R11 decision table (docs/research/2026-09-17-remote-effect-reconciliation.md).
-
-    | Observation                                   | Proof                      | Verdict     |
-    |-----------------------------------------------|----------------------------|-------------|
-    | exactly 1 marker+parent match                 | this attempt landed        | ADOPT       |
-    | ≥2 matches                                    | double write / key bug     | UNKNOWN     |
-    | 0 matches, head == expected parent            | nothing landed *yet*       | REDISPATCH  |
-    | 0 matches, head moved / branch gone           | someone else owns the ref  | DUPLICATED  |
-
-    A12 caveat on REDISPATCH: "nothing landed *yet*" is all a negative read
-    can ever prove — the provider may have accepted the first request and be
-    applying it slowly. Every consumer of this verdict must route it through
-    :func:`settle_negative_probe` instead of dispatching on the read alone.
-    """
+    """The decision table (docs/research/2026-09-17-remote-effect-reconciliation.md)."""
     if len(observation.marker_hits) > 1:
         return ProbeVerdict.UNKNOWN
     if len(observation.marker_hits) == 1:
         return ProbeVerdict.ADOPT
     if observation.head_oid == observation.expected_parent_oid:
-        # Includes the root-commit case: both None = the branch still has no
-        # commits — exactly the state the intent expected.
+        # Includes the root-commit case: both None = the branch still has no commits —
+        # exactly the state the intent expected.
         return ProbeVerdict.REDISPATCH
     return ProbeVerdict.DUPLICATED
 
@@ -368,16 +277,7 @@ def commit_matches(
     operation_key: str,
     expected_parent_oid: str | None,
 ) -> list[str]:
-    """The ``marker_hits`` for :class:`ProbeObservation` from a provider's
-    commit listing.
-
-    *commits* is the provider-shaped list each client returns:
-    ``{"sha"/"id"/"commit_id", "message"/"comment", "parent_ids"/"parents"}``
-    — both GitLab's ``list_commits`` and the new GitHub listings, so
-    the three lanes share one matcher. A commit counts ONLY when the exact
-    marker is present AND its parents equal the intent-time expectation; the
-    human message repeats across repair cycles and proves nothing (F07).
-    """
+    """The ``marker_hits`` for:class:`ProbeObservation` from a provider's commit listing."""
     marker = op_marker(operation_key)
     expected_parents: list[str] = [] if expected_parent_oid is None else [expected_parent_oid]
     hits: list[str] = []
@@ -406,13 +306,7 @@ async def find_open_intent(
     operation: str = "commit",
     idempotency_scope: str | None = None,
 ) -> PublicationIntent | None:
-    """The open intent for this publication identity, newest first.
-
-    ``idempotency_scope=None`` matches any scope: a crashed attempt's intent
-    must be found regardless of the cycle counter a resumed walk derives
-    (the durable row wins over re-derivation). None when every intent for
-    the identity is terminal — the caller may mint a fresh one.
-    """
+    """The open intent for this publication identity, newest first."""
     query = (
         select(PublicationIntent)
         .where(
@@ -445,13 +339,7 @@ async def record_intent(
     expected_parent_oid: str | None = None,
     expected_head: str | None = None,
 ) -> PublicationIntent:
-    """Insert the ``requested`` intent row (the intent-before-I/O write).
-
-    The row is flushed into the CALLER's transaction — the same transaction
-    that journals the ``action_log`` intent — so the effect can never start
-    without a durable key (R11 invariant 1). ``operation_key`` is minted
-    here exactly once when not supplied.
-    """
+    """Insert the ``requested`` intent row (the intent-before-I/O write)."""
     intent = PublicationIntent(
         run_id=run_id,
         provider=provider,
@@ -478,18 +366,7 @@ async def mark_dispatched(
     expected_parent_oid: str | None = None,
     expected_head: str | None = None,
 ) -> PublicationIntent:
-    """``requested → dispatched`` (or the A12 release ``probing →
-    dispatched``): the caller is about to touch the remote.
-
-    Stamps the intent-time branch head (the probe's parent expectation) when
-    given and counts the attempt. The ``probing`` entry is the certainty
-    window's release on a CAS-protected provider
-    (:func:`settle_negative_probe` decision REDISPATCH): the window expired
-    still-negative and the branch-wide CAS makes the same-key redispatch
-    inherently safe. Flushes into the caller's transaction; the caller
-    commits BEFORE the HTTP effect so a crash leaves the intent findable by
-    the recovery scanner.
-    """
+    """``requested → dispatched`` (or the release ``probing → dispatched``): the caller is about to touch the remote."""
     intent = await session.get(PublicationIntent, intent_id)
     if intent is None:
         raise InvalidIntentTransition(f"publication intent {intent_id} not found")
@@ -518,27 +395,15 @@ async def complete_intent(
     provider_object_id: str | None = None,
     remote_result: dict | None = None,
 ) -> PublicationIntent:
-    """Record the outcome of an intent exactly once (terminal is final).
-
-    ``committed`` = this dispatch's own response arrived; ``adopted`` = a
-    probe found a PREVIOUS attempt's effect (the durable result is filled in
-    from the probe); ``duplicated`` = the ref moved away from this intent;
-    ``unknown`` = inconclusive — the caller must block the run (ADR-0005);
-    ``failed`` = a deterministic provider rejection. Flushes into the
-    caller's transaction.
-    """
+    """Record the outcome of an intent exactly once (terminal is final)."""
     intent = await session.get(PublicationIntent, intent_id)
     if intent is None:
         raise InvalidIntentTransition(f"publication intent {intent_id} not found")
     if status not in _LEGAL_TRANSITIONS[intent.status]:
-        # Terminal rows are immutable — but a RE-publication of an effect
-        # that is already terminally recorded is not a conflict: e.g. a
-        # repair cycle force-pushed the same candidate, the probe had
-        # already ``adopted`` the commit, and the direct push then answers
-        # ok. Completing the same intent ``committed`` over ``adopted``
-        # must be an idempotent no-op, not an exception (LIVE-found
-        # 2026-09-20: the raise aborted the publish step mid-transaction
-        # while the run kept going, poisoning the review context).
+        # Terminal rows are immutable — but a RE-publication of an effect that is already
+        # terminally recorded is not a conflict: e.g. a repair cycle force-pushed the same
+        # candidate, the probe had already ``adopted`` the commit, and the direct push then
+        # answers ok.
         if (
             intent.status in TERMINAL_STATES
             and intent.provider_object_id
@@ -567,11 +432,7 @@ async def due_intents(
     now: datetime | None = None,
     limit: int = 25,
 ) -> list[PublicationIntent]:
-    """The open intents the recovery scanner owes a probe, oldest first.
-
-    ``next_probe_at`` NULL means due immediately (a just-crashed attempt);
-    a set value is the jittered backoff after an inconclusive probe pass.
-    """
+    """The open intents the recovery scanner owes a probe, oldest first."""
     query = (
         select(PublicationIntent)
         .where(

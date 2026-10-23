@@ -1,21 +1,4 @@
-"""Verification profile + verdict evidence (F19, ADR-0018 §5; R02 honesty).
-
-Two concerns live here:
-
-- :class:`VerificationProfile` is the effective verification policy built
-  from settings (sorted required jobs, producer allowlist placeholder,
-  freshness window). :func:`evaluate` keeps the ``(ok, reason)`` contract of
-  :func:`forge.runs.ci_contract.evaluate_quality_contract`; an empty profile
-  never *fails* the run, but R02 forbids presenting pipeline success as
-  verified — the caller labels the run with :meth:`VerificationResult.unverified`.
-- :class:`VerificationResult` is the ONE evidence dict every provider
-  records under ``flow_runs.evidence["verification"]`` (``status``,
-  ``tested_oid``, ``observed_at``, ``producer``). R02: verified must mean
-  the same thing on GitLab and GitHub — only
-  ``status="passed"`` is verified; every other form (``pending``,
-  ``failed``, ``unknown``, ``not_configured``, ``unverified``) reaches the
-  human labeled as what it is, never as a green check.
-"""
+"""Verify independent checks for the exact current candidate."""
 
 from __future__ import annotations
 
@@ -28,16 +11,13 @@ from forge.config import Settings
 from forge.gitlab.schemas import Job, Pipeline
 from forge.runs.ci_contract import evaluate_quality_contract
 
-#: Seconds a verification verdict stays fresh. Placeholder for the producer
-#: allowlist wave: the reconciler evaluates on pipeline completion, so the
-#: window bounds nothing today — it is part of the frozen profile shape.
+#: Seconds a verification verdict stays fresh.
 DEFAULT_FRESHNESS_WINDOW_SECONDS = 60
 
-#: The unified verdict vocabulary (R02). ``passed`` is the ONLY verified
-#: status; ``unverified``/``not_configured`` are the honest no-CI forms;
-#: ``stale`` (R36-14) is the re-rendering of a verdict whose subject no
-#: longer binds the current candidate — retained evidence, withdrawn
-#: authority, never ``verified_ready``.
+#: The unified verdict vocabulary. ``passed`` is the ONLY verified status;
+#: ``unverified``/``not_configured`` are the honest no-CI forms; ``stale`` is the
+#: re-rendering of a verdict whose subject no longer binds the current candidate — retained
+#: evidence, withdrawn authority, never ``verified_ready``.
 STATUS_PENDING = "pending"
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -46,16 +26,15 @@ STATUS_NOT_CONFIGURED = "not_configured"
 STATUS_UNVERIFIED = "unverified"
 STATUS_STALE = "stale"
 
-#: The subject freshness vocabulary (R36-14): a recorded verdict is
-#: ``current`` for the candidate it names, ``stale`` for any other, and
-#: ``unknown`` when it carries no subject identity at all (a row written
-#: before the binding landed — its legacy sha binding still decides).
+#: The subject freshness vocabulary: a recorded verdict is ``current`` for the candidate it
+#: names, ``stale`` for any other, and ``unknown`` when it carries no subject identity at
+#: all (a row written before the binding landed — its legacy sha binding still decides).
 FRESHNESS_CURRENT = "current"
 FRESHNESS_STALE = "stale"
 FRESHNESS_UNKNOWN = "unknown"
 
-#: The reporting system behind a verdict — part of the evidence so an
-#: operator can tell WHO claimed a check passed.
+#: The reporting system behind a verdict — part of the evidence so an operator can tell WHO
+#: claimed a check passed.
 PRODUCER_GITLAB_PIPELINE = "gitlab-pipeline"
 PRODUCER_GITHUB_CHECKS = "github-checks"
 
@@ -66,18 +45,12 @@ def _utc_now_iso() -> str:
 
 @dataclass(frozen=True)
 class VerificationResult:
-    """A provider-independent verification verdict for one candidate commit.
-
-    ``as_evidence`` is the exact dict stored under
-    ``flow_runs.evidence["verification"]`` — the same key shape on every
-    provider (R02). ``summary``/``surface`` are optional detail: the failed
-    check names, or the per-job/build results backing the verdict.
-    """
+    """A provider-independent verification verdict for one candidate commit."""
 
     #: One of the ``STATUS_*`` constants above.
     status: str
-    #: The candidate commit oid the verdict is bound to (ADR-0008: a verdict
-    #: approves a *specific* commit, never a branch).
+    #: The candidate commit oid the verdict is bound to (ADR-0008: a verdict approves a
+    #: *specific* commit, never a branch).
     tested_oid: str
     #: ISO-8601 UTC moment the verdict was observed.
     observed_at: str
@@ -87,15 +60,14 @@ class VerificationResult:
     summary: str = ""
     #: Optional per-check details (name/status or name/result entries).
     surface: tuple[dict, ...] = field(default=())
-    #: R36-14: the subject the verdict vouches for — the candidate
-    #: digest / source OID / tested OID / generation / plan+environment
-    #: digests, as the ``verification.subject_identity`` evidence
-    #: fragment. ``None`` (the default) keeps pre-R36-14 verdicts
-    #: byte-identical; a verdict that names its subject renders it.
+    #: the subject the verdict vouches for — the candidate digest / source OID / tested OID
+    #: / generation / plan+environment digests, as the ``verification.subject_identity``
+    #: evidence fragment. ``None`` (the default) keeps pre- verdicts byte-identical; a
+    #: verdict that names its subject renders it.
     subject_identity: Mapping[str, Any] | None = None
 
     def as_evidence(self) -> dict:
-        """The evidence-fragment dict (the unified R02 shape)."""
+        """The evidence-fragment dict (the unified shape)."""
         evidence: dict = {
             "status": self.status,
             "tested_oid": self.tested_oid,
@@ -112,7 +84,7 @@ class VerificationResult:
 
     @property
     def verified(self) -> bool:
-        """R02: only a passed verdict counts as verified — nothing else."""
+        """only a passed verdict counts as verified — nothing else."""
         return self.status == STATUS_PASSED
 
     # -- constructors (one per verdict, so call sites read as sentences) ----
@@ -171,9 +143,7 @@ class VerificationResult:
 class VerificationProfile:
     """The effective verification policy a run's CI verdict is judged by."""
 
-    #: CI job names that must exist AND succeed (ADR-0008). Empty means the
-    #: deployment has no verification profile — pipeline success only, which
-    #: R02 labels honestly as *unverified* (never as verified).
+    #: CI job names that must exist AND succeed (ADR-0008).
     required_jobs: tuple[str, ...]
     #: Placeholder for the producer allowlist (who may report a verdict).
     producers: tuple[str, ...] = ()
@@ -193,51 +163,29 @@ def evaluate(
     jobs: list[Job],
     profile: VerificationProfile,
 ) -> tuple[bool, str]:
-    """Evaluate the verification profile for a finished pipeline.
-
-    Same ``(ok, reason)`` contract as the ADR-0008 quality contract. An empty
-    profile is ``ok=True`` with a warning reason — the caller records the
-    honest :meth:`VerificationResult.unverified` verdict instead of claiming
-    a verification that never ran. A non-empty profile enforces every
-    required job exactly as before.
-    """
+    """Evaluate the verification profile for a finished pipeline."""
     if not profile.required_jobs:
         return True, "no verification profile configured (warning)"
     return evaluate_quality_contract(pipeline, jobs, profile.required_jobs)
 
 
-# ----------------------------------------------------------------------
-# A01: the positive-proof contract (GitHub Actions)
-# ----------------------------------------------------------------------
-#
-# Verification is POSITIVE PROOF that the required checks RAN and SUCCEEDED
-# for the exact candidate commit — never "nothing failed". The frozen
-# executable spec (``forge.runs.spec``) carries the required-checks list and
-# the harness lane identity (``harness_workflow`` / ``lane_pipeline_id``);
-# the provider services observe the candidate's checks and classify every
-# conclusion through :func:`evaluate_positive_proof` below. Verdict rules:
-#
-# - verified ONLY when every required check is PRESENT with an explicitly
-#   successful conclusion for the candidate oid (or an explicitly waived
-#   inconclusive one — the FORGE_VERIFICATION_WAIVE_CONCLUSIONS policy);
-# - a green OPTIONAL check never substitutes for a missing required one,
-#   and (missing/inconclusive) proof keeps the run waiting — it never
-#   verifies and never repairs;
-# - a conclusion that BLAMES THE CHANGE (failure-class) is the only repair
-#   trigger; CANCELLED/TIMED_OUT conclusions are infrastructure evidence —
-#   they block, never repair (the repair budget is for code failures only);
-# - the verdict binds to the sha the PROVIDER verified (each observed
-#   run/build carries its own head oid), never a self-asserted one.
+# the positive-proof contract (GitHub Actions)
+# Verification is
+# POSITIVE PROOF that the required checks RAN and SUCCEEDED for the exact candidate commit —
+# never "nothing failed". The frozen executable spec (``forge.runs.spec``) carries the
+# required-checks list and the harness lane identity (``harness_workflow`` /
+# ``lane_pipeline_id``); the provider services observe the candidate's checks and classify
+# every conclusion through :func:`evaluate_positive_proof` below.
 
 #: GitHub Actions run conclusions that PROVE a check succeeded.
 GITHUB_SUCCESS_CONCLUSIONS: frozenset[str] = frozenset({"success"})
-#: GitHub Actions conclusions that carry evidence the CHANGE is wrong (the
-#: only repair triggers).
+#: GitHub Actions conclusions that carry evidence the CHANGE is wrong (the only repair
+#: triggers).
 GITHUB_CODE_FAILURE_CONCLUSIONS: frozenset[str] = frozenset(
     {"failure", "action_required", "startup_failure"}
 )
-#: GitHub Actions conclusions that mean the EXECUTION died (cancelled by a
-#: human/system, runner timeout) — infrastructure, never code repair.
+#: GitHub Actions conclusions that mean the EXECUTION died (cancelled by a human/system,
+#: runner timeout) — infrastructure, never code repair.
 GITHUB_INFRA_CONCLUSIONS: frozenset[str] = frozenset({"cancelled", "timed_out"})
 
 
@@ -249,30 +197,16 @@ PROOF_INCONCLUSIVE = "inconclusive"
 PROOF_CODE_FAILURE = "code_failure"
 PROOF_INFRA_FAILURE = "infra_failure"
 
-#: A01: the blocked-reason token for a cancelled/timed_out verification
-#: surface — infrastructure evidence, never a code-repair trigger (the
-#: ``verification_timeout``-family of honest parked reasons).
+#: the blocked-reason token for a cancelled/timed_out verification surface — infrastructure
+#: evidence, never a code-repair trigger (the ``verification_timeout``-family of honest
+#: parked reasons).
 VERIFICATION_INFRA_REASON = "verification_infrastructure"
 
 
 def verification_epoch(
     evidence: Mapping[str, Any] | None, candidate_sha: str, now: datetime
 ) -> tuple[dict[str, str], bool]:
-    """The verification epoch for *candidate_sha* — a B01 fix.
-
-    The wait deadline must anchor to WHEN WAITING BEGAN for THIS candidate,
-    never to ``FlowRun.updated_at``: every observation merges new evidence
-    and ``updated_at`` has ``onupdate`` — a poll every 15s slid the 1800s
-    deadline forever (review e53ffd2 B01; probe: 480 observations, 7200
-    simulated seconds, no timeout).
-
-    The epoch lives in the run's evidence (``verification_epoch``):
-    ``{"candidate_sha": ..., "started_at": iso}``. It is written ONCE per
-    candidate — a new candidate starts a new epoch (a genuinely new wait);
-    repeated observations of the same candidate, restarts and ``/status``
-    never touch it. Pure: returns ``(epoch, changed)`` — the caller
-    persists via its evidence-merge when *changed*.
-    """
+    """The verification epoch for *candidate_sha* — a B01 fix."""
     stored = (evidence or {}).get("verification_epoch")
     if isinstance(stored, Mapping):
         if str(stored.get("candidate_sha") or "") == candidate_sha and stored.get("started_at"):
@@ -281,11 +215,7 @@ def verification_epoch(
 
 
 def epoch_started_at(epoch: Mapping[str, Any]) -> datetime | None:
-    """Parse the epoch's ``started_at`` (ISO) into an aware datetime.
-
-    None when unparseable — the caller treats an unknown start as "no
-    deadline yet" and the next pass re-writes the epoch.
-    """
+    """Parse the epoch's ``started_at`` (ISO) into an aware datetime."""
     raw = str((epoch or {}).get("started_at") or "")
     try:
         parsed = datetime.fromisoformat(raw)
@@ -297,27 +227,14 @@ def epoch_started_at(epoch: Mapping[str, Any]) -> datetime | None:
 
 
 def waived_conclusions_from_settings(settings: Settings) -> frozenset[str]:
-    """The policy waiver set from ``FORGE_VERIFICATION_WAIVE_CONCLUSIONS``.
-
-    Comma-separated provider conclusions/results a deployment explicitly
-    accepts on a REQUIRED check (e.g. ``"skipped,neutral"``). Lower-cased so
-    either vocabulary spelling matches. Empty (default) — a skipped/neutral/
-    unknown conclusion on a required check never verifies the run.
-    """
+    """The policy waiver set from ``FORGE_VERIFICATION_WAIVE_CONCLUSIONS``."""
     raw = str(getattr(settings, "FORGE_VERIFICATION_WAIVE_CONCLUSIONS", "") or "")
     return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
 
 
 @dataclass(frozen=True)
 class PositiveProof:
-    """The A01 positive-proof evaluation over one candidate's observations.
-
-    ``verified`` is True only when every required check is proven: present
-    with an explicitly successful conclusion (or an explicitly waived
-    inconclusive one). ``code_failures``/``infra_failures`` name the proof
-    checks whose conclusion blames the change / the execution environment;
-    ``unproven`` names the checks a green surface could not prove.
-    """
+    """The positive-proof evaluation over one candidate's observations."""
 
     required: tuple[str, ...]
     succeeded: tuple[str, ...]
@@ -326,9 +243,9 @@ class PositiveProof:
     inconclusive: tuple[str, ...]
     code_failures: tuple[str, ...]
     infra_failures: tuple[str, ...]
-    #: C01: checks whose name matched MULTIPLE distinct workflow identities
-    #: with DISAGREEING conclusions — which workflow is "the check" cannot
-    #: be decided by picking the newest run number; the proof stays unknown.
+    #: C01: checks whose name matched MULTIPLE distinct workflow identities with DISAGREEING
+    #: conclusions — which workflow is "the check" cannot be decided by picking the newest
+    #: run number; the proof stays unknown.
     ambiguous: tuple[str, ...] = ()
 
     @property
@@ -377,13 +294,7 @@ def evaluate_positive_proof(
     waived_conclusions: frozenset[str] = frozenset(),
     ambiguous_checks: Mapping[str, Sequence[str]] | None = None,
 ) -> PositiveProof:
-    """Classify one candidate's observed check conclusions into the proof.
-
-    *observations* maps check name → the NEWEST conclusion observed for that
-    name (the provider service owns the newest-attempt rule). The proof set
-    is *required_jobs* when the frozen spec carries one; when the deployment
-    froze NO contract, every OBSERVED check becomes the proof set — so even
-    a lone ``skipped`` workflow never verifies without the waiver (A01 AC2)."""
+    """Classify one candidate's observed check conclusions into the proof."""
     success = frozenset(name.lower() for name in success_conclusions)
     code = frozenset(name.lower() for name in code_failure_conclusions)
     infra = frozenset(name.lower() for name in infra_conclusions)
@@ -397,8 +308,8 @@ def evaluate_positive_proof(
     ambiguous: list[str] = []
     for name in names:
         if name in (ambiguous_checks or {}):
-            # C01: the name matched multiple workflow identities whose
-            # conclusions disagree — no single occurrence is THE check.
+            # C01: the name matched multiple workflow identities whose conclusions disagree
+            # — no single occurrence is THE check.
             ambiguous.append(name)
             continue
         if name not in observations:
@@ -429,14 +340,8 @@ def evaluate_positive_proof(
     )
 
 
-# ----------------------------------------------------------------------
-# R36-14: subject binding + freshness — a verdict is applicable ONLY to
-# the EXACT candidate (and tested world) its subject names. The subject
-# record itself lives with the collector-side machinery
-# (:mod:`forge.adaptive.verification_binding`); these core helpers read
-# the PERSISTED evidence shape so every provider can apply the gate
-# without importing the adaptive package.
-# ----------------------------------------------------------------------
+# subject binding + freshness — a verdict is applicable ONLY to the EXACT candidate (and
+# tested world) its subject names.
 
 
 def subject_digest_of_evidence(verification: Mapping[str, Any] | None) -> str:
@@ -456,17 +361,7 @@ def verdict_freshness(
     *,
     environment_profile_digest: str = "",
 ) -> str:
-    """The freshness status of a PERSISTED verdict for the current
-    candidate (one of the ``FRESHNESS_*`` constants).
-
-    ``current`` — the verdict's subject binds this exact candidate (and,
-    when both sides record one, this environment profile). ``stale`` —
-    the subject names another candidate/world: a passed record renders
-    :data:`STATUS_STALE` and never counts as verified for this one
-    (fresh verification is required). ``unknown`` — the verdict carries
-    no subject identity (``verification.freshness_unknown``): its legacy
-    ADR-0008 sha binding decides, exactly as before.
-    """
+    """The freshness status of a PERSISTED verdict for the current candidate (one of the ``FRESHNESS_*`` constants)."""
     if not isinstance(verification, Mapping):
         return FRESHNESS_UNKNOWN
     subject = verification.get("subject_identity")
@@ -490,20 +385,7 @@ def render_stale(
     now: datetime | None = None,
     applicability: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Re-render a persisted verdict whose subject no longer binds.
-
-    The record is RETAINED (producer, observed surface and the subject
-    it names stay inspectable for audit) while its authority is
-    withdrawn: the status becomes :data:`STATUS_STALE` and the summary
-    says why. A stale verdict is never ``verified_ready`` — the ready
-    decision requires fresh verification of the current candidate.
-
-    R37-05: *applicability* carries the shared applicability decision
-    that withdrew the authority (status, the named equivalent and
-    invalidated inputs) as the ``verification.applicability`` fragment,
-    and the *reason* doubles as the recorded supersession reason — the
-    superseded proof stays archived WITH why it was superseded, never
-    deleted."""
+    """Re-render a persisted verdict whose subject no longer binds."""
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     rendered: dict = {
         "status": STATUS_STALE,

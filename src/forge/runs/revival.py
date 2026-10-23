@@ -1,43 +1,4 @@
-"""Terminal-failure classification and revival (Tier 1 auto / Tier 2 operator).
-
-A run that dies terminal must not cost operator attention unless a human is
-genuinely needed. Every ``failed`` terminalization is classified first:
-
-- **transient** (dispatch 5xx / network / timeout, rate limits, runner
-  startup, an empty harness-start error) — the run parks ``blocked`` with a
-  revival stamp in its evidence (``revive_at``-style ``due_at`` +
-  ``revive_count``-style ``count``) and the provider reconciler re-dispatches
-  the SAME branch after bounded backoff, at most
-  ``FORGE_RUN_AUTO_REVIVE_LIMIT`` times. Journaled as ``auto_revive`` actions
-  (ADR-0005). No issue comment, no operator.
-- **fatal** (driver exit failed — a real quality signal, config errors such
-  as 4xx input mismatches or a missing workflow, exhausted cycles) — the run
-  parks ``blocked`` with the precise reason. No auto-retry.
-
-Tier 2 is the operator override for everything Tier 1 correctly refuses to
-touch: ``/retry [run-id]`` walks ``failed``/``blocked`` back to ``proposing``
-through the explicit revival graph edge
-(:meth:`forge.durable.controller.Controller.revive_transition`), grants one
-extra commit cycle and re-dispatches on the same branch.
-
-A11 makes both tiers a durable, single, idempotent transition: every revival
-writes an ATTEMPT record (the ``action_log`` revival row, extended with an
-idempotency key, a :class:`Retryability` class and a ``pending → dispatched``
-dispatch state) in the SAME transaction as the CAS walk. The key is the
-triggering command's delivery id (``/retry`` — a redelivered webhook is a
-no-op; a different delivery while an attempt is in flight is refused) or the
-recovery-window identity (auto-revive — two reconcilers in one window
-collapse to one attempt, one dispatch). A crash between the revive commit
-and the dispatch leaves the attempt findable, and
-:func:`evaluate_attempt_recovery` — a reconciler pass in the R11 scanner
-shape — re-drives the dispatch exactly once, guarded by the dispatch legs'
-own journaled actions (an interrupted leg's unknown remote effect is parked
-for an operator, never re-dispatched blind).
-
-Classification lives here (one table) so the GitLab and GitHub
-services cannot drift apart — the same reason text classifies the same way on
-every lane, and the limits come from the same settings.
-"""
+"""Retry transient failures without bypassing unresolved effects or exhausted budgets."""
 
 from __future__ import annotations
 
@@ -66,25 +27,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-lig
 
 logger = logging.getLogger(__name__)
 
-#: Failure classes. ``fatal`` is the default — Tier 1 must be conservative,
-#: a mis-classified fatal costs two bounded retries, a mis-classified
-#: transient hides a real quality signal from the operator.
+#: Failure classes. ``fatal`` is the default — Tier 1 must be conservative, a mis-classified
+#: fatal costs two bounded retries, a mis-classified transient hides a real quality signal
+#: from the operator.
 FailureClass = Literal["transient", "fatal"]
 TRANSIENT: FailureClass = "transient"
 FATAL: FailureClass = "fatal"
 
 
 class Retryability(StrEnum):
-    """WHY a run is retryable — the typed revival-attempt class (A11).
+    """WHY a run is retryable — the typed revival-attempt class."""
 
-    Deliberately ORTHOGONAL to the A12 effect-certainty states: the cause
-    class says nothing about whether a remote effect is unresolved. An
-    UNKNOWN-outcome publication blocks any auto-revive until the intent
-    scanner reconciles it, whatever this enum says.
-    """
-
-    #: Tier-1: a transient infrastructure death (dispatch 5xx / network /
-    #: rate limit / runner startup) the reconciler re-drives on its own.
+    #: Tier-1: a transient infrastructure death (dispatch 5xx / network / rate limit /
+    #: runner startup) the reconciler re-drives on its own.
     TRANSIENT_INFRASTRUCTURE = "transient_infrastructure"
     #: Tier-2: an operator explicitly granted the revival (``/retry``).
     OPERATOR_OVERRIDE = "operator_override"
@@ -92,29 +47,21 @@ class Retryability(StrEnum):
     VERIFICATION_TIMEOUT = "verification_timeout"
 
 
-#: The revival action kinds — these ``action_log`` rows ARE the durable
-#: revival-attempt record (written in the SAME transaction as the CAS
-#: revival transition, A11).
+#: The revival action kinds — these ``action_log`` rows ARE the durable revival-attempt
+#: record (written in the SAME transaction as the CAS revival transition,).
 REVIVAL_ACTION_KINDS: frozenset[str] = frozenset({"retry_requested", "auto_revive"})
 RevivalKind = Literal["retry_requested", "auto_revive"]
 
-#: A verification-shaped transient cause (``verification_timeout``): the
-#: reason mentions verification AND a timeout — a harness/verification leg
-#: that ran out of time is infrastructure pacing, not a quality signal.
+#: A verification-shaped transient cause (``verification_timeout``): the reason mentions
+#: verification AND a timeout — a harness/verification leg that ran out of time is
+#: infrastructure pacing, not a quality signal.
 _VERIFICATION_TIMEOUT_RE = re.compile(
     r"verification[_ ]?(timed?|timeout)|timed? ?out[^\n]*verification", re.IGNORECASE
 )
 
 
 def classify_retryability(kind: RevivalKind, reason: str = "") -> Retryability:
-    """The retryability class for a revival attempt of *kind*.
-
-    An operator ``/retry`` is retryable because an operator said so
-    (``operator_override``) — even when the cause was transient. The
-    Tier-1 auto-revive records the cause class instead: a verification
-    timeout when the terminal reason is one, ``transient_infrastructure``
-    for every other transient cause (the only cause Tier-1 ever revives).
-    """
+    """The retryability class for a revival attempt of *kind*."""
     if kind == "retry_requested":
         return Retryability.OPERATOR_OVERRIDE
     if _VERIFICATION_TIMEOUT_RE.search(reason or ""):
@@ -123,7 +70,7 @@ def classify_retryability(kind: RevivalKind, reason: str = "") -> Retryability:
 
 
 class RevivalError(Exception):
-    """Base class for revival-attempt refusals (A11)."""
+    """Base class for revival-attempt refusals."""
 
 
 class RevivalAlreadyDelivered(RevivalError):
@@ -144,22 +91,22 @@ class RevivalAttempt:
     action_id: int
     idempotency_key: str | None
     retryability: Retryability
-    #: False = the SAME idempotency key was already delivered (redelivery
-    #: no-op — the caller must not bump a cycle, re-walk, or re-dispatch).
+    #: False = the SAME idempotency key was already delivered (redelivery no-op — the caller
+    #: must not bump a cycle, re-walk, or re-dispatch).
     created: bool
 
 
-#: Default revival budget (``FORGE_RUN_AUTO_REVIVE_LIMIT``) and the base of
-#: the bounded backoff ladder (``FORGE_RUN_REVIVE_BACKOFF_SECONDS``).
+#: Default revival budget (``FORGE_RUN_AUTO_REVIVE_LIMIT``) and the base of the bounded
+#: backoff ladder (``FORGE_RUN_REVIVE_BACKOFF_SECONDS``).
 DEFAULT_REVIVE_LIMIT = 2
 DEFAULT_BACKOFF_SECONDS = 60
-#: Backoff ceiling: an unrecoverable transient never waits longer than this
-#: between attempts.
+#: Backoff ceiling: an unrecoverable transient never waits longer than this between
+#: attempts.
 MAX_BACKOFF_SECONDS = 900
 
-#: Markers that make a terminal reason *transient*. Matched case-insensitively
-#: against the whole reason; 4xx status codes are deliberately absent (a 4xx
-#: is a config error — exactly the db5408f4 undeclared-input 422).
+#: Markers that make a terminal reason *transient*. Matched case-insensitively against the
+#: whole reason; 4xx status codes are deliberately absent (a 4xx is a config error — exactly
+#: the db5408f4 undeclared-input 422).
 _TRANSIENT_MARKERS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern)
     for pattern in (
@@ -181,10 +128,9 @@ _TRANSIENT_MARKERS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
-#: Leg prefixes whose *empty* error detail still counts as transient: a
-#: dispatch that died with an empty message (``httpx`` raises bare
-#: ``ConnectError``/``ReadError`` with ``str() == ""``) is infrastructure
-#: silence, not a quality signal.
+#: Leg prefixes whose *empty* error detail still counts as transient: a dispatch that died
+#: with an empty message (``httpx`` raises bare ``ConnectError``/``ReadError`` with ``str ==
+#: ""``) is infrastructure silence, not a quality signal.
 _DISPATCH_PREFIXES = ("harness_start_failed",)
 
 
@@ -241,9 +187,8 @@ def revival_due(run: FlowRun, now: datetime) -> bool:
     return as_aware_utc(now) >= due
 
 
-# ----------------------------------------------------------------------
 # Tier 1: classification at terminalization + the reconciler revive pass
-# ----------------------------------------------------------------------
+#
 
 
 async def terminalize_failure(
@@ -254,14 +199,7 @@ async def terminalize_failure(
     reason: str,
     log: logging.Logger = logger,
 ) -> None:
-    """Park a dead ``failed`` leg as ``blocked`` — reviving it if transient.
-
-    Shared by every provider service's ``_to_terminal(FAILED, …)`` so the
-    classification and the budget cannot drift between lanes. The run never
-    ends in ``failed`` from here: transient deaths carry a revival stamp the
-    reconciler acts on, fatal deaths park ``blocked`` with the precise,
-    actionable reason.
-    """
+    """Park a dead ``failed`` leg as ``blocked`` — reviving it if transient."""
     limit = revival_limit(settings)
     async with session_factory() as session:
         run = await session.get(FlowRun, run_id)
@@ -311,12 +249,7 @@ async def terminalize_failure(
 
 
 def _blocked_runs_query(provider: str, repo_full_name: str | None):
-    """Blocked runs of *provider*, optionally scoped to ONE repository.
-
-    B08: a repo-bound service's recovery scans must never select another
-    repository's runs — the bound adapter would read config and post
-    comments through the WRONG repo's client (review e53ffd2 B08).
-    """
+    """Blocked runs of *provider*, optionally scoped to ONE repository."""
     query = select(FlowRun).where(
         FlowRun.provider == provider,
         FlowRun.status == FlowStatus.BLOCKED.value,
@@ -336,23 +269,7 @@ async def evaluate_revivals(
     log: logging.Logger = logger,
     repo_full_name: str | None = None,
 ) -> None:
-    """One reconciler pass over every run waiting for its auto-revive.
-
-    Scans ``blocked`` runs of *provider* whose revival stamp is due, walks
-    each back to ``proposing`` through the revival graph edge (journaled as
-    an ``auto_revive`` attempt — the durable revival-attempt record, A11)
-    and hands it to *redispatch* — the same ``_advance_harness``/
-    ``_advance_proposal`` leg that ``_begin_repair`` uses, on the same
-    branch. Not-due runs are skipped: the wait is worker-free, like
-    ``waiting_ci``.
-
-    A11 durability: the attempt row carries the window's idempotency key
-    (``revive:<run id>:<stamp count>``), so two reconcilers hitting one
-    recovery window produce ONE attempt and ONE dispatch; a run holding an
-    unresolved (``unknown``/open) publication intent is HELD until the A12
-    scanner reconciles it — an unknown remote effect is never re-executed
-    blind; and a cancelled grant is never revived.
-    """
+    """One reconciler pass over every run waiting for its auto-revive."""
     now = now or datetime.now(timezone.utc)
     async with session_factory() as session:
         runs = (
@@ -375,9 +292,8 @@ async def evaluate_revivals(
             log.exception("Auto-revive walk failed for run %s", run_id[:8])
             continue
         if not attempt.created:
-            # Same recovery window, second driver (another reconciler or a
-            # re-delivered tick): the idempotency key collapsed it — exactly
-            # one attempt, one dispatch.
+            # Same recovery window, second driver (another reconciler or a re-delivered
+            # tick): the idempotency key collapsed it — exactly one attempt, one dispatch.
             continue
         try:
             if not await _claim_attempt_dispatch(session_factory, attempt.action_id, now=now):
@@ -397,15 +313,7 @@ async def evaluate_revivals(
 
 
 async def revival_hold_reason(session: AsyncSession, run_id: str) -> str | None:
-    """Why auto-revive must NOT re-dispatch *run* yet, or ``None``.
-
-    - a cancelled grant is never revived (R10: ``cancel_requested`` fences
-      every effect, revivals included);
-    - an UNKNOWN-outcome (or still-open) publication intent must be
-      reconciled by the A12 scanner FIRST — a revival here could double-
-      publish over an effect whose existence forge has not proven (A12:
-      reconcile, never re-execute).
-    """
+    """Why auto-revive must NOT re-dispatch *run* yet, or ``None``."""
     run = await session.get(FlowRun, run_id)
     if run is None:
         return "run vanished"
@@ -429,14 +337,7 @@ async def revival_hold_reason(session: AsyncSession, run_id: str) -> str | None:
 async def _begin_auto_revive(
     session_factory: async_sessionmaker, settings: object, run_id: str, now: datetime
 ) -> RevivalAttempt:
-    """Journal the revival ATTEMPT, mark the stamp dispatched and re-open the run.
-
-    The attempt row (``auto_revive``) is written in the SAME transaction as
-    the CAS revival transition — crash-proof by construction (A11). Its
-    idempotency key is the recovery-window identity
-    (``revive:<run id>:<stamp count>``): two reconcilers in one window
-    derive the same key and the second gets ``created=False``.
-    """
+    """Journal the revival ATTEMPT, mark the stamp dispatched and re-open the run."""
     async with session_factory() as session:
         controller = Controller(session)
         run = await session.get(FlowRun, run_id)
@@ -452,8 +353,8 @@ async def _begin_auto_revive(
             repo_full_name=run.github_repo_full_name,
             exclude_run_id=run.id,
         ):
-            # ADR-0017: one active run per subject — a fresh /implement wins
-            # over a stale revival stamp (the run stays parked and due).
+            # ADR-0017: one active run per subject — a fresh /implement wins over a stale
+            # revival stamp (the run stays parked and due).
             raise LookupError(f"run {run_id} has a live sibling run — revival superseded")
         revival = revival_of(run)
         count = int(revival.get("count") or 0)
@@ -467,8 +368,8 @@ async def _begin_auto_revive(
         if not attempt.created:
             await session.commit()
             return attempt
-        # Consume the due stamp before dispatching: a second pass must never
-        # re-dispatch while this leg is in flight.
+        # Consume the due stamp before dispatching: a second pass must never re-dispatch
+        # while this leg is in flight.
         run.evidence = _merge_evidence(
             run.evidence,
             {"revival": {"count": count, "dispatched_at": now.isoformat()}},
@@ -492,27 +393,18 @@ async def _complete_auto_revive(
         await session.commit()
 
 
-# ----------------------------------------------------------------------
-# A11: the revival attempt record (the action journal's revival rows)
-# ----------------------------------------------------------------------
+# the revival attempt record (the action journal's revival rows)
+#
 
 
 def retry_delivery_key(delivery_id: str | None) -> str | None:
-    """The attempt idempotency key for a ``/retry`` delivery id.
-
-    ``delivery:<id>``; ``None`` when the caller has no delivery identity
-    (direct/test invocations) — those keep the pre-A11 no-dedup behavior.
-    """
+    """The attempt idempotency key for a ``/retry`` delivery id."""
     text = (delivery_id or "").strip()
     return f"delivery:{text}" if text else None
 
 
 def auto_revive_key(run_id: str, stamp_count: int) -> str:
-    """The attempt idempotency key for one auto-revive recovery window.
-
-    ``revive:<run id>:<stamp count>`` — every reconciler tick driving the
-    SAME window derives the same key, so the window is driven once.
-    """
+    """The attempt idempotency key for one auto-revive recovery window."""
     return f"revive:{run_id}:{int(stamp_count)}"
 
 
@@ -570,20 +462,7 @@ async def begin_revival_attempt(
     idempotency_key: str | None,
     retryability: Retryability,
 ) -> RevivalAttempt:
-    """Write the revival attempt row into the CALLER's transaction (A11).
-
-    The row is the attempt record: ``requested`` + ``dispatch_state='pending'``
-    until a driver claims the dispatch. Call it in the SAME transaction as
-    :meth:`Controller.revive_transition` — the attempt and the walk commit
-    atomically, so a crash between them leaves a findable, recoverable
-    record instead of a lost redispatch.
-
-    - the SAME ``idempotency_key`` already delivered → ``created=False``
-      (a webhook redelivery: no-op for the caller);
-    - a DIFFERENT trigger's attempt still open → :class:`RevivalInFlight`
-      (the partial unique index ``uq_revival_attempt_inflight`` is the race
-      arbiter — a concurrent insert that loses raises it too).
-    """
+    """Write the revival attempt row into the CALLER's transaction."""
     if idempotency_key:
         existing = await find_revival_attempt(
             session, run_id=run_id, kind=kind, idempotency_key=idempotency_key
@@ -629,16 +508,7 @@ async def begin_revival_attempt(
 async def claim_attempt_dispatch(
     session: AsyncSession, action_id: int, *, now: datetime | None = None
 ) -> bool:
-    """Claim the attempt's dispatch leg — the ``pending → dispatched`` CAS.
-
-    ``UPDATE … WHERE dispatch_state IS NULL-or-'pending'``: the rowcount is
-    the ownership decision, so two drivers (a live flow and a recovery scan,
-    or two scans) produce exactly one claimer and one dispatch. The claim
-    instant is stamped into ``correlation_id`` as ``claim:<iso>`` (unused
-    otherwise on revival rows) — the recovery scan's re-arm compares it
-    lexicographically, so a scan can never re-arm an attempt whose claim is
-    younger than the recovery bound. Flushes into the caller's transaction.
-    """
+    """Claim the attempt's dispatch leg — the ``pending → dispatched`` CAS."""
     stamp = f"claim:{(now or datetime.now(timezone.utc)).isoformat()}"
     result = cast(
         CursorResult[Any],
@@ -665,27 +535,22 @@ async def _claim_attempt_dispatch(
         return claimed
 
 
-# ----------------------------------------------------------------------
-# A11: the revival-attempt recovery scan (the R11 scanner pattern)
-# ----------------------------------------------------------------------
+# the revival-attempt recovery scan (the scanner pattern)
+#
 
-#: How long a ``pending`` attempt may sit before the recovery scan presumes
-#: its driver died between the revive commit and the dispatch claim. The
-#: live flow's pending window is one note-post call wide (provider HTTP
-#: timeouts are far below this).
+#: How long a ``pending`` attempt may sit before the recovery scan presumes its driver died
+#: between the revive commit and the dispatch claim.
 DISPATCH_RECOVERY_PENDING_SECONDS = 120
 
-#: How long a ``dispatched`` (claimed, never completed) attempt may sit
-#: before the recovery scan resolves it. Generous on purpose: a builtin-lane
-#: dispatch leg legitimately spends minutes inside model calls before its
-#: first journaled write, and a live leg must never be mistaken for a crash.
+#: How long a ``dispatched`` (claimed, never completed) attempt may sit before the recovery
+#: scan resolves it.
 DISPATCH_RECOVERY_DISPATCHED_SECONDS = 1800
 
-#: Action kinds whose journal row proves a dispatch leg ENTERED (the legs
-#: journal intent-first, ADR-0005) — the double-dispatch guard: an OPEN row
-#: of one of these kinds created at/after the attempt means the leg was
-#: interrupted mid-flight and its remote effect is UNKNOWN, so the scan
-#: resolves the journal and parks the run instead of ever re-dispatching.
+#: Action kinds whose journal row proves a dispatch leg ENTERED (the legs journal
+#: intent-first, ADR-0005) — the double-dispatch guard: an OPEN row of one of these kinds
+#: created at/after the attempt means the leg was interrupted mid-flight and its remote
+#: effect is UNKNOWN, so the scan resolves the journal and parks the run instead of ever
+#: re-dispatching.
 _DISPATCH_LEG_ACTION_KINDS: frozenset[str] = frozenset(
     {"harness_start", "harness_fallback", "commit", "create_merge_request", "update_merge_request"}
 )
@@ -700,14 +565,7 @@ async def due_revival_attempts(
     dispatched_bound: int = DISPATCH_RECOVERY_DISPATCHED_SECONDS,
     repo_full_name: str | None = None,
 ) -> list[tuple[ActionLog, FlowRun]]:
-    """The stranded revival attempts of *provider*, oldest first.
-
-    A ``pending`` attempt older than *pending_bound* never reached its
-    dispatch claim (crash between the revive commit and the dispatch). A
-    ``dispatched`` attempt older than *dispatched_bound* was claimed but its
-    journal was never completed (crash inside the dispatch leg). Pre-017
-    rows (``dispatch_state`` NULL) count as pending.
-    """
+    """The stranded revival attempts of *provider*, oldest first."""
     now = as_aware_utc(now)
     query = (
         select(ActionLog, FlowRun)
@@ -749,27 +607,7 @@ async def evaluate_attempt_recovery(
     log: logging.Logger = logger,
     repo_full_name: str | None = None,
 ) -> int:
-    """One recovery pass over stranded revival attempts (A11).
-
-    Mirrors the R11 intent-scanner shape: a reconciler pass over the
-    durable attempt rows whose driver may have died, re-driving each
-    stranded dispatch EXACTLY ONCE —
-
-    - ``pending`` (crash between the revive commit and the dispatch): the
-      claim CAS is the once-arbiter; the winner re-drives the dispatch leg
-      and completes the attempt.
-    - ``dispatched`` but never completed (crash inside the leg): resolved
-      by inspection, never blind — a run that moved on finishes the journal
-      as succeeded; a run still ``proposing`` with an OPEN journaled
-      dispatch-leg action (the leg's own intent-first journal is the
-      double-dispatch guard) completes the attempt ``unknown_outcome`` and
-      parks the run ``blocked(revival_dispatch_interrupted)`` for an
-      operator (an unknown remote effect is reconciled, never re-executed —
-      A12/ADR-0005); a run still ``proposing`` with NO journaled leg action
-      is re-armed to ``pending`` and re-driven through the same claim.
-
-    Returns the number of attempts whose dispatch was (re-)driven.
-    """
+    """One recovery pass over stranded revival attempts."""
     now = as_aware_utc(now) if now is not None else datetime.now(timezone.utc)
     async with session_factory() as session:
         stranded = await due_revival_attempts(
@@ -813,8 +651,8 @@ async def _recover_one_attempt(
     """Resolve ONE stranded attempt. True when its dispatch was re-driven."""
     run_id = str(action.flow_run_id)
     if run.status != FlowStatus.PROPOSING.value:
-        # The dispatch demonstrably happened and the run moved on (or another
-        # decision parked it): finish the journal, never re-drive.
+        # The dispatch demonstrably happened and the run moved on (or another decision
+        # parked it): finish the journal, never re-drive.
         outcome = "succeeded" if action.dispatch_state == "dispatched" else "failed"
         await _complete_auto_revive(
             session_factory,
@@ -832,9 +670,9 @@ async def _recover_one_attempt(
         return False
     if action.dispatch_state == "dispatched":
         if await _dispatch_leg_open(session_factory, run_id, since=action.created_at):
-            # The dispatch leg ENTERED (its intent-first journal row is open)
-            # and its outcome is unknown: resolve the journal, park the run —
-            # never a blind re-dispatch (A12/ADR-0005).
+            # The dispatch leg ENTERED (its intent-first journal row is open) and its
+            # outcome is unknown: resolve the journal, park the run — never a blind
+            # re-dispatch (ADR-0005).
             await _complete_auto_revive(
                 session_factory,
                 action.id,
@@ -843,11 +681,8 @@ async def _recover_one_attempt(
             )
             await _park_interrupted_revival(session_factory, action, log=log)
             return False
-        # Claimed but the leg never journaled anything: nothing was started —
-        # re-arm to pending and fall through to the same claim path. The
-        # re-arm is fenced by the claim stamp: an attempt whose claim is
-        # younger than *dispatched_bound* is a live driver's window and is
-        # left alone (a concurrent scan mid-leg is never double-driven).
+        # Claimed but the leg never journaled anything: nothing was started — re-arm to
+        # pending and fall through to the same claim path.
         if not await _rearm_attempt(
             session_factory, action.id, now=now, bound_seconds=dispatched_bound
         ):
@@ -870,11 +705,7 @@ async def _recover_one_attempt(
 async def _dispatch_leg_open(
     session_factory: async_sessionmaker, run_id: str, *, since: datetime
 ) -> bool:
-    """Whether a dispatch-leg journal row opened at/after *since* is OPEN.
-
-    The journaled dispatch action is the re-drive guard: an open row means
-    the leg was interrupted mid-flight and its remote effect is unknown.
-    """
+    """Whether a dispatch-leg journal row opened at/after *since* is OPEN."""
     async with session_factory() as session:
         row = (
             await session.execute(
@@ -894,12 +725,7 @@ async def _dispatch_leg_open(
 async def _rearm_attempt(
     session_factory: async_sessionmaker, action_id: int, *, now: datetime, bound_seconds: int
 ) -> bool:
-    """``dispatched → pending`` for a claimed-but-never-started attempt.
-
-    Fenced by the claim stamp (``correlation_id = 'claim:<iso>'``): only a
-    claim older than *bound_seconds* is presumed dead — a concurrent
-    driver's fresh claim is never stolen mid-leg.
-    """
+    """``dispatched → pending`` for a claimed-but-never-started attempt."""
     cutoff = f"claim:{(as_aware_utc(now) - timedelta(seconds=bound_seconds)).isoformat()}"
     async with session_factory() as session:
         result = cast(
@@ -923,12 +749,7 @@ async def _rearm_attempt(
 async def _park_interrupted_revival(
     session_factory: async_sessionmaker, action: ActionLog, *, log: logging.Logger
 ) -> None:
-    """Park a run whose revival dispatch leg was interrupted mid-flight.
-
-    The reason prefix classifies FATAL on purpose: an unknown remote effect
-    must be reconciled/inspected by an operator, never auto-revived into a
-    blind re-dispatch (``/retry`` remains the explicit re-drive).
-    """
+    """Park a run whose revival dispatch leg was interrupted mid-flight."""
     run_id = str(action.flow_run_id)
     reason = (
         f"revival_dispatch_interrupted: the {action.action_kind} dispatch leg was interrupted "
@@ -945,15 +766,11 @@ async def _park_interrupted_revival(
     )
 
 
-# ----------------------------------------------------------------------
-# A13: the config-block recovery pass
-# ----------------------------------------------------------------------
+# the config-block recovery pass
+#
 
-#: Reason prefixes marking a run parked by the A13 config gate
-#: (``blocked(config_unreadable: …)`` / ``blocked(config_invalid: …)``).
-#: The reconciler retries those reads; a run whose config reads again (or
-#: is provider-confirmed absent) re-enters planning — nothing was paid or
-#: committed while it waited, and its scope never widened meanwhile.
+#: Reason prefixes marking a run parked by the config gate (``blocked(config_unreadable:
+#: …)`` / ``blocked(config_invalid: …)``).
 CONFIG_BLOCK_PREFIXES = ("config_unreadable", "config_invalid")
 
 
@@ -966,24 +783,7 @@ async def evaluate_config_blocks(
     log: logging.Logger = logger,
     repo_full_name: str | None = None,
 ) -> int:
-    """One reconciler pass over runs parked ``blocked(config_…)`` (A13).
-
-    For every blocked run of *provider* whose reason is a config gate:
-
-    - the read is retried through *reread* (a typed
-      :class:`~forge.project_config.ConfigReadResult`) — a
-      still-failing read leaves the run parked (the retry is free);
-    - a recovered read (``valid`` or provider-confirmed absence) walks the
-      run back to ``preflight`` through the journaled plan-restart edge
-      (:meth:`Controller.restart_plan_transition` — fenced to runs that
-      never froze a spec, so an approved input is never re-planned past
-      its gate) and hands it to *replan* with the stashed start context.
-
-    A run with a live sibling run stays parked: a fresh ``/implement``
-    wins over a parked run (ADR-0017, same as the revival stamps).
-
-    Returns the number of runs re-entering planning.
-    """
+    """One reconciler pass over runs parked ``blocked(config_…)``."""
     async with session_factory() as session:
         runs = (
             (await session.execute(_blocked_runs_query(provider, repo_full_name))).scalars().all()
@@ -1031,12 +831,7 @@ async def _begin_config_recovery(
     *,
     log: logging.Logger,
 ) -> bool:
-    """Walk one config-blocked run back to ``preflight`` (guarded).
-
-    Consumes the parked state exactly once: a second pass finds the run no
-    longer ``blocked`` and does nothing. ``False`` when the run was taken
-    (terminal, or superseded by a live sibling run).
-    """
+    """Walk one config-blocked run back to ``preflight`` (guarded)."""
     async with session_factory() as session:
         controller = Controller(session)
         run = await session.get(FlowRun, run_id)
@@ -1065,9 +860,8 @@ async def _begin_config_recovery(
     return True
 
 
-# ----------------------------------------------------------------------
 # Tier 2: the operator /retry target resolution and guards
-# ----------------------------------------------------------------------
+#
 
 #: Statuses a run must be parked in for ``/retry`` to touch it.
 _RETRYABLE_STATUSES = frozenset({FlowStatus.FAILED.value, FlowStatus.BLOCKED.value})
@@ -1082,12 +876,7 @@ async def has_active_run(
     repo_full_name: str | None = None,
     exclude_run_id: str | None = None,
 ) -> bool:
-    """Whether another NON-terminal run is live for the subject.
-
-    The durable one-active-run-per-subject invariant (ADR-0017) is enforced
-    by a partial unique index — a revival walk that ignored it would blow up
-    on commit; both revival tiers check before walking instead.
-    """
+    """Whether another NON-terminal run is live for the subject."""
     query = select(FlowRun.id).where(
         FlowRun.provider == provider,
         FlowRun.project_id == project_id,
@@ -1108,13 +897,7 @@ def _subject_query(
     issue_iid: int | None,
     repo_full_name: str | None,
 ) -> Select:
-    """The subject-scoped base query EVERY target resolution starts from (A07).
-
-    Provider + connection + project + repo + issue — the full subject — is
-    mandatory for every id form (bare, 8-char prefix, and the full 32-char id
-    alike): a run from another project that happens to share the issue iid is
-    invisible here, exactly like the provider-scoped ``/cancel`` lookups.
-    """
+    """The subject-scoped base query EVERY target resolution starts from."""
     query = select(FlowRun).where(
         FlowRun.provider == provider,
         FlowRun.project_id == project_id,
@@ -1134,14 +917,7 @@ async def resolve_retry_target(
     requested: str,
     repo_full_name: str | None = None,
 ) -> FlowRun | None:
-    """The run ``/retry [run-id]`` refers to — latest dead run when bare.
-
-    Mirrors ``/cancel``'s resolution: an explicit 32-char id, a unique 8-char
-    prefix among the issue's runs, or — bare — the most recent
-    ``failed``/``blocked`` run for the issue. ``None`` when nothing matches.
-    Every form resolves through the SAME subject-scoped query (A07) — the
-    full id no longer takes a looser lookup.
-    """
+    """The run ``/retry [run-id]`` refers to — latest dead run when bare."""
     query = _subject_query(
         provider=provider,
         project_id=project_id,
@@ -1172,16 +948,7 @@ async def resolve_retry_target(
 
 
 class RetryRefusalCode(StrEnum):
-    """The TYPED ``/retry`` refusal reasons (R36-02, issue #261).
-
-    The operator-facing MESSAGE is unchanged; the CODE is what programs
-    branch on — the GitHub retry handler superseded ONLY the continuity arm
-    (:attr:`NOTHING_TO_RETRY`), and only for a decision that proves the
-    continuity demand wrong (a proven no-WIP death) or an operator-authorized
-    discard. Every other code — cancellation, another live attempt, a
-    non-retryable status, no subject — keeps refusing no matter what the
-    continuation decision says.
-    """
+    """The TYPED ``/retry`` refusal reasons."""
 
     #: No retryable run on the subject (nothing to resolve a command to).
     NO_RETRYABLE_RUN = "no_retryable_run"
@@ -1191,24 +958,16 @@ class RetryRefusalCode(StrEnum):
     NOT_RETRYABLE_STATUS = "not_retryable_status"
     #: The run was cancelled — its publication grant is revoked.
     CANCEL_REQUESTED = "cancel_requested"
-    #: The continuity arm: no candidate AND no durable checkpoint — nothing
-    #: to retry IN PLACE (may be superseded by a proven baseline or an
-    #: explicit operator restart).
+    #: The continuity arm: no candidate AND no durable checkpoint — nothing to retry IN
+    #: PLACE (may be superseded by a proven baseline or an explicit operator restart).
     NOTHING_TO_RETRY = "nothing_to_retry"
-    #: R36-03: the checkpoint AUTHORITY could not answer (outage, refused
-    #: credential, rotted bytes, or never consulted) — distinct from a
-    #: proven absence, and never worded as one.
+    #: the checkpoint AUTHORITY could not answer (outage, refused credential, rotted bytes,
+    #: or never consulted) — distinct from a proven absence, and never worded as one.
     CHECKPOINT_AUTHORITY_UNAVAILABLE = "checkpoint_authority_unavailable"
 
 
 class RetryRejection(str):
-    """A typed ``/retry`` refusal (R36-02).
-
-    The VALUE is the operator-facing message — every existing caller posts
-    it verbatim (``f"🔁 {rejection}"``) and truthiness still means
-    "refused" — while :attr:`code` carries the machine-readable
-    :class:`RetryRefusalCode` the caller may branch on.
-    """
+    """A typed ``/retry`` refusal."""
 
     code: str
     __slots__ = ("code",)
@@ -1225,22 +984,7 @@ def retry_rejection(
     other_active: bool = False,
     checkpoint: CheckpointLookupOutcome | None = None,
 ) -> str:
-    """Why ``/retry`` refuses *run* — an actionable message, or "" when fine.
-
-    R36-02: refusals are TYPED — the returned string is a
-    :class:`RetryRejection` whose ``code`` names the refusing arm; the
-    wording is unchanged for operators.
-
-    R36-03: the continuity arm consumes the PRE-RESOLVED typed lookup
-    outcome (``checkpoint`` — a
-    :class:`forge.adaptive.checkpoint_repository.CheckpointLookupOutcome`
-    the caller awaited through the configured async authority; ``None``
-    when it never consulted one). The refusal table never performs a
-    lookup itself: an outage, a refused credential or rotted bytes are
-    answers of their own kind (:attr:`RetryRefusalCode.
-    CHECKPOINT_AUTHORITY_UNAVAILABLE`) — distinct from a PROVEN
-    absence, and never worded as "no stored checkpoint".
-    """
+    """Why ``/retry`` refuses *run* — an actionable message, or "" when fine."""
     if run is None:
         return RetryRejection(
             RetryRefusalCode.NO_RETRYABLE_RUN,
@@ -1268,16 +1012,13 @@ def retry_rejection(
             "grant is not allowed. Start fresh with a new implement request.",
         )
     if not list(run.candidate_shas or []):
-        # Wave D: a run that was PAUSED mid-turn has no candidate — but
-        # it may have a DURABLE CHECKPOINT on the control plane (the
-        # pause captured verified WIP). The checkpoint IS the work to
-        # continue from; the re-dispatched lane restores from it before
-        # its turn. No checkpoint AND no candidate = genuinely nothing.
+        # A run paused mid-turn has no candidate but may have a
+        # DURABLE CHECKPOINT on the control plane (the pause captured verified WIP).
         outcome = checkpoint
         if outcome is None or not getattr(outcome, "state", None):
-            # The authority was never consulted or could not answer: an
-            # unprovable checkpoint state is NOT "no stored checkpoint"
-            # — zero model starts until the authority answers.
+            # The authority was never consulted or could not answer: an unprovable
+            # checkpoint state is NOT "no stored checkpoint" — zero model starts until the
+            # authority answers.
             return RetryRejection(
                 RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE,
                 f"Run `{run.id[:8]}` died before it committed a candidate and the "
@@ -1295,8 +1036,8 @@ def retry_rejection(
                 "stored checkpoint — there is no work to retry in place. Start fresh "
                 "with a new implement request.",
             )
-        # unavailable / corrupt / unauthorized — typed, distinct, and
-        # worded by WHAT failed, never as a proven absence.
+        # unavailable / corrupt / unauthorized — typed, distinct, and worded by WHAT failed,
+        # never as a proven absence.
         detail = str(getattr(outcome, "detail", "") or "").strip()
         named = {"unavailable": "is unavailable", "corrupt": "holds a corrupt checkpoint"}.get(
             state, "refused the lookup credential"
@@ -1312,16 +1053,14 @@ def retry_rejection(
     return ""
 
 
-#: R36-03: the explicit opt-in for the RETIRED legacy lookup chain
-#: (raw filesystem index + the generation-less work token over HTTP).
-#: ``FORGE_RETRY_LEGACY_LOOKUP=1`` re-enables it for deployments pinned
-#: to a versioned pre-R36-03 build ONLY; the modern path (the configured
-#: async authority) is the default and the only supported one.
+#: the explicit opt-in for the RETIRED legacy lookup chain (raw filesystem index + the
+#: generation-less work token over HTTP). ``FORGE_RETRY_LEGACY_LOOKUP=1`` re-enables it for
+#: deployments pinned to a versioned pre- build ONLY; the modern path (the configured async
+#: authority) is the default and the only supported one.
 LEGACY_LOOKUP_ENV: str = "FORGE_RETRY_LEGACY_LOOKUP"
 
-#: R36-03: the observability label the legacy adapter answers under —
-#: unmistakable in logs and outcomes, so nobody mistakes it for the
-#: configured authority.
+#: the observability label the legacy adapter answers under — unmistakable in logs and
+#: outcomes, so nobody mistakes it for the configured authority.
 LEGACY_LOOKUP_AUTHORITY: str = "legacy-http-opt-in"
 
 
@@ -1332,32 +1071,7 @@ async def durable_checkpoint_outcome(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CheckpointLookupOutcome:
-    """The TYPED checkpoint-presence lookup every retry/revival path runs.
-
-    R36-03 (issue #262): the old :func:`_has_durable_checkpoint` read the
-    RAW filesystem index, then fell back to a SYNCHRONOUS ``httpx.get``
-    with the LEGACY work-only token, and collapsed every failure into
-    ``False`` — a PostgreSQL-only checkpoint read as "no checkpoint" in
-    ``/retry``. This adapter is its replacement — a thin async selection
-    over the configured authority (``checkpoint.lookup.authority`` /
-    ``checkpoint.lookup.outcome`` / ``checkpoint.lookup.latency``):
-
-    - an injected *repository* wins (tests, an explicitly composed
-      service);
-    - else :func:`forge.adaptive.checkpoint_repository.
-      resolve_checkpoint_lookup_authority` — a session factory selects
-      the SAME configured repository upload/resume use; without one,
-      the control URL + lane credential select the authenticated
-      checkpoint-channel proxy (:class:`HttpCheckpointRepository`);
-    - neither → the TYPED ``unavailable``: never the filesystem index a
-      factory-less process has no contract with, never "absent", never
-      a synchronous HTTP call inside the event loop.
-
-    The legacy chain survives ONLY behind the explicit opt-in
-    (:data:`LEGACY_LOOKUP_ENV`, default OFF) as
-    :func:`_legacy_http_lookup` — see its docstring for the removal
-    path.
-    """
+    """The TYPED checkpoint-presence lookup every retry/revival path runs."""
     from forge.adaptive.checkpoint_repository import (
         CheckpointLookupOutcome,
         LOOKUP_UNAVAILABLE,
@@ -1417,32 +1131,7 @@ async def durable_checkpoint_outcome(
 async def _legacy_http_lookup(
     run_id: str, *, env: Mapping[str, str] | None = None
 ) -> CheckpointLookupOutcome:
-    """The RETIRED pre-R36-03 lookup chain, kept behind an explicit opt-in.
-
-    What this does (verbatim from the retired :func:`_has_durable_
-    checkpoint`): read the LOCAL filesystem checkpoint index, then dial
-    ``GET /lane/checkpoints/{run_id}` with the GENERATION-LESS legacy
-    work token (``lane_control_token(secret, run_id)`` — the token
-    #243/Q35-06 made expire) over SYNCHRONOUS ``httpx``, and collapse
-    every error and non-200 into "no checkpoint". Every property the
-    modern path guarantees is absent here ON PURPOSE: this is the
-    behavior a versioned pre-R36-03 deployment still has, nothing more.
-
-    Opt-in: :data:`LEGACY_LOOKUP_ENV` (``FORGE_RETRY_LEGACY_LOOKUP=1``),
-    default OFF. The outcome is labeled :data:`LEGACY_LOOKUP_AUTHORITY`
-    so logs and evidence can never mistake it for the configured
-    authority, and it answers only ``exact``/``absent`` (the lossy
-    boolean it always was — an outage still reads as absent here,
-    exactly like the deployment it emulates).
-
-    REMOVAL PATH: this function and the ``FORGE_RETRY_LEGACY_LOOKUP``
-    read in :func:`durable_checkpoint_outcome` are deleted together at
-    R38 — one release after every deployment recorded in the rollout
-    ledger (issue #262's "migrate callers, not data") has passed a full
-    legacy-credential window with the modern authority. No data
-    migration is involved: flipping the env off selects the configured
-    authority with no change to any persisted checkpoint.
-    """
+    """The RETIRED pre- lookup chain, kept behind an explicit opt-in."""
     from forge.adaptive.checkpoint_repository import (
         CheckpointLookupOutcome,
         LOOKUP_ABSENT,
@@ -1462,8 +1151,8 @@ async def _legacy_http_lookup(
         checkpoint_id = None
     if checkpoint_id is not None:
         return CheckpointLookupOutcome.exact(checkpoint_id, authority=LEGACY_LOOKUP_AUTHORITY)
-    # 2. The legacy work-token HTTP fallback (the worker crossing the
-    #    process boundary with the EXPIRING credential).
+    # 2. The legacy work-token HTTP fallback (the worker crossing the process boundary with
+    # the EXPIRING credential).
     url = (source.get("FORGE_LANE_CONTROL_URL") or "").strip()
     secret = source.get("FORGE_LANE_CONTROL_SECRET") or ""
     if url and secret:
@@ -1497,12 +1186,7 @@ async def _legacy_http_lookup(
 
 
 def retry_in_flight_rejection(run_id: str) -> str:
-    """Why a DIFFERENT delivery's ``/retry`` is refused mid-revival (A11).
-
-    An attempt is already open (dispatch pending/in flight): a second
-    revival of the same run would double-dispatch. The existing rejection-
-    note machinery carries the refusal.
-    """
+    """Why a DIFFERENT delivery's ``/retry`` is refused mid-revival."""
     return (
         f"Run `{run_id[:8]}` already has a revival in flight — its dispatch is being driven. "
         "A second retry now would dispatch twice; wait for the current attempt to land, or "
@@ -1510,19 +1194,17 @@ def retry_in_flight_rejection(run_id: str) -> str:
     )
 
 
-# ----------------------------------------------------------------------
-# R29: operator surface around dead/stuck runs (/status, /why-blocked,
-# /reconcile) — shared by the GitLab and GitHub services so
-# the reply content and the target resolution cannot drift per lane.
-# ----------------------------------------------------------------------
+# operator surface around dead/stuck runs (status, /why-blocked, /reconcile) — shared by the
+# GitLab and GitHub services so the reply content and the target resolution cannot drift per
+# lane.
 
 #: ``/status [run-id]`` — bare reports the issue's LATEST run, any state.
 STATUS_RE = re.compile(r"/status(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
-#: ``/why-blocked [run-id]`` — bare targets the issue's latest run, any state
-#: (the reply says precisely when the run is NOT blocked, too).
+#: ``/why-blocked [run-id]`` — bare targets the issue's latest run, any state (the reply
+#: says precisely when the run is NOT blocked, too).
 WHY_BLOCKED_RE = re.compile(r"/why-blocked(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
-#: ``/reconcile <run-id>`` — the run id is REQUIRED: recovery is targeted,
-#: never guessed off the issue's latest run.
+#: ``/reconcile <run-id>`` — the run id is REQUIRED: recovery is targeted, never guessed off
+#: the issue's latest run.
 RECONCILE_RE = re.compile(r"/reconcile\s+([0-9a-f]{8,32})\b", re.IGNORECASE)
 
 
@@ -1535,15 +1217,7 @@ async def resolve_status_target(
     requested: str,
     repo_full_name: str | None = None,
 ) -> FlowRun | None:
-    """The run ``/status [run-id]`` / ``/why-blocked [run-id]`` refers to.
-
-    Same resolution discipline as :func:`resolve_retry_target` — explicit
-    32-char id, unique 8-char prefix among the issue's runs, or — bare — the
-    most recent run of ANY state for the issue (a status question is about
-    the latest run, alive or dead). ``None`` when nothing matches. Every
-    form resolves through the SAME subject-scoped query (A07) — the full id
-    no longer takes a looser lookup.
-    """
+    """The run ``/status [run-id]`` / ``/why-blocked [run-id]`` refers to."""
     query = _subject_query(
         provider=provider,
         project_id=project_id,
@@ -1572,11 +1246,7 @@ async def resolve_status_target(
 
 
 async def intents_for_run(session: AsyncSession, run_id: str) -> list[PublicationIntent]:
-    """Every publication intent of *run*, newest first (R11 surface).
-
-    Shared by ``/status`` (intent states as evidence) and ``/reconcile``
-    (the intents the operator-driven probe pass resolves).
-    """
+    """Every publication intent of *run*, newest first ( surface)."""
     return list(
         (
             await session.execute(
@@ -1591,13 +1261,7 @@ async def intents_for_run(session: AsyncSession, run_id: str) -> list[Publicatio
 
 
 async def collect_status_snapshot(session: AsyncSession, run: FlowRun) -> dict[str, Any]:
-    """Everything ``/status`` reports, read in ONE session — no side effects.
-
-    Pure reads over the durable row plus its satellite tables (budget,
-    publication intents, revive/retry action counters). No transitions, no
-    model calls, no provider I/O: the reply is composed from persisted state
-    only (R29).
-    """
+    """Everything ``/status`` reports, read in ONE session — no side effects."""
     from forge.durable.budgets import budget_for_run  # lazy: budgets is a sibling module
 
     budget = await budget_for_run(session, run.id)
@@ -1746,17 +1410,7 @@ def why_blocked_reply(
     other_active: bool = False,
     checkpoint: CheckpointLookupOutcome | None = None,
 ) -> str:
-    """The ``/why-blocked`` note: the precise cause + the honest revival paths.
-
-    READ-ONLY: the parked reason, its Tier-1 classification, and the
-    revive/retry verdict — :func:`retry_rejection` is THE one rejection
-    table (R29), so this reply can never promise a revival ``/retry``
-    would refuse.
-
-    R36-03: *checkpoint* is the caller's pre-resolved typed lookup
-    outcome (``None`` = not consulted) — the reply reports what the
-    AUTHORITY answered, never a guess.
-    """
+    """The ``/why-blocked`` note: the precise cause + the honest revival paths."""
     status = run.status
     reason = (run.status_reason or "").strip()
     lines = [f"## Forge — run `{run.id[:8]}`: why blocked", ""]
@@ -1813,14 +1467,7 @@ def why_blocked_reply(
 
 
 def format_reconcile_reply(run_id: str, intents: list[PublicationIntent]) -> str:
-    """The ``/reconcile`` resolution note: what the probe pass proved.
-
-    One line per intent — ``adopted`` (the lost publication is now the
-    run's candidate), ``duplicated`` (someone else owns the ref),
-    ``unknown`` (+ the manual-inspection instruction — never guessed), or
-    still open (nothing had landed; the run's own publish leg re-dispatches
-    with the SAME key).
-    """
+    """The ``/reconcile`` resolution note: what the probe pass proved."""
     lines = [f"## Forge — reconcile of run `{run_id[:8]}`", ""]
     if not intents:
         lines.append("No publication intents were found — nothing to reconcile.")
@@ -1864,12 +1511,7 @@ def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
 
 
 def build_retry_context(settings: Settings, status_reason: str, evidence: dict) -> str:
-    """Bounded ``/retry`` brief: why the run stopped + its last verification evidence.
-
-    Shared by every provider so a retried lane gets the same shape of context.
-    Redacted like all CI-derived context (F23) and capped like all repair
-    briefs (ADR-0013).
-    """
+    """Bounded ``/retry`` brief: why the run stopped + its last verification evidence."""
     from forge.policy.evidence import EvidencePolicy
     from forge.runs.service import REPAIR_CONTEXT_MAX_CHARS  # lazy: avoids the import cycle
 

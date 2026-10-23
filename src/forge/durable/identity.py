@@ -1,9 +1,4 @@
-"""Run identity helpers (ADR-0006/0009).
-
-Branch naming, short ids and the plan digest the human gate binds to. Kept
-dependency-free so both the durable layer and the factory agents can use them
-without import cycles.
-"""
+"""Stable run, branch and operation identities."""
 
 from __future__ import annotations
 

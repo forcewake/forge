@@ -1,15 +1,4 @@
-"""ChangeSet: the trusted write contract between proposers and GitLab (ADR-0001).
-
-A proposer (LLM implementer agent) emits a strict-JSON ChangeSet draft;
-:func:`materialize` turns it into a typed ChangeSet against the actual base
-content, and :func:`validate_changeset` is the trusted validation layer that
-checks it before anything reaches the Commits API. Authority is never derived
-from the proposal — paths, project and branch are constrained by trusted
-policy here.
-
-All limits and denylists are module-level constants so tests (and future
-policy configuration) can monkeypatch them.
-"""
+"""Validate candidate paths, operations and bounds before publication."""
 
 from __future__ import annotations
 
@@ -23,7 +12,7 @@ FORGE_MATERIALIZE_MAX_FILE_CHARS = 400_000
 
 
 class Operation(StrEnum):
-    """File action supported by the GitLab Commits API in M1."""
+    """File action supported by the GitLab Commits API in."""
 
     CREATE = "create"
     UPDATE = "update"
@@ -43,12 +32,7 @@ class Change:
 
 @dataclass(frozen=True)
 class ChangeSet:
-    """A proposed atomic commit: branch, message and the file actions.
-
-    ``attempt_base_oid`` records the snapshot the proposal was materialized
-    against (which commit a repair extends); trusted proposers set it —
-    like branch and message it is never taken from the model's word alone.
-    """
+    """A proposed atomic commit: branch, message and the file actions."""
 
     branch: str
     commit_message: str
@@ -57,12 +41,7 @@ class ChangeSet:
 
 
 class MaterializationError(Exception):
-    """A raw ChangeSet draft cannot be materialized against the base content.
-
-    Raised on zero or ambiguous ``old_text`` matches, on a missing
-    base file for update/delete, or on a create without content — ADR-0001
-    forbids fuzzy matching, ever.
-    """
+    """A raw ChangeSet draft cannot be materialized against the base content."""
 
 
 # --- Trusted validation policy (module-level so tests can monkeypatch) ------
@@ -97,29 +76,23 @@ MAX_CHANGES = 20
 #: Maximum UTF-8 size of a single change's content (256 KiB).
 MAX_CHANGE_BYTES = 256 * 1024
 
-#: Default exact-match count an ``update``'s ``old_text`` must have in the
-#: base content (ADR-0001: ambiguous operations are rejected).
+#: Default exact-match count an ``update``'s ``old_text`` must have in the base content
+#: (ADR-0001: ambiguous operations are rejected).
 DEFAULT_EXPECTED_MATCHES = 1
 
 _OPERATION_ALIASES: dict[str, Operation] = {op.value: op for op in Operation}
 
 
-# --- Write-policy profiles (R18) ---------------------------------------------
-#
-# A profile names ONE write policy: what may never be written, what is
-# explicitly permitted despite a deny, and whether publishing under it needs
-# an extra operator gate. The builtins cover the common postures; custom
-# profiles arrive as parsed config (``forge.config.validate_write_profiles``)
-# and extend the base denies tighten-only. The default profile IS today's
-# behavior — ``no_dependencies`` — so an unconfigured deployment is
-# byte-compatible.
+# Write-policy profiles A profile names ONE
+# write policy: what may never be written, what is explicitly permitted despite a deny, and
+# whether publishing under it needs an extra operator gate.
 
 
 #: The write profile used when nothing else is configured.
 DEFAULT_WRITE_PROFILE = "no_dependencies"
 
-#: The closed set of built-in profile names (custom profiles must not shadow
-#: them — a same-named override could silently RELAX the default).
+#: The closed set of built-in profile names (custom profiles must not shadow them — a
+#: same-named override could silently RELAX the default).
 BUILTIN_WRITE_PROFILES: tuple[str, ...] = (
     "no_dependencies",
     "code_only",
@@ -127,8 +100,8 @@ BUILTIN_WRITE_PROFILES: tuple[str, ...] = (
     "ci_change",
 )
 
-#: Source-code file suffixes writable under ``code_only`` — everything else
-#: (docs, manifests, lockfiles, images, CI) is outside that profile.
+#: Source-code file suffixes writable under ``code_only`` — everything else (docs,
+#: manifests, lockfiles, images, CI) is outside that profile.
 CODE_ONLY_SUFFIXES: tuple[str, ...] = (
     ".py",
     ".pyi",
@@ -170,58 +143,37 @@ CODE_ONLY_SUFFIXES: tuple[str, ...] = (
     ".svelte",
 )
 
-#: fnmatch globs for the suffixes above (``*`` spans ``/`` in fnmatch, so a
-#: suffix glob matches at any depth).
+#: fnmatch globs for the suffixes above (``*`` spans ``/`` in fnmatch, so a suffix glob
+#: matches at any depth).
 CODE_ONLY_GLOBS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in CODE_ONLY_SUFFIXES)
 
-#: CI files the ``ci_change`` profile permits despite the base denies: exactly
-#: what the base denylist names. Forge's own ``.forge.yml`` is never writable
-#: under any builtin — it is forge's control plane, not the project's CI.
+#: CI files the ``ci_change`` profile permits despite the base denies: exactly what the base
+#: denylist names.
 CI_PERMITTED_GLOBS: tuple[str, ...] = (".gitlab-ci.yml", ".github/*")
 
 
 @dataclass(frozen=True)
 class WritePolicy:
-    """One named write policy (R18) — the deny/permit knobs of a profile.
-
-    Checks run on the :func:`normalize_repo_path` form, so equivalent
-    spellings of a path can never split the verdict. ``denied_paths`` /
-    ``denied_prefixes`` mirror the module-level constants (builtins read them
-    at resolve time, so test monkeypatches keep working); ``denied_globs``
-    carries custom-profile denies; ``permitted_globs`` exempts a path from
-    the deny checks (never from the safety checks — absolute paths, ``..``
-    traversal and size caps apply under every profile); ``allowed_globs``,
-    when non-empty, is an allowlist beyond which nothing is writable.
-    """
+    """One named write policy — the deny/permit knobs of a profile."""
 
     name: str
     denied_paths: frozenset[str]
     denied_prefixes: tuple[str, ...]
-    #: Provider-sensitive paths (e.g. the project's pipeline entrypoints):
-    #: denied under EVERY profile — even where a permitted glob would lift
-    #: the ordinary denies. A candidate never rewrites its execution lane.
+    #: Provider-sensitive paths (e.g. the project's pipeline entrypoints): denied under
+    #: EVERY profile — even where a permitted glob would lift the ordinary denies.
     sensitive_paths: frozenset[str] = frozenset()
     denied_globs: tuple[str, ...] = ()
     permitted_globs: tuple[str, ...] = ()
     allowed_globs: tuple[str, ...] = ()
     deny_lockfiles: bool = True
-    #: Publishing under this profile requires the operator approver set
-    #: (``FORGE_APPROVERS`` and friends) — enforced by the publisher, which
-    #: refuses the publication when the run carries no operator-approved
-    #: frozen plan and the caller asserts no explicit approval.
+    #: Publishing under this profile requires the operator approver set (``FORGE_APPROVERS``
+    #: and friends) — enforced by the publisher, which refuses the publication when the run
+    #: carries no operator-approved frozen plan and the caller asserts no explicit approval.
     require_special_approval: bool = False
 
 
 def normalize_repo_path(path: str) -> str:
-    """Canonical repo-relative spelling of *path* (R18).
-
-    Backslashes become slashes, duplicate slashes collapse and empty/``.```
-    segments are dropped, so ``./src/a.py``, ``src//a.py`` and
-    ``src\\a.py`` all compare equal to ``src/a.py`` — a policy bypass by
-    spelling is impossible. ``..`` is deliberately NOT resolved: traversal
-    is rejected outright by :func:`validate_changeset`, never laundered
-    into a legal path.
-    """
+    """Canonical repo-relative spelling of *path*."""
     unified = path.replace("\\", "/")
     parts = [part for part in unified.split("/") if part and part != "."]
     return "/".join(parts)
@@ -244,8 +196,8 @@ def _builtin_policy(name: str) -> WritePolicy:
             allowed_globs=CODE_ONLY_GLOBS,
         )
     if name == "dependency_update":
-        # Lockfiles and manifests are writable; everything else stays per
-        # the base denies (CI and forge's own config).
+        # Lockfiles and manifests are writable; everything else stays per the base denies
+        # (CI and forge's own config).
         return WritePolicy(
             name=name,
             denied_paths=DENIED_PATHS,
@@ -264,14 +216,7 @@ def _builtin_policy(name: str) -> WritePolicy:
 
 
 def _policy_from_custom(name: str, entry: Mapping[str, Any]) -> WritePolicy:
-    """A custom profile from parsed config (tighten-only over the base).
-
-    ``denied_paths`` entries are fnmatch globs ADDED to the base denies;
-    ``allowed_paths`` entries are globs EXEMPT from every deny check; a
-    true ``require_special_approval`` puts the profile behind the operator
-    approver gate. Lockfiles stay denied (a custom profile never relaxes
-    the base lockfile deny — use ``dependency_update`` for dependency work).
-    """
+    """A custom profile from parsed config (tighten-only over the base)."""
     denied_globs = tuple(
         normalize_repo_path(str(glob))
         for glob in (entry.get("denied_paths") or [])
@@ -300,7 +245,7 @@ def resolve_write_policy(
     custom_profiles: Mapping[str, Mapping[str, Any]] | None = None,
     extra_denied_paths: Sequence[str] = (),
 ) -> WritePolicy:
-    "The effective :class:`WritePolicy` for profile *name* (R18)."
+    """The effective:class:`WritePolicy` for profile *name*."""
     key = (name or DEFAULT_WRITE_PROFILE).strip() or DEFAULT_WRITE_PROFILE
     profiles = dict(custom_profiles or {})
     if key in profiles and key in BUILTIN_WRITE_PROFILES:
@@ -327,38 +272,12 @@ def is_lockfile(path: str) -> bool:
 
 
 def in_path_scope(path: str, allowed_paths: list[str]) -> bool:
-    """Whether *path* matches at least one of the *allowed_paths* globs.
-
-    Monorepo path scoping (docs/research/2026-09-14-complex-projects.md §1): a work
-    package may carry a path allowlist; a change outside it is a failed run,
-    not a review comment. Globs are fnmatch-style and matched against the
-    repo-relative path — ``*`` also spans ``/``, so ``services/api/*``
-    covers nested files without needing ``**``.
-    """
+    """Whether *path* matches at least one of the *allowed_paths* globs."""
     return any(fnmatchcase(path, glob) for glob in allowed_paths if glob)
 
 
 def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
-    """Materialize a raw (untrusted, usually LLM-emitted) ChangeSet dict.
-
-    *git_base* maps path -> current file content at the run's base snapshot,
-    fetched by the caller (ADR-0006: the base the gate approved). ADR-0001
-    rules, with no fuzzy matching ever:
-
-    - ``create``: full ``content`` required; the file must not exist in the
-      base snapshot.
-    - ``update``: ``old_text`` must occur exactly ``expected_matches`` times
-      (default 1) in the base content; the materialized content is
-      ``base.replace(old_text, new_text, expected_matches)``.
-    - ``delete``: no content; the file must exist in the base snapshot.
-
-    An optional ``attempt_base_oid`` string on the draft is carried through
-    as trusted metadata (the snapshot *git_base* was read at); anything else
-    is dropped.
-
-    Raises :class:`MaterializationError` (zero/>expected matches, wrong
-    shapes) — the caller decides what that means for the run.
-    """
+    """Materialize a raw (untrusted, usually LLM-emitted) ChangeSet dict."""
     if not isinstance(cs_raw, dict):
         raise MaterializationError("changeset draft must be a JSON object")
 
@@ -381,8 +300,8 @@ def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
         change = _materialize_change(raw, git_base)
         canonical = normalize_repo_path(change.path)
         if canonical and canonical in seen_paths:
-            # Two actions for one path in one commit is ambiguous for the
-            # Commits API (R18) — a spelling difference does not hide it.
+            # Two actions for one path in one commit is ambiguous for the Commits API — a
+            # spelling difference does not hide it.
             raise MaterializationError(
                 f"change {change.path!r}: duplicate path ({canonical!r}) — "
                 f"one action per path per changeset"
@@ -451,26 +370,7 @@ def validate_changeset(
     allowed_paths: list[str] | None = None,
     policy: WritePolicy | None = None,
 ) -> list[str]:
-    """Validate *cs* against the write policy and return all violations.
-
-    An empty list means the ChangeSet may be committed. Every violation is a
-    human-readable string; validation never raises for proposal content (it
-    reports instead), only trusted callers decide what a violation means for
-    the run.
-
-    When *git_base* (path -> base content at the approved snapshot) is given,
-    ADR-0001 existence rules are enforced on top of the path policy: an
-    ``update``/``delete`` must address a file that exists in the snapshot.
-
-    A non-empty *allowed_paths* list restricts every change to its frozen
-    glob scope at the write boundary. Coding CLIs resolve nested instruction
-    files themselves; this validation handles only paths and policy.
-
-    *policy* (R18) selects the write profile; ``None`` resolves the default
-    ``no_dependencies`` profile, which is exactly the historical hardcoded
-    behavior. All deny/scope checks run on :func:`normalize_repo_path`
-    spellings, and two changes addressing one canonical path are a violation.
-    """
+    """Validate *cs* against the write policy and return all violations."""
     effective = policy if policy is not None else resolve_write_policy()
     violations: list[str] = []
 
@@ -505,8 +405,8 @@ def validate_changeset(
         if ".." in canonical.split("/"):
             violations.append(f"{where}: path traversal ('..') is not allowed")
 
-        # Provider-sensitive paths (pipeline entrypoints) are denied even
-        # where a profile's permitted glob would lift the ordinary denies.
+        # Provider-sensitive paths (pipeline entrypoints) are denied even where a profile's
+        # permitted glob would lift the ordinary denies.
         if canonical in effective.sensitive_paths:
             violations.append(f"{where}: path is a protected pipeline entrypoint")
             permitted = False
@@ -556,17 +456,12 @@ def validate_changeset(
     return violations
 
 
-# ----------------------------------------------------------------------
 # Document round-trip (durable attempt manifest)
-# ----------------------------------------------------------------------
+#
 
 
 def changeset_to_document(cs: ChangeSet) -> dict[str, Any]:
-    """Serialize a materialized ChangeSet into a JSON-safe document.
-
-    The durable manifest of one attempt: a resumed walk re-adopts exactly
-    these changes instead of re-proposing (and re-paying) for them.
-    """
+    """Serialize a materialized ChangeSet into a JSON-safe document."""
     return {
         "branch": cs.branch,
         "commit_message": cs.commit_message,
@@ -583,12 +478,7 @@ def changeset_to_document(cs: ChangeSet) -> dict[str, Any]:
 
 
 def changeset_from_document(data: object) -> ChangeSet | None:
-    """Rebuild the ChangeSet *data* was written from; None when it is not one.
-
-    The record is forge's own (written by :func:`changeset_to_document`), so a
-    malformed or alien document simply means "no resumable manifest" and the
-    caller falls back to a fresh proposal — never an error path.
-    """
+    """Rebuild the ChangeSet *data* was written from; None when it is not one."""
     if not isinstance(data, dict):
         return None
     branch = data.get("branch")

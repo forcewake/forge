@@ -42,9 +42,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# GitHub ingress (ADR-0019 slice) is mounted unconditionally; the endpoint
-# itself answers 503 unless FORGE_GITHUB_ENABLED and the webhook secret are
-# set — fail closed.
+# GitHub ingress (ADR-0019 slice) is mounted unconditionally; the endpoint itself answers
+# 503 unless FORGE_GITHUB_ENABLED and the webhook secret are set — fail closed.
 router.include_router(github_router)
 
 #: Active durable run commands; deferred verbs are recognized only to refuse them.
@@ -52,39 +51,28 @@ _RUN_COMMANDS = frozenset(
     {"/implement", "/go", "/cancel", "/retry", "/status", "/why-blocked", "/reconcile"}
 )
 
-#: R40-01 (#337): the review-feedback verbs (``/fix``/``/ask``) join the
-#: parsed set ONLY while ``FORGE_REVIEW_FEEDBACK_ENABLED`` is on — with the
-#: default OFF the verbs are not recognized at all (zero routing). They are
-#: NOT classic run commands: an MR-discussion-bound surface served by the
-#: ``review_feedback`` service branch, never issue-bound. The module-level
-#: alias is the capability manifest's binding proof (the
-#: ``_ADAPTIVE_NOTE_COMMANDS`` pattern — a removed binding breaks the
-#: manifest's claim instead of silently passing).
+#: the review-feedback verbs (``/fix``/``/ask``) join the parsed set ONLY while
+#: ``FORGE_REVIEW_FEEDBACK_ENABLED`` is on — with the default OFF the verbs are not
+#: recognized at all (zero routing).
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
-    """Parse issue commands, MR feedback and explicit deferred-feature refusals.
-
-    The mention pattern and bare first-token forms are equivalent. Bot
-    authors never trigger work. Feedback stays MR-bound and flag-gated;
-    malformed feedback returns its typed refusal before durable acceptance.
-    """
+    """Parse issue commands, MR feedback and explicit deferred-feature refusals."""
     if not isinstance(event, NoteEvent):
         return None
 
     bot_username = getattr(settings, "FORGE_BOT_USERNAME", "forge-bot")
     if event.user and event.user.username == bot_username:
-        # Forge's own comments contain /go lines; a bot-authored note must
-        # never act as a trigger or an approval, whatever the author's role.
+        # Forge's own comments contain /go lines; a bot-authored note must never act as a
+        # trigger or an approval, whatever the author's role.
         return None
 
     mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
     note_text = (event.object_attributes.note or "").strip()
-    # NXT-10: the adaptive control verbs (/pause /resume /steer /answer) join
-    # the parsed set ONLY while FORGE_ADAPTIVE_COMMANDS_ENABLED is on — with
-    # the default OFF the verbs are not recognized at all (zero routing).
-    # R40-01: the review-feedback verbs (/fix /ask) follow the same pattern
-    # behind FORGE_REVIEW_FEEDBACK_ENABLED.
+    # the adaptive control verbs (pause /resume /steer /answer) join the parsed set ONLY
+    # while FORGE_ADAPTIVE_COMMANDS_ENABLED is on — with the default OFF the verbs are not
+    # recognized at all (zero routing).: the review-feedback verbs (fix /ask) follow the
+    # same pattern behind FORGE_REVIEW_FEEDBACK_ENABLED.
     commands = (
         _RUN_COMMANDS
         | adaptive_command_set()
@@ -97,9 +85,9 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     if mention.is_mention and mention.slash_command in commands:
         slash_command = mention.slash_command
     else:
-        # Bare commands are equally valid: extract_mention only parses
-        # @mentions, so requiring one here silently rerouted "/implement"
-        # notes into the legacy path, where nothing handles them.
+        # Bare commands are equally valid: extract_mention only parses @mentions, so
+        # requiring one here silently rerouted "/implement" notes into the legacy path,
+        # where nothing handles them.
         first_token = note_text.split(None, 1)[0] if note_text else ""
         if first_token in commands:
             slash_command = first_token
@@ -111,16 +99,13 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     feedback_mr_iid: int | None = None
     if feedback_command:
         if on_issue or event.merge_request is None:
-            # R40-01: review feedback lives on MR discussions — the Draft MR
-            # the candidate opened. An issue-bound or commit/snippet-bound
-            # /fix//ask is not a run command at all (zero routing, the legacy
-            # path owns it).
+            # review feedback lives on MR discussions — the Draft MR the candidate opened.
             return None
         feedback_mr_iid = event.merge_request.iid
     elif not on_issue and slash_command != "/security":
-        # Gate notes are posted on issues; MR notes keep the legacy paths —
-        # except the unavailable /security reply and
-        # the review-feedback verbs (R40-01), which are MR-bound BY design.
+        # Gate notes are posted on issues; MR notes keep the legacy paths — except the
+        # unavailable /security reply and the review-feedback verbs, which are MR-bound BY
+        # design.
         return None
 
     common = {
@@ -128,23 +113,18 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         "issue_iid": event.issue.iid if event.issue is not None else None,
         "author_username": event.user.username if event.user else "",
         "author_user_id": event.user.id if event.user else 0,
-        # A11: the note id is the /retry delivery identity — it keys the
-        # revival attempt's idempotency (a redelivered webhook is a no-op).
+        # the note id is the /retry delivery identity — it keys the revival attempt's
+        # idempotency (a redelivered webhook is a no-op).
         "note_id": event.object_attributes.id,
     }
     if feedback_command:
-        # R40-01 (#337): the reviewer's comment ON the Draft MR — the same
-        # durable run-command dispatch, carrying the note
-        # identity (project + note id — a GitLab note id is unique inside a
-        # project, the logical request identity), the MR and the discussion
-        # the request binds to. The head binding is read LIVE by the service
-        # (the branch head at request time), never trusted from the payload.
+        # the reviewer's comment ON the Draft MR — the same durable run-command dispatch,
+        # carrying the note identity (project + note id — a GitLab note id is unique inside
+        # a project, the logical request identity), the MR and the discussion the request
+        # binds to.
         if parse_review_feedback_note(note_text) is None:
-            # A recognized verb with a malformed body (``/fix`` with no
-            # description): the typed INGRESS refusal. It answers 2xx with
-            # the reason — a 4xx spike would count toward GitLab's hook
-            # auto-disable (4 failures → 24h backoff project-wide) — and it
-            # never becomes a run command, so nothing can activate.
+            # A recognized verb with a malformed body (``/fix`` with no description): the
+            # typed INGRESS refusal.
             return {
                 **common,
                 "command": "review_feedback_refused",
@@ -160,10 +140,9 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
             "discussion_id": event.object_attributes.discussion_id or "",
         }
     if slash_command in _ADAPTIVE_NOTE_COMMANDS:
-        # NXT-10: the adaptive verbs normalize to ONE command and route to
-        # the ControlCommandRouter (approver gate, work-scoped run
-        # resolution, OperatorControlService mailbox) — not the classic
-        # run-command step path.
+        # the adaptive verbs normalize to ONE command and route to the ControlCommandRouter
+        # (approver gate, work-scoped run resolution, OperatorControlService mailbox) — not
+        # the classic run-command step path.
         return {
             **common,
             "command": "adaptive_control",
@@ -175,7 +154,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         common["mr_iid"] = event.merge_request.iid if not on_issue and event.merge_request else None
         return {**common, "command": "feature_unavailable", "feature": "/security"}
     if slash_command == "/implement":
-        # M1 cutover: /implement takes the durable RunService path, not flows.
+        # cutover: /implement takes the durable RunService path, not flows.
         return {**common, "command": "start_run"}
     if slash_command == "/cancel":
         return {**common, "command": "cancel", "note_text": event.object_attributes.note or ""}
@@ -183,43 +162,31 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         # Tier 2: operator revival of a dead run on the same branch.
         return {**common, "command": "retry", "note_text": event.object_attributes.note or ""}
     if slash_command == "/status":
-        # R29 read-only operator snapshot of a run (bare = latest on the issue).
+        # read-only operator snapshot of a run (bare = latest on the issue).
         return {**common, "command": "status", "note_text": event.object_attributes.note or ""}
     if slash_command == "/why-blocked":
-        # R29 read-only explanation of the terminal/blocked cause.
+        # read-only explanation of the terminal/blocked cause.
         return {
             **common,
             "command": "why_blocked",
             "note_text": event.object_attributes.note or "",
         }
     if slash_command == "/reconcile":
-        # R29 operator-driven publication-intent recovery (the ONE mutating
-        # new command; approver-gated at the executor like /retry).
+        # operator-driven publication-intent recovery (the ONE mutating new command;
+        # approver-gated at the executor like /retry).
         return {**common, "command": "reconcile", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
 
 
 def _label_title(label: Any) -> str:
-    """The label's title across GitLab payload generations.
-
-    ``changes.labels`` entries are label objects today but older GitLab sent
-    bare title strings — normalize both, unknown shapes to "".
-    """
+    """The label's title across GitLab payload generations."""
     if isinstance(label, dict):
         return str(label.get("title") or "").strip()
     return str(label or "").strip()
 
 
 def _match_issue_lifecycle(event: GitLabEvent, settings) -> dict[str, Any] | None:
-    """Detect issue-update events that belong to the #29 lifecycle commands.
-
-    Everything else (state changes, label additions, reopen) takes the
-    legacy path. The delivery keys are content-stable per change —
-    ``edit:{issue_id}:{digest}:{updated_at}`` and
-    ``unlabel:{issue_id}:{updated_at}`` — so a redelivered update collapses
-    onto one inbox identity while two genuinely different updates never do
-    (the digest alone is not enough identity: an edit landing BACK on a
-    previously-seen text would collide with the first edit's inbox row)."""
+    """Detect issue-update events that belong to the #29 lifecycle commands."""
     if not isinstance(event, IssueEvent):
         return None
     attrs = event.object_attributes
@@ -278,12 +245,7 @@ def _capture_webhook_payload(
     *,
     header_field: str = "x_gitlab_event",
 ) -> None:
-    """Persist a raw webhook payload for diagnostics (FORGE_CAPTURE_DIR).
-
-    Stores the event header and payload only — never the webhook secret.
-    Failures to capture must never break ingestion. *header_field* names the
-    record key for the event header (the GitHub ingress passes its own).
-    """
+    """Persist a raw webhook payload for diagnostics (FORGE_CAPTURE_DIR)."""
     capture_dir = getattr(settings, "FORGE_CAPTURE_DIR", None)
     if not capture_dir:
         return
@@ -305,13 +267,12 @@ def _capture_webhook_payload(
         logger.warning("Failed to capture webhook payload", exc_info=True)
 
 
-# R41-02 parity: the authoritative duplicate lookup lives in
-# forge.gateway.durable_ingress (imported above) — ONE implementation
-# shared by all three provider gateways, never duplicated per gateway.
-# R41-17 (#372) closed the residual: this gateway CONSUMES the shared
-# cache_confirms_duplicate/mark_delivered_best_effort helpers like the
-# GitHub gateways do — the probe→confirm sequence is no longer
-# spelled inline here (a second spelling of the #357 decision).
+# parity: the authoritative duplicate lookup lives in forge.gateway.durable_ingress
+# (imported above) — ONE implementation shared by all three provider gateways, never
+# duplicated per gateway. closed the residual: this gateway CONSUMES the shared
+# cache_confirms_duplicate/mark_delivered_best_effort helpers like the GitHub gateways do —
+# the probe→confirm sequence is no longer spelled inline here (a second spelling of the
+# decision).
 
 
 async def _ingest_run_command(
@@ -320,27 +281,7 @@ async def _ingest_run_command(
     event: GitLabEvent,
     run_command: dict[str, Any],
 ) -> dict[str, Any]:
-    """Transactional ingress for run commands (ADR-0017 §1, R41-02).
-
-    ONE transaction persists the inbox row (native delivery identity) and the
-    first scheduled step; the ``202`` is answered only after that commit, so
-    the command is durable in Postgres before it is acknowledged — the ONE
-    durable-acceptance rule every actionable command obeys (/implement,
-    /go, /fix, /pause, /steer, /approve-revision alike).
-
-    R41-02 (#357) demoted the Redis dedup marker from decision to cache:
-
-    - the marker is only SET AFTER the commit (a positive cache), and a
-      cache hit still performs the authoritative SQL lookup above before
-      answering ``deduplicated`` — a marker without a record proceeds as a
-      first delivery, so the P02 schedule (SET-NX ok → SQL fails → retry
-      within the TTL) can no longer produce a successful empty duplicate;
-    - the queue submit and the step-wake push after the commit remain
-      wake-up accelerators — losing them (or Redis entirely) costs one
-      step-worker poll interval, never correctness;
-    - a persistence outage refuses honestly (503, retryable by the
-      provider) instead of acknowledging an unsaved command.
-    """
+    """Transactional ingress for run commands (ADR-0017 §1,)."""
     from forge.durable import ingest_event
     from forge.worker.steps import (
         STEP_WAKE_KEY,
@@ -353,17 +294,15 @@ async def _ingest_run_command(
     settings = request.app.state.settings
     session_factory = getattr(request.app.state, "session_factory", None)
     queue = getattr(request.app.state, "task_queue", None)
-    # Only the two dispatchers above reach this ingest path — note events
-    # (run commands), the
-    # GitLabEvent models that carry ``object_attributes.id``.
+    # Only the two dispatchers above reach this ingest path — note events (run commands),
+    # the GitLabEvent models that carry ``object_attributes.id``.
     if isinstance(event, (NoteEvent, PipelineEvent)):
         note_id: int | str = event.object_attributes.id
     else:  # pragma: no cover — the dispatchers guarantee the attribute
         note_id = 0
-    # Lifecycle commands (issue_edited/unlabeled) carry a per-delivery
-    # content key (digest + updated_at): two distinct edits of ONE issue
-    # must not collapse onto one inbox identity, while a redelivered edit
-    # still does. Note/pipeline commands keep the object id as identity.
+    # Lifecycle commands (issue_edited/unlabeled) carry a per-delivery content key (digest +
+    # updated_at): two distinct edits of ONE issue must not collapse onto one inbox
+    # identity, while a redelivered edit still does.
     note_id = str(run_command.get("delivery_key") or note_id)
     source_event_id = command_source_event_id(
         run_command["command"], run_command["project_id"], note_id
@@ -375,18 +314,17 @@ async def _ingest_run_command(
         marker_keys.insert(0, f"delivery:{delivery_uuid}")
 
     if session_factory is None:
-        # Honesty (R41-02): without the durable store there is NOTHING to
-        # accept against — a 2xx here would certify a command no worker can
-        # ever find. Refuse with the retryable 5xx instead.
+        # Honesty: without the durable store there is NOTHING to accept against — a 2xx here
+        # would certify a command no worker can ever find. Refuse with the retryable 5xx
+        # instead.
         logger.error("Run command without a database — refusing (no durable acceptance possible)")
         raise HTTPException(status_code=503, detail="Database not configured — command refused")
 
     if queue is not None and await cache_confirms_duplicate(
         queue, marker_keys, session_factory, source_event_id
     ):
-        # R41-17 (#372): the ONE shared decision helper answers — the
-        # GitLab gateway no longer spells the probe→confirm sequence
-        # inline (the residual duplicate #357 left behind on this leg).
+        # the ONE shared decision helper answers — the GitLab gateway no longer spells the
+        # probe→confirm sequence inline (the residual duplicate left behind on this leg).
         if is_feedback:
             logger.info("feedback.duplicate_delivery layer=cache-confirmed note=%s", note_id)
         return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
@@ -404,18 +342,16 @@ async def _ingest_run_command(
                     payload={**run_command, "note_id": note_id},
                 )
                 if created:
-                    # The scheduled step is the durability contract behind
-                    # the 202: once this commits, a worker WILL attempt it.
+                    # The scheduled step is the durability contract behind the 202: once
+                    # this commits, a worker WILL attempt it.
                     await schedule_command_step(
                         session, run_command, source_event_id=source_event_id
                     )
                 else:
                     deduplicated = True
     except Exception as exc:
-        # Bounded retryable failure: the provider redelivers on 5xx and the
-        # next attempt finds NO marker (markers are post-commit only), so
-        # the command lands exactly once. Never a successful acceptance
-        # claim over a lost write.
+        # Bounded retryable failure: the provider redelivers on 5xx and the next attempt
+        # finds NO marker (markers are post-commit only), so the command lands exactly once.
         logger.exception(
             "Run command ingress transaction failed — refusing (retryable), identity=%s",
             source_event_id[:12],
@@ -434,9 +370,6 @@ async def _ingest_run_command(
 
     if queue is not None:
         # Wake-up accelerators only — Postgres owns the work (ADR-0017).
-        # Every write here happens strictly AFTER the commit (or after the
-        # authoritative duplicate read) and is best-effort: Redis loss
-        # changes latency, never correctness (the shared helper).
         await mark_delivered_best_effort(queue, marker_keys)
         if deduplicated:
             if is_feedback:
@@ -460,15 +393,12 @@ async def _ingest_run_command(
         }
 
     if deduplicated:
-        # No queue to refresh — the authoritative read already proved the
-        # record; nothing to execute (the original delivery's step stands).
+        # No queue to refresh — the authoritative read already proved the record; nothing to
+        # execute (the original delivery's step stands).
         return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
 
-    # No Redis — dev fallback: execute the ALREADY-COMMITTED step
-    # in-process, through the SAME claim/lease/fence protocol as the
-    # worker. The BackgroundTask is an execution nudge, never the
-    # durability mechanism — the step row survives its loss and a fresh
-    # worker (or the reaper) claims it.
+    # No Redis — dev fallback: execute the ALREADY-COMMITTED step in-process, through the
+    # SAME claim/lease/fence protocol as the worker.
     background_tasks.add_task(
         run_pending_command_step,
         session_factory,
@@ -486,20 +416,7 @@ async def _ingest_adaptive_control(
     run_command: dict[str, Any],
     event: GitLabEvent,
 ) -> dict[str, Any]:
-    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
-
-    R41-02 (#357): the adaptive surface obeys the ONE durable-acceptance
-    rule — the SAME inbox + scheduled-step transaction as /implement and
-    /fix, acknowledged only after the commit. The scheduled step's executor
-    (:func:`forge.adaptive.command_router.execute_adaptive_command_step`)
-    drives the ControlCommandRouter (authorize → resolve the run → mailbox
-    decision → ONE journaled reply per note id); a process death between
-    the 202 and the routing leaves the step ``scheduled`` and a fresh
-    worker recovers it — no reliance on the provider's redelivery and no
-    after-response BackgroundTask as the durability mechanism. The mailbox
-    itself stays command-idempotent (note-keyed idempotency keys, the
-    /retry A11 journal pattern), so a re-executed step adds nothing.
-    """
+    """ingress for adaptive operator commands (pause /resume /steer /answer)."""
     result = await _ingest_run_command(request, background_tasks, event, run_command)
     return {**result, "adaptive_command": True}
 
@@ -554,13 +471,7 @@ async def health(request: Request) -> dict[str, Any]:
 
 
 async def _gather_metrics(request: Request) -> dict[str, Any]:
-    """Collect queue/worker stats (Redis-backed) and run counts (DB-backed).
-
-    Redis and the database are optional at read time: without either, the
-    corresponding numbers degrade to zero/empty rather than failing the
-    endpoint (the JSON /metrics keeps its historical 503-without-Redis
-    contract; the Prometheus exposition never fails — F30).
-    """
+    """Collect queue/worker stats (Redis-backed) and run counts (DB-backed)."""
     redis_manager = getattr(request.app.state, "redis_manager", None)
     task_queue = getattr(request.app.state, "task_queue", None)
 
@@ -593,12 +504,8 @@ async def _gather_metrics(request: Request) -> dict[str, Any]:
     return snapshot
 
 
-#: The acceptance ladder (ADR-0021 §5, F34): a run's CURRENT status mapped to
-#: the furthest ladder rung that status implies. Runs that regressed (a
-#: failed repair after CI) count only at their present rung — this is a
-#: gauge of where work packages stand, not a cumulative funnel; the
-#: merged-without-rework rung lives provider-side (the bot never merges) and
-#: is intentionally absent.
+#: The acceptance ladder (ADR-0021 §5, F34): a run's CURRENT status mapped to the furthest
+#: ladder rung that status implies.
 _LADDER_RUNGS: tuple[str, ...] = (
     "started",
     "planned",
@@ -608,8 +515,8 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "ready_for_human",
 )
 
-#: furthest rung per lifecycle status (statuses below a rung's bar are
-#: omitted — they default to "started").
+#: furthest rung per lifecycle status (statuses below a rung's bar are omitted — they
+#: default to "started").
 _LADDER_BY_STATUS: dict[str, str] = {
     "waiting_approval": "planned",
     "proposing": "gate_approved",
@@ -625,12 +532,7 @@ _LADDER_BY_STATUS: dict[str, str] = {
 
 
 def _delivery_ladder(runs_by_status: dict[str, int]) -> dict[str, int]:
-    """Bucket runs by the furthest ladder rung their status has reached.
-
-    Terminal failure states (``failed``/``blocked``/``cancelled``) and
-    in-flight early states count at ``started`` — the work package entered
-    the factory but has not (yet) cleared the gate.
-    """
+    """Bucket runs by the furthest ladder rung their status has reached."""
     ladder = {rung: 0 for rung in _LADDER_RUNGS}
     for status, count in runs_by_status.items():
         rung = _LADDER_BY_STATUS.get(status, "started")
@@ -667,12 +569,7 @@ async def metrics(request: Request) -> JSONResponse:
 
 @router.get("/metrics.prometheus")
 async def metrics_prometheus(request: Request) -> Response:
-    """Prometheus exposition of the processing metrics (F30).
-
-    Same stat keys as the JSON /metrics, plus the durable-run gauge
-    ``forge_runs_by_status``. Served as text/plain (Prometheus format
-    version 4.0.4); never 5xx — missing backends report zero.
-    """
+    """Prometheus exposition of the processing metrics (F30)."""
     snapshot = await _gather_metrics(request)
 
     lines = [
@@ -776,17 +673,16 @@ async def webhook(
 
     logger.info("Webhook event: %s", event.object_kind, extra=log_extra)
 
-    # M1 durable run loop: /implement and /go notes bypass the legacy
-    # command dispatch commits durable acceptance without a model call here.
+    # durable run loop: /implement and /go notes bypass the legacy command dispatch commits
+    # durable acceptance without a model call here.
     run_command = _match_run_command(event, settings)
     if run_command is not None:
         if run_command.get("command") == "feature_unavailable":
             return unavailable_reply(run_command["feature"])
         if run_command.get("command") == "review_feedback_refused":
-            # R40-01: the typed ingress refusal for a malformed feedback
-            # verb — a 2xx WITH the reason (a 4xx spike counts toward
-            # GitLab's hook auto-disable: 4 failures → 24h backoff
-            # project-wide), and no run command (nothing can activate).
+            # the typed ingress refusal for a malformed feedback verb — a 2xx WITH the
+            # reason (a 4xx spike counts toward GitLab's hook auto-disable: 4 failures → 24h
+            # backoff project-wide), and no run command (nothing can activate).
             logger.info(
                 "feedback.refusal_reason=%s note=%s project=%s",
                 run_command["refusal_reason"],
@@ -800,15 +696,13 @@ async def webhook(
                 "refusal_reason": run_command["refusal_reason"],
             }
         if run_command.get("command") == "adaptive_control":
-            # NXT-10 / R41-02: the adaptive verbs take the SAME durable
-            # inbox + scheduled-step acceptance as the classic commands;
-            # the step executor routes to the ControlCommandRouter.
+            # the adaptive verbs take the SAME durable inbox + scheduled-step acceptance as
+            # the classic commands; the step executor routes to the ControlCommandRouter.
             return await _ingest_adaptive_control(request, background_tasks, run_command, event)
         if run_command.get("command") == "review_feedback":
-            # R40-01: the transport identity rides the metadata (audit +
-            # transport-layer dedup); the LOGICAL identity stays the note
-            # id — the request, the reply journal and the revision decision
-            # all key on it, so an exact redelivery observes the original
+            # the transport identity rides the metadata (audit + transport-layer dedup); the
+            # LOGICAL identity stays the note id — the request, the reply journal and the
+            # revision decision all key on it, so an exact redelivery observes the original
             # request and never a second paid correction run.
             run_command = {**run_command, "delivery_uuid": x_gitlab_event_uuid or ""}
             logger.info(
@@ -820,8 +714,8 @@ async def webhook(
             )
         return await _ingest_run_command(request, background_tasks, event, run_command)
 
-    # #29 lifecycle commands: issue updates (edit → replan, trigger-label
-    # removal → cancel at the gate) route through the SAME durable step path.
+    # 29 lifecycle commands: issue updates (edit → replan, trigger-label removal → cancel at
+    # the gate) route through the SAME durable step path.
     lifecycle_command = _match_issue_lifecycle(event, settings)
     if lifecycle_command is not None:
         return await _ingest_run_command(request, background_tasks, event, lifecycle_command)
@@ -833,13 +727,7 @@ async def webhook(
 
 
 def _require_api_read_auth(request: Request) -> None:
-    """Bearer-token gate for the management read API (F30).
-
-    When ``FORGE_API_READ_TOKEN`` is set, GET /runs* require
-    ``Authorization: Bearer <token>`` (constant-time compare). When unset —
-    dev default — the routes are open. The legacy unauthenticated
-    ``/flows/{id}`` endpoint (raw Redis flow state) was removed entirely.
-    """
+    """Bearer-token gate for the management read API (F30)."""
     settings = request.app.state.settings
     token = getattr(settings, "FORGE_API_READ_TOKEN", None)
     if token is None:
@@ -871,9 +759,7 @@ def _run_summary(run: FlowRun) -> dict[str, Any]:
     }
 
 
-#: run.evidence keys kept in the read model, nested per section. Everything
-#: else (plan.files_hint, review.findings, harness.handle, ...) is bulky
-#: internal context and is dropped from the API (F30).
+#: run.evidence keys kept in the read model, nested per section.
 _EVIDENCE_SUMMARY_FIELDS: dict[str, tuple[str, ...]] = {
     "plan": ("digest", "summary"),
     "pipeline": ("id", "url", "status", "sha"),

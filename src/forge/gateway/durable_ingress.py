@@ -1,18 +1,4 @@
-"""The durable-acceptance helpers every gateway command ingress shares.
-
-The helpers here are the cache-side halves of that contract:
-
-- :func:`inbox_record_exists` — the authoritative SQL lookup. Before any
-  ``deduplicated`` answer the delivery identity is proven against the
-  committed inbox row; a marker without a record (a failed transaction
-  behind a pre-commit marker — the P02 schedule) means the delivery is a
-  FIRST delivery, not a suppressed one.
-- :func:`cache_confirms_duplicate` — the read-only post-commit probe plus
-  that authoritative confirmation, with the ``ingress.cache_without_record``
-  anomaly surfaced on the orphaned-marker fall-through.
-- :func:`mark_delivered_best_effort` — the post-commit positive-cache write.
-  It runs strictly AFTER the commit and is best-effort: Redis loss changes
-  latency, never correctness."""
+"""Persist command intake before scheduling durable execution."""
 
 from __future__ import annotations
 
@@ -27,14 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 async def inbox_record_exists(session_factory: Any, source_event_id: str) -> bool:
-    """The authoritative duplicate check: does the inbox row exist in SQL.
-
-    R41-02 (#357): the Redis marker is a post-commit positive cache, never
-    the dedup authority. Before any ``deduplicated`` answer the gateway
-    proves the delivery identity against PostgreSQL — a marker without a
-    record (a failed transaction behind a pre-commit marker) means the
-    delivery is treated as a FIRST delivery, not suppressed.
-    """
+    """The authoritative duplicate check: does the inbox row exist in SQL."""
     async with session_factory() as session:
         row = (
             await session.execute(
@@ -50,15 +29,7 @@ async def cache_confirms_duplicate(
     session_factory: Any,
     source_event_id: str,
 ) -> bool:
-    """Whether the cache hint is backed by the committed inbox row.
-
-    A cache hit is only a HINT: the authoritative lookup must confirm the
-    committed record before any deduplicated answer. Returns True only on a
-    confirmed duplicate; an orphaned marker (the pre-commit SET-NX of a
-    failed transaction) falls through — the marker must never suppress an
-    unsaved command — and a probe failure degrades to the database deciding
-    alone.
-    """
+    """Whether the cache hint is backed by the committed inbox row."""
     try:
         cached = any([await queue.was_delivered(key) for key in marker_keys])
     except Exception:
@@ -68,10 +39,8 @@ async def cache_confirms_duplicate(
         return False
     if await inbox_record_exists(session_factory, source_event_id):
         return True
-    # The anomaly the review asked to surface: a marker whose record never
-    # landed (pre-commit marker of a failed transaction, or a stale
-    # leftover). Fall through and ingest — the delivery proceeds as a first
-    # delivery, never a successful empty duplicate.
+    # A receipt marker without its durable record must be reported as anomalous
+    # (pre-commit marker of a failed transaction, or a stale leftover).
     logger.warning(
         "ingress.cache_without_record identity=%s — treating as first delivery",
         source_event_id[:12],

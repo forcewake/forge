@@ -1,15 +1,4 @@
-"""Durable execution foundation (M1).
-
-Public surface:
-
-- :class:`Controller` and :class:`FlowStatus` — the ADR-0004 lifecycle state
-  machine with atomic outbox writes, action journaling and worker leases.
-- :func:`forge.durable.gates.record_approval` / ``consume_approval`` — ADR-0009
-  human gates.
-- :func:`forge.durable.inbox.ingest_event` — idempotent webhook ingestion
-  (ADR-0005).
-- The six durable tables in :mod:`forge.durable.models`.
-"""
+"""Public durable controller, gate, identity and model APIs."""
 
 from forge.durable.budgets import (
     AXIS_CALLS,

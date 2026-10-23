@@ -1,28 +1,4 @@
-"""The explicit collaboration target (R41-04, #359).
-
-The disclosed debt this module retires: child round ids deliberately
-reused the parent's first 8 hex chars so every ``factory_branch``
-derivation landed on the same source branch
-(``child_id = f"{run_id[:8]}{uuid4().hex[:24]}"``). That coupled work
-identity (the run id), collaboration identity (the branch + MR a whole
-delivery lineage shares) and display shorthand (the 8-char short id) —
-and made short command ids ambiguous within a lineage.
-
-From #359 the collaboration surface is a PERSISTED record — provider,
-repository, source branch, target branch, MR identity — linked from
-root and child work (``flow_runs.target_id`` →
-``collaboration_targets``). New rounds get INDEPENDENT run ids; branch
-identity resolves through the target in the publisher, the drift
-checks, the harness dispatch, CI collection and the operator commands.
-Legacy runs (admitted before the target column existed) get their
-target derived ONCE by the adapter here — validated against recorded
-MR/source information before anything is materialized; an unresolved
-legacy topology records as a REFUSAL row, never an inferred branch.
-
-Kept dependency-light like :mod:`forge.durable.identity` (identity
-helpers only) plus the ORM row: the module is imported by the durable
-package facade and by the services.
-"""
+"""Persist one collaboration target per run without changing it on replay."""
 
 from __future__ import annotations
 
@@ -52,46 +28,29 @@ __all__ = [
     "target_handle_mismatches",
 ]
 
-#: The one live target status. A ``refused`` row is a durable record
-#: that a legacy topology could NOT be resolved — it carries the typed
-#: reason and never a branch.
+#: The one live target status. A ``refused`` row is a durable record that a legacy topology
+#: could NOT be resolved — it carries the typed reason and never a branch.
 ACTIVE_TARGET_STATUS = "active"
 
-#: The outbox event type emitted when a recorded handle disagrees with
-#: the target (run MR vs round MR vs provider MR vs target row) — the
-#: observability dimension the review named.
+#: The outbox event type emitted when a recorded handle disagrees with the target (run MR vs
+#: round MR vs provider MR vs target row) — the observability dimension the review named.
 TARGET_MISMATCH_EVENT = "collaboration.target_mismatch"
 
-#: The outbox event type emitted when the legacy adapter records a
-#: refusal (unresolved legacy topology).
+#: The outbox event type emitted when the legacy adapter records a refusal (unresolved
+#: legacy topology).
 TARGET_REFUSED_EVENT = "collaboration.target_refused"
 
-#: ``round 2 of a1b2c3d4`` — the concise human round reference. It is
-#: DISPLAY AND READ RESOLUTION ONLY: never an authorization token (the
-#: destructive commands still require the full run id) and never a
-#: publication input (publication keys on the target's recorded source
-#: branch and the run ids, never on a label or a round number).
+#: ``round 2 of a1b2c3d4`` — the concise human round reference.
 ROUND_REFERENCE_RE = re.compile(r"round\s+(\d+)\s+of\s+([0-9a-fA-F]{8,32})\b", re.IGNORECASE)
 
 
 def round_reference(round_number: int, root_run_id: str) -> str:
-    """``round <n> of <root-short>`` — the human reference for one round.
-
-    Unambiguous within a repository because the pair (lineage root,
-    round number) names exactly one delivery: round 1 is the root
-    delivery itself, round N ≥ 2 the child of the (N−1)-th delivery.
-    """
+    """``round <n> of <root-short>`` — the human reference for one round."""
     return f"round {int(round_number)} of {root_run_id[:8]}"
 
 
 class CollaborationTargetError(RuntimeError):
-    """The typed refusal of the target contract.
-
-    ``code`` is the stable machine-readable reason
-    (``collaboration_target_unresolved`` for a refused legacy topology,
-    ``collaboration.target_mismatch`` for disagreeing recorded
-    handles); ``detail`` names the concrete disagreement.
-    """
+    """The typed refusal of the target contract."""
 
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(f"{code}: {detail}")
@@ -101,17 +60,7 @@ class CollaborationTargetError(RuntimeError):
 
 @dataclass(frozen=True)
 class LegacyTargetEvidence:
-    """The recorded MR/source information the legacy adapter validates
-    a derivation against — everything the run ever PERSISTED about its
-    collaboration surface (never a live provider read).
-
-    ``branches`` — the branch names recorded on the run's own rows
-    (``mr_reservations.branch``, publication-intent ``target_ref``s,
-    succeeded commit ``correlation_id``s). ``mr_iids`` — the MR numbers
-    those same rows recorded. Both are advisory-unless-present: absent
-    evidence means the run never touched a branch; PRESENT evidence is
-    binding.
-    """
+    """The recorded MR/source information the legacy adapter validates a derivation against — everything the run ever PERSISTED about its collaboration surface (never a live provider read)."""
 
     branches: tuple[str, ...] = ()
     mr_iids: tuple[int, ...] = ()
@@ -125,13 +74,7 @@ class LegacyTargetEvidence:
 
 @dataclass(frozen=True)
 class TargetDecision:
-    """The pure outcome of the legacy validation: materialize, or refuse.
-
-    A materialization carries the validated ``source_branch`` and the
-    single agreeing ``mr_iid`` (``None`` when nothing recorded one). A
-    refusal carries the typed reason and NEVER a branch — an unresolved
-    legacy topology is recorded, not inferred.
-    """
+    """The pure outcome of the legacy validation: materialize, or refuse."""
 
     source_branch: str | None = None
     target_branch: str | None = None
@@ -153,37 +96,10 @@ def derive_legacy_target(
     evidence: LegacyTargetEvidence,
     target_branch: str,
 ) -> TargetDecision:
-    """Derive ONE legacy run's collaboration target — validated first.
-
-    The candidate is the run's OWN historical derivation
-    (:func:`forge.durable.identity.factory_branch` — the exact
-    expression every pre-#359 call site evaluated for this run, prefix
-    reuse included). It is only materialized when the run's RECORDED
-    MR/source information does not CONTRADICT it:
-
-    - recorded branches must ALL equal the candidate — a disagreeing
-      record (hand-migrated data, a foreign reservation) is an
-      unresolved topology, refused;
-    - the recorded MR numbers (reservations, intents, the run row)
-      must agree on at most one MR — two different MRs for one run is
-      a topology mismatch, refused;
-    - a run with NO contradicting evidence keeps its own deterministic
-      derivation — that IS the topology its admission minted (delivery
-      1 always derived from its own full id; a legacy round child's
-      prefix reuse made its own-id derivation the lineage branch by
-      construction). Absent evidence is not disagreement: a delivery-1
-      run records its branch only as publication intents / journal
-      correlation ids once it commits, and its MR row alone pins no
-      branch — materialized with provenance ``legacy``.
-
-    This function is PURE (no session, no I/O): migration 032 applies
-    the same decision in SQL terms, and the runtime adapter calls this
-    one directly — one validation, two entry points.
-    """
+    """Derive ONE legacy run's collaboration target — validated first."""
     if provider != "gitlab":
-        # The GitHub lanes keep their own per-run branch twins
-        # (no review rounds exist there); the legacy adapter is the
-        # GitLab lane's alone this cycle.
+        # The GitHub lanes keep their own per-run branch twins (no review rounds exist
+        # there); the legacy adapter is the GitLab lane's alone this cycle.
         return TargetDecision(refusal_reason=f"no_legacy_adapter_for_provider:{provider}")
     candidate = factory_branch(issue_iid, run_id)
     recorded_branches = evidence.branch_set()
@@ -280,27 +196,7 @@ async def target_for_run(
     *,
     target_branch: str = "main",
 ) -> CollaborationTarget:
-    """The run's collaboration target — the live link, or the ONE
-    legacy materialization.
-
-    - a run already linked to an ACTIVE target returns it (the fast
-      path every modern admission rides; read-only, no commit);
-    - a run linked to a REFUSED target raises
-      :class:`CollaborationTargetError` — the refusal is durable, the
-      topology is never re-derived on later attempts;
-    - an unlinked run (admitted before the target column existed, or by
-      a worker from before a staged rollout) gets the legacy adapter:
-      derive ONCE, validate against recorded MR/source information,
-      find-or-create the row by its unique (provider, project,
-      source-branch) key, link the run and COMMIT — this session's own
-      transaction, complete when the call returns. Call it on a
-      dedicated session (idempotent: the unique branch key collapses
-      racing materializers, the loser re-reads the winner's row).
-
-    The admission path resolves the lineage target BEFORE opening its
-    transaction, then re-reads the linked row inside it — so the
-    materialization never interleaves with the admission's commit.
-    """
+    """The run's collaboration target — the live link, or the ONE legacy materialization."""
     if run.target_id:
         target = await session.get(CollaborationTarget, run.target_id)
         if target is None:
@@ -360,9 +256,9 @@ async def target_for_run(
         .first()
     )
     if existing is not None:
-        # A lineage sibling (or the migration) materialized this branch's
-        # target already — link and go; the recorded MR identity only
-        # strengthens (never contradicts: validation refused mismatches).
+        # A lineage sibling (or the migration) materialized this branch's target already —
+        # link and go; the recorded MR identity only strengthens (never contradicts:
+        # validation refused mismatches).
         run.target_id = existing.id
         if existing.mr_iid is None and decision.mr_iid is not None:
             existing.mr_iid = decision.mr_iid
@@ -411,14 +307,7 @@ def admission_target(
     run_id: str,
     target_branch: str,
 ) -> CollaborationTarget:
-    """The target row a NEW admission materializes (unpersisted).
-
-    The ONE live derivation site: the source branch of a delivery-1
-    admission is minted from the run's own identity exactly once, here
-    and in :func:`derive_legacy_target` — every consumer afterwards
-    resolves through the persisted row (the run id NEVER re-derives a
-    branch downstream; R41-04's boundary rule confines exactly this).
-    """
+    """The target row a NEW admission materializes (unpersisted)."""
     return CollaborationTarget(
         id=uuid4().hex,
         provider=provider,
@@ -440,19 +329,7 @@ def target_handle_mismatches(
     provider_mr_source_branch: str = "",
     project_ref: str | None = None,
 ) -> list[str]:
-    """Every disagreement between the recorded handles — the pre-write
-    guard (R41-04's ``collaboration.target_mismatch``).
-
-    Compares what each recorded surface says about the collaboration
-    identity: the target row's MR, the run row's MR, the round's MR,
-    the provider's live MR document (its source branch, when it
-    reports one) and the repository identity. Any disagreement is a
-    mismatch string; an empty list means the handles agree and the
-    write may proceed. Provider-scoped subjects keep two repositories
-    with the same MR number and branch label apart by construction
-    (``project_ref``), so they never reach a mismatch — they are
-    different targets outright.
-    """
+    """Every disagreement between the recorded handles — the pre-write guard ('s ``collaboration.target_mismatch``)."""
     mismatches: list[str] = []
     recorded: dict[str, int] = {}
     if target.mr_iid is not None:

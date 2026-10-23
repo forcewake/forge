@@ -41,6 +41,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-09 historical evidence archive | Implemented locally; 508 original files recover byte-for-byte from unpublished archive/evidence-0.42; active contract fixtures and dump guard retained |
 | P1-10 lane-only implementation | Source implemented; builtin execution removed and actual project CI checked before paid work; remaining lifecycle-test ports join engine integration |
 | P1-12 Codeward legacy | Implemented; legacy orchestrator, YAML agents/flows, context, chat, MCP client and unused stores/models removed; old queued tasks refuse and migration tables remain |
+| P1-16 surviving-source prose | Implemented for 41 surviving modules with identical non-docstring AST and directive targets; label-gated CI checker added; global prose target remains open until old lifecycle/lane removal |
 | P1-15 operator surfaces | Implemented; list/detail retain authorization, scope and redaction, optional exports and report grades removed; list credential leakage fixed |
 | P1-14 dependency diet | Implemented source cleanup; Agno/LiteLLM/MCP/tiktoken and orphan dependencies removed, three distribution dependency checks pass; 13 direct server requirements remain, above the target of ten |
 | P1-13 deferred features | Implemented; MCP server, scanner/triage and standalone CI-debug removed; historical migration schema preserved and /security refuses explicitly |

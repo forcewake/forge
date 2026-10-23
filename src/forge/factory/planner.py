@@ -1,11 +1,4 @@
-"""LLM planner agent (ADR-0004): issue -> implementation plan.
-
-Pure: takes an :class:`~forge.factory.llm.LLMClient`, never touches the
-controller or GitLab. Returns the rendered plan markdown (the exact text the
-human gate's plan digest binds to, ADR-0009); the structured JSON it parsed
-is kept on ``last_plan`` so the service can persist ``files_hint`` and a
-summary into the run's evidence for the implementer and reviewer.
-"""
+"""Produce a bounded implementation plan for the human approval gate."""
 
 from __future__ import annotations
 
@@ -28,11 +21,8 @@ PLANNER_MAX_INPUT_CHARS = 12000
 #: How much of the plan markdown is kept as the evidence summary.
 PLAN_SUMMARY_CHARS = 1500
 
-#: The budget classes the planner may REQUEST (R42-06 / #379): the same
-#: closed triple :data:`forge.runs.harness_selection.BUDGET_CLASSES` freezes.
-#: The assessment is a REQUEST, never a grant — the numeric ceilings live in
-#: the operator's configured profiles (FORGE_BUDGET_PROFILES) and the
-#: compiler re-validates the class against the closed set (rule 4, ADR-0023).
+#: The budget classes the planner may REQUEST: the same closed
+#: triple :data:`forge.runs.harness_selection.BUDGET_CLASSES` freezes.
 PLANNER_BUDGET_CLASSES: tuple[str, ...] = ("trivial", "standard", "heavy")
 
 _SYSTEM_PROMPT = (
@@ -73,12 +63,7 @@ class LLMPlanner:
         flow_run_id: str | None = None,
         path_scope: list[str] | None = None,
     ) -> str:
-        """Return the plan as markdown (the text the gate digest binds to).
-
-        *path_scope* (v0.7 monorepo scoping) carries the project's
-        ``implement.paths`` globs; when set, the prompt states the
-        restriction so the plan aims inside it from the start.
-        """
+        """Return the plan as markdown (the text the gate digest binds to)."""
         self.last_plan = None
         user = f"Issue title: {issue_title}\n\nIssue description:\n{issue_description or '(empty)'}"
         if path_scope:
@@ -130,16 +115,7 @@ class LLMPlanner:
         return [str(h) for h in (self.last_plan.get("files_hint") or []) if str(h).strip()]
 
     def budget_assessment(self) -> str:
-        """The planner's REQUESTED budget class (R42-06 / #379), or ``""``.
-
-        A lenient read of the optional structured assessment: whatever the
-        model answered for ``budget_class``, cleaned to a string. An absent,
-        non-string or unknown value returns ``""`` — the assessment is a
-        REQUEST the selection compiler re-validates against the closed
-        :data:`PLANNER_BUDGET_CLASSES` triple (the model may narrow or
-        escalate the class; it never grants itself a ceiling — the numeric
-        profiles stay the operator's configured authority).
-        """
+        """The planner's REQUESTED budget class, or ``""``."""
         if not self.last_plan:
             return ""
         value = str(self.last_plan.get("budget_class") or "").strip()

@@ -1,53 +1,4 @@
-"""GitHub webhook ingress (ADR-0019 first slice).
-
-Fail-closed by design:
-
-- The route only accepts deliveries when ``FORGE_GITHUB_ENABLED`` is true AND
-  ``FORGE_GITHUB_WEBHOOK_SECRET`` is set — anything else answers
-  ``503 github ingress disabled`` (an unsigned delivery is never processed).
-- Authenticity is the ``X-Hub-Signature-256`` HMAC-SHA256 over the RAW
-  request bytes, compared in constant time (research §2.1). A missing header
-  is invalid — if no secret is configured on the GitHub side, GitHub does not
-  send the header at all.
-- Responses are answered from durable state only: the ingestion commits an
-  inbox row (and, for run commands, the first scheduled step) BEFORE the
-  ``202`` — the same transactional contract as the GitLab ingress
-  (ADR-0017 §1). GitHub retries nothing, so a dropped connection costs a
-  redelivery, which the inbox identity collapses.
-
-Event routing for this slice:
-
-- ``ping`` → ``200 pong`` (the cheapest end-to-end check of URL + secret).
-- ``issue_comment`` ``created`` → normalized run command routed through the
-  SAME durable step path as GitLab commands (inbox row + scheduled step in
-  one transaction). The EventInbox identity is connection-scoped:
-  ``github:{installation_id}:{repo_full_name}`` + event + comment id.
-- ``issues`` ``labeled`` → when the label name matches
-  ``FORGE_TRIGGER_LABEL`` (default ``forge``, case-insensitive) the SAME
-  run command is normalized (``start_run``) with the labeler as the actor
-  (ADR-0020 §4: the honest agent-UX fallback — a label trigger, not a
-  partner-program listing). Admission still applies downstream: only
-  FORGE_APPROVERS logins actually start runs.
-- ``issues`` ``edited`` → normalized to ``issue_edited``: the executor
-  compares the new text against the plan-time snapshot and either replans a
-  gate-waiting run or notes a mid-flight edit (see
-  ``GitHubRunService.handle_issue_edited``).
-- ``issues`` ``unlabeled`` (trigger label) → normalized to ``unlabeled``:
-  label-off = cancel, the mirror of the label-on trigger — runs still
-  parked at the gate are cancelled, runs past it are untouched.
-- ``pull_request`` ``opened``/``synchronize`` → the reactive review lane
-  (v0.7, docs/research/2026-09-14-github-reactive.md F1): Draft PRs in tracked repos
-  are normalized to a ``review_pr`` command routed through the SAME durable
-  step path (inbox row + scheduled step in one transaction). Bot senders,
-  bot-authored PRs and forge's own ``forge/*`` branches are skipped — the
-  reactive reviewer never reviews forge's own output.
-- ``workflow_job`` failures are inbox-only; the CI-debug feature is deferred.
-- ``installation`` ``deleted``/``removed`` → the connection is disabled:
-  logged and persisted as an inbox row (reconciliation hooks come with the
-  v0.5 contracts extraction).
-- everything else (``push``, ``workflow_run``, …) → inbox row only;
-  reconciliation hooks arrive later.
-"""
+"""Authenticate and deduplicate GitHub events before routing commands."""
 
 from __future__ import annotations
 
@@ -85,9 +36,8 @@ _COMMAND_MAP = {
     "/go": "go",
     "/cancel": "cancel",
     "/retry": "retry",
-    # R29 operator surface around dead/stuck runs: two read-only commands
-    # and the ONE mutating recovery command (/reconcile — approver-gated
-    # at the executor, like /retry).
+    # operator surface around dead/stuck runs: two read-only commands and the ONE mutating
+    # recovery command (reconcile — approver-gated at the executor, like /retry).
     "/status": "status",
     "/why-blocked": "why_blocked",
     "/reconcile": "reconcile",
@@ -96,18 +46,13 @@ _COMMAND_MAP = {
 #: installation webhook actions that mean "this connection is gone".
 _INSTALLATION_REMOVED_ACTIONS = frozenset({"deleted", "removed"})
 
-#: ``pull_request`` actions the reactive review lane reacts to (v0.7 F1):
-#: a new Draft PR, or new commits pushed to one. Everything else
-#: (``closed``, ``ready_for_review``, ``edited``, …) is inbox-only.
+#: ``pull_request`` actions the reactive review lane reacts to (v0.7 F1): a new Draft PR, or
+#: new commits pushed to one.
 _PR_REVIEW_ACTIONS = frozenset({"opened", "synchronize"})
 
 
 def verify_github_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
-    """Constant-time check of ``X-Hub-Signature-256`` over the RAW bytes.
-
-    Value format: ``sha256=<hex hmac-sha256(secret, body)>``. A missing
-    header is invalid (research §2.1).
-    """
+    """Constant-time check of ``X-Hub-Signature-256`` over the RAW bytes."""
     if not signature_header or not secret:
         return False
     expected = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -120,15 +65,7 @@ def github_connection_id(installation_id: Any, repo_full_name: str) -> str:
 
 
 def github_source_event_id(connection_id: str, event: str, action: str, delivery_key: str) -> str:
-    """Content-stable inbox identity for a GitHub delivery.
-
-    sha256 over connection id + event + action + a per-event delivery key
-    (the comment id for ``issue_comment``, the ``X-GitHub-Delivery`` GUID
-    otherwise). Re-delivered webhooks collapse onto one id — and since a
-    manual redelivery intentionally REUSES the delivery GUID (research
-    §2.2), dedupe means drop-duplicates, which is exactly what the inbox
-    unique index does.
-    """
+    """Content-stable inbox identity for a GitHub delivery."""
     material = "|".join((connection_id, event, action, str(delivery_key)))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -138,18 +75,7 @@ def normalize_issue_comment(
     mention_pattern: str = "@forge",
     extra_commands: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
-    """Normalize an ``issue_comment`` payload into run-command metadata.
-
-    Returns None when the comment carries no forge command. PR comments are
-    distinguished by the ``pull_request`` key on the issue object (research
-    §2.3) and surfaced as ``issue_is_pr`` — routing treats them the same for
-    now; the flow decides what a PR-comment command means post-v0.5.
-
-    *extra_commands* carries the adaptive control verbs while
-    ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` is on (NXT-10): those verbs
-    normalize to the single ``adaptive_control`` command with the verb in
-    ``adaptive_verb`` — the mailbox leg, not the classic run-command step.
-    """
+    """Normalize an ``issue_comment`` payload into run-command metadata."""
     issue = payload.get("issue") or {}
     comment = payload.get("comment") or {}
     repository = payload.get("repository") or {}
@@ -162,9 +88,9 @@ def normalize_issue_comment(
     if mention.is_mention and mention.slash_command in commands:
         slash_command = mention.slash_command
     else:
-        # Bare commands are equally valid (same rule as the GitLab ingress):
-        # extract_mention only parses @mentions, so requiring one here would
-        # silently drop "/implement" notes that lack it.
+        # Bare commands are equally valid (same rule as the GitLab ingress): extract_mention
+        # only parses @mentions, so requiring one here would silently drop "/implement"
+        # notes that lack it.
         first_token = body.split(None, 1)[0] if body else ""
         if first_token in commands:
             slash_command = first_token
@@ -200,14 +126,7 @@ def normalize_labeled_event(
     payload: dict[str, Any],
     trigger_label: str = "forge",
 ) -> dict[str, Any] | None:
-    """Normalize an ``issues.labeled`` payload into run-command metadata.
-
-    Fires only when the applied label matches *trigger_label*
-    case-insensitively (ADR-0020 §4). The labeler (``sender.login``) becomes
-    the acting user — the run then crosses the SAME admission gate as a
-    /implement, so a non-approver's label starts nothing. Any other label
-    (or an unlabeled issue payload) returns None → inbox-only recording.
-    """
+    """Normalize an ``issues.labeled`` payload into run-command metadata."""
     issue = payload.get("issue") or {}
     label = payload.get("label") or {}
     repository = payload.get("repository") or {}
@@ -229,34 +148,16 @@ def normalize_labeled_event(
         "issue_is_pr": "pull_request" in issue,
         "author_username": str((payload.get("sender") or {}).get("login") or ""),
         "note_text": "",
-        # The ISSUE id, not the label id: the label id is constant across
-        # every issue carrying it, so keying dedupe on it silently swallowed
-        # every labeled event after the first (LIVE-found on forcewake/forge:
-        # #28 auto-planned, #29 with the same label never did). Issue-scoped
-        # identity keeps redelivery dedup intact while distinct issues fire.
+        # The ISSUE id, not the label id: the label id is constant across every issue
+        # carrying it, so keying dedupe on it silently swallowed every labeled event after
+        # the first (LIVE-found on forcewake/forge: 28 auto-planned, #29 with the same label
+        # never did).
         "note_id": issue.get("id"),
     }
 
 
 def normalize_issue_edited_event(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize an ``issues.edited`` payload into an ``issue_edited`` command.
-
-    Fires for ISSUE edits only — a PR arrives as an issue object too, but the
-    plan snapshot binds the issue text, so PR body edits are inbox-only. The
-    edited title + body travel in the metadata: the executor compares them
-    against the snapshot frozen at plan time without an extra API read, and
-    the payload's ``changes`` diff is not needed for that.
-
-    The delivery key is content-stable — ``edit:{issue_id}:{digest of the new
-    text}:{issue updated_at}`` — so a redelivered edit collapses onto one
-    inbox identity while two genuinely different edits never do. The text
-    digest alone is not enough identity: the inbox index is permanent, so an
-    edit landing BACK on a previously-seen text (A→B→A) would collide with
-    the first A-edit's row and be silently swallowed — no command, and the
-    waiting plan goes stale again. ``updated_at`` is bumped by GitHub on
-    every edit and travels identically in a redelivered payload, so it
-    separates the re-applied edit from the replay without a clock.
-    """
+    """Normalize an ``issues.edited`` payload into an ``issue_edited`` command."""
     issue = payload.get("issue") or {}
     if not issue or "pull_request" in issue:
         return None
@@ -293,19 +194,7 @@ def normalize_issue_unlabeled_event(
     trigger_label: str = "forge",
     delivery_key: str = "",
 ) -> dict[str, Any] | None:
-    """Normalize an ``issues.unlabeled`` payload into an ``unlabeled`` command.
-
-    Label-off = cancel: the mirror of :func:`normalize_labeled_event`
-    (ADR-0020 §4). Fires only when the REMOVED label matches *trigger_label*
-    case-insensitively; PRs are ignored. Whether the actor may actually
-    cancel is the executor's admission decision — the ingress stays shape-only.
-
-    The delivery GUID is the only per-event identity GitHub gives an unlabel,
-    so it is the delivery key (research §2.2: a redelivery reuses the GUID and
-    collapses). A duplicate that slipped through with a fresh GUID is harmless
-    — the executor cancels only runs still parked at the gate, and a cancelled
-    run is terminal.
-    """
+    """Normalize an ``issues.unlabeled`` payload into an ``unlabeled`` command."""
     issue = payload.get("issue") or {}
     if not issue or "pull_request" in issue:
         return None
@@ -335,30 +224,15 @@ def normalize_issue_unlabeled_event(
 
 
 def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize a ``pull_request`` payload into a reactive-review command.
-
-    Fires only for ``opened``/``synchronize`` on **Draft** PRs (the reactive
-    lane's v0.7 scope, research §8 F1) and never for forge's own output:
-    bot-authored PRs and the ``forge/`` head-branch prefix — E1's durable
-    flow publishes forge commits there — return None (inbox-only record).
-    The sender-type Bot guard lives at the routing site (it answers
-    ``skipped`` rather than recording).
-
-    The payload's ``before``/``after`` SHAs travel in the metadata so the
-    engine gets the synchronize delta without extra API reads (research
-    §1.4); a zero ``before`` (branch creation) is blanked to force a full
-    review. The delivery key is content-stable — ``pr:<n>:<action>:<after>``
-    — so a redelivered push collapses onto one inbox identity even when the
-    delivery GUID differs.
-    """
+    """Normalize a ``pull_request`` payload into a reactive-review command."""
     pull_request = payload.get("pull_request") or {}
     if not pull_request:
         return None
     action = str(payload.get("action") or "")
     if action not in _PR_REVIEW_ACTIONS:
         return None
-    # Reviews fire for draft AND ready PRs alike — the draft marker is not
-    # a skip signal (research §6: major agents review drafts too).
+    # Reviews fire for draft AND ready PRs alike — the draft marker is not a skip signal
+    # (research §6: major agents review drafts too).
 
     head = pull_request.get("head") or {}
     head_branch = str(head.get("ref") or "")
@@ -366,8 +240,8 @@ def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | No
     if str(pr_author.get("type") or "") == "Bot":
         return None
     if head_branch.startswith("forge/"):
-        # forge's own durable-flow branch: reviewing forge's own run output
-        # would self-trigger (research §6.2).
+        # forge's own durable-flow branch: reviewing forge's own run output would
+        # self-trigger (research §6.2).
         logger.info(
             "Skipping forge-owned branch %s on reactive review",
             head_branch,
@@ -443,9 +317,9 @@ async def github_webhook(
         extra={"event": event, "provider": "github"},
     )
 
-    # Raw-payload diagnostics: the GitHub ingress captures the same way the
-    # GitLab one does — without this, a live routing gap is undiagnosable
-    # (the inbox row alone says nothing about WHY a delivery didn't route).
+    # Raw-payload diagnostics: the GitHub ingress captures the same way the GitLab one does
+    # — without this, a live routing gap is undiagnosable (the inbox row alone says nothing
+    # about WHY a delivery didn't route).
     from forge.gateway.router import _capture_webhook_payload
 
     _capture_webhook_payload(settings, event, payload, header_field="x_github_event")
@@ -484,11 +358,6 @@ async def _ingest_github_event(
         bot_login = str(getattr(settings, "FORGE_GITHUB_BOT_LOGIN", "") or "")
         if author and author in (settings.FORGE_BOT_USERNAME, bot_login):
             # Forge's own comments never act as triggers (bot-loop guard).
-            # FORGE_GITHUB_BOT_LOGIN is the one that matters here: GitHub App
-            # comments are authored by e.g. forcewake-forge[bot] (LIVE-found:
-            # the retry-rejection note suggested "/implement", the gateway
-            # parsed the bot's own note as a command and created a phantom
-            # run). Same check for the issues.labeled/issues.edited paths.
             logger.info("Skipping bot-authored GitHub comment", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         run_command = normalize_issue_comment(
@@ -506,9 +375,8 @@ async def _ingest_github_event(
             connection_id, event, action, f"comment:{run_command['note_id']}"
         )
         if run_command.get("command") == "adaptive_control":
-            # NXT-10 / R41-02: the adaptive verbs take the SAME durable
-            # inbox + scheduled-step acceptance as the classic commands; the
-            # step executor routes to the ControlCommandRouter.
+            # the adaptive verbs take the SAME durable inbox + scheduled-step acceptance as
+            # the classic commands; the step executor routes to the ControlCommandRouter.
             return await _ingest_github_adaptive_control(
                 request, background_tasks, run_command, source_event_id, event=event
             )
@@ -520,10 +388,9 @@ async def _ingest_github_event(
         sender = payload.get("sender") or {}
         author = str(sender.get("login") or "")
         if author and author in (settings.FORGE_BOT_USERNAME, settings.FORGE_GITHUB_BOT_LOGIN):
-            # Forge never labels or edits issues, but the guard stays
-            # symmetric with the comment path (bot-loop safety by
-            # construction; the GitHub App bot login is the identity that
-            # matters here).
+            # Forge never labels or edits issues, but the guard stays symmetric with the
+            # comment path (bot-loop safety by construction; the GitHub App bot login is the
+            # identity that matters here).
             logger.info("Skipping bot-authored GitHub issue event", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         if action == "labeled":
@@ -543,9 +410,8 @@ async def _ingest_github_event(
                 request, background_tasks, event, delivery, connection_id, project_id, payload
             )
         if action == "labeled":
-            # The ISSUE id, not the label id, keys the identity — the label id
-            # is constant across every issue carrying it (see
-            # normalize_labeled_event).
+            # The ISSUE id, not the label id, keys the identity — the label id is constant
+            # across every issue carrying it (see normalize_labeled_event).
             key = f"label:{run_command['note_id']}"
         else:
             key = str(run_command["delivery_key"])
@@ -557,9 +423,8 @@ async def _ingest_github_event(
     if event == "pull_request" and action in _PR_REVIEW_ACTIONS:
         sender = payload.get("sender") or {}
         if str(sender.get("type") or "") == "Bot":
-            # Recursion guard (research §6.2): App-token events DO fire
-            # webhooks — forge's own pushes must never re-trigger the
-            # reviewer.
+            # Recursion guard (research §6.2): App-token events DO fire webhooks — forge's
+            # own pushes must never re-trigger the reviewer.
             logger.info("Skipping Bot-sent GitHub pull_request event", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         review_command = normalize_pull_request_event(payload)
@@ -575,8 +440,8 @@ async def _ingest_github_event(
         )
 
     if event == "installation" and action in _INSTALLATION_REMOVED_ACTIONS:
-        # Connection disabled: log loudly and persist the fact; reconciliation
-        # hooks (pause runs, drain steps) come with the v0.5 contracts work.
+        # Connection disabled: log loudly and persist the fact; reconciliation hooks (pause
+        # runs, drain steps) come with the v0.5 contracts work.
         logger.warning(
             "GitHub installation removed — connection %s disabled",
             connection_id,
@@ -593,8 +458,8 @@ async def _ingest_github_event(
             handler_result={"connection_disabled": True},
         )
 
-    # push / workflow_run / check_suite / … — persist the delivery only;
-    # reconciliation hooks arrive later (ADR-0019 §3).
+    # push / workflow_run / check_suite / … — persist the delivery only; reconciliation
+    # hooks arrive later (ADR-0019 §3).
     return _record_inbox_only(
         request, background_tasks, event, delivery, connection_id, project_id, payload
     )
@@ -638,11 +503,9 @@ def _record_inbox_only(
                 "GitHub delivery %s could not be persisted", source_event_id[:12], exc_info=True
             )
 
-    # Non-command deliveries are audit-only: persist via the request's
-    # background tasks so the 2XX GitHub expects within 10 seconds is never
-    # delayed by the write (research §2.2). Failures are logged, never
-    # fatal. R41-02 honesty: the response precedes the write, so it never
-    # claims the record — "accepted" is the whole truthful answer.
+    # Non-command deliveries are audit-only: persist via the request's background tasks so
+    # the 2XX GitHub expects within 10 seconds is never delayed by the write (research
+    # §2.2).
     background_tasks.add_task(_write)
     return JSONResponse(status_code=202, content={"status": "accepted", "event": event})
 
@@ -655,30 +518,10 @@ async def _durable_ingest_github_command(
     *,
     event: str = "issue_comment",
 ) -> dict[str, Any]:
-    """Transactional ingress for GitHub run commands (ADR-0017 §1, R41-02).
-
-    ONE transaction persists the inbox row (native delivery identity) and
-    the first scheduled step; the ``202`` is answered only after that
-    commit, so the command is durable in Postgres before it is
-    acknowledged — the ONE durable-acceptance rule every actionable
-    command obeys (/implement, /go, /fix-equivalents, /pause, /steer,
-    /approve-revision alike).
-
-    R41-02 (#357) — ported from the GitLab ``_ingest_run_command``:
-
-    - the Redis dedup marker is a post-commit cache, never the authority:
-      a cache hit is confirmed against the committed inbox row before any
-      ``deduplicated`` answer, and an orphaned marker (the pre-commit
-      SET-NX of a failed transaction) proceeds as a first delivery;
-    - the queue submit and the step-wake push after the commit remain
-      wake-up accelerators — losing them (or Redis entirely) costs one
-      step-worker poll interval, never correctness;
-    - a persistence outage refuses honestly (503, retryable by the
-      provider) instead of acknowledging an unsaved command.
-    """
-    # Call-time imports, exactly like the GitLab ingest: the kill matrix
-    # patches these module attributes in the gateway subprocess, and the
-    # ingest path must see the patched seam.
+    """Transactional ingress for GitHub run commands (ADR-0017 §1,)."""
+    # Call-time imports, exactly like the GitLab ingest: the kill matrix patches these
+    # module attributes in the gateway subprocess, and the ingest path must see the patched
+    # seam.
     from forge.durable import ingest_event
     from forge.worker.steps import STEP_WAKE_KEY, schedule_command_step
     from forge.worker.tasks import create_run_command_task
@@ -690,9 +533,9 @@ async def _durable_ingest_github_command(
     marker_keys = [f"run:{run_command['connection_id']}:{note_id}"]
 
     if session_factory is None:
-        # Honesty (R41-02): without the durable store there is NOTHING to
-        # accept against — a 2xx here would certify a command no worker can
-        # ever find. Refuse with the retryable 5xx instead.
+        # Honesty: without the durable store there is NOTHING to accept against — a 2xx here
+        # would certify a command no worker can ever find. Refuse with the retryable 5xx
+        # instead.
         logger.error("GitHub run command without a database — refusing (no durable acceptance)")
         raise HTTPException(status_code=503, detail="Database not configured — command refused")
 
@@ -714,18 +557,16 @@ async def _durable_ingest_github_command(
                     payload={**run_command, "delivery_note_id": note_id},
                 )
                 if created:
-                    # The durability contract behind the 202: once this
-                    # commits, a worker WILL attempt the command.
+                    # The durability contract behind the 202: once this commits, a worker
+                    # WILL attempt the command.
                     await schedule_command_step(
                         session, run_command, source_event_id=source_event_id
                     )
                 else:
                     deduplicated = True
     except Exception as exc:
-        # Bounded retryable failure: the provider redelivers on 5xx and the
-        # next attempt finds NO marker (markers are post-commit only), so
-        # the command lands exactly once. Never a successful acceptance
-        # claim over a lost write.
+        # Bounded retryable failure: the provider redelivers on 5xx and the next attempt
+        # finds NO marker (markers are post-commit only), so the command lands exactly once.
         logger.exception(
             "GitHub run command ingress transaction failed — refusing (retryable), identity=%s",
             source_event_id[:12],
@@ -745,17 +586,13 @@ async def _durable_ingest_github_command(
 
     if queue is not None:
         # Wake-up accelerators only — Postgres owns the work (ADR-0017).
-        # Every write here happens strictly AFTER the commit (or after the
-        # authoritative duplicate read) and is best-effort: Redis loss
-        # changes latency, never correctness.
         await mark_delivered_best_effort(queue, marker_keys)
         if deduplicated:
             return {"status": "accepted", "event": event, "deduplicated": True}
         try:
-            # The wake task must address the step that was actually
-            # scheduled (its inbox identity), not a recomputed one — two
-            # different hashes meant the worker never found the step and
-            # executed the command directly, doubling the run.
+            # The wake task must address the step that was actually scheduled (its inbox
+            # identity), not a recomputed one — two different hashes meant the worker never
+            # found the step and executed the command directly, doubling the run.
             run_command.setdefault("source_event_id", source_event_id)
             await queue.submit(create_run_command_task(run_command, note_id=note_id or 0))
         except Exception:
@@ -769,16 +606,12 @@ async def _durable_ingest_github_command(
         return {"status": "accepted", "event": event, "queued": True, "run_command": True}
 
     if deduplicated:
-        # No queue to refresh — the authoritative read already proved the
-        # record; nothing to execute (the original delivery's step stands).
+        # No queue to refresh — the authoritative read already proved the record; nothing to
+        # execute (the original delivery's step stands).
         return {"status": "accepted", "event": event, "deduplicated": True}
 
-    # No Redis — dev fallback: execute the ALREADY-COMMITTED step
-    # in-process, through the SAME claim/lease/fence protocol as the
-    # worker. The BackgroundTask is an execution nudge, never the
-    # durability mechanism — the step row survives its loss and a fresh
-    # worker (or the reaper) claims it. (Imported at call time: the kill
-    # matrix patches the module attribute, and the nudge must see it.)
+    # No Redis — dev fallback: execute the ALREADY-COMMITTED step in-process, through the
+    # SAME claim/lease/fence protocol as the worker.
     from forge.worker.steps import run_pending_command_step
 
     background_tasks.add_task(
@@ -800,7 +633,7 @@ async def _ingest_github_run_command(
     *,
     event: str = "issue_comment",
 ) -> JSONResponse:
-    """The classic run-command surface over the durable core (R41-02)."""
+    """The classic run-command surface over the durable core."""
     payload = await _durable_ingest_github_command(
         request, background_tasks, run_command, source_event_id, event=event
     )
@@ -815,19 +648,7 @@ async def _ingest_github_adaptive_control(
     *,
     event: str = "issue_comment",
 ) -> JSONResponse:
-    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
-
-    R41-02 (#357): the adaptive surface obeys the ONE durable-acceptance
-    rule — the SAME inbox + scheduled-step transaction as /implement and
-    /status, acknowledged only after the commit. The scheduled step's
-    executor (:func:`forge.adaptive.command_router.execute_adaptive_command_step`)
-    drives the ControlCommandRouter (authorize → resolve the run → mailbox
-    decision → ONE journaled reply per note id); a process death between
-    the 202 and the routing leaves the step ``scheduled`` and a fresh
-    worker recovers it — no after-response BackgroundTask as the durability
-    mechanism. GitHub retries nothing, but a manual redelivery re-enters
-    the router idempotently (mailbox key + A11 note journal).
-    """
+    """ingress for adaptive operator commands (pause /resume /steer /answer)."""
     result = await _durable_ingest_github_command(
         request, background_tasks, run_command, source_event_id, event=event
     )

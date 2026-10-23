@@ -154,42 +154,17 @@ class TaskQueue:
         return await self.redis.llen(DEAD_KEY)
 
     async def is_duplicate(self, fingerprint: str, ttl: int = 300) -> bool:
-        """Check if an event fingerprint was recently seen (5-minute window).
-
-        Returns True if this is a duplicate (key already existed).
-
-        R41-02 (#357): this SET-NX probe-and-claim is only safe for callers
-        whose duplicate answer does not certify durability (the legacy
-        orchestrator event lane). Actionable command ingress must NOT use it
-        in front of the database — a marker claimed before a failed SQL
-        transaction turns later redeliveries into successful empty
-        duplicates. Use :meth:`was_delivered` + :meth:`mark_delivered`
-        (the post-commit positive cache) there.
-        """
+        """Check if an event fingerprint was recently seen (5-minute window)."""
         key = f"{DEDUP_PREFIX}{fingerprint}"
         was_set = await self.redis.set_nx(key, "1", ex=ttl)
         return not was_set  # True if key already existed
 
     async def was_delivered(self, fingerprint: str) -> bool:
-        """Read-only probe of the dedup marker — nothing is claimed.
-
-        R41-02 (#357): the marker is a POST-COMMIT positive cache, so a hit
-        may only mean "probably already durably ingested". The caller must
-        confirm with an authoritative database lookup before answering
-        ``deduplicated`` — a hit without a record is a stale/orphaned marker
-        (a failed transaction behind an old-code pre-commit marker) and the
-        delivery proceeds as a first delivery.
-        """
+        """Read-only probe of the dedup marker — nothing is claimed."""
         key = f"{DEDUP_PREFIX}{fingerprint}"
         return await self.redis.get(key) is not None
 
     async def mark_delivered(self, fingerprint: str, ttl: int = 300) -> None:
-        """Set the dedup marker AFTER the durable record committed.
-
-        The positive-cache write: setting the marker here means a later hit
-        references an inbox row that exists (or existed — the authoritative
-        lookup still arbitrates). Best-effort by contract: Redis being down
-        must never fail an already-committed command.
-        """
+        """Set the dedup marker AFTER the durable record committed."""
         key = f"{DEDUP_PREFIX}{fingerprint}"
         await self.redis.set_ex(key, "1", ttl)

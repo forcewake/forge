@@ -1,10 +1,4 @@
-"""Webhook token validation and bot-loop prevention.
-
-GitLab CE sends the configured secret as a plain value in the
-``X-Gitlab-Token`` header.  We use ``hmac.compare_digest`` for
-constant-time comparison to prevent timing side-channel attacks —
-this is *not* HMAC signing, just a timing-safe equality check.
-"""
+"""Validate webhook signatures before interpreting their payloads."""
 
 from __future__ import annotations
 import hmac

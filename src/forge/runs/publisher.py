@@ -1,72 +1,4 @@
-"""Trusted publisher (ADR-0016 §2, ADR-0026): THE write boundary for candidates.
-
-Every candidate — validated adapter inputs and CI artifacts, on every
-provider — crosses this boundary before anything reaches a commit API. The
-application-service entry :func:`publish_validated_candidate` owns the
-sequence (validate → fence → native adapter); the pure policy half is
-:func:`validate_candidate_bundle`, shared by every backend:
-
-1. checks the candidate's diff base against the run's frozen attempt base
-   (cycle 1 → approved source base; repair → last verified candidate);
-2. checks the publication grant (:func:`publication_grant_valid` — run not
-   cancelled AND, when the executing :class:`~forge.durable.claims.ExecutionClaim`
-   pinned one, the run's cancellation generation unchanged), the RunSpec
-   digest (the spec frozen at plan acceptance is the one being executed) and
-   a caller-supplied Stage-B-style fence callable;
-3. materializes the bundle against AUTHORITATIVE full base contents
-   (no truncation; strict hunk application with no fuzz) — the R08/R09
-   ``base_blob_digest``/``intended_digest`` verification runs here; the
-   base reads are TYPED (R14): only a provider-confirmed ``not_found``
-   may make a path absent, so a create is only publishable against
-   confirmed absence, and a ``forbidden``/``unavailable``/``incomplete``
-   read fails validation (``authoritative_read_failed``) BEFORE any
-   remote effect;
-4. validates the resulting ChangeSet against the write policy
-   (:func:`validate_changeset` — denied paths, lockfiles, size caps,
-   existence rules) and the RunSpec's frozen ``allowed_paths`` scope
-   (v0.7 monorepo path scoping: any change outside the globs is rejected);
-5. hands a :class:`ValidatedCandidate` — the capability token only the
-   boundary can issue — to the native adapter for the journaled,
-   reconcilable write (GitLab: :class:`ChangesetWriter` with
-   ``start_ref = expected_head = attempt base``).
-
-The grant is re-checked at the RESERVATION POINT — after the long
-base-content reads, immediately before the adapter (R10) — together with the
-A04 claim-ownership arbitration: a bound
-:class:`~forge.durable.claims.ExecutionClaim` must still OWN its step row
-(same owner, same fence token, live unexpired lease, bound to this run) for
-the dispatch to happen. A stale claim stands the publish leg down with
-superseded evidence and no native call — queue ownership that lapsed
-(reaped, reassigned, expired) no longer implies effect ownership. A cancel
-that lands during the already-started remote commit is NOT rolled back
-(best-effort), but its completion records superseded evidence on the run and
-``PublishResult.superseded`` is set instead of letting the caller walk a
-cancelled run toward ``ready_for_human``.
-
-The recovery half is the A12 effect-certainty contract: a NEGATIVE
-publication-intent probe (zero ``(forge-op:<key>)`` marker hits, head still
-at the expected parent) is NOT proof that no remote effect is pending — the
-provider may have accepted the first request and be applying it slowly. The
-GitLab transport therefore never re-dispatches off one read: a negative
-probe returns ``WriteOutcome.SETTLING`` (``PublishResult.settling``), the
-intent parks in the bounded ``probing`` certainty window
-(``FORGE_PUBLISH_SETTLE_SECONDS``, 30s default, ×2 backoff), and only the
-window-end re-probe decides — a late-landing commit is ADOPTED, and an
-exhausted window on GitLab (no branch-wide CAS) parks
-``blocked(unknown_outcome)`` with operator instructions. GitHub
-DevOps carry a per-adapter guarantee (see
-:mod:`forge.durable.intents`): their writes are branch-wide CAS
-(``expectedHeadOid`` / ``oldObjectId``), so a redispatch whose
-``expected_parent`` is the unchanged head is INHERENTLY duplicate-safe — a
-slow first write would move the head and the CAS would refuse the
-duplicate.
-
-The publisher never executes candidate content and never trusts the
-harness's claims; a rejected candidate is reported, not repaired. The
-negative conformance suite (``tests/test_publication_boundary.py``) is the
-enforcement: every publish path must refuse a policy-violating candidate
-with zero commit-API calls.
-"""
+"""Authorize and validate the exact candidate immediately before repository effects."""
 
 from __future__ import annotations
 
@@ -105,9 +37,9 @@ from forge.runs.candidate import (
 
 logger = logging.getLogger(__name__)
 
-#: Stage-B-style fence: an async callable re-checked right before the write;
-#: ``False`` rejects the publication (ADR-0017 fenced-CAS semantics, reused
-#: here via a callable so the publisher stays independent of the step run).
+#: Stage-B-style fence: an async callable re-checked right before the write; ``False``
+#: rejects the publication (ADR-0017 fenced-CAS semantics, reused here via a callable so the
+#: publisher stays independent of the step run).
 FenceCheck = Callable[[], Awaitable[bool]]
 
 _OPERATION_MAP: dict[str, Operation] = {
@@ -116,22 +48,13 @@ _OPERATION_MAP: dict[str, Operation] = {
     "delete": Operation.DELETE,
 }
 
-#: Fetches the AUTHORITATIVE full content of *paths* at *base_ref* (the
-#: provider-side half of materialization). Under the R14 policy a path is
-#: absent from the result ONLY on a provider-confirmed ``not_found`` — a
-#: fetcher that drops paths on ANY failure forges existence facts; a base
-#: file over the materialization cap raises :class:`CandidateError`
-#: (``file_too_large``).
+#: Fetches the AUTHORITATIVE full content of *paths* at *base_ref* (the provider-side half
+#: of materialization).
 BaseContentFetcher = Callable[[str, list[str]], Awaitable[dict[str, str]]]
 
 
 class PolicyViolation(Exception):
-    """The publication boundary rejected a candidate on write policy.
-
-    ``violations`` are the human-readable strings from
-    :func:`validate_changeset` — reported to the run's evidence, never
-    repaired and never narrowed to "just the first one".
-    """
+    """The publication boundary rejected a candidate on write policy."""
 
     def __init__(self, violations: list[str]) -> None:
         self.violations = violations
@@ -140,13 +63,7 @@ class PolicyViolation(Exception):
 
 @dataclass(frozen=True)
 class ValidatedCandidate:
-    """A candidate that crossed the publication boundary (ADR-0026).
-
-    Constructed ONLY by :func:`validate_candidate_bundle` after strict
-    materialization + policy validation passed; provider transports accept
-    nothing else. Carrying this type IS the capability to publish — there
-    is no unvalidated route into a commit API.
-    """
+    """A candidate that crossed the publication boundary (ADR-0026)."""
 
     bundle: CandidateBundle
     #: The completed manifest (full contents) the digests were verified on.
@@ -189,28 +106,7 @@ def validate_candidate_bundle(
     allowed_paths: Sequence[str] = (),
     policy: WritePolicy | None = None,
 ) -> ValidatedCandidate:
-    """The pure publication-boundary check, shared by EVERY backend (ADR-0026).
-
-    1. strict materialization of *bundle* against *base_contents* (the
-       authoritative full texts at the attempt base): ``base_blob_digest``
-       verified BEFORE anything is applied, ``intended_digest`` AFTER — the
-       R08/R09 guarantees run on every publication path;
-    2. :func:`validate_changeset` — denied paths/prefixes/lockfiles, change
-       count and size caps, existence rules, and the *allowed_paths* globs,
-       under the write profile *policy* (R18; ``None`` = the default
-       ``no_dependencies`` profile, the historical behavior);
-    3. the R14 create rule: a create publishes only against a CONFIRMED
-       absence. Callers feed *base_contents* from the strict typed reads,
-       so presence in the mapping means the provider said the file exists —
-       a create over it is a violation, not a silent overwrite;
-    4. one action per path (R18): two bundle entries for one canonical path
-       are a ``duplicate_path`` rejection before anything is applied.
-
-    Raises :class:`CandidateError` (materialization/digest failures) or
-    :class:`PolicyViolation` (write-policy violations). Returns the
-    :class:`ValidatedCandidate` wrapper — the only thing a transport may
-    write.
-    """
+    """The pure publication-boundary check, shared by EVERY backend (ADR-0026)."""
     if bundle.is_empty:
         raise CandidateError("empty_candidate", "candidate contains no changes")
     _reject_duplicate_paths(bundle)
@@ -243,12 +139,7 @@ def validate_candidate_bundle(
 
 
 def _reject_duplicate_paths(bundle: CandidateBundle) -> None:
-    """Refuse a bundle with two entries for one canonical path (R18).
-
-    The bundle doctrine is exactly ONE representation per file (R08); a
-    repeated path — even under a different spelling (``./a.py`` vs ``a.py``)
-    — is an ambiguous candidate and is rejected before any base read.
-    """
+    """Refuse a bundle with two entries for one canonical path."""
     seen: set[str] = set()
     for path in bundle.paths:
         canonical = normalize_repo_path(path)
@@ -262,17 +153,7 @@ def _reject_duplicate_paths(bundle: CandidateBundle) -> None:
 
 @dataclass(frozen=True)
 class PublishResult:
-    """The publisher's verdict. ``ok=False`` carries a machine-readable
-    ``reason`` for the run's blocking evidence; ``unknown_outcome=True``
-    means the commit MAY exist — the caller must fail, never retry.
-    ``settling=True`` (with ``ok=False``, A12) means the recovery probe was
-    negative and the intent parked in the effect-certainty window — NOT
-    final: the caller must NOT park the run terminal, the window-end
-    re-probe (the lane's recovery scanner) adopts a late-landing commit or
-    resolves the honest unknown. ``superseded=True`` (with ``ok=True``)
-    means the commit DID land but the publication grant was revoked
-    meanwhile — the run's completion records superseded evidence and must
-    never walk toward ``ready_for_human`` (R10)."""
+    """The publisher's verdict. ``ok=False`` carries a machine-readable ``reason`` for the run's blocking evidence; ``unknown_outcome=True`` means the commit MAY exist — the caller must fail, never retry. ``settling=True`` (with ``ok=False``,) means the recovery probe was negative and the intent parked in the effect-certainty window — NOT final: the caller must NOT park the run terminal, the window-end re-probe (the lane's recovery scanner) adopts a late-landing commit or resolves the honest unknown. ``superseded=True`` (with ``ok=True``) means the commit DID land but the publication grant was revoked meanwhile — the run's completion records superseded evidence and must never walk toward ``ready_for_human``."""
 
     ok: bool
     reason: str = ""
@@ -283,20 +164,7 @@ class PublishResult:
 
 
 def publication_grant_valid(run: FlowRun, generation: int | None) -> bool:
-    """Whether *run* still grants a publication to the *generation* holder.
-
-    The one grant predicate, consulted at the entry check and again at the
-    reservation point (R10):
-
-    - a run with ``cancel_requested`` set or already ``cancelled`` has NO
-      grant (F13/ADR-0018 §4);
-    - a *generation* that no longer equals the run's
-      ``cancellation_generation`` has NO grant — the claim was minted before
-      a cancel bumped the run (:meth:`forge.durable.controller.Controller.request_cancel`),
-      so queue ownership no longer implies effect ownership;
-    - ``generation=None`` (no claim binding — legacy/transport callers) only
-      applies the flag-level checks above.
-    """
+    """Whether *run* still grants a publication to the *generation* holder."""
     if bool(run.cancel_requested) or run.status == FlowStatus.CANCELLED.value:
         return False
     if generation is not None and int(run.cancellation_generation) != generation:
@@ -318,12 +186,7 @@ async def _latest_spec_row(session: AsyncSession, run: FlowRun) -> RunSpec | Non
 
 
 async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
-    """Whether the frozen RunSpec's digest still equals the run's spec digest.
-
-    Legacy runs without a spec row/digest pass (nothing to compare); a real
-    mismatch fails closed — the plan the approver saw is not the plan bound
-    to this run.
-    """
+    """Whether the frozen RunSpec's digest still equals the run's spec digest."""
     if not run.spec_digest:
         return True
     row = await _latest_spec_row(session, run)
@@ -333,11 +196,7 @@ async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
 
 
 async def spec_allowed_paths(session: AsyncSession, run: FlowRun) -> list[str]:
-    """The ``allowed_paths`` globs frozen in the run's RunSpec document.
-
-    Monorepo path scoping (v0.7, complex-projects.md §1): empty/missing —
-    the run is unscoped and every path is in scope.
-    """
+    """The ``allowed_paths`` globs frozen in the run's RunSpec document."""
     row = await _latest_spec_row(session, run)
     if row is None:
         return []
@@ -348,11 +207,7 @@ async def spec_allowed_paths(session: AsyncSession, run: FlowRun) -> list[str]:
 
 
 def run_project_keys(run: FlowRun) -> tuple[str, ...]:
-    """The config keys identifying *run*'s project (R18 pipeline hooks).
-
-    ``"<provider>:<project_id>"`` always; a GitHub run additionally answers
-    to ``"github:<owner/repo>"`` — the human-readable subject identity.
-    """
+    """The config keys identifying *run*'s project ( pipeline hooks)."""
     provider = str(getattr(run, "provider", "") or "gitlab")
     keys = [f"{provider}:{run.project_id}"]
     repo = str(getattr(run, "github_repo_full_name", "") or "")
@@ -365,7 +220,7 @@ def sensitive_paths_for_run(
     run: FlowRun,
     pipeline_entrypoints: Mapping[str, Sequence[str]] | None,
 ) -> list[str]:
-    "The configured sensitive pipeline paths for *run*'s project (R18)."
+    """The configured sensitive pipeline paths for *run*'s project."""
     if not pipeline_entrypoints:
         return []
     paths: list[str] = []
@@ -383,18 +238,7 @@ async def _fetch_base_contents(
     base_ref: str,
     paths: list[str],
 ) -> dict[str, str]:
-    """Fetch COMPLETE content of *paths* at the attempt base snapshot.
-
-    Authoritative full-content reads (no truncation, ever). R14 strict
-    semantics: a path is absent from the result ONLY on a provider-confirmed
-    ``not_found`` — create is then provably safe, and update/delete
-    existence is honestly reported by validation. ``forbidden``,
-    ``unavailable`` and ``incomplete`` raise :class:`CandidateError`
-    (``authoritative_read_failed``) so publication fails BEFORE any remote
-    effect instead of letting an unreadable base forge existence facts. A
-    file over the :data:`FORGE_MATERIALIZE_MAX_FILE_CHARS` cap still
-    raises ``file_too_large``.
-    """
+    """Fetch COMPLETE content of *paths* at the attempt base snapshot."""
     contents: dict[str, str] = {}
     for path in dict.fromkeys(paths):
         result: BlobReadResult = await gitlab.read_blob(project_id, path, ref=base_ref)
@@ -421,14 +265,14 @@ async def _reload_run(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: str,
 ) -> FlowRun | None:
-    """The run row as it is NOW, in a fresh session (R10 reservation checks)."""
+    """The run row as it is NOW, in a fresh session ( reservation checks)."""
     async with session_factory() as session:
         return await session.get(FlowRun, run_id)
 
 
 #: The step status a live owner's row must still show. Mirrors
-#: ``forge.worker.steps.STEP_RUNNING`` (not imported: the worker package
-#: transitively imports this module).
+#: ``forge.worker.steps.STEP_RUNNING`` (not imported: the worker package transitively
+#: imports this module).
 _STEP_RUNNING = "running"
 
 
@@ -437,18 +281,7 @@ async def _claim_staleness(
     claim: ExecutionClaim,
     run_id: str,
 ) -> str | None:
-    """Why the ambient claim no longer owns its step, or ``None`` while it does (A04).
-
-    The pre-dispatch arbitration the review demands: queue ownership must
-    imply effect ownership at EVERY effect, the publication dispatch
-    included. The step row is re-read (same fresh session as the reservation
-    re-check) and must still show the claim's owner and fence token on a
-    live, unexpired lease, bound to the run being published — a reaped,
-    reassigned, completed or lease-expired row means another execution owns
-    the work now, and THIS one must stand down before the native call. A
-    command step binds its run only at execution time, so a NULL
-    ``flow_run_id`` stays acceptable.
-    """
+    """Why the ambient claim no longer owns its step, or ``None`` while it does."""
     step = await session.get(StepRun, claim.step_id)
     if step is None:
         return "step row vanished"
@@ -476,14 +309,7 @@ async def _record_superseded_publication(
     reason: str,
     detail: str | None = None,
 ) -> None:
-    """Record on the run that a publication leg must not be trusted.
-
-    R10 best-effort completion: an already-started remote commit is not
-    rolled back, and a stale claim never dispatches at all — either way the
-    run's evidence names WHY (``reason``, with the failed dispatch's
-    ``detail``) so no reader mistakes the leg for the published candidate,
-    and the run is never walked toward ``ready_for_human`` on its back.
-    """
+    """Record on the run that a publication leg must not be trusted."""
     async with session_factory() as session:
         run = await session.get(FlowRun, run_id)
         if run is None:
@@ -523,55 +349,13 @@ async def publish_validated_candidate(
     sensitive_paths: Sequence[str] | None = None,
     operator_approved: bool | None = None,
 ) -> PublishResult:
-    """Validate and publish *candidate* for *run* — THE boundary (ADR-0026).
-
-    The single application-service entry every provider×backend publishes
-    through: run-state checks → strict materialization + write policy → the
-    injected *native_publish* adapter (the journaled, reconcilable write).
-    The adapter receives a :class:`ValidatedCandidate` or nothing at all —
-    a rejected candidate never reaches it, so a rejection leaves the remote
-    untouched by construction.
-
-    *session_factory* enables the fresh-run leg (run existence, RunSpec
-    digest, frozen ``allowed_paths`` from the spec when *allowed_paths* is
-    None) and the R10 reservation guard: the publication grant is re-read
-    AFTER the base-content reads and immediately before the adapter, so a
-    cancel during the long reads forbids a NEW reservation. Transport
-    callers without a session run the checks they own service-side. Never
-    raises for candidate content — rejections are returned as a failed
-    :class:`PublishResult` with a machine-readable reason; the caller
-    decides what that means for the run.
-
-    The executing step's :class:`~forge.durable.claims.ExecutionClaim` (if
-    bound) pins the publication-grant generation it was minted under: a
-    cancel that bumped the run's generation after the claim fences the
-    reservation out even before the flag flips (R10). A04: the claim must
-    also still OWN its step at the reservation point — owner, fence token,
-    live lease and run binding are re-read immediately before the dispatch;
-    a stale claim stands the leg down with superseded evidence and no
-    native call.
-
-    Write-policy profile knobs (R18, all defaulting to today's behavior):
-
-    - *write_profile* names the profile (a builtin or a custom profile from
-      *custom_write_profiles* — the parsed forge.yml / FORGE_WRITE_PROFILES
-      mapping); ``None`` = the default ``no_dependencies`` profile;
-    - *sensitive_paths* carries the project's onboarding-provided pipeline
-      entrypoints (see :func:`sensitive_paths_for_run`); they are denied
-      under EVERY profile;
-    - *operator_approved* explicitly asserts the operator-approver gate for
-      profiles with ``require_special_approval`` (``ci_change``). When
-      ``None``, a session-backed run proves the gate with its frozen RunSpec
-      row (an operator /go froze it); transport callers without a session
-      must assert it explicitly — absent proof refuses the publication.
-    """
+    """Validate and publish *candidate* for *run* — THE boundary (ADR-0026)."""
     claim: ExecutionClaim | None = current_claim()
     claim_generation = claim.cancellation_generation if claim is not None else None
 
     spec_present = False
     if session_factory is not None:
-        # Fresh trusted state: the run row as it is NOW, not as the caller
-        # saw it.
+        # Fresh trusted state: the run row as it is NOW, not as the caller saw it.
         async with session_factory() as session:
             fresh = await session.get(FlowRun, run.id)
             if fresh is None:
@@ -595,7 +379,7 @@ async def publish_validated_candidate(
     if candidate.is_empty:
         return PublishResult(False, "empty_candidate")
 
-    # Publication grant (F13/ADR-0018 §4, generation-fenced per R10).
+    # Publication grant (F13/ADR-0018 §4, generation-fenced per).
     if not publication_grant_valid(fresh, claim_generation):
         return PublishResult(False, "publication_revoked")
     # F14: the spec frozen at plan acceptance is the one being executed.
@@ -605,9 +389,9 @@ async def publish_validated_candidate(
     if fence_check is not None and not await fence_check():
         return PublishResult(False, "fence_invalid")
 
-    # The effective write policy (R18): profile + provider-sensitive paths.
-    # A broken configuration fails the publication with a clear reason —
-    # it never degrades to a more permissive policy.
+    # The effective write policy: profile + provider-sensitive paths. A broken configuration
+    # fails the publication with a clear reason — it never degrades to a more permissive
+    # policy.
     try:
         policy = resolve_write_policy(
             write_profile,
@@ -617,8 +401,8 @@ async def publish_validated_candidate(
     except ValueError as exc:
         return PublishResult(False, f"write_policy_config_error: {exc}")
     if policy.require_special_approval and operator_approved is None:
-        # No explicit assertion: the frozen RunSpec row IS the proof (an
-        # operator /go — FORGE_APPROVERS-gated — froze the plan).
+        # No explicit assertion: the frozen RunSpec row IS the proof (an operator /go —
+        # FORGE_APPROVERS-gated — froze the plan).
         operator_approved = session_factory is not None and spec_present
     if policy.require_special_approval and not operator_approved:
         return PublishResult(
@@ -627,8 +411,8 @@ async def publish_validated_candidate(
             f"approval from the operator approver set",
         )
 
-    # Materialize against authoritative base contents (no truncation) and
-    # run the shared policy — the one validation, every backend.
+    # Materialize against authoritative base contents (no truncation) and run the shared
+    # policy — the one validation, every backend.
     try:
         base_contents = await fetch_base_contents(attempt_base, candidate.paths)
         validated = validate_candidate_bundle(
@@ -645,13 +429,8 @@ async def publish_validated_candidate(
     except PolicyViolation as exc:
         return PublishResult(False, "changeset_invalid: " + "; ".join(exc.violations))
 
-    # R10 RESERVATION POINT + A04 PRE-DISPATCH ARBITRATION: the reads above
-    # can take arbitrarily long — re-read the grant immediately before
-    # handing the candidate to the adapter. A cancel during the reads forbids
-    # this NEW reservation. A bound ExecutionClaim must ALSO still own its
-    # step row (owner + fence + live lease + run binding): a stale claim
-    # stands down with superseded evidence and no native call — the reclaimed
-    # work belongs to the new owner now.
+    # RESERVATION POINT + PRE-DISPATCH ARBITRATION: the reads above can take arbitrarily
+    # long — re-read the grant immediately before handing the candidate to the adapter.
     if session_factory is not None:
         async with session_factory() as session:
             recent = await session.get(FlowRun, fresh.id)
@@ -685,9 +464,9 @@ async def publish_validated_candidate(
             len(validated.changeset.changes),
             policy.name,
         )
-        # R10 best-effort completion: the remote commit already started (or
-        # landed) — never rolled back, but a grant revoked DURING the commit
-        # turns the completion into superseded evidence.
+        # best-effort completion: the remote commit already started (or landed) — never
+        # rolled back, but a grant revoked DURING the commit turns the completion into
+        # superseded evidence.
         if session_factory is not None:
             recent = await _reload_run(session_factory, fresh.id)
             if recent is None or not publication_grant_valid(recent, claim_generation):
@@ -721,23 +500,7 @@ async def publish_candidate(
     sensitive_paths: Sequence[str] | None = None,
     operator_approved: bool | None = None,
 ) -> PublishResult:
-    """Validate and publish *bundle* for *run* via the GitLab transport.
-
-    The GitLab-native binding of :func:`publish_validated_candidate`
-    (ADR-0026): the run-state, materialization and policy legs are shared;
-    only the base-content reads and the journaled
-    :class:`ChangesetWriter` apply are GitLab's. The writer is pinned to
-    the frozen attempt base (``start_ref = expected_head``) — in the
-    proposal-only model nothing else ever pushed, so the guarded apply
-    proves the branch did not move. The write-policy profile knobs (R18)
-    pass straight through to the shared entry.
-
-    *branch* names the collaboration surface the candidate lands on — for
-    a review-round child that is the lineage's PERSISTED collaboration
-    target source branch, NEVER a re-derivation from the run id (R41-04).
-    Callers that pass nothing keep the legacy derivation (an ordinary
-    run's own factory branch — identical bytes for every non-round run).
-    """
+    """Validate and publish *bundle* for *run* via the GitLab transport."""
 
     async def _fetch(base_ref: str, paths: list[str]) -> dict[str, str]:
         return await _fetch_base_contents(gitlab, run.project_id, base_ref, paths)
@@ -750,10 +513,10 @@ async def publish_candidate(
                 validated.changeset,
                 start_ref=attempt_base,
                 expected_head=attempt_base,
-                # R11 intent identity: the writer journals the durable
-                # publication intent (stable operation key + expected
-                # parent) BEFORE the HTTP effect, and an open intent from a
-                # crashed attempt is probed-and-adopted, never duplicated.
+                # intent identity: the writer journals the durable publication intent
+                # (stable operation key + expected parent) BEFORE the HTTP effect, and an
+                # open intent from a crashed attempt is probed-and-adopted, never
+                # duplicated.
                 provider="gitlab",
                 repo=str(run.project_id),
                 commit_cycle=run.commit_cycle or 1,
@@ -763,11 +526,8 @@ async def publish_candidate(
         except GitLabAPIError as exc:
             return PublishResult(False, f"commit_failed: {exc}")
         if result.outcome is WriteOutcome.SETTLING:
-            # A12: the recovery probe was negative — the intent parked in the
-            # effect-certainty window. NOT a final outcome: the caller must
-            # leave the run in its (non-terminal) publishing state so the
-            # window-end re-probe can adopt a late-landing commit or resolve
-            # the honest unknown.
+            # the recovery probe was negative — the intent parked in the effect-certainty
+            # window.
             return PublishResult(False, "commit_settling_probe_pending", settling=True)
         if result.outcome is WriteOutcome.UNKNOWN or not result.commit_sha:
             return PublishResult(False, "commit_unknown_outcome", unknown_outcome=True)

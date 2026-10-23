@@ -1,17 +1,4 @@
-"""Parse the proposal-only candidate artifact at the trusted boundary.
-
-A candidate contains a binary/full-index diff and attempt/driver/usage
-metadata. Each file has one representation: create, delete, replacement or
-unified patch. New files carry full bytes; modifications apply strictly to
-the authoritative attempt-base blob without fuzz.
-
-Base and intended digests bind bytes before and after application. Tagged
-digests are sha256 content hashes or full pre/post-image blob object ids.
-Every hunk must match its declared old/new counts. Empty old ranges insert
-after the specified line. Binary deltas, renames, copies and mode-only
-changes fail explicitly. CandidateError gives the backend or publisher a
-machine-readable reason; harness claims never grant publication authority.
-"""
+"""Collect and validate candidate bytes against the frozen run contract."""
 
 from __future__ import annotations
 
@@ -26,8 +13,8 @@ from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 #: The manifest operations (``update`` in ChangeSet terms is ``modify``).
 CandidateOperation = Literal["create", "delete", "modify"]
 
-#: Usage receipt completeness (F22 lite): sums of per-turn receipts are
-#: "aggregate"; a missing receipt is "unknown" — never zero, never invented.
+#: Usage receipt completeness (F22 lite): sums of per-turn receipts are "aggregate"; a
+#: missing receipt is "unknown" — never zero, never invented.
 UsageCompleteness = Literal["exact", "aggregate", "unknown"]
 
 #: Digest schemes of ``base_blob_digest``/``intended_digest`` claims.
@@ -45,9 +32,7 @@ class CandidateError(Exception):
         super().__init__(message)
 
 
-# ----------------------------------------------------------------------
 # Diff primitives
-# ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -61,12 +46,7 @@ class HunkLine:
 
 @dataclass(frozen=True)
 class DiffHunk:
-    """A parsed ``@@ -a,b +c,d @@`` hunk with its body lines.
-
-    ``old_count``/``new_count`` are mandatory (R09): the parser cross-checks
-    them against the body before anything is applied, and the applier relies
-    on ``old_count == 0`` for the POSIX insertion-point rule.
-    """
+    """A parsed ``@@ -a,b +c,d @@`` hunk with its body lines."""
 
     old_start: int
     old_count: int
@@ -75,9 +55,8 @@ class DiffHunk:
     lines: tuple[HunkLine, ...] = ()
 
 
-# ----------------------------------------------------------------------
-# Entry representations — exactly ONE per file (R08)
-# ----------------------------------------------------------------------
+# Entry representations — exactly ONE per file
+#
 
 
 def _validated_digest(digest: str) -> str:
@@ -147,8 +126,8 @@ class DeleteFile:
 
     path: str
     mode: str = "100644"
-    #: Digest of the blob being deleted, when the artifact carries it —
-    #: verified against the authoritative base before the delete publishes.
+    #: Digest of the blob being deleted, when the artifact carries it — verified against the
+    #: authoritative base before the delete publishes.
     base_blob_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -169,12 +148,7 @@ class DeleteFile:
 
 @dataclass(frozen=True)
 class FullReplacement:
-    """A file the candidate rewrites wholesale (the R08 representation).
-
-    ``new_content`` REPLACES the entire base content. An UPDATE is never
-    represented as "modify with content and empty hunks" — that shape
-    silently materialized to the ORIGINAL file.
-    """
+    """A file the candidate rewrites wholesale (the representation)."""
 
     path: str
     new_content: str
@@ -201,20 +175,16 @@ class FullReplacement:
 
 @dataclass(frozen=True)
 class UnifiedPatch:
-    """A file the candidate modifies by applying unified hunks to the base.
-
-    Carrying hunks excludes carrying full content (R08): the result exists
-    only after a verified application to the authoritative base.
-    """
+    """A file the candidate modifies by applying unified hunks to the base."""
 
     path: str
     hunks: tuple[DiffHunk, ...]
     mode: str = "100644"
     #: Digest of the base content the hunks were diffed against.
     base_blob_digest: str = ""
-    #: Digest of the expected post-image (the diff's own new blob OID when
-    #: the capture is ``--full-index``) — an applier bug becomes a detected
-    #: rejection instead of silent corruption.
+    #: Digest of the expected post-image (the diff's own new blob OID when the capture is
+    #: ``--full-index``) — an applier bug becomes a detected rejection instead of silent
+    #: corruption.
     intended_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -235,18 +205,13 @@ class UnifiedPatch:
         return None
 
 
-#: One bundle entry — exactly one representation per file (R08).
+#: One bundle entry — exactly one representation per file.
 ChangeEntry = CreateFile | DeleteFile | FullReplacement | UnifiedPatch
 
 
 @dataclass(frozen=True)
 class ChangeManifestEntry:
-    """The completed, flat form :meth:`CandidateBundle.materialize` returns.
-
-    Publishers map these onto the write-path ``ChangeSet``: ``new_content``
-    is the FULL new text for ``create``/``modify`` entries (``None`` for
-    ``delete``).
-    """
+    """The completed, flat form:meth:`CandidateBundle.materialize` returns."""
 
     path: str
     operation: CandidateOperation
@@ -257,62 +222,37 @@ class ChangeManifestEntry:
 
 @dataclass(frozen=True)
 class HarnessUsage:
-    """The F22-lite usage receipt parsed from ``candidate.meta.json``.
-
-    Normalization honesty (R23, docs/research/2026-09-17-actions-artifacts-usage.md
-    § Usage normalization table): token fields are ``None`` when unknown —
-    unknown stays unknown, never zero — and cache counters are never folded
-    into the input count:
-
-    - OpenAI-compatible shapes (grok-build, opencode, copilot) count the
-      cache inside the inclusive input; ``cached_input_tokens`` is a
-      breakdown, never added on top;
-    - Anthropic(-compatible) shapes (the claude-code driver, whether it
-      talks to Anthropic or to ``api.z.ai/api/anthropic``) carry DISJOINT
-      counters — ``input_tokens`` already excludes the cache — so their
-      spend total is ``input + cache_read + cache_write + output``
-      (:attr:`total_known_tokens`).
-    """
+    """The F22-lite usage receipt parsed from ``candidate.meta.json``."""
 
     driver: str = ""
     model: str = ""
     input_tokens: int | None = None
     cached_input_tokens: int | None = None
-    #: Anthropic ``cache_creation_input_tokens`` — a counter the
-    #: OpenAI-compatible shapes never expose. Absent → unknown, never 0.
+    #: Anthropic ``cache_creation_input_tokens`` — a counter the OpenAI-compatible shapes
+    #: never expose. Absent → unknown, never 0.
     cache_write_tokens: int | None = None
     output_tokens: int | None = None
-    #: Informational only (``reasoning_tokens`` / ``thinking_tokens``): a
-    #: breakdown inside the inclusive output on every shape forge sees —
-    #: never added on top of anything.
+    #: Informational only (``reasoning_tokens`` / ``thinking_tokens``): a breakdown inside
+    #: the inclusive output on every shape forge sees — never added on top of anything.
     reasoning_tokens: int | None = None
     completeness: UsageCompleteness = "unknown"
     source: str = ""
     #: The lane's attempt identity (v2 meta ``attempt_id``, GitHub's own
-    #: ``<run_id>:<run_attempt>``) — the second component of the receipt
-    #: identity: a repair re-dispatch is a legitimately distinct receipt.
+    #: ``<run_id>:<run_attempt>``) — the second component of the receipt identity: a repair
+    #: re-dispatch is a legitimately distinct receipt.
     attempt_id: str = ""
-    #: The receipt's identity, sha256 over (run id, attempt id, normalized
-    #: usage JSON) — :func:`usage_receipt_id`. The lane may embed it as
-    #: ``usage.receipt_id``; the control plane recomputes the SAME value
-    #: when absent (deterministic), so a re-downloaded artifact replays
-    #: byte-identical identity.
+    #: The receipt's identity, sha256 over (run id, attempt id, normalized usage JSON)
+    #: —:func:`usage_receipt_id`.
     receipt_id: str = ""
-    #: The verbatim usage block as received (never normalized in place) —
-    #: preserved on the ledger so spend stays reconstructable later.
+    #: The verbatim usage block as received (never normalized in place) — preserved on the
+    #: ledger so spend stays reconstructable later.
     raw: dict[str, Any] | None = None
 
     @classmethod
     def from_meta(
         cls, data: object, *, driver: str = "", model: str = "", attempt_id: str = ""
     ) -> HarnessUsage:
-        """Build a receipt from the meta JSON's ``usage`` object (defensive).
-
-        Anything not a non-negative int stays ``None``; ``completeness``
-        degrades to ``unknown`` unless at least one token count survived.
-        ``attempt_id`` comes from the v2 meta's top-level attempt identity
-        (the caller passes it) with an in-block override.
-        """
+        """Build a receipt from the meta JSON's ``usage`` object (defensive)."""
         if not isinstance(data, dict):
             return cls(driver=driver, model=model, attempt_id=attempt_id)
 
@@ -329,9 +269,8 @@ class HarnessUsage:
         reasoning = _token("reasoning_tokens")
         completeness = data.get("completeness")
         if completeness not in ("exact", "aggregate"):
-            # Receipts parsed from the event stream are sums of per-turn
-            # counters — the honest default is "aggregate", never fabricated
-            # precision.
+            # Receipts parsed from the event stream are sums of per-turn counters — the
+            # honest default is "aggregate", never fabricated precision.
             completeness = "aggregate"
         if all(
             value is None for value in (input_tokens, cached, cache_write, output_tokens, reasoning)
@@ -359,27 +298,12 @@ class HarnessUsage:
 
     @property
     def anthropic_shaped(self) -> bool:
-        """Whether the counters are DISJOINT (Anthropic-compatible semantics).
-
-        Provider shape is decided by the endpoint, not the hostname, and the
-        meta's canonical field names cannot distinguish "input excludes the
-        cache" from "input includes it" — so shape is detected by the two
-        tells the research table names: the ``cache_write`` counter only an
-        Anthropic-compatible endpoint exposes, and the claude-code driver
-        that always talks to one.
-        """
+        """Whether the counters are DISJOINT (Anthropic-compatible semantics)."""
         return self.cache_write_tokens is not None or self.driver == "claude-code"
 
     @property
     def total_known_tokens(self) -> int | None:
-        """The receipt's KNOWN token total, per the normalization table.
-
-        Anthropic-shaped (disjoint counters): ``input + cache_read +
-        cache_write + output`` — the caching guide's total-input formula.
-        OpenAI-shaped (inclusive counters): ``input + output`` — the cache
-        rides inside the input and is never added on top. Unknown parts
-        contribute nothing (never zero-filled); nothing known → ``None``.
-        """
+        """The receipt's KNOWN token total, per the normalization table."""
         parts: tuple[int | None, ...]
         if self.anthropic_shaped:
             parts = (
@@ -397,13 +321,7 @@ class HarnessUsage:
 
 
 def usage_document(usage: HarnessUsage) -> dict[str, Any]:
-    """The receipt's canonical normalized counters — the identity material.
-
-    Sorted-key JSON of this document is what :func:`usage_receipt_id`
-    hashes; ``raw`` is deliberately excluded (the verbatim provider block is
-    preserved on the ledger but is not part of the identity: two lanes that
-    aggregate the same counters must produce the same receipt id).
-    """
+    """The receipt's canonical normalized counters — the identity material."""
     return {
         "driver": usage.driver,
         "model": usage.model,
@@ -418,15 +336,7 @@ def usage_document(usage: HarnessUsage) -> dict[str, Any]:
 
 
 def usage_receipt_id(run_id: str, attempt_id: str, usage: HarnessUsage) -> str:
-    """The receipt's identity: sha256 over (run id, attempt id, usage JSON).
-
-    R23: computed over the NORMALIZED usage document, so it is deterministic
-    across re-downloads of the same artifact (the exact double-count
-    scenario) while a repair re-dispatch — a new attempt id — is a
-    legitimately distinct receipt. The lane may embed the value it computed
-    at emit time as ``usage.receipt_id``; the control plane recomputes this
-    SAME function when the meta does not carry it.
-    """
+    """The receipt's identity: sha256 over (run id, attempt id, usage JSON)."""
     document = json.dumps(usage_document(usage), sort_keys=True, separators=(",", ":"))
     material = f"{run_id}|{attempt_id}|{document}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -434,12 +344,7 @@ def usage_receipt_id(run_id: str, attempt_id: str, usage: HarnessUsage) -> str:
 
 @dataclass(frozen=True)
 class CandidateBundle:
-    """A parsed harness candidate: diff manifest + trusted context.
-
-    ``attempt_base_oid`` and ``driver_exit`` are supplied by the TRUSTED
-    caller (what forge pinned and what it classified), never read back from
-    the artifact alone.
-    """
+    """A parsed harness candidate: diff manifest + trusted context."""
 
     attempt_base_oid: str
     driver_exit: str
@@ -455,17 +360,7 @@ class CandidateBundle:
         return [entry.path for entry in self.entries]
 
     def materialize(self, base_contents: dict[str, str]) -> list[ChangeManifestEntry]:
-        """Complete every entry against the authoritative base texts.
-
-        *base_contents* maps path -> FULL file text at the attempt base (the
-        trusted full-content reader — no truncation). For each entry the
-        ``base_blob_digest`` claim is verified BEFORE anything is applied
-        (mismatch → ``stale_base``) and the ``intended_digest`` claim AFTER
-        (mismatch → ``result_digest_mismatch``: an internal error, never
-        published). Raises :class:`CandidateError` (``patch_does_not_apply``)
-        when a hunk does not match the base exactly, or ``file_too_large``
-        when a completed content exceeds the materialization cap.
-        """
+        """Complete every entry against the authoritative base texts."""
         completed: list[ChangeManifestEntry] = []
         for entry in self.entries:
             completed.append(self._materialize_entry(entry, base_contents))
@@ -518,16 +413,9 @@ class CandidateBundle:
 
 
 def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBundle:
-    """Wrap an already-materialized ChangeSet as a candidate bundle.
-
-    A ChangeSet carries FULL contents — every update
-    becomes a :class:`FullReplacement` (R08: never "modify with content and
-    empty hunks"); routing it through the same publisher boundary (ADR-0016
-    §2) gives every backend identical validation. ``cs`` is typed loosely to
-    avoid an import cycle with :mod:`forge.repository`.
-    """
-    # ChangeSet operation (create/update/delete) → manifest operation; typed
-    # so the manifest Literal is checked at this boundary, not erased to str.
+    """Wrap an already-materialized ChangeSet as a candidate bundle."""
+    # ChangeSet operation (create/update/delete) → manifest operation; typed so the manifest
+    # Literal is checked at this boundary, not erased to str.
     operation_map: dict[str, CandidateOperation] = {
         "create": "create",
         "update": "modify",
@@ -556,17 +444,7 @@ def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBund
 
 @dataclass(frozen=True)
 class AttemptContext:
-    """The base snapshot set of ONE proposal attempt (R06).
-
-    One definition of the bases every leg of an attempt shares: the
-    implementer reads and materializes at ``attempt_base``, update/delete
-    existence is validated against the same snapshot, and the writer pins the
-    factory branch to it (``start_ref == expected_head``). Cycle 1 reads the
-    approved source base; a repair extends the last verified candidate so it
-    can see cycle 1's files. ``source_base`` stays frozen at the approved
-    snapshot for the final cumulative review/acceptance diff only — it is
-    never consulted for repair existence checks.
-    """
+    """The base snapshot set of ONE proposal attempt."""
 
     cycle: int
     #: read/materialize/validate/publish base for the WHOLE attempt.
@@ -610,22 +488,17 @@ def candidate_base_from_meta(meta: dict[str, Any]) -> str:
 
 
 def attempt_base_for(run: object) -> str:
-    """The frozen attempt base for *run* (ADR-0016 §4): cycle 1 → approved
-    source base; repair → the last verified candidate OID. The
-    :class:`AttemptContext` shared by the harness lane (``FORGE_ATTEMPT_BASE``,
-    checked against every candidate artifact) and validated adapter inputs.
-    """
+    """The frozen attempt base for *run* (ADR-0016 §4): cycle 1 → approved source base; repair → the last verified candidate OID. The:class:`AttemptContext` shared by the harness lane (``FORGE_ATTEMPT_BASE``, checked against every candidate artifact) and validated adapter inputs."""
     return AttemptContext.of(run).attempt_base
 
 
-# ----------------------------------------------------------------------
 # Unified-diff parsing
-# ----------------------------------------------------------------------
+#
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
-#: A ``--full-index`` capture carries full pre/post blob OIDs — the artifact's
-#: own claim about base and result, used for stale-base/result verification.
+#: A ``--full-index`` capture carries full pre/post blob OIDs — the artifact's own claim
+#: about base and result, used for stale-base/result verification.
 _FULL_OID_LENGTHS = (40, 64)
 
 _NO_NEWLINE_PREFIX = "\\ "
@@ -639,17 +512,7 @@ def parse_unified_diff(
     driver_exit: str = "completed",
     usage: HarnessUsage | None = None,
 ) -> CandidateBundle:
-    """Parse ``git diff --binary --full-index <base>`` output into a bundle.
-
-    The diff is split on ``"\\n"`` ONLY — never :meth:`str.splitlines`, which
-    also splits on ``\\r``, U+2028 and friends and destroys both CRLF diffs
-    and hunk lines containing those characters (R09).
-
-    Raises :class:`CandidateError` on binary deltas, renames, mode-only
-    changes, oversized created files, malformed hunks and hunk counts that
-    disagree with their body. An empty diff yields an empty bundle (the
-    caller classifies "no changes").
-    """
+    """Parse ``git diff --binary --full-index <base>`` output into a bundle."""
     parser = _DiffParser(diff_text)
     entries = parser.parse()
     return CandidateBundle(
@@ -685,9 +548,9 @@ class _FileParse:
 
 class _DiffParser:
     def __init__(self, diff_text: str) -> None:
-        # Split on "\n" ONLY; a trailing newline must not produce a phantom
-        # empty context line at EOF. CR stays content (CRLF diffs), and
-        # U+2028/\\x85 inside a line never splits it (R09).
+        # Split on "\n" ONLY; a trailing newline must not produce a phantom empty context
+        # line at EOF. CR stays content (CRLF diffs), and U+2028/\\x85 inside a line never
+        # splits it.
         self._lines = diff_text.split("\n")
         if self._lines and self._lines[-1] == "":
             self._lines.pop()
@@ -775,8 +638,8 @@ class _DiffParser:
 
     @staticmethod
     def _path_from_git_header(line: str) -> str:
-        # "diff --git a/<p> b/<p>" — best-effort b-side; the +++/--- headers
-        # refine it when present.
+        # "diff --git a/<p> b/<p>" — best-effort b-side; the +++/--- headers refine it when
+        # present.
         _, _, rest = line.partition("diff --git ")
         parts = rest.split(" b/")
         if len(parts) > 1:
@@ -791,8 +654,8 @@ class _DiffParser:
         elif line.startswith("deleted file mode "):
             file.is_delete = True
         elif line.startswith(("old mode ", "new mode ")):
-            # A pure mode flip has no content delta and the write path has no
-            # mode action — rejected, never silently dropped (R09).
+            # A pure mode flip has no content delta and the write path has no mode action —
+            # rejected, never silently dropped.
             file.is_mode_change = True
         elif line.startswith(("rename ", "copy ")):
             file.is_rename = True
@@ -877,25 +740,14 @@ def _strip_diff_prefix(path: str) -> str:
     return path
 
 
-# ----------------------------------------------------------------------
 # Strict hunk application (no fuzz, ever — ADR-0001 semantics for patches)
-# ----------------------------------------------------------------------
+#
 
 
 def apply_unified_hunks(
     base_text: str, hunks: tuple[DiffHunk, ...], *, path: str = "<data>"
 ) -> str:
-    """Apply *hunks* to *base_text* with strict line matching.
-
-    Every context/removal line must equal the base line at the hunk's exact
-    position; hunks must not overlap and must appear in order. An empty old
-    range (``old_count == 0``) positions AFTER base line ``old_start`` —
-    POSIX: "if a range is empty, its beginning line number shall be the
-    number of the line just before the range" (R09: ``@@ -3,0 +4,1 @@``
-    inserts between lines 3 and 4). Any deviation raises
-    :class:`CandidateError` (``patch_does_not_apply``, ``corrupt_patch``) —
-    no fuzzy matching, ever.
-    """
+    """Apply *hunks* to *base_text* with strict line matching."""
     where = f"{path}: "
     base_lines, base_ends_nl = _split_text(base_text)
     out: list[str] = []
@@ -934,8 +786,8 @@ def apply_unified_hunks(
     out.extend(tail)
 
     if pos >= len(base_lines) and last_old_no_nl is not None:
-        # The diff consumed the base to EOF: its trailing-newline claim about
-        # the old side must match the base exactly.
+        # The diff consumed the base to EOF: its trailing-newline claim about the old side
+        # must match the base exactly.
         if base_ends_nl == last_old_no_nl:
             raise CandidateError(
                 "patch_does_not_apply", f"{where}trailing-newline mismatch on the base"
@@ -951,12 +803,7 @@ def apply_unified_hunks(
 
 
 def _split_text(text: str) -> tuple[list[str], bool]:
-    """Split on ``"\\n"`` ONLY into (lines without terminators, ends_with_newline).
-
-    ``splitlines()`` would also split on ``\\r``, U+2028, U+0085 and friends,
-    destroying CRLF content and mid-line Unicode separators — CR is content,
-    never a line break and never resynthesized.
-    """
+    """Split on ``"\n"`` ONLY into (lines without terminators, ends_with_newline)."""
     if text == "":
         return [], True
     lines = text.split("\n")
