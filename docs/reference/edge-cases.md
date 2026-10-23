@@ -187,6 +187,10 @@ When a pin breaks:
 
 | EC-291 | A pinned reusable workflow can be called from an unapproved ref | Independently require the GitHub caller ref to match the dispatch branch or explicit tag | `src/forge/api/lane_auth.py` | `tests/test_lane_auth.py::test_reusable_workflow_pin_does_not_authorize_another_caller_ref` |
 
+| EC-430 | A v1 lane installs mutable or incomplete release dependencies | Verify the requirement-file digest, require every wheel hash and install the lane/protocol distributions without the server | `.github/workflows/lane.yml`, `ci/lane.gitlab-ci.yml`, `tools/release/artifacts.py` | `tests/test_lane_templates_v1.py::test_bootstrap_requires_hashes_and_an_isolated_lane`, `tests/test_release_flow.py::test_v1_requirements_contain_only_lane_and_protocol_wheels` |
+| EC-431 | A reusable lane accidentally inherits repository write authority | Keep repository contents read-only, grant OIDC issuance separately, disable persisted checkout credentials and forbid push | `.github/workflows/lane.yml`, `ci/lane.gitlab-ci.yml` | `tests/invariants/test_i1_no_merge.py::test_v1_lanes_hold_no_repository_write_credential` |
+| EC-432 | Dispatch JSON executes as shell code or selects a moving checkout | Pass JSON as environment data, validate the base SHA and checkout that commit before running the lane | `.github/workflows/lane.yml`, `ci/lane.gitlab-ci.yml` | `tests/test_lane_templates_v1.py::test_dispatch_is_data_and_the_checkout_uses_the_frozen_base` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

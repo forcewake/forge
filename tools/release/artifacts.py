@@ -41,6 +41,19 @@ def prepare(dist: Path, repo: str, tag: str, rc: str, commit: str, image: str) -
         + "\n".join(f"{base}/{p.name} --hash=sha256:{sha256(p)}" for p in wheels)
         + "\n"
     )
+    lane_wheels = [p for p in wheels if p.name.startswith(("forge_lane-", "forge_protocol-"))]
+    if len(lane_wheels) != 2:
+        raise ValueError("release requires exactly one lane and protocol wheel")
+    lane_requirements = dist / "lane-v1-requirements.txt"
+    lane_locked = (dist / "lane-v1-dependencies.txt").read_text()
+    if any(line.startswith("-e ") or " @ file:" in line for line in lane_locked.splitlines()):
+        raise ValueError("lane requirements cannot contain source checkouts")
+    lane_requirements.write_text(
+        lane_locked
+        + "\n"
+        + "\n".join(f"{base}/{p.name} --hash=sha256:{sha256(p)}" for p in lane_wheels)
+        + "\n"
+    )
     artifacts = {
         p.name: sha256(p)
         for p in sorted(dist.iterdir())
@@ -56,6 +69,8 @@ def prepare(dist: Path, repo: str, tag: str, rc: str, commit: str, image: str) -
         "wheel_sha256": sha256(server[0]),
         "requirements_url": f"{base}/{requirements.name}",
         "requirements_sha256": sha256(requirements),
+        "lane_requirements_url": f"{base}/{lane_requirements.name}",
+        "lane_requirements_sha256": sha256(lane_requirements),
     }
     (dist / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest

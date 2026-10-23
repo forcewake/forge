@@ -62,6 +62,7 @@ jobs:
           uv export --frozen --all-packages --no-dev --extra postgres --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/runtime-requirements.txt
           uv export --frozen --all-packages --no-dev --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/lane-dependencies.txt
           uv export --frozen --all-packages --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file "$RUNNER_TEMP/test-requirements.txt"
+          uv export --frozen --package forge-lane --no-dev --all-extras --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/lane-v1-dependencies.txt
       - name: Test installed wheels in a fresh environment
         run: |
           set -euo pipefail

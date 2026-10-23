@@ -1,0 +1,79 @@
+name: forge-lane-v1
+on:
+  workflow_call:
+    inputs:
+      dispatch:
+        description: Frozen forge.lane/1 dispatch JSON
+        required: true
+        type: string
+      requirements_url:
+        description: Immutable lane requirement file from the release manifest
+        required: true
+        type: string
+      requirements_sha256:
+        description: SHA256 from the same release manifest
+        required: true
+        type: string
+    secrets:
+      copilot_token:
+        required: false
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DISPATCH_JSON: ${{ inputs.dispatch }}
+      REQUIREMENTS_URL: ${{ inputs.requirements_url }}
+      REQUIREMENTS_SHA256: ${{ inputs.requirements_sha256 }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Validate frozen dispatch input
+        run: |
+          python - <<'PYDISPATCH'
+          import json, os, pathlib, re
+          data = json.loads(os.environ['DISPATCH_JSON'])
+          assert re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', data['base_sha'])
+          assert data['provider'] == 'github'
+          assert data['driver'] in {'claude_code', 'copilot_cli'}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'forge-dispatch.json').write_text(json.dumps(data))
+          PYDISPATCH
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(inputs.dispatch).base_sha }}
+          persist-credentials: false
+      - name: Disable push
+        run: git remote set-url --push origin FORBIDDEN
+      - name: Install the verified lane distribution
+        env:
+          LANE_TEMP: ${{ runner.temp }}
+        run: |
+          python -m venv "$RUNNER_TEMP/forge-lane-venv"
+          export LANE_PYTHON="$RUNNER_TEMP/forge-lane-venv/bin/python"
+          set -euo pipefail
+          printf '%s' "$REQUIREMENTS_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          case "$REQUIREMENTS_URL" in https://*) ;; *) exit 2 ;; esac
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-filesize 2097152 "$REQUIREMENTS_URL" -o "$LANE_TEMP/requirements.txt"
+          printf '%s  %s\n' "$REQUIREMENTS_SHA256" "$LANE_TEMP/requirements.txt" | sha256sum --check --status
+          "$LANE_PYTHON" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$LANE_TEMP/requirements.txt"
+          "$LANE_PYTHON" -I -c 'import forge_lane, forge_protocol, importlib.util; assert importlib.util.find_spec("forge") is None, "server wheel in lane environment"'
+      - uses: actions/setup-node@v4
+        if: fromJSON(inputs.dispatch).driver == 'copilot_cli'
+        with:
+          node-version: '22'
+      - name: Install the pinned native Copilot binary
+        if: fromJSON(inputs.dispatch).driver == 'copilot_cli'
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/forge-copilot" --ignore-scripts --no-audit --no-fund @github/copilot-linux-x64@1.0.86
+          ln -s "$RUNNER_TEMP/forge-copilot/node_modules/.bin/copilot-linux-x64" "$RUNNER_TEMP/forge-lane-venv/bin/copilot"
+      - name: Run one authenticated generation
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.copilot_token }}
+        run: |
+          export PATH="$RUNNER_TEMP/forge-lane-venv/bin:$PATH"
+          forge-lane run --dispatch "$RUNNER_TEMP/forge-dispatch.json" --workspace "$GITHUB_WORKSPACE"

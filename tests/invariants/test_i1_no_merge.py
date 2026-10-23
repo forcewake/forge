@@ -128,7 +128,8 @@ def _mappings(node: Any) -> Iterator[dict[str, Any]]:
 def _source_files() -> list[Path]:
     return sorted(
         p
-        for p in (REPO / "src").rglob("*")
+        for root in [REPO / "src", *REPO.glob("packages/*/src")]
+        for p in root.rglob("*")
         if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc", ".pyo"}
     )
 
@@ -182,3 +183,34 @@ def test_azure_lane_holds_no_access_token(path: Path):
     assert checkouts, "no checkout step found"
     assert all(m.get("persistCredentials") is False for m in checkouts)
     assert not re.search(r"system[._]accesstoken", text, re.IGNORECASE)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".github/workflows/lane.yml", "templates/github/forge-lane.yml", "ci/lane.gitlab-ci.yml"],
+)
+def test_v1_lanes_hold_no_repository_write_credential(relative):
+    path = REPO / relative
+    doc = yaml.safe_load(path.read_text())
+    text = path.read_text()
+    assert "GITLAB_TOKEN" not in text and "GH_TOKEN" not in text
+    if relative.endswith("gitlab-ci.yml"):
+        job = doc["forge-lane-v1"]
+        assert job["id_tokens"]["FORGE_OIDC_TOKEN"]["aud"] == "$FORGE_PUBLIC_URL"
+        assert "git remote set-url --push origin FORBIDDEN" in text
+        assert "unset CI_JOB_TOKEN CI_REPOSITORY_URL" in text
+        return
+    assert doc["permissions"] == {"contents": "read", "id-token": "write"}
+    job = doc["jobs"]["lane"]
+    assert "permissions" not in job
+    if "uses" in job:
+        assert job["uses"] == "forcewake/forge/.github/workflows/lane.yml@v1"
+        assert "secrets: inherit" not in text
+        return
+    checkouts = [
+        m for m in _mappings(job) if str(m.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert checkouts and all(
+        (m.get("with") or {}).get("persist-credentials") is False for m in checkouts
+    )
+    assert "git remote set-url --push origin FORBIDDEN" in text

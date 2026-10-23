@@ -1,0 +1,25 @@
+name: forge-lane
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch:
+        required: true
+        type: string
+      requirements_url:
+        required: true
+        type: string
+      requirements_sha256:
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  lane:
+    uses: forcewake/forge/.github/workflows/lane.yml@v1
+    with:
+      dispatch: ${{ inputs.dispatch }}
+      requirements_url: ${{ inputs.requirements_url }}
+      requirements_sha256: ${{ inputs.requirements_sha256 }}
+    secrets:
+      copilot_token: ${{ secrets.FORGE_COPILOT_TOKEN }}

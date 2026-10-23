@@ -854,6 +854,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P2-11 CI templates v1
+- **Status:** implemented locally on 2026-10-23. Local actionlint and static contract checks pass; authenticated GitLab lint and hosted executions remain unperformed.
 - **Goal:** a two-line onboarding for target repositories.
 - **Work:**
   - `.github/workflows/lane.yml` (`workflow_call`) with permissions

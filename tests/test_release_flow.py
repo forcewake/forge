@@ -18,6 +18,7 @@ def candidate(tmp_path):
     (tmp_path / "forge_lane-0.1.0-py3-none-any.whl").write_bytes(b"lane")
     (tmp_path / "forge-1.0.0.tar.gz").write_bytes(b"source")
     (tmp_path / "lane-dependencies.txt").write_text("httpx==0.28.1 --hash=sha256:" + "e" * 64)
+    (tmp_path / "lane-v1-dependencies.txt").write_text("httpx==0.28.1 --hash=sha256:" + "e" * 64)
     value = prepare(
         tmp_path,
         "acme/forge",
@@ -228,3 +229,14 @@ def test_release_refuses_editable_source_dependencies(candidate):
             manifest["commit"],
             manifest["image"],
         )
+
+
+def test_v1_requirements_contain_only_lane_and_protocol_wheels(candidate):
+    directory, manifest = candidate
+    requirements = (directory / "lane-v1-requirements.txt").read_text()
+    assert "forge_lane-0.1.0-" in requirements
+    assert "forge_protocol-0.1.0-" in requirements
+    assert "forge-1.0.0-" not in requirements
+    assert requirements.count("/releases/download/") == 2
+    assert manifest["lane_requirements_sha256"]
+    verify(manifest, directory)

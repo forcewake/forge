@@ -1,0 +1,44 @@
+forge-lane-v1:
+  image: node:22-bookworm
+  timeout: 6h
+  rules:
+    - if: '$FORGE_LANE_DISPATCH'
+  id_tokens:
+    FORGE_OIDC_TOKEN:
+      aud: $FORGE_PUBLIC_URL
+  variables:
+    GIT_DEPTH: '1'
+  script:
+    - |
+      set -euo pipefail
+      apt-get update -qq
+      apt-get install -y -qq python3 python3-pip curl
+      python3 -m pip install --break-system-packages --disable-pip-version-check uv==0.9.29
+      export LANE_TEMP="$(mktemp -d)"
+      trap 'rm -rf "$LANE_TEMP"' EXIT
+      printf '%s' "$FORGE_LANE_DISPATCH" > "$LANE_TEMP/dispatch.json"
+      base_sha="$(python3 -c 'import json,os,re; d=json.loads(os.environ["FORGE_LANE_DISPATCH"]); assert re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",d["base_sha"]); assert d["provider"] == "gitlab"; assert d["driver"] in {"claude_code","copilot_cli"}; print(d["base_sha"])')"
+      git cat-file -e "$base_sha^{commit}" || git fetch --depth=1 origin "$base_sha"
+      git checkout --detach "$base_sha"
+      git remote set-url origin "${CI_PROJECT_URL}.git"
+      git remote set-url --push origin FORBIDDEN
+      unset CI_JOB_TOKEN CI_REPOSITORY_URL
+      uv venv --python 3.13 --seed "$LANE_TEMP/venv"
+      export LANE_PYTHON="$LANE_TEMP/venv/bin/python"
+      export REQUIREMENTS_URL="$FORGE_LANE_REQUIREMENTS_URL"
+      export REQUIREMENTS_SHA256="$FORGE_LANE_REQUIREMENTS_SHA256"
+      set -euo pipefail
+      printf '%s' "$REQUIREMENTS_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+      case "$REQUIREMENTS_URL" in https://*) ;; *) exit 2 ;; esac
+      curl --fail --location --proto '=https' --proto-redir '=https' --max-filesize 2097152 "$REQUIREMENTS_URL" -o "$LANE_TEMP/requirements.txt"
+      printf '%s  %s\n' "$REQUIREMENTS_SHA256" "$LANE_TEMP/requirements.txt" | sha256sum --check --status
+      "$LANE_PYTHON" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$LANE_TEMP/requirements.txt"
+      "$LANE_PYTHON" -I -c 'import forge_lane, forge_protocol, importlib.util; assert importlib.util.find_spec("forge") is None, "server wheel in lane environment"'
+      driver="$(python3 -c 'import json,os; print(json.loads(os.environ["FORGE_LANE_DISPATCH"])["driver"])')"
+      if [ "$driver" = copilot_cli ]; then
+        case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) exit 2 ;; esac
+        npm install --prefix "$LANE_TEMP/copilot" --ignore-scripts --no-audit --no-fund "@github/copilot-linux-$arch@1.0.86"
+        ln -s "$LANE_TEMP/copilot/node_modules/.bin/copilot-linux-$arch" "$LANE_TEMP/venv/bin/copilot"
+      fi
+      export PATH="$LANE_TEMP/venv/bin:$PATH"
+      forge-lane run --dispatch "$LANE_TEMP/dispatch.json" --workspace "$CI_PROJECT_DIR"
