@@ -74,7 +74,11 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         "I7",
         "A killed worker loses no work and duplicates no effect",
-        ("tests/test_failure_injection.py", "tests/test_engine_effects.py"),
+        (
+            "tests/test_failure_injection.py",
+            "tests/test_engine_effects.py",
+            "tests/test_engine_runner.py",
+        ),
     ),
     Invariant(
         "I8",

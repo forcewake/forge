@@ -1,13 +1,13 @@
 """Fenced step claims; completion and successor scheduling commit together."""
 
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.domain.states import TERMINAL, Handler
+from forge.domain.states import TERMINAL, Handler, State, transition
 from forge.store.models_execution import EngineStep
 from forge.store.models_runs import EngineRun
 from forge.store.records import Lease, StepRecord, StepRequest, StepState, StoreConflict
@@ -17,6 +17,7 @@ from forge.store.transactions import (
     canonical_json,
     fence,
     locked_run,
+    notify_steps,
     stored_time,
     transaction,
 )
@@ -111,7 +112,32 @@ async def enqueue_in(session: AsyncSession, run: EngineRun, request: StepRequest
     )
     session.add(row)
     await session.flush()
+    await notify_steps(session)
     return row
+
+
+async def claim_one(
+    session: AsyncSession, row: EngineStep, owner: str, now: datetime, lease_seconds: float
+) -> Lease | None:
+    run = await locked_run(session, row.run_id)
+    if run.cancel_requested or State(run.state) in TERMINAL:
+        return None
+    expired = row.deadline_at is not None and stored_time(row.deadline_at) <= now
+    if row.attempts >= row.max_attempts or expired:
+        row.state, row.lease_owner, row.lease_expires_at = "dead", None, None
+        run.state = transition(State(run.state), State.BLOCKED).value
+        run.failed_handler = row.handler
+        run.reason = "step_deadline_expired" if expired else "step_attempts_exhausted"
+        run.version += 1
+        return None
+    row.state, row.lease_owner = "running", owner
+    row.lease_epoch += 1
+    row.attempts += 1
+    expiry = now + timedelta(seconds=lease_seconds)
+    row.lease_expires_at = (
+        min(expiry, stored_time(row.deadline_at)) if row.deadline_at is not None else expiry
+    )
+    return lease_record(row)
 
 
 class StepStore:
@@ -128,6 +154,15 @@ class StepStore:
         async with self.factory() as session:
             row = await session.scalar(select(EngineStep).where(EngineStep.key == key))
             return step_record(row) if row is not None else None
+
+    async def load(self, step_id: str) -> StepRecord | None:
+        async with self.factory() as session:
+            row = await session.get(EngineStep, step_id)
+            return step_record(row) if row is not None else None
+
+    async def assert_current(self, lease: Lease, *, now: datetime) -> None:
+        async with transaction(self.factory) as session:
+            await fence(session, lease, now)
 
     async def claim_due(
         self, owner: str, now: datetime, lease_seconds: float, limit: int = 1
@@ -160,21 +195,9 @@ class StepStore:
             ).all()
             leases: list[Lease] = []
             for row in rows:
-                if row.attempts >= row.max_attempts or (
-                    row.deadline_at is not None and stored_time(row.deadline_at) <= now
-                ):
-                    row.state, row.lease_owner, row.lease_expires_at = "dead", None, None
-                    continue
-                row.state, row.lease_owner = "running", owner
-                row.lease_epoch += 1
-                row.attempts += 1
-                expiry = now + timedelta(seconds=lease_seconds)
-                row.lease_expires_at = (
-                    min(expiry, stored_time(row.deadline_at))
-                    if row.deadline_at is not None
-                    else expiry
-                )
-                leases.append(lease_record(row))
+                lease = await claim_one(session, row, owner, now, lease_seconds)
+                if lease is not None:
+                    leases.append(lease)
             await session.flush()
             return tuple(leases)
 
@@ -197,6 +220,9 @@ class StepStore:
         successors: tuple[StepRequest, ...] = (),
         *,
         now: datetime | None = None,
+        transition_to: State | None = None,
+        reason: str | None = None,
+        outcome: Literal["succeeded", "failed"] = "succeeded",
     ) -> StepRecord:
         canonical_json(result_json)
         for request in successors:
@@ -206,18 +232,36 @@ class StepStore:
             run = await locked_run(session, lease.run_id)
             for request in successors:
                 await enqueue_in(session, run, request)
-            row.state, row.result_json = "succeeded", result_json
+            if transition_to is not None:
+                run.state = transition(State(run.state), transition_to).value
+                run.failed_handler = (
+                    row.handler if transition_to in {State.BLOCKED, State.FAILED} else None
+                )
+                run.reason = reason
+                run.version += 1
+            row.state, row.result_json = outcome, result_json
             row.lease_owner, row.lease_expires_at = None, None
             await session.flush()
             return step_record(row)
 
-    async def reschedule(self, lease: Lease, *, due_at: datetime, now: datetime) -> StepRecord:
+    async def reschedule(
+        self, lease: Lease, *, due_at: datetime, now: datetime, reason: str = "retry_exhausted"
+    ) -> StepRecord:
         due_at = aware(due_at)
         if due_at < aware(now):
             raise ValueError("retry cannot be due in the past")
         async with transaction(self.factory) as session:
             row = await fence(session, lease, now)
-            row.state = "dead" if row.attempts >= row.max_attempts else "scheduled"
+            exhausted = row.attempts >= row.max_attempts or (
+                row.deadline_at is not None and due_at >= stored_time(row.deadline_at)
+            )
+            row.state = "dead" if exhausted else "scheduled"
+            if exhausted:
+                run = await locked_run(session, lease.run_id)
+                run.state = transition(State(run.state), State.BLOCKED).value
+                run.failed_handler, run.reason = row.handler, reason
+                run.version += 1
             row.due_at, row.lease_owner, row.lease_expires_at = due_at, None, None
             await session.flush()
+            await notify_steps(session)
             return step_record(row)

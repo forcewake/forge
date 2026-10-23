@@ -101,3 +101,8 @@ async def fence(session: AsyncSession, lease: Lease, now: datetime) -> EngineSte
     ):
         raise StaleLease("step epoch or run identity is no longer current")
     return row
+
+
+async def notify_steps(session: AsyncSession) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SELECT pg_notify('forge_engine_steps', '')"))
