@@ -46,7 +46,6 @@ def boundary_by_name(name: str) -> ImportBoundary:
 
 
 LEGACY_LOOKUP_CHAIN_MODULES: tuple[str, ...] = (
-    "forge.adaptive.checkpoint_migration",
     "forge.adaptive.checkpoint_repository",
     "forge.api_checkpoint_channel",
     "forge.runs.revival",
@@ -55,7 +54,6 @@ LEGACY_LOOKUP_CHAIN_MODULES: tuple[str, ...] = (
 LEGACY_LOOKUP_CONFINED_FUNCTION: str = "_legacy_http_lookup"
 
 RESOLVE_REPOSITORY_CALLERS: tuple[str, ...] = (
-    "forge.adaptive.checkpoint_migration",
     "forge.adaptive.checkpoint_repository",
     "forge.adaptive.revisions",
     "forge.adaptive.wiring",

@@ -17,7 +17,7 @@
 ```
 
 * Two supported providers: GitHub and GitLab CE.
-* **9,283 tests**, a fail-closed promotion gate, mutation-tested release traces, and a qualification record store that keeps lab proof and customer proof honestly separated.
+* Native provider checks, an Invariant Suite, and a source release flow that binds tested artifacts to their exact hashes.
 * One reviewed-ready task on the reference profile costs about **$0.40** in lane spend. The credential-redemption proof cost less than one cent — because it was designed to be provable without spending money.
 
 ---
@@ -38,23 +38,14 @@ The bet: agentic work becomes trustworthy not when the models get better, but wh
 Most tooling asks you to believe the README. forge's README asks you to read the records.
 
 * **The promotion gate** refuses to publish an image unless every required check is green *at the tagged commit* — a check with no recorded result blocks, fail-closed; a check that failed and passed on retry records both attempts. Verdicts: `promote`, `conditional_promote`, `block`. A green canary never outweighs a red required check.
-* **Mutation gates** run each critical release trace twice — once as a baseline, once with the defect deliberately reintroduced. If the seeded defect does not fail the trace, the gate fails. Release traces that cannot detect their own regressions do not ship.
-* **Byte-identical composition**: the wheel the release publishes is byte-identical to the wheel the live qualification trace executed — verified by digest, second release running. The code you install is the code that earned the evidence.
-* **The closure matrix** grades every capability on six evidence levels — domain, wired, executed, native, recovery, customer — and leaves the gaps visible as data. "Pending" is a state you can query, not a euphemism.
-* **Honest unknowns**: unknown spend is never rendered as zero; a killed job stays an unknown, never a successful cheap one; a partial receipt holds its upper-bound liability until it settles. The economics ledger keeps provider-reported, estimated, and billing-reconciled costs in three columns that are never blended.
-
+* **Exact artifact identity**: release verification consumes the built wheel, image digest and hash-pinned requirements. Promotion preserves those bytes; an unreleased working tree carries no hosted verification claim.
 ### Guarantee levels
 
-Every capability claim in the release manifest (`forge.release_manifest`, generated from the tagged tree) carries exactly one of four levels, and this README uses the same words with the same meanings:
-
-* **implemented** — code + unit tests; no CI contract suite yet.
-* **contract-tested** — a CI suite over fakes and stubs gates the contract, or a failure-injection suite (`coroutine_fi`) has exercised it.
-* **live-canary-tested** — the shipped artifact was booted and probed by the release canary against a real database.
-* **not-run** — not executed in this release's evidence; stated, never implied by silence.
-
-Run `python -m forge.release_manifest` to regenerate the machine-readable manifest and `python -m forge.release_promotion gaps` to list every capability whose evidence class requires live qualification and does not have it. A gap with a name is a fact; a gap without one is a bug.
-
-All of it is committed: [`docs/releases/`](docs/releases/) (per-release promotion evidence), [`qualification/`](qualification/) (profile records with derived verdicts), [`docs/adr/`](docs/adr/) (34 architecture decision records), [`docs/operations/`](docs/operations/) (runbooks that were executed, not imagined).
+Release verification is implemented in `tools/release/`: artifact hashes,
+installed-wheel invariant results, fresh-database boot and both native provider
+smokes must agree on the exact release identity. Historical qualification
+records under `docs/releases/evidence/` describe their recorded versions; they
+do not certify this unreleased source tree.
 
 ## What lands in your repository
 
@@ -97,17 +88,12 @@ A run, end to end, produces things you can point at:
 * **One coherent projection** — execution, review round, candidate, verification and acceptance as separate but linked facts; every offered action names the version it expects and refuses if the world moved ([`src/forge/adaptive/operator_view.py`](src/forge/adaptive/operator_view.py)).
 * **The measured operating envelope** — slot limits, queue policy, degradation behavior, restore rehearsals and alerts with threshold bases, measured on the real workflow ([`docs/operations/support-agreement.md`](docs/operations/support-agreement.md)).
 
-### Qualification machinery
-
-* **The supported profile** — a frozen manifest binding control plane, wheel, template, runner and schema together; cold-install proven fresh, upgraded (data-bearing, fingerprinted) and verified ([`qualification/profiles/`](qualification/profiles/)).
-* **Deployment drills** — occupancy under partition, lost responses, backup/restore with typed refusals, degraded modes, workflow-restore covering rounds/amendments/grants.
-* **The economics ledger** — run → attempt → receipt → native job → candidate → verification → human decision, joined on stable ids; unjoinable links surface as gaps, never drop ([`src/forge/adaptive/delivery_economics.py`](src/forge/adaptive/delivery_economics.py)).
 
 ## Quick start
 
 ### 1. Run the image
 
-<!-- generated by scripts/generate_template_pins.py -- begin -->
+<!-- static maintenance release example -- begin -->
 ```bash
 docker run -d --name forge -p 8420:8420 \
   --env-file .env ghcr.io/forcewake/forge:0.42.0
@@ -117,7 +103,7 @@ docker run -d --name forge -p 8420:8420 \
 git clone https://github.com/forcewake/forge && cd forge
 uv sync && set -o pipefail && .venv/bin/python -m pytest -q
 ```
-<!-- generated by scripts/generate_template_pins.py -- end -->
+<!-- static maintenance release example -- end -->
 
 ### 2. Configure
 
@@ -131,7 +117,7 @@ cp .env.example .env    # GITLAB_URL/GITLAB_TOKEN (or GitHub App values),
 
 ```bash
 python -m forge.migrate             # alembic chain, currently head 031
-python -m forge.doctor              # environment + capability report
+python -m forge.doctor              # read-only environment report
 python -m forge.worker              # the durable worker
 ```
 
@@ -170,8 +156,8 @@ webhook ──► gateway (token-checked ingress, two-layer dedup)
 * [`src/forge/gateway/`](src/forge/gateway/) — authenticated native ingress; commands are durable rows before anything slow happens.
 * [`src/forge/runs/`](src/forge/runs/) — the service, the reconciler, the publisher: one validated write path per decision (ADR-0034's ownership map names the owner and its real callers).
 * [`src/forge/durable/`](src/forge/durable/) — Postgres models, budgets, leases, the append-only stores.
-* [`src/forge/adaptive/`](src/forge/adaptive/) — the authority surface: credential broker, revisions, closing budget, economics, operator view, ops limits, the closure matrix.
-* [`scripts/`](scripts/) — the gates: conformance, PG qualification, profile freeze, cold-install checks, promotion. The release pipeline is in [`.github/workflows/`](.github/workflows/) and refuses to flatter itself.
+* [`src/forge/adaptive/`](src/forge/adaptive/) — the authority surface: credential broker, revisions, closing budget, usage exposure, operator view and ops limits.
+* [`scripts/`](scripts/) — program guardrails and the required PostgreSQL gate. [`tools/`](tools/) holds development, lab and source release tools outside the product wheel.
 
 ## Providers and harnesses
 
@@ -185,7 +171,6 @@ Azure DevOps is supported only on the [`release/0.42.x` maintenance line](docs/o
 | Review feedback (`/fix`, `/ask`, `/approve-revision`) and bounded review rounds | ✅ live — the reference path | not yet |
 | Plan comment + human gate | ✅ | ✅ |
 | Harness execution | ✅ project CI (docker executor) | ✅ Actions (`workflow_dispatch`) |
-| Builtin LLM implementer (no CI needed) | ✅ | ✅ |
 | Trusted publisher | Commits API | GraphQL CAS (`expectedHeadOid`) |
 | Draft MR / PR before CI — one per run, reserved | ✅ | ✅ |
 | Readonly LLM review | ✅ MR notes | ✅ native reviews |
@@ -200,14 +185,13 @@ Delivery semantics, with the evidence level honestly stated per cell:
 
 | Capability | GitLab CE | GitHub |
 |---|---|---|
-| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) |
 | Publication policy — harness lane | live | contract-tested (shared publisher validation) |
 | CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks |
 | Repair-in-place | implemented · contract-tested | implemented · contract-tested |
 | Operator `/retry` + auto-revive | live | live |
 | Exact-WIP cross-runner resume | live (three file shapes) | contract-tested |
 
-GitLab CE 19.x is the reference profile: every capability this README describes is proven live on it, with the records committed under [`qualification/records/`](qualification/records/). GitHub keeps native CAS semantics explicit, never approximated.
+Historical GitLab CE qualification records remain under [`qualification/records/`](qualification/records/). Current release verification requires independent native GitHub and GitLab smokes; local source changes alone do not establish a live result.
 
 ### Drivers
 
@@ -222,10 +206,10 @@ Real clients against real binaries — [`src/forge/adaptive/drivers/`](src/forge
 
 ## Status
 
-<!-- generated by scripts/generate_template_pins.py -- begin -->
+<!-- static maintenance release example -- begin -->
 (`ghcr.io/forcewake/forge:0.42.0` — digest `sha256:c172ae07405978b415ef1ad9428e45f8fa261467b7f0c61fd953462b450599a8`, verdict `promote`,
 evidence `docs/releases/evidence/v0.42.0/promotion.json`, qualifying CI run `36405280551`).
-<!-- generated by scripts/generate_template_pins.py -- end -->
+<!-- static maintenance release example -- end -->
 
 **v0.42.0** (release candidate, the BUILD-ONCE window — the frozen qualification manifest `23ac40df…` binds the FINAL candidate: wheel `ff1d0769…` + the alignment image of the same tree e305478, digests recorded BEFORE qualification and RE-QUALIFIED live after three review commits (#380/#379/#389) landed inside the release window — the build-once rule applied to the cycle's own qualification; the exact-composition gate refuses any promotion whose bytes are not the qualified candidate's) — the honest tiers — what is machine-proven, what is live-proven on the recorded compositions, what waits on this cycle's live traces and the world:
 
@@ -254,9 +238,8 @@ evidence `docs/releases/evidence/v0.42.0/promotion.json`, qualifying CI run `364
 ```bash
 uv sync
 uv run python -m pytest -q                     # the suite
-uv run python scripts/gate_conformance.py      # shipped-template conformance + mutation arms
+uv run lint-imports                         # enforced product import boundaries
 uv run python scripts/pg_gate.py               # required PG profiles (fail-closed on missing fixtures)
-uv run python scripts/freeze_supported_profile.py --check
 uv run ruff check . && uv run ruff format --check .
 ```
 

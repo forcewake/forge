@@ -466,8 +466,8 @@ class AuthorityMarkerFence:
                 f"the checkpoint authority marker at {authority_marker_path(self._root)} "
                 f"names {named!r}; this {configured_authority!r} repository refuses "
                 "metadata mutations (configured vs active authority mismatch) — "
-                "immutable reads stay available; recovery: `python -m "
-                "forge.adaptive.checkpoint_migration rollback --verify-report <path>`"
+                "immutable reads stay available; reconcile deployment configuration "
+                "with the active authority before restarting"
             )
 
     def state(self) -> dict[str, Any]:

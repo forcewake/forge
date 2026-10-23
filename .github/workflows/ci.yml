@@ -356,7 +356,7 @@ jobs:
         run: uv run pytest tests/test_failure_injection_os.py -q
 
   # Release-artifact canary (review R30): builds the Containerfile from the
-  # pushed commit and runs scripts/canary_smoke.py against the BUILT IMAGE —
+  # pushed commit and runs tools/canary_smoke.py against the BUILT IMAGE —
   # the real alembic chain on a fresh Postgres (R22: never create_all), the
   # boot gate at head, /health ok, MCP mount fail-closed (401), doctor on the
   # in-container env — plus the previous-release → this-tree schema upgrade
@@ -377,7 +377,7 @@ jobs:
       # Stdlib-only script: no uv sync needed, it only drives the runtime CLI.
       - name: Canary the built image
         run: |
-          python3 scripts/canary_smoke.py forge:canary \
+          python3 tools/canary_smoke.py forge:canary \
             --allow-unpinned \
             --runtime docker \
             --previous-image ghcr.io/forcewake/forge:latest \

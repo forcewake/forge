@@ -140,7 +140,7 @@ id = "authority-repository_identity_checkpoint_lifecycle"
 name = "repository_identity_checkpoint_lifecycle: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.checkpoint_repository", "forge.api_checkpoint_channel"]
-allowed_importers = ["forge.adaptive.checkpoint_migration", "forge.adaptive.checkpoint_repository", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
+allowed_importers = ["forge.doctor", "forge.adaptive.checkpoint_repository", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -156,7 +156,7 @@ id = "authority-native_occupancy"
 name = "native_occupancy: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.admission", "forge.runs.admission"]
-allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.github_service", "forge.runs.service"]
+allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.github_service", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -228,7 +228,7 @@ id = "reference-importers"
 name = "reference package has only registered compatibility importers"
 type = "protected"
 protected_modules = ["forge.adaptive.reference"]
-allowed_importers = ["forge.adaptive.steering_causality"]
+allowed_importers = []
 
 [[tool.importlinter.contracts]]
 id = "reference-direction"
@@ -247,6 +247,7 @@ forbidden_modules = ["tests"]
 allow_indirect_imports = true
 
 [tool.uv.workspace]
+exclude = ["tools"]
 members = ["packages/forge-protocol", "packages/forge-lane"]
 
 [tool.uv.sources]

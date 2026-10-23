@@ -121,14 +121,12 @@ src/forge/
   orchestrator/, flows/, agents/, mcp_client/, stores/
                legacy GitLab reactive bot: review, pipeline debug, chat; agents/ also
                holds the LLM agents that reactive/ CI debug and findings/ triage use
-  release_*.py, profile_qualification.py
-               release gates
   doctor.py    environment verification (this is your setup oracle)
 agents/        YAML agent definitions (FORGE_AGENTS_DIR) and the legacy flows in flows/
 alembic/       schema migrations
 ci/templates/  lane CI templates (GitLab CI and GitHub Actions) + log filter
-scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
-               release tooling
+scripts/       program guardrails (metrics, ratchet, prose lint, test ledger)
+tools/         development, lab and source release tools, outside the wheel
 tests/         tiered (docs/reference/testing.md); tests/invariants/registry.py lists the
                Invariant Suite files; fixtures/fake_gitlab.py is the GitLab fake
 docs/adr/      architecture decisions (start with 0003, 0005, 0016, 0026, 0035)

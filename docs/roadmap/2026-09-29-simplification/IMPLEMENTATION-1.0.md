@@ -36,6 +36,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-04 reference twins | Waits for P1-03 and P1-07 under the adopted plan |
 | P1-05 boundary registry | Implemented; 901 source lines removed, 15 contracts added, 48 architecture checks retained; 186 focused passes |
 | P1-06 closure matrix | Implemented; grading module, generated publication and approved drop suite removed |
+| P1-07 qualification retirement | Implemented; grading modules and obsolete scripts removed, six dev tools moved out of the wheel; native release, credential, migration and dispatch contracts retained |
 | P1-08 release and CI flow | Source implemented; one build, mandatory provider smokes, signed reports and identical-digest promotion; hosted dry run remains unperformed |
 | P1-10 lane-only implementation | Source implemented; builtin execution removed and actual project CI checked before paid work; remaining lifecycle-test ports join engine integration |
 | P1-12 Codeward legacy | Implemented; legacy orchestrator, YAML agents/flows, context, chat, MCP client and unused stores/models removed; old queued tasks refuse and migration tables remain |

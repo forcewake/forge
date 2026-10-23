@@ -21,13 +21,7 @@ CONTROL_PLANE_ROOTS = ("forge.main", "forge.worker.__main__", "forge.worker", "f
 LANE_ROOTS = ("forge.harness_entry", "forge.lane_driver", "forge.candidate_collector", "forge_lane")
 # Declared roots that do not exist yet; their absence is expected.
 FUTURE_ROOTS = frozenset({"forge_lane"})
-TOOLING_ROOTS = (
-    "forge.doctor",
-    "forge.release_manifest",
-    "forge.release_promotion",
-    "forge.profile_qualification",
-    "forge.capability_manifest",
-)
+TOOLING_ROOTS = ("forge.doctor",)
 # History that belongs in git and ADRs, not in code: review, backlog and
 # acceptance item ids, issue references and "review <sha>". Short forms such as
 # R17 or A12 are too ambiguous to count, so this is a lower bound.

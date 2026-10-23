@@ -1,34 +1,8 @@
-"""R36-05 (issue #264): the cutover fence at the STANDARD composition root.
+"""The standard repository fence survives retirement of migration tooling.
 
-AT-06's core, driven the way the trace demands — ordinary repository
-instances composed through the ONE standard
-:func:`forge.adaptive.checkpoint_repository.resolve_repository` (no
-hand-wrapped repository objects), the REAL migration CLI flipping the
-marker, and the actual HTTP upload route:
-
-- an OLD-authority process (composed before the flip, still running)
-  has its NEXT metadata mutation refused with the typed
-  :class:`MutationsFencedError` naming configured-vs-active, while its
-  immutable reads stay available and distinguishable;
-- a NEW-authority process (postgres configured, composed the same way)
-  reads every imported ACTIVE and PINNED checkpoint with NO JSON
-  mirror, and its mutations land in the database only;
-- the fence check runs BEFORE the store's volume-wide GC lock — a
-  fence refusal never waits on a contended volume (bounded both ways),
-  and the one residual window (a mutation that already passed the
-  check when the flip lands) is pinned honestly: drained-offline
-  cutover is the documented first mode, never an online zero-downtime
-  promise;
-- startup observability reports
-  ``migration.configured_vs_active_authority`` + the marker
-  generation wherever the app composes the repository, and ``forge
-  doctor`` renders the marker/configured/mismatch verdict;
-- losing the target database after the cutover answers the TYPED
-  unavailable — never a filesystem fallback.
-
-Real PostgreSQL runs the two-instance AT-06 core when
-``FORGE_PG_TEST_URL`` is set (the FI convention; rows are deleted per
-test).
+Tests seed known filesystem/database states and authority marker fixtures,
+then drive real repository composition, HTTP upload and immutable reads.
+They verify the runtime fence, not the removed migration procedure.
 """
 
 from __future__ import annotations
@@ -50,13 +24,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from forge import api_checkpoint_channel as api_channel
-from forge.adaptive import checkpoint_migration as migration
-from forge.adaptive.checkpoint_migration import (
-    EXIT_OK,
+from forge.adaptive.checkpoint_repository import (
+    AUTHORITY_MARKER_SCHEMA,
+    authority_marker_path,
+    cutover_fence_path,
     MutationsFencedError,
     read_authority_marker,
-)
-from forge.adaptive.checkpoint_repository import (
     AUTHORITY_FILESYSTEM,
     AUTHORITY_POSTGRES,
     CheckpointRepositoryUnavailable,
@@ -73,7 +46,7 @@ WORK = "wp-at06"
 
 
 # ---------------------------------------------------------------------------
-# The lab: ordinary composition + the REAL CLI
+# The lab: ordinary composition + known repository fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -129,21 +102,18 @@ def _new_env(root: Path) -> dict[str, str]:
     }
 
 
-async def _cli(*argv: str) -> int:
-    """The REAL migration CLI, run off the test's event loop (its ``main``
-    owns its loop through ``asyncio.run`` — a worker thread is exactly the
-    separate process the trace simulates)."""
-    return await asyncio.to_thread(migration.main, list(argv))
-
-
-async def _run(*steps: Any) -> None:
-    """Await CLI steps in order inside one ``asyncio.run`` (sync-test arm)."""
-    for step in steps:
-        assert await step == EXIT_OK
+def _marker(root: Path, authority: str, generation: int) -> None:
+    path = authority_marker_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"schema": AUTHORITY_MARKER_SCHEMA, "authority": authority, "generation": generation}
+        )
+    )
 
 
 class _Lab:
-    """The AT-06 schedule: seed → import → verify through the real CLI.
+    """The AT-06 schedule: seed → import → verify through standard repository composition.
 
     The two ``processes'' are two ordinary repository instances composed
     through :func:`resolve_repository` BEFORE the flip — exactly what an
@@ -171,16 +141,13 @@ class _Lab:
         self.new = resolve_repository(
             env=_new_env(self.root), session_factory=self.factory, root=self.root
         )
-        # 3. the REAL CLI: inventory → import → verify (clean).
-        assert await _cli("--root", str(self.root), "inventory") == EXIT_OK
-        assert await _cli("--root", str(self.root), "import", "--database-url", self.url) == EXIT_OK
-        assert await _cli("--root", str(self.root), "verify", "--database-url", self.url) == EXIT_OK
+        # Both native authorities start with the same known fixture bytes.
+        await self.new.put(WORK, checkpoint_id, manifest, blobs)
+        await self.new.put(WORK, newer_id, newer, newer_blobs)
 
     async def cutover(self) -> None:
-        """The REAL cutover CLI — the flip under its fence."""
-        assert (
-            await _cli("--root", str(self.root), "cutover", "--database-url", self.url) == EXIT_OK
-        )
+        """Seed the already-cut-over deployment state; exercise no migration tool."""
+        _marker(self.root, AUTHORITY_POSTGRES, 1)
 
     async def dispose(self) -> None:
         await self.engine.dispose()
@@ -204,7 +171,7 @@ async def lab(tmp_path: Path):
 class TestStandardCompositionCarriesTheFence:
     async def test_the_default_resolution_attaches_the_fence(self, lab):
         """A repository resolved through the composition point (the DEFAULT
-        path) refuses its next mutation after the real cutover — no
+        path) refuses its next mutation after the marker change — no
         wrapper was composed by hand."""
         await lab.cutover()
         manifest, blobs, checkpoint_id = _checkpoint(WORK, {"a.txt": b"post\n"}, 6)
@@ -235,7 +202,10 @@ class TestStandardCompositionCarriesTheFence:
 
     async def test_a_cutover_in_progress_fences_both_composed_sides(self, lab):
         manifest, blobs, checkpoint_id = _checkpoint(WORK, {"a.txt": b"during\n"}, 6)
-        with migration.cutover_fence(lab.root):
+        path = cutover_fence_path(lab.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
             with pytest.raises(MutationsFencedError, match="cutover is in progress"):
                 await lab.old.put(WORK, checkpoint_id, manifest, blobs)
             with pytest.raises(MutationsFencedError, match="cutover is in progress"):
@@ -262,7 +232,7 @@ class TestStandardCompositionCarriesTheFence:
 
 
 # ---------------------------------------------------------------------------
-# AT-06 core — the two ordinary processes around the real cutover
+# AT-06 core — the two ordinary processes around the marker change
 # ---------------------------------------------------------------------------
 
 
@@ -318,54 +288,14 @@ class TestAt06Core:
         assert state["active_authority"] == AUTHORITY_POSTGRES
         assert state["configured_authority"] == AUTHORITY_FILESYSTEM
 
-    async def test_rollback_restores_the_old_process_without_a_restart(self, lab):
+    async def test_marker_is_rechecked_by_both_existing_processes_without_restart(self, lab):
         await lab.cutover()
-        manifest, blobs, checkpoint_id = _checkpoint(WORK, {"a.txt": b"post\n"}, 6)
-
-        # A post-cutover upload exists only in the database: the rollback
-        # refuses until the reverse transfer + verification pass.
-        await lab.new.put(WORK, checkpoint_id, manifest, blobs)
-        assert (
-            await _cli("--root", str(lab.root), "verify", "--database-url", lab.url)
-            == migration.EXIT_REFUSED
-        )
-        assert (
-            await _cli(
-                "--root",
-                str(lab.root),
-                "rollback",
-                "--database-url",
-                lab.url,
-                "--verify-report",
-                str(migration.migration_dir(lab.root) / "verify.json"),
-            )
-            == migration.EXIT_REFUSED  # the not-clean report gates the flip
-        )
-
-        assert (
-            await _cli("--root", str(lab.root), "import", "--database-url", lab.url, "--reverse")
-            == EXIT_OK
-        )
-        assert await _cli("--root", str(lab.root), "verify", "--database-url", lab.url) == EXIT_OK
-        assert (
-            await _cli(
-                "--root",
-                str(lab.root),
-                "rollback",
-                "--database-url",
-                lab.url,
-                "--verify-report",
-                str(migration.migration_dir(lab.root) / "verify.json"),
-            )
-            == EXIT_OK
-        )
-
-        # The still-running OLD process accepts mutations again — no
-        # restart, exactly the fence's symmetric recovery.
-        later, later_blobs, later_id = _checkpoint(WORK, {"a.txt": b"back\n"}, 7)
-        await lab.old.put(WORK, later_id, later, later_blobs)
+        _marker(lab.root, AUTHORITY_FILESYSTEM, 2)
+        manifest, blobs, checkpoint_id = _checkpoint(WORK, {"a.txt": b"back\n"}, 7)
+        await lab.old.put(WORK, checkpoint_id, manifest, blobs)
         with pytest.raises(MutationsFencedError):
-            await lab.new.put(WORK, later_id, later, later_blobs)
+            await lab.new.put(WORK, checkpoint_id, manifest, blobs)
+        assert read_authority_marker(lab.root)["generation"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +333,7 @@ class TestHttpUploadRouteHonorsTheFence:
         self, tmp_path, monkeypatch
     ):
         """The route resolves the repository through the ONE composition
-        point per request — after the real cutover, an upload to the still
+        point per request — after the marker change, an upload to the still
         running old-authority app is refused (503 naming the marker), and
         nothing lands on the retired index."""
         root = tmp_path / "store"
@@ -422,13 +352,6 @@ class TestHttpUploadRouteHonorsTheFence:
                 f"/lane/checkpoints/{WORK}", json=self._payload(WORK, 6), headers=self._bearer(WORK)
             )
             assert response.status_code == 200, response.text
-            asyncio.run(
-                _run(
-                    _cli("--root", str(root), "import", "--database-url", url),
-                    _cli("--root", str(root), "verify", "--database-url", url),
-                )
-            )
-
             asyncio.run(laboratory.cutover())
 
             response = client.put(
@@ -712,7 +635,7 @@ class TestDoctorReportsTheMarker:
         assert marker.status == "fail"
         assert "filesystem" in marker.detail and "postgres" in marker.detail
         assert "MutationsFencedError" in marker.detail
-        assert "rollback" in marker.detail
+        assert "reconcile the deployment configuration" in marker.detail
 
 
 # ---------------------------------------------------------------------------

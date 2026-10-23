@@ -28,10 +28,7 @@ contract end to end:
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
-import shutil
-import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,17 +73,6 @@ _FORGE_WHEEL = f"forge-{_TREE_FORGE_VERSION}-py3-none-any.whl"
 #: v0.36.0 bump made the old 0.36.0 "future" a no-op).
 _BUMPED_FORGE_VERSION = "999.0.0"
 _SIX_WHEEL = "six-1.17.0-py2.py3-none-any.whl"
-
-
-def _load_closure_script():
-    spec = importlib.util.spec_from_file_location(
-        "build_lane_closure", ROOT / "scripts" / "build_lane_closure.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["build_lane_closure"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 # ---------------------------------------------------------------------------
@@ -335,93 +321,23 @@ class TestVerifyClosureDir:
 # ---------------------------------------------------------------------------
 
 
-class TestBuildLaneClosureScript:
-    """A REAL end-to-end build against the shipped script: ``uv build``
-    produces the forge wheel (deterministically — two builds hash the
-    same), a seeded builder pip downloads the tiny pinned set with
-    ``--require-hashes``, and the manifest verifies green. Network is
-    used for the one sentinel dependency, exactly like the suite's
-    existing ``uv venv --seed`` lane-runner fixture."""
+class TestReleaseArtifactIdentity:
+    def test_release_bytes_are_verified_before_any_installed_execution(self, tmp_path):
+        from tools.release.artifacts import verify
 
-    def _build(self, script, tmp_path: Path, name: str):
-        requirements = tmp_path / f"{name}-requirements.txt"
-        requirements.write_text(_TINY_REQUIREMENTS, encoding="utf-8")
-        closure = tmp_path / f"{name}-closure"
-        return closure, script.build_closure(ROOT, closure, local=True, requirements=requirements)
+        wheel = tmp_path / _FORGE_WHEEL
+        wheel.write_bytes(b"frozen wheel")
+        manifest = {"artifacts": {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}}
+        verify(manifest, tmp_path)
+        wheel.write_bytes(b"tampered wheel")
+        with pytest.raises(ValueError, match="artifact changed"):
+            verify(manifest, tmp_path)
 
-    def test_a_real_small_closure_builds_and_verifies(self, tmp_path):
-        script = _load_closure_script()
-        closure, manifest = self._build(script, tmp_path, "main")
-        assert (closure / CLOSURE_MANIFEST_FILENAME).is_file()
-        assert [a.name for a in manifest.artifacts] == [_FORGE_WHEEL, _SIX_WHEEL]
-        assert manifest.forge_source == "local-uv-build"
-        assert manifest.forge_version == _TREE_FORGE_VERSION
-        # the canonical, path-free resolution command — reproducible
-        assert manifest.resolution_command == script.RESOLUTION_COMMAND
-        assert "require-hashes" in manifest.resolution_command
-        # every artifact is hash-pinned with its REAL bytes
-        for artifact in manifest.artifacts:
-            path = closure / artifact.name
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact.sha256
-        # and the wheelhouse verifies green through the library
-        assert verify_closure_dir(closure) == manifest
+    def test_release_artifact_paths_cannot_escape_the_staging_directory(self, tmp_path):
+        from tools.release.artifacts import verify
 
-    def test_two_clean_builds_produce_the_same_closure_digest(self, tmp_path, monkeypatch):
-        """The acceptance core: two clean installs of the same inputs
-        produce the same declared identity. The second build reuses the
-        EXACT wheel bytes the first produced (the working tree is live —
-        a sibling edit between two ``uv build`` calls is a different
-        SOURCE, and a different closure for different bytes is correct
-        behavior, not an unstable digest); the wheel's own byte-level
-        build determinism is uv/hatchling's property, verified out of
-        band."""
-        script = _load_closure_script()
-        closure, first = self._build(script, tmp_path, "first")
-        frozen = tmp_path / "frozen-wheel"
-        frozen.mkdir()
-        shutil.copy2(closure / first.forge_wheel.name, frozen / first.forge_wheel.name)
-        monkeypatch.setattr(
-            script,
-            "_forge_wheel_local",
-            lambda root, staging: (
-                shutil.copy2(frozen / first.forge_wheel.name, staging / first.forge_wheel.name),
-                "local-uv-build",
-            ),
-        )
-        _, second = self._build(script, tmp_path, "second")
-        assert first.closure_digest == second.closure_digest
-        assert first == second
-
-    def test_a_build_refuses_a_populated_directory(self, tmp_path):
-        script = _load_closure_script()
-        closure = tmp_path / "dirty"
-        closure.mkdir()
-        (closure / "leftover.whl").write_bytes(b"old")
-        with pytest.raises(script.ClosureBuildError, match="not empty"):
-            script.build_closure(ROOT, closure, local=True, requirements=None)
-
-    def test_the_cli_verifies_green_and_refuses_tampering(self, tmp_path, capsys):
-        script = _load_closure_script()
-        closure, _manifest = self._build(script, tmp_path, "cli")
-        assert script.main(["--verify", str(closure)]) == 0
-        assert "closure verified" in capsys.readouterr().out
-        # the tamper arm: one flipped byte → typed refusal, exit 1
-        wheel = closure / _SIX_WHEEL
-        wheel.write_bytes(wheel.read_bytes() + b"poison")
-        assert script.main(["--verify", str(closure)]) == 1
-        captured = capsys.readouterr()
-        assert "CLOSURE VERIFICATION REFUSED" in captured.err
-        assert "tampered artifact" in captured.err and _SIX_WHEEL in captured.err
-
-    def test_the_cli_refuses_a_missing_directory(self, tmp_path, capsys):
-        script = _load_closure_script()
-        assert script.main(["--verify", str(tmp_path / "ghost")]) == 1
-        assert CLOSURE_MANIFEST_FILENAME in capsys.readouterr().err
-
-    def test_an_unpinned_explicit_wheel_url_refuses(self, tmp_path):
-        script = _load_closure_script()
-        with pytest.raises(script.ClosureBuildError, match="requires --wheel-sha256"):
-            script.build_closure(ROOT, tmp_path / "c", wheel_url="https://example.invalid/x.whl")
+        with pytest.raises(ValueError, match="invalid release artifact identity"):
+            verify({"artifacts": {"../outside.whl": "a" * 64}}, tmp_path)
 
 
 # ---------------------------------------------------------------------------

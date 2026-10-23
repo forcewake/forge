@@ -630,7 +630,7 @@ class TestImmutableResourcePinning:
         assert 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-' not in run
         # The refuse-unset gate precedes the install it guards.
         assert run.index("no lane version pinned") < run.index("forge@${FORGE_LANE_REF_RESOLVED}")
-        assert "generate_template_pins.py" in run  # the upgrade instruction
+        assert "hash-pinned requirements" in run  # the release upgrade instruction
         # R36-07 ladder order: the user inputs are consulted BEFORE the
         # mode resolves, the generated pin during resolution, and the
         # dispatch consumes only the resolved mode.

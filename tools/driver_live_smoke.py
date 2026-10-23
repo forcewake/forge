@@ -21,7 +21,7 @@ Per lane:
   prompt.
 
 Usage:
-    uv run --extra interactive python scripts/driver_live_smoke.py \
+    uv run --extra interactive python tools/driver_live_smoke.py \
         --driver claude --out docs/evaluation/.../claude-live.json
 
 Exit code 0 = every recorded step passed; 1 = any step failed (the

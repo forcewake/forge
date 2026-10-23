@@ -1,6 +1,6 @@
 """R37-06 (#287) — the read-only lab inventory machinery.
 
-``scripts/inventory_lab.py`` is driven end to end against FAKES: an HTTP
+``tools/inventory_lab.py`` is driven end to end against FAKES: an HTTP
 + podman stub (no network, no container runtime) and a fake repo tree
 (promotion record + alembic chain). What is held here:
 
@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from scripts.inventory_lab import (
+from tools.inventory_lab import (
     APP_CONTAINER,
     INVENTORY_STAMP,
     ProbeError,
@@ -257,7 +257,7 @@ def test_lane_records_pinned_wheel_template_and_venv_refusal(
 ) -> None:
     root = _repo_tree(tmp_path)
     monkeypatch.setattr(
-        "scripts.inventory_lab._gitlab_settings",
+        "tools.inventory_lab._gitlab_settings",
         lambda: ("https://gitlab.example.com", "token", "forge"),
     )
     probe = FakeProbe(template_content=TEMPLATE_AT_OLD_REF, podman_outputs=_podman_stub())
@@ -303,7 +303,7 @@ def test_missing_credentials_refuse_the_template_observation(
     def _no_credentials() -> tuple[str, str, str]:
         raise RuntimeError("Settings: GITLAB_URL not set")
 
-    monkeypatch.setattr("scripts.inventory_lab._gitlab_settings", _no_credentials)
+    monkeypatch.setattr("tools.inventory_lab._gitlab_settings", _no_credentials)
     probe = FakeProbe(template_error="unreachable")
     observation = stage_lane(
         probe,  # type: ignore[arg-type]
@@ -319,7 +319,7 @@ def test_runner_records_worker_digests_and_runner_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "scripts.inventory_lab._gitlab_settings",
+        "tools.inventory_lab._gitlab_settings",
         lambda: ("https://gitlab.example.com", "token", "forge"),
     )
     probe = FakeProbe(
@@ -335,7 +335,7 @@ def test_runner_tolerates_an_unreachable_gitlab(monkeypatch: pytest.MonkeyPatch)
     def _unreachable() -> tuple[str, str, str]:
         raise ProbeError("no .env")
 
-    monkeypatch.setattr("scripts.inventory_lab._gitlab_settings", _unreachable)
+    monkeypatch.setattr("tools.inventory_lab._gitlab_settings", _unreachable)
     probe = FakeProbe(podman_outputs=_podman_stub())
     observation = stage_runner(probe)  # type: ignore[arg-type]
     assert observation["status"] == "observed"
@@ -407,7 +407,7 @@ def test_the_caps_stage_never_copies_env_values() -> None:
 
 def _stages(probe: FakeProbe, root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
-        "scripts.inventory_lab._gitlab_settings",
+        "tools.inventory_lab._gitlab_settings",
         lambda: ("https://gitlab.example.com", "token", "forge"),
     )
     intended = load_intended_profile(root)
@@ -465,7 +465,7 @@ def test_a_fully_matched_lab_derives_aligned(
         },
     )
     monkeypatch.setattr(
-        "scripts.inventory_lab._gitlab_settings",
+        "tools.inventory_lab._gitlab_settings",
         lambda: ("https://gitlab.example.com", "token", "forge"),
     )
     intended = load_intended_profile(root)
@@ -551,7 +551,7 @@ def test_run_inventory_emits_the_stamped_read_only_document(
         podman_outputs=_podman_stub(),
     )
     monkeypatch.setattr(
-        "scripts.inventory_lab._gitlab_settings",
+        "tools.inventory_lab._gitlab_settings",
         lambda: ("https://gitlab.example.com", "token", "forge"),
     )
     document = run_inventory(probe, root, lane_venv=root / "no-venv")  # type: ignore[arg-type]
@@ -577,11 +577,11 @@ def test_run_inventory_refuses_an_unknown_stage(tmp_path: Path) -> None:
 
 
 def test_the_cli_writes_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import scripts.inventory_lab as inventory_lab
+    import tools.inventory_lab as inventory_lab
 
     root = _repo_tree(tmp_path)
     monkeypatch.setattr(
-        "scripts.inventory_lab.run_inventory",
+        "tools.inventory_lab.run_inventory",
         lambda *args, **kwargs: {
             "stamp": INVENTORY_STAMP,
             "compatibility_verdict": {"verdict": "misaligned", "checks": []},

@@ -572,9 +572,8 @@ class TestConsoleEntryPoints:
     def test_the_dispatcher_maps_each_command_to_its_module_main(self) -> None:
         import forge.cli as cli
 
-        assert set(cli.COMMANDS) == {"doctor", "gate", "migrate"}
+        assert set(cli.COMMANDS) == {"doctor", "migrate"}
         assert cli.COMMANDS["doctor"] == ("forge.doctor", "main")
-        assert cli.COMMANDS["gate"] == ("forge.release_promotion", "main")
         assert cli.COMMANDS["migrate"] == ("forge.migrate", "main")
 
     def test_the_dispatcher_usage_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -598,27 +597,17 @@ class TestConsoleEntryPoints:
             cli.main(["doctor", "--help"])
         assert excinfo.value.code == 0
 
-    def test_the_gate_subcommand_forwards_the_gate_verb(self) -> None:
-        """`forge gate` maps onto release_promotion's gate subcommand —
-        the forwarded argv starts with the verb, then the module's own
-        argparse owns everything else (here: its usage refusal)."""
+    def test_the_removed_gate_verb_is_an_unknown_command(self, capsys):
         import forge.cli as cli
 
-        forwarded: list[list[str]] = []
+        assert cli.main(["gate", "--version", "1.0.0"]) == 2
+        assert "unknown command" in capsys.readouterr().err
 
-        def fake_main(argv: list[str] | None = None) -> int:
-            forwarded.append(list(argv or []))
-            return 0
+    def test_the_migrate_subcommand_forwards_arguments(self, monkeypatch):
+        import forge.cli as cli
+        import forge.migrate as migrate
 
-        original = cli.COMMANDS["gate"]
-        try:
-            import forge.release_promotion as promotion
-
-            held = promotion.main
-            promotion.main = fake_main  # type: ignore[assignment]
-            cli.COMMANDS["gate"] = ("forge.release_promotion", "main")
-            assert cli.main(["gate", "--version", "v0.38.0"]) == 0
-        finally:
-            promotion.main = held  # type: ignore[assignment]
-            cli.COMMANDS["gate"] = original
-        assert forwarded == [["gate", "--version", "v0.38.0"]]
+        forwarded = []
+        monkeypatch.setattr(migrate, "main", lambda argv: forwarded.append(argv) or 0)
+        assert cli.main(["migrate", "--database-url", "sqlite+aiosqlite:///:memory:"]) == 0
+        assert forwarded == [["--database-url", "sqlite+aiosqlite:///:memory:"]]

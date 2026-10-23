@@ -1632,8 +1632,14 @@ class TestIntentionalViolationTraps:
         violations = _check_reference_separation(modules)
         assert any("hidden_leg" in text for text in violations)
 
-    def test_a_drained_compat_home_registration_is_caught(self) -> None:
-        modules = _synthetic("forge.adaptive.steering_causality", "X = 1\n")
+    def test_a_drained_compat_home_registration_is_caught(self, monkeypatch) -> None:
+        # A deliberately stale registration is fixture input to the real checker.
+        monkeypatch.setattr(
+            sys.modules[__name__],
+            "REFERENCE_COMPAT_HOMES",
+            frozenset({"forge.compat.retired_home"}),
+        )
+        modules = _synthetic("forge.compat.retired_home", "X = 1\n")
         violations = _check_reference_separation(modules)
         assert any("drained" in text or "does not exist" in text for text in violations)
 

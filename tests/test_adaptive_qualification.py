@@ -1089,24 +1089,18 @@ class TestSupplyChainBinding:
             verify_artifact_supply_chain(_closure_manifest(), {"decision": {}})
         assert excinfo.value.reason == "unreadable_record"
 
-    def test_the_promotionrecord_object_shape_binds_too(self):
-        from forge.release_promotion import (
-            FileIdentity,
-            PromotionDecision,
-            PromotionRecord,
-            WheelIdentity,
-        )
+    def test_a_structural_release_record_binds_the_exact_artifact(self):
+        from types import SimpleNamespace
 
-        record = PromotionRecord(
+        record = SimpleNamespace(
             version="0.35.0",
-            image_ref="ghcr.io/forcewake/forge",
-            image_digest="sha256:" + "a" * 64,
-            wheel=WheelIdentity(
-                sdist=FileIdentity("forge-0.35.0.tar.gz", "f" * 64),
-                wheel=FileIdentity("forge-0.35.0-py3-none-any.whl", "e" * 64),
-            ),
             wheel_sha256="e" * 64,
-            decision=PromotionDecision(verdict="promote"),
+            wheel=SimpleNamespace(
+                wheel=SimpleNamespace(
+                    name="forge-0.35.0-py3-none-any.whl",
+                    sha256="e" * 64,
+                )
+            ),
         )
         assert verify_artifact_supply_chain(_closure_manifest(), record).verdict == "bound"
 

@@ -4,7 +4,7 @@
 (PostgreSQL custom-format magic, pg_dump extensions, archives CONTAINING
 dump members) outside the reviewed synthetic-fixture allowlist, and
 validates the sanitized backup receipts (digest + verdict + reference per
-artifact). ``scripts/align_lab.py`` must default its backup destination to
+artifact). ``tools/align_lab.py`` must default its backup destination to
 private storage and refuse an in-repo destination. Everything here runs
 against synthetic bytes and a throwaway git repo — no real dump is ever
 created or committed.
@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from scripts.align_lab import AlignmentError, build_plan, private_backup_base, resolve_backup_dir
+from tools.align_lab import AlignmentError, build_plan, private_backup_base, resolve_backup_dir
 from scripts.gate_public_artifacts import (
     ALLOWLIST_STAMP,
     VERDICTS,

@@ -3,7 +3,7 @@
 The :class:`~forge.adaptive.adapters.DriverMatrix` refuses any
 combination that was not TESTED — until now nothing populated it,
 because nothing had run against the real vendor surfaces. The
-``scripts/driver_live_smoke.py`` runs (2026-09-21, this machine) are
+``tools/driver_live_smoke.py`` runs (2026-09-21, this machine) are
 the first live evidence; this module ships them as DATA so onboarding
 seeds its matrix from evidence instead of aspiration.
 
@@ -145,7 +145,7 @@ def seed_live_matrix(
     - an sdk whose installed version is missing from the mapping is
       refused (unknown present ⇒ no claim), and
     - a mismatch is refused as vendor drift — re-run
-      ``scripts/driver_live_smoke.py`` on the new binary before the
+      ``tools/driver_live_smoke.py`` on the new binary before the
       combination may be seeded again.
 
     ``None`` (the default) keeps the evidence-only path: historical
@@ -183,7 +183,7 @@ def seed_live_matrix(
             raise ValueError(
                 f"live registration ({entry.sdk}/{entry.provider_route}) cites "
                 f"{entry.evidence} whose recorded run FAILED ({failures}) — "
-                f"re-run scripts/driver_live_smoke.py until green before seeding"
+                f"re-run tools/driver_live_smoke.py until green before seeding"
             )
         target.register(entry.sdk, entry.provider_route, entry.credential_mode)
     return target
@@ -455,7 +455,7 @@ class RegistrationVerdict:
     ``unknown_present`` when the runner did not report a version. A
     drift carries a ``warning`` (the lane keeps running — the
     registration is evidence, not a gate) naming BOTH versions and the
-    remedy: re-run ``scripts/driver_live_smoke.py`` on the new binary.
+    remedy: re-run ``tools/driver_live_smoke.py`` on the new binary.
     """
 
     driver: str
@@ -504,7 +504,7 @@ def registration_verdict(driver: str, installed_cli_version: str) -> Registratio
         f"{driver}: live registration verified {sdk} against {recorded!r} but the"
         f" runner installed {installed!r} — the registration is evidence of the"
         " PAST, not a claim about this binary; re-run"
-        " scripts/driver_live_smoke.py on the installed version before"
+        " tools/driver_live_smoke.py on the installed version before"
         " promoting a recipe that cites it",
     )
 

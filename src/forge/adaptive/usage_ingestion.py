@@ -39,8 +39,7 @@ front door, and every rule here is pinned by
   presence, settles** (Q39-06/#325, corrected by R40-03/#339) —
   :func:`spend_cap_check` is the check the existing budget/caps gate
   consults BEFORE the next chargeable action
-  (:meth:`forge.adaptive.research_cohort_live.SpendLedger.allows_call` is
-  the projection seam; ``budget_block_reason`` the dispatch gate). The
+  (``budget_block_reason`` is the dispatch gate). The
   exposure fold (:func:`exposure_fold`, :class:`SpendExposure`) keeps the
   quantities SEPARATE: ``settled_usd`` (FINAL rows' costs — settlement
   is decided by the ``final`` marker, never by the presence of a cost),

@@ -1,0 +1,8 @@
+[project]
+name = "forge-dev-tools"
+version = "1.0.0"
+requires-python = ">=3.13"
+dependencies = ["forge"]
+
+[tool.uv.sources]
+forge = { path = "..", editable = true }

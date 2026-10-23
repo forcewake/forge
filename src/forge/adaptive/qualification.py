@@ -1694,7 +1694,7 @@ def assemble_qualification_trace(
 # closure pins the whole wheelhouse: every artifact the lane runtime
 # consists of, by name and sha256, in ONE manifest whose canonical-JSON
 # digest IS the closure identity. The builder is
-# scripts/build_lane_closure.py (uv export from the frozen lock → pip
+# Historical closure build (uv export from the frozen lock → pip
 # download with --require-hashes); this module owns the CONTRACT so the
 # runtime can verify a staged wheelhouse without importing a script.
 
@@ -2101,7 +2101,7 @@ class SupplyChainBinding:
 def _release_wheel_identity(release_record: Any) -> tuple[str, str | None, str | None]:
     """``(version, wheel_name, wheel_sha256)`` from a release record —
     the archived promotion.json document shape (a Mapping) or the
-    :class:`forge.release_promotion.PromotionRecord` object shape."""
+    structural release-record object shape."""
     if isinstance(release_record, Mapping):
         version = str(release_record.get("version") or "")
         sha = release_record.get("wheel_sha256")

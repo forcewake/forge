@@ -402,6 +402,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-07 Retire the qualification machinery from the package
+- **Status:** implemented locally on 2026-10-23. Native release evidence and the required PostgreSQL gate remain; obsolete qualification grades do not.
 - **Goal:** the wheel is the product only.
 - **Work:**
   - Delete `release_manifest.py`, `release_promotion.py`,

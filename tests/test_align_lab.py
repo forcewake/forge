@@ -1,6 +1,6 @@
 """R37-08 (#289) — the authorized lab-alignment machinery.
 
-``scripts/align_lab.py`` is driven end to end against FAKES: a podman/HTTP
+``tools/align_lab.py`` is driven end to end against FAKES: a podman/HTTP
 stub (no container runtime, no network) and a fake repo tree (version +
 alembic chain). What is held here:
 
@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from scripts.align_lab import (
+from tools.align_lab import (
     APP_CONTAINER,
     IMAGE_TAG,
     WORKER_CONTAINER,
@@ -276,7 +276,7 @@ def test_dry_run_probes_read_only_and_executes_nothing(
     repo_root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = FakeLabRunner()
-    monkeypatch.setattr("scripts.align_lab.LabRunner", lambda: runner)
+    monkeypatch.setattr("tools.align_lab.LabRunner", lambda: runner)
     code = main(["--root", str(repo_root)])
     assert code == 0
     mutating = {"build", "stop", "run", "tag", "cp", "rm"}

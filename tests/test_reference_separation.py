@@ -36,18 +36,13 @@ from __future__ import annotations
 
 import ast
 import importlib
-import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 import forge.adaptive.reference as reference_package
-import forge.adaptive.steering_causality as steering_causality
-from forge.adaptive.reference import reactive_vendor, system_twin
+from forge.adaptive.reference import system_twin
 
 SRC_FORGE = Path(__file__).resolve().parents[1] / "src" / "forge"
 REFERENCE_ROOT = SRC_FORGE / "adaptive" / "reference"
@@ -68,11 +63,7 @@ RUNTIME_ENTRY_MODULES: tuple[str, ...] = (
 #: reference.*``: the compat homes the scenarios were extracted from
 #: (ADR-0031's migration policy — compat imports are removed only when
 #: callers are drained to the reference paths).
-REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
-    {
-        "forge.adaptive.steering_causality",
-    }
-)
+REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset()
 
 #: What the reference package may never import: the provider services,
 #: the wiring, ``main`` and the lane entry (it composes contracts only).
@@ -82,14 +73,6 @@ REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(RUNTIME_ENTRY_MODULES)
 #: surface. Removing one re-export (or letting the object drift from the
 #: reference module's) fails the pinned tests below. Drain the callers,
 #: then shrink this list together with the re-export.
-MOVED_SYMBOLS: dict[str, tuple[tuple[str, str], ...]] = {
-    # steering_causality → reference/reactive_vendor.py (the pure grader
-    # stays; the scenario constants, the grammar and the executable moved)
-    "forge.adaptive.steering_causality": tuple(
-        (name, "forge.adaptive.reference.reactive_vendor")
-        for name in steering_causality._MOVED_SCENARIO_SYMBOLS
-    ),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -194,49 +177,7 @@ class TestDependencyDirection:
 # ---------------------------------------------------------------------------
 
 
-class TestCompatibilitySurface:
-    @pytest.mark.parametrize(
-        ("home_name", "symbol", "reference_name"),
-        [
-            (home, symbol, reference)
-            for home, moves in MOVED_SYMBOLS.items()
-            for symbol, reference in moves
-        ],
-        ids=[
-            f"{home.rsplit('.', 1)[-1]}.{symbol}"
-            for home, moves in MOVED_SYMBOLS.items()
-            for symbol, _ in moves
-        ],
-    )
-    def test_every_moved_symbol_resolves_identically_on_its_old_path(
-        self, home_name: str, symbol: str, reference_name: str
-    ) -> None:
-        home = importlib.import_module(home_name)
-        reference = importlib.import_module(reference_name)
-        assert hasattr(reference, symbol), (
-            f"{reference_name} no longer defines {symbol} — the reference "
-            "module and this pin drifted together; update both"
-        )
-        assert getattr(home, symbol) is getattr(reference, symbol), (
-            f"{home_name}.{symbol} is not {reference_name}.{symbol} — the "
-            "compatibility re-export drifted from the moved object (a copy, "
-            "not a re-export, would fork the decision)"
-        )
-
-    def test_the_old_from_import_spellings_still_work(self) -> None:
-        """The exact from-import forms the pre-move callers used."""
-        from forge.adaptive.steering_causality import (  # noqa: F401
-            SCRIPTED_CAUSAL_PROVENANCE,
-            vendor_main,
-        )
-
-    def test_the_lazy_homes_do_not_over_expose(self) -> None:
-        """The ``__getattr__`` re-exports answer ONLY the moved names —
-        an arbitrary attribute is still an AttributeError, never a
-        silent passthrough to the reference module."""
-        with pytest.raises(AttributeError):
-            _ = steering_causality.definitely_not_a_moved_symbol
-
+class TestReferenceLabel:
     def test_the_reference_package_label_is_documented(self) -> None:
         assert reference_package.REFERENCE_PACKAGE_LABEL == "forge.reference/1"
         for name in ("system_twin", "reactive_vendor"):
@@ -272,64 +213,6 @@ class TestNoImplicitReferenceSelection:
             f"({leaked}) — a runtime import selected reference-native behavior"
         )
 
-    def test_importing_the_pure_grader_loads_no_reference(self) -> None:
-        probe = (
-            "import sys\n"
-            "import forge.adaptive.steering_causality\n"
-            "leaked = sorted(m for m in sys.modules if m.startswith('forge.adaptive.reference'))\n"
-            "print('LEAKED=' + ','.join(leaked))\n"
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
-        )
-        leaked = result.stdout.strip().removeprefix("LEAKED=")
-        assert leaked == "", (
-            f"importing the pure grader loaded reference modules ({leaked}) — "
-            "the spawned file must stay stdlib-only at import time"
-        )
-
-    def test_the_spawned_vendor_runs_where_forge_cannot_be_imported(self, tmp_path: Path) -> None:
-        """The lane spawn arm: ``steering_causality.py`` doubles as the
-        subprocess ``CODEX_BINARY`` executed under the system python
-        (the production-entry trace spawns it via its shebang), where NO
-        forge import is guaranteed to resolve. Simulated here by copying
-        the spawned file and its reference sibling out of the package
-        and running them under ``python -I`` from a scratch directory —
-        if the spawn arm ever grew a forge import, this fails."""
-        spawn_root = tmp_path / "spawn"
-        (spawn_root / "reference").mkdir(parents=True)
-        shutil.copy(
-            SRC_FORGE / "adaptive" / "steering_causality.py", spawn_root / "steering_causality.py"
-        )
-        shutil.copy(
-            REFERENCE_ROOT / "reactive_vendor.py", spawn_root / "reference" / "reactive_vendor.py"
-        )
-        workdir = tmp_path / "work"
-        workdir.mkdir()
-        eventlog = tmp_path / "events.jsonl"
-        actions = json.dumps(
-            [{"op": "write", "path": reactive_vendor.POLICY_PATH, "content": "k = 1\n"}]
-        )
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": os.environ.get("HOME", ""),
-            reactive_vendor.ACTIONS_ENV: actions,
-            reactive_vendor.EVENTLOG_ENV: str(eventlog),
-        }
-        result = subprocess.run(
-            [sys.executable, "-I", str(spawn_root / "steering_causality.py"), "--once"],
-            cwd=workdir,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        assert result.returncode == 0, f"the isolated spawn failed: {result.stderr}"
-        events = [json.loads(line) for line in eventlog.read_text().splitlines()]
-        assert [event["kind"] for event in events] == ["vendor_once", "vendor_edits"]
-        assert events[0]["provenance"] == reactive_vendor.SCRIPTED_CAUSAL_PROVENANCE
-        assert (workdir / reactive_vendor.POLICY_PATH).read_text() == "k = 1\n"
-
 
 # ---------------------------------------------------------------------------
 # The moved scenarios still decide through the runtime contracts
@@ -342,7 +225,3 @@ class TestScenariosComposeContracts:
     def test_the_twin_freezes_through_the_owned_tested_world_entry(self) -> None:
         world = system_twin.default_twin_scenario().freeze()
         assert world.tested_world_digest, "the twin's freeze binds to the owned entry"
-
-    def test_the_grader_uses_the_scenario_grammar_it_moved(self) -> None:
-        target = steering_causality.parse_instruction(steering_causality.STEERING_TASK_INSTRUCTION)
-        assert target is not None and target.old == "refund_limit"

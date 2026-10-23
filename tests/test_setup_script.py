@@ -3,13 +3,13 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from scripts.setup_gitlab import main
+from tools.setup_gitlab import main
 
 
 @pytest.fixture()
 def mock_settings():
     """Patch Settings to avoid needing a real .env file."""
-    with patch("scripts.setup_gitlab.Settings") as mock_cls:
+    with patch("tools.setup_gitlab.Settings") as mock_cls:
         settings = MagicMock()
         settings.GITLAB_URL = "https://gitlab.test"
         settings.GITLAB_TOKEN.get_secret_value.return_value = "glpat-test"
@@ -21,7 +21,7 @@ def mock_settings():
 @pytest.fixture()
 def mock_client():
     """Create a mock httpx.Client."""
-    with patch("scripts.setup_gitlab._api_client") as mock_fn:
+    with patch("tools.setup_gitlab._api_client") as mock_fn:
         client = MagicMock(spec=httpx.Client)
         mock_fn.return_value = client
         yield client

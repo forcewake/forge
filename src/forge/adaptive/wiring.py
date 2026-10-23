@@ -562,7 +562,7 @@ def _log_authority_state(state: Mapping[str, Any]) -> None:
             "%s — this process's checkpoint mutations are fenced (restart on the "
             "configured authority, or roll the marker back); %s",
             line,
-            "recovery: python -m forge.adaptive.checkpoint_migration rollback --verify-report <path>",
+            "recovery: reconcile with the active authority; rollback uses the maintenance line",
         )
     elif state["cutover_in_progress"]:
         logger.warning("%s — a cutover holds the fence; mutations are fenced on both sides", line)

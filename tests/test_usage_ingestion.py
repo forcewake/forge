@@ -67,7 +67,6 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from forge.adaptive.delivery_economics import EconomicsLinker
 from forge.adaptive.delivery_measurement import (
     MeasurementLinker,
     ProviderRoute,
@@ -463,41 +462,14 @@ def test_ledger_join_three_distinct_measures_from_mixed_sources():
     assert work.planner_call_ids == (f"{RUN_ID}:planner:1",)
     assert len(work.attempts) == 2
 
-    report = EconomicsLinker().link(
-        ledger,
-        acceptance_records=[
-            {
-                "work_id": "w",
-                "accepted": True,
-                "decided_by": "human:operator",
-                "attempt_outcomes": {"w/a1": "rejected", "w/a2": "accepted"},
-            },
-            {"work_id": "x", "accepted": False, "decided_by": "human:operator"},
-        ],
-    )
-    document = report.to_document()
-    costs = document["costs"]
-    # measure 1: the SUCCESSFUL attempt's own cost (a2 only, 0.70)
-    successful = costs["successful_attempt_costs"]["w"]["w/a2"]
-    assert successful["cost_usd"] == pytest.approx(0.70)
-    # measure 2: the accepted item's ALL-ATTEMPT cost (a1 + a2 = 1.00)
-    assert costs["accepted_item_totals"]["w"]["billed_usd"] == pytest.approx(1.00)
-    # measure 3: programme per accepted ((0.30 + 0.70 + 0.20) / 1 = 1.20)
-    assert costs["programme_per_accepted_item"]["programme_billed_per_accepted_usd"] == (
-        pytest.approx(1.20)
-    )
-    # three DIFFERENT numbers for three different questions
-    assert {0.70, 1.00, 1.20} == {
-        successful["cost_usd"],
-        costs["accepted_item_totals"]["w"]["billed_usd"],
-        costs["programme_per_accepted_item"]["programme_billed_per_accepted_usd"],
-    }
-    # the provider-reported column is separated from estimates
-    assert costs["programme"]["provider_reported_usd"] == pytest.approx(1.20)
-    assert costs["cost_basis_census"]["bases"][COST_BASIS_PROVIDER_REPORTED]["receipts"] == 3
+    by_id = {attempt.attempt_id: attempt for attempt in work.attempts}
+    assert by_id["w/a1"].usage.cost_usd == pytest.approx(0.30)
+    assert by_id["w/a2"].usage.cost_usd == pytest.approx(0.70)
+    assert ledger.work_by_id("x").attempts[0].usage.cost_usd == pytest.approx(0.20)
+    assert len(store.rows()) == 4  # planner population remains distinct
 
 
-def test_duplicate_call_ids_across_attempts_never_false_join():
+def test_same_receipt_name_across_attempts_preserves_both_scoped_identities():
     store = UsageIngestStore()
     # ONE model-call id delivered under TWO attempts — both natural keys
     # exist (the callers each claim it), the join must not sum it twice
@@ -527,14 +499,15 @@ def test_duplicate_call_ids_across_attempts_never_false_join():
         ],
     )
     ledger = MeasurementLinker().link(**records)
-    report = EconomicsLinker().link(ledger)
-    document = report.to_document()
-    # the duplicate identity is REFUSED a second copy: one attribution
-    # keeps the spend, the other is labelled refused — never 0.02
-    assert len(document["cross_joins"]) == 1
-    assert document["cross_joins"][0]["receipt_id"] == "dup-1"
-    programme = document["costs"]["programme"]
-    assert programme["billed_known_lower_bound_usd"] == pytest.approx(0.01)
+    attempts = ledger.works[0].attempts
+    assert len(attempts) == 2
+    assert {attempt.attempt_id for attempt in attempts} == {"w/a1", "w/a2"}
+    assert {receipt.attempt_id for attempt in attempts for receipt in attempt.receipts} == {
+        "w/a1",
+        "w/a2",
+    }
+    assert all(attempt.receipts[0].receipt_id == "dup-1" for attempt in attempts)
+    assert len(store.rows()) == 2
 
 
 # ----------------------------------------------------------------------
@@ -586,10 +559,9 @@ def test_rate_card_and_route_changes_create_new_segments_history_intact():
         works=[{"work_id": "w", "outcome": ""}],
         attempts=[{"work_id": "w", "attempt_id": "w/a1"}, {"work_id": "w", "attempt_id": "w/a2"}],
     )
-    document = EconomicsLinker().link(MeasurementLinker().link(**records)).to_document()
-    segments = document["costs"]["attribution_segments"]
-    assert len(segments) == 2
-    assert segments[0]["segment"] != segments[1]["segment"]
+    linked = MeasurementLinker().link(**records)
+    assert len(linked.works[0].attempts) == 2
+    assert {row.rate_card_id for row in store.rows()} == {"card-v1", "card-v2"}
 
 
 def test_estimated_vs_provider_reported_vs_billing_reconciliation_distinguished():
@@ -640,12 +612,14 @@ def test_estimated_vs_provider_reported_vs_billing_reconciliation_distinguished(
             {"work_id": "w", "attempt_id": "w/a3"},
         ],
     )
-    document = EconomicsLinker().link(MeasurementLinker().link(**records)).to_document()
-    bases = document["costs"]["cost_basis_census"]["bases"]
-    assert set(bases) == {"provider-reported", "estimated", "billing-reconciliation"}
-    assert bases["provider-reported"]["usd"] == pytest.approx(0.1498992, abs=1e-6)
-    assert bases["estimated"]["usd"] == pytest.approx(0.003, abs=1e-6)
-    assert bases["billing-reconciliation"]["usd"] == pytest.approx(0.006, abs=1e-6)
+    linked = MeasurementLinker().link(**records)
+    assert len(linked.works[0].attempts) == 3
+    by_basis = {row.cost_basis: row.cost_usd for row in store.rows()}
+    assert by_basis == {
+        "provider-reported": pytest.approx(0.1498992, abs=1e-6),
+        "estimated": pytest.approx(0.003),
+        "billing-reconciliation": pytest.approx(0.006),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -1139,13 +1113,10 @@ def test_the_budget_gate_projection_seam_consults_the_calculator():
     calculator consults. A provider streaming a partial receipt that
     already carries a subtotal must NOT unlock the headroom its envelope
     still fences (the seam the review calls the SpendLedger projection)."""
-    from forge.adaptive.research_cohort_live import SpendLedger
-
-    ledger = SpendLedger(model="unknown", limit_usd=1.0)
-    max_tokens = 4000
-    projection = ledger.estimate(ledger.worst_case_input_tokens, max_tokens)
-    subtotal = round(projection / 2, 6)
-    settled_cost = round(ledger.limit_usd - 1.5 * projection, 6)
+    cap_usd = 1.0
+    projection = 0.2
+    subtotal = projection / 2
+    settled_cost = cap_usd - 1.5 * projection
 
     # the recording provider: one settled receipt + one STREAMED partial
     # whose envelope is the lane's contracted worst case (the ledger's own
@@ -1182,17 +1153,15 @@ def test_the_budget_gate_projection_seam_consults_the_calculator():
     )
     # the ledger's own arithmetic over the SUBTOTALS would admit the call:
     # settled + subtotal + projection == the limit exactly
-    ledger.spent_usd = settled_cost + subtotal
-    assert ledger.allows_call(max_tokens) is True  # the naive reading fits
-    assert settled_cost + subtotal + projection == pytest.approx(ledger.limit_usd)
+    assert settled_cost + subtotal + projection == pytest.approx(cap_usd)
     # the corrected calculator the gate consults REFUSES: the envelope
     # rides on top of the settled spend, and the projection tips it over
-    check = spend_cap_check(store.rows(), cap_usd=ledger.limit_usd, projection_usd=projection)
+    check = spend_cap_check(store.rows(), cap_usd=cap_usd, projection_usd=projection)
     assert check["allowed"] is False
     assert check["settled_usd"] == pytest.approx(settled_cost)
     assert check["accrued_unsettled_usd"] == pytest.approx(subtotal)
     assert check["retained_liability_usd"] == pytest.approx(projection)
-    assert check["reserved_usd"] + projection > ledger.limit_usd
+    assert check["reserved_usd"] + projection > cap_usd
     # and once the partial settles at its subtotal, the same projection fits
     store.ingest(
         [
@@ -1209,7 +1178,7 @@ def test_the_budget_gate_projection_seam_consults_the_calculator():
             )
         ]
     )
-    settled = spend_cap_check(store.rows(), cap_usd=ledger.limit_usd, projection_usd=projection)
+    settled = spend_cap_check(store.rows(), cap_usd=cap_usd, projection_usd=projection)
     assert settled["allowed"] is True  # settled + projection <= limit
 
 

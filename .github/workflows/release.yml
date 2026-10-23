@@ -99,7 +99,7 @@ jobs:
         env:
           IMAGE: ${{ steps.identity.outputs.image }}
         run: >-
-          python3 scripts/canary_smoke.py "$IMAGE" --runtime docker
+          python3 tools/canary_smoke.py "$IMAGE" --runtime docker
           --expected-version "${GITHUB_REF_NAME#v}"
           --previous-image "ghcr.io/${GITHUB_REPOSITORY,,}:latest"
           --stages fresh,migrate --seed-real-data --results-json canary-results.json

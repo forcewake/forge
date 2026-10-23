@@ -1,9 +1,9 @@
 """Register GitLab webhooks and create Forge labels for projects.
 
 Usage:
-    uv run python scripts/setup_gitlab.py --project-id 42 --webhook-url http://forge:8420/webhook
-    uv run python scripts/setup_gitlab.py --group-id 10 --webhook-url http://forge:8420/webhook
-    uv run python scripts/setup_gitlab.py --project-id 42 --dry-run
+    uv run python tools/setup_gitlab.py --project-id 42 --webhook-url http://forge:8420/webhook
+    uv run python tools/setup_gitlab.py --group-id 10 --webhook-url http://forge:8420/webhook
+    uv run python tools/setup_gitlab.py --project-id 42 --dry-run
 """
 
 from __future__ import annotations

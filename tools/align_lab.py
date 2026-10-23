@@ -48,8 +48,8 @@ Default mode is ``--dry-run`` (prints the plan, executes nothing);
 
 Run from the repository root::
 
-    uv run python scripts/align_lab.py --dry-run
-    uv run python scripts/align_lab.py --apply
+    uv run python tools/align_lab.py --dry-run
+    uv run python tools/align_lab.py --apply
 """
 
 from __future__ import annotations
@@ -310,8 +310,8 @@ def repo_schema_head(root: Path) -> str:
     """The migration chain head (same derivation as inventory_lab)."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from scripts.inventory_lab import ProbeError
-    from scripts.inventory_lab import repo_schema_head as _head
+    from tools.inventory_lab import ProbeError
+    from tools.inventory_lab import repo_schema_head as _head
 
     try:
         return _head(root)
@@ -830,7 +830,7 @@ def execute_plan(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python scripts/align_lab.py",
+        prog="python tools/align_lab.py",
         description=(
             "R37-08 (#289): align the real GitLab CE lab onto the repo head — "
             "scripted, idempotent, receipted. Default is --dry-run (plan only)."

@@ -39,7 +39,7 @@ failure); exit 2 means a usage/probe error.
 
 Run from the repository root:
 
-    uv run python scripts/inventory_lab.py --stage all --out qualification/inventory-<date>.json
+    uv run python tools/inventory_lab.py --stage all --out qualification/inventory-<date>.json
 """
 
 from __future__ import annotations
@@ -731,7 +731,7 @@ def run_inventory(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python scripts/inventory_lab.py",
+        prog="python tools/inventory_lab.py",
         description=(
             "R37-06 (#287): read-only inventory of the real GitLab CE lab against the "
             "intended supported profile. No container is touched beyond read-only "

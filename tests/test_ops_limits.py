@@ -110,7 +110,6 @@ from forge.database import reset_engine
 from forge.durable.models import FlowRun
 from forge.main import create_app
 from forge.models.base import Base
-from forge.profile_qualification import load_profile_records, validate_record
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRET = "operator-secret"  # noqa: S105 — fake value for tests
@@ -1069,28 +1068,6 @@ class TestRetentionUnderPausedCheckpointAndInvestigationHold:
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def test_the_ops_limits_record_loads_strict_with_live_references() -> None:
-    records = {record.record_id: record for record in load_profile_records(ROOT)}
-    record = records["gitlab-ce-v1-Q39-15-ops-limits-2026-09-25"]
-    assert record.legacy is False  # strict: any finding would have refused the load
-    assert (
-        validate_record(_load_json(ROOT / "qualification/records/ops-limits-2026-09-25.json")) == []
-    )
-    for ref in record.evidence_refs:
-        assert (ROOT / ref).exists(), f"dangling evidence ref {ref}"
-    # the record sorts before the composition-v2 record and changes
-    # NOTHING about which record speaks for the profile (the per-release
-    # machine record at the tree version stays the latest, the v2 record
-    # stays `supported`)
-    from forge import __version__
-
-    gitlab_ids = [r.record_id for r in load_profile_records(ROOT) if r.profile == "gitlab-ce-v1"]
-    assert gitlab_ids[-1] == f"gitlab-ce-v1@{__version__}"
-    assert gitlab_ids.index("gitlab-ce-v1-Q39-15-ops-limits-2026-09-25") < gitlab_ids.index(
-        "gitlab-ce-v1-composition-v2-2026-09-25"
-    )
 
 
 def test_the_support_agreement_names_its_pending_human_items() -> None:

@@ -28,7 +28,7 @@ NO source mount anywhere — every command runs inside the artifact:
 
 --results-json PATH writes the machine-readable stage outcomes — each row
 tagged with the manifest capability slug it qualifies, at collection time —
-for forge.release_promotion's gate and gaps query. pass/skip/fail only: a
+for the source release report. pass/skip/fail only: a
 self-skipped stage is recorded as a skip and is never counted as a pass.
 
 No LLM keys are needed: LiteLLM reachability is the boundary, satisfied by
@@ -37,12 +37,12 @@ itself (python -m http.server on a one-file directory), so the stub is one
 more proof the artifact is self-sufficient. No model call is made.
 
 Usage:
-    python scripts/canary_smoke.py ghcr.io/forcewake/forge@sha256:... \
+    python tools/canary_smoke.py ghcr.io/forcewake/forge@sha256:... \
         --expected-version 0.9.0 \
         --previous-image ghcr.io/forcewake/forge:latest
 
     # local build (tag instead of digest — requires the flag):
-    python scripts/canary_smoke.py localhost/forge:canary --allow-unpinned
+    python tools/canary_smoke.py localhost/forge:canary --allow-unpinned
 
 Options --stages fresh,migrate select the stages; the default is both,
 with the migrate stage self-skipping when no previous image resolves.

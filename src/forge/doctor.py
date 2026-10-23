@@ -9,21 +9,9 @@ Usage::
     uv run python -m forge.doctor                 # human-readable report
     uv run python -m forge.doctor --json          # machine-readable
     uv run python -m forge.doctor --project 68    # + target-project checks
-    uv run python -m forge.doctor --capabilities  # the capability matrix (NXT-02)
-    uv run python -m forge.doctor --capabilities --strict  # + the promotion gate (R28-27)
-    uv run python -m forge.doctor --support-matrix         # per (driver, provider, recipe) support (NEXT-26)
 
 Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = usage error.
-Warnings do not affect the exit code. ``--capabilities`` is offline: it prints
-the reachability-based capability manifest (no environment contacts) and exits
-nonzero if the manifest fails its own honesty validation. ``--strict`` adds the
-promotion gate: a row claiming a tier whose required evidence class is missing
-(an unexecuted cross-runner test cannot produce a cross-runner support badge)
-exits 1 as well. ``--capabilities --json`` additionally carries the
-``support_matrix`` field (NEXT-26: per (driver, provider, recipe) support from
-executed profile evidence); ``--support-matrix`` prints it standalone and exits
-1 when the matrix reports evidence problems (a registration citing an artifact
-the checkout cannot show).
+Warnings do not affect the exit code.
 """
 
 from __future__ import annotations
@@ -694,165 +682,64 @@ async def _grandfathered_works(settings: Settings) -> str:
     return f"grandfathered generation-less works: {int(count or 0)}"
 
 
+def _checkpoint_topology(root, authority: str) -> CheckResult:
+    """A local-path heuristic is advisory, never proof of shared storage."""
+    import tempfile
+    from pathlib import Path
+
+    path = Path(root)
+    node_local = not path.is_absolute() or path.resolve().is_relative_to(
+        Path(tempfile.gettempdir()).resolve()
+    )
+    if authority != "postgres":
+        return _result(
+            "checkpoint.blob_topology",
+            None,
+            "best_effort durability assumes ONE process on a shared volume; multiple "
+            "replicas require postgres metadata AND a shared blob volume",
+            "",
+        )
+    if node_local:
+        return _result(
+            "checkpoint.blob_topology",
+            None,
+            f"blob root {path} looks node-local — separate volumes are UNSUPPORTED: "
+            "a shared database does not share content-addressed blobs",
+            "",
+        )
+    return _result(
+        "checkpoint.blob_topology",
+        True,
+        f"blob root {path} assumed shared — confirm every replica mounts it; "
+        "an absolute, non-temp path is only a heuristic",
+        "",
+    )
+
+
 async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
-    """Q35-21 preflight + the R36-05 authority-marker view.
+    """Read the live repository fence and topology without changing either."""
+    import os
+    from pathlib import Path
 
-    Read-only, env-driven (``FORGE_CHECKPOINT_DURABILITY`` /
-    ``FORGE_CHECKPOINT_STORE_DIR``), best-effort on the database half
-    (a not-visible database degrades to a note, never a failure):
+    from forge.adaptive.checkpoint_repository import authority_state_report
+    from forge.api_checkpoint_channel import CHECKPOINT_STORE_DIR_ENV, DEFAULT_CHECKPOINT_ROOT
 
-    - ``checkpoint.migration_coverage`` — while the postgres authority
-      is ACTIVE: how many works still live only on the filesystem index
-      (their active checkpoint has no ``checkpoint_metadata`` row) —
-      the not-yet-migrated population, with the import command named;
-    - ``checkpoint.pointer_conflicts`` — works both authorities hold
-      whose DERIVED actives disagree: operator resolution demanded,
-      never a winner and never by timestamp (post-cutover drift where
-      the database active outranks a still-present old active is
-      expected and counted separately);
-    - ``checkpoint.blob_topology`` — the two-replica-separate-volumes
-      unsupported topology, in its simplest honest form: a WARNING when
-      the configured store root looks node-local (relative or under a
-      temp directory — the documented heuristic), because a shared
-      database does not make node-local content-addressed blobs shared;
-    - ``checkpoint.authority_marker`` (R36-05, issue #264) — the
-      composition-root fence's state: which authority the deployment's
-      marker names (and its generation), the CONFIGURED repository, and
-      a MISMATCH verdict — a process configured for the retired
-      authority has its metadata mutations refused with
-      ``MutationsFencedError``, so a mismatch FAILS with the two
-      remedies named (restart on the configured authority, or the
-      gated rollback). Read-only: doctor never flips either authority.
-    """
-    from forge.adaptive.checkpoint_migration import preflight
-
-    try:
-        views = await preflight(database_url=str(getattr(settings, "DATABASE_URL", "") or ""))
-    except Exception as exc:  # noqa: BLE001 — preflight is observability, never a crash
-        return [_result("checkpoint.authority", False, "", _short(exc))]
-
-    results: list[CheckResult] = []
-    coverage = views["coverage"]
-    if coverage["mode"] == "postgres":
-        unmigrated = coverage["unmigrated_works"]
-        note = f", {coverage['database_note']}" if coverage["database_note"] else ""
-        detail = (
-            f"postgres authority active; {coverage['works_filesystem']} filesystem work(s), "
-            f"{coverage['works_database']} database work(s){note}, "
-            f"{coverage['blob_problems']} missing/corrupt artifact(s)"
-        )
-        if coverage["database_note"]:
-            results.append(_result("checkpoint.migration_coverage", None, detail, ""))
-        elif unmigrated:
-            named = ", ".join(unmigrated[:5]) + ("…" if len(unmigrated) > 5 else "")
-            results.append(
-                _result(
-                    "checkpoint.migration_coverage",
-                    None,
-                    f"{detail}; not yet migrated: {named} — run "
-                    "`python -m forge.adaptive.checkpoint_migration import`",
-                    "",
-                )
-            )
-        else:
-            results.append(_result("checkpoint.migration_coverage", True, detail, ""))
-    else:
-        staged = (
-            f", {coverage['works_database']} work(s) staged in the database pending cutover"
-            if coverage["works_database"] is not None
-            else ""
-        )
-        results.append(
-            _result(
-                "checkpoint.migration_coverage",
-                True,
-                f"filesystem authority active ({coverage['works_filesystem']} work(s)"
-                f"{staged}) — nothing to migrate until the postgres authority is adopted",
-                "",
-            )
-        )
-
-    conflicts = views["conflicts"]
-    if conflicts["count"]:
-        first = conflicts["works"][0]
-        detail = (
-            f"{conflicts['count']} work(s) disagree on the active checkpoint (e.g. "
-            f"{first['work_id']}: filesystem={first['filesystem_active'][:12]}… "
-            f"database={first['database_active'][:12]}…) — {first['resolution']}; run "
-            "`python -m forge.adaptive.checkpoint_migration verify`"
-        )
-        results.append(
-            _result(
-                "checkpoint.pointer_conflicts",
-                False if coverage["mode"] == "best_effort" else None,
-                detail,
-                detail,
-            )
-        )
-    else:
-        drift = conflicts["post_cutover_drift"]
-        drift_note = f", {drift} at expected post-cutover drift" if drift else ""
-        results.append(
-            _result(
-                "checkpoint.pointer_conflicts",
-                True,
-                f"no active-pointer disagreements between the old index and the "
-                f"database{drift_note}",
-                "",
-            )
-        )
-
-    topology = views["topology"]
-    if coverage["mode"] != "postgres":
-        results.append(
-            _result(
-                "checkpoint.blob_topology",
-                None,
-                "best_effort durability: the JSON index assumes ONE process on a shared "
-                "volume — multi-replica topologies need the postgres authority AND a "
-                "shared blob volume",
-                "",
-            )
-        )
-    elif topology["looks_node_local"]:
-        results.append(
-            _result(
-                "checkpoint.blob_topology",
-                None,
-                f"blob root {topology['store_root']} looks node-local ({topology['heuristic']}"
-                ") — two replicas on separate volumes are UNSUPPORTED: a shared database "
-                "does not share content-addressed blobs",
-                "",
-            )
-        )
-    else:
-        results.append(
-            _result(
-                "checkpoint.blob_topology",
-                True,
-                f"blob root {topology['store_root']} assumed shared — confirm every "
-                "replica mounts this volume (heuristic: absolute, non-temp path)",
-                "",
-            )
-        )
-
-    # R36-05: the authority marker, the configured repository, and any
-    # mismatch — read exactly the way the composition-root fence reads
-    # them, changing neither authority.
-    marker = views["authority_marker"]
-    state = str(marker.get("state") or "unmarked")
+    root = Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "") or DEFAULT_CHECKPOINT_ROOT)
+    marker = authority_state_report(root=root)
+    if marker["configured_problem"]:
+        return [_result("checkpoint.authority", False, "", marker["configured_problem"])]
+    results = [_checkpoint_topology(root, marker["configured_authority"])]
+    state = marker["state"]
     if state == "mismatch":
         detail = (
-            f"the authority marker names {marker.get('active_authority')!r} "
-            f"(generation {marker.get('marker_generation')}), but this process is "
-            f"configured for {marker.get('configured_authority')!r} — its checkpoint "
-            "mutations will be refused with MutationsFencedError; set "
-            "FORGE_CHECKPOINT_DURABILITY to the marker's authority and restart, or "
-            "roll the marker back (python -m forge.adaptive.checkpoint_migration "
-            "rollback --verify-report <path>)"
+            f"the authority marker names {marker['active_authority']!r} "
+            f"(generation {marker['marker_generation']}), but this process is configured "
+            f"for {marker['configured_authority']!r} — checkpoint mutations are refused "
+            "with MutationsFencedError; reconcile the deployment configuration with "
+            "the active authority and restart; doctor never changes the marker"
         )
         results.append(_result("checkpoint.authority_marker", False, "", detail))
-    elif marker.get("cutover_in_progress"):
+    elif marker["cutover_in_progress"]:
         results.append(
             _result(
                 "checkpoint.authority_marker",
@@ -867,9 +754,8 @@ async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
             _result(
                 "checkpoint.authority_marker",
                 True,
-                f"no authority marker at {marker.get('marker_path')} — the mutation "
-                f"fence is dormant; the configured repository is "
-                f"{marker.get('configured_authority')!r}",
+                f"no authority marker at {marker['marker_path']} — the mutation fence is "
+                f"dormant; the configured repository is {marker['configured_authority']!r}",
                 "",
             )
         )
@@ -878,106 +764,13 @@ async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
             _result(
                 "checkpoint.authority_marker",
                 True,
-                f"the authority marker names {marker.get('active_authority')!r} "
-                f"(generation {marker.get('marker_generation')}) and the configured "
-                f"repository is {marker.get('configured_authority')!r} — aligned",
+                f"the authority marker names {marker['active_authority']!r} "
+                f"(generation {marker['marker_generation']}) and the configured repository "
+                f"is {marker['configured_authority']!r} — aligned",
                 "",
             )
         )
     return results
-
-
-def check_capabilities() -> CheckResult:
-    """NXT-02: the reachability-based capability manifest holds honestly.
-
-    Re-validates the seeded registry on every doctor run — including the
-    routed-command cross-check against the LIVE ingress sets — so doctor
-    never reports an unavailable command as supported, and a removed
-    application binding surfaces here instead of as a silent over-claim.
-    """
-    from forge.capability_manifest import capabilities, manifest_problems
-
-    rows = capabilities()
-    problems = manifest_problems(rows)
-    detail = f"{len(rows)} rows, {sum(1 for r in rows if r.entry_point is None)} not wired"
-    if problems:
-        return _result("capabilities.manifest", False, "", f"{detail} — " + "; ".join(problems[:3]))
-    return _result("capabilities.manifest", True, detail, "")
-
-
-def _capabilities_mode(as_json: bool, strict: bool = False) -> int:
-    """``--capabilities``: print the matrix (NXT-02); exit 1 on drift.
-
-    R28-27 ``--strict`` adds the PROMOTION GATE: every row claiming a
-    tier above ``domain_contract`` must hold the evidence classes that
-    tier requires (``classify_evidence`` over its pointers), and an
-    over-claim fails the run — a capability cannot claim a tier its
-    evidence class cannot support.
-
-    NEXT-26: the JSON form additionally carries the ``support_matrix``
-    field (per (driver, provider, recipe) support folded from the
-    manifest, the live registrations and the provenance reports). Its
-    problems do not change THIS mode's exit code — the standalone
-    ``--support-matrix`` owns that verdict.
-    """
-    import json as _json
-
-    from forge.adaptive.support_matrix import support_matrix
-    from forge.capability_manifest import (
-        TIER_LEGEND,
-        capabilities,
-        format_matrix,
-        manifest_gate_problems,
-        manifest_problems,
-    )
-
-    rows = capabilities()
-    problems = manifest_problems(rows)
-    gate_problems = manifest_gate_problems(rows) if strict else []
-    if as_json:
-        print(
-            _json.dumps(
-                {
-                    "status": "failed" if problems or gate_problems else "ok",
-                    "legend": TIER_LEGEND,
-                    "capabilities": [row.to_json() for row in rows],
-                    "problems": problems,
-                    "gate_problems": gate_problems,
-                    "support_matrix": support_matrix().to_json(),
-                },
-                indent=2,
-            )
-        )
-    else:
-        print(format_matrix(rows))
-        if problems:
-            print()
-            for problem in problems:
-                print(f"  DRIFT: {problem}")
-        for problem in gate_problems:
-            print(f"  GATE: {problem}")
-    return 1 if problems or gate_problems else 0
-
-
-def _support_matrix_mode(as_json: bool) -> int:
-    """``--support-matrix``: the per-(driver, provider, recipe) matrix (NEXT-26).
-
-    Offline: folds the capability manifest, the live registrations and
-    the provenance reports into one evidence-graded matrix. Exits 1 when
-    the matrix reports problems — a registration citing an evidence
-    artifact the checkout cannot show is exactly the over-claim this
-    mode exists to refuse.
-    """
-    import json as _json
-
-    from forge.adaptive.support_matrix import format_support_matrix, support_matrix
-
-    matrix = support_matrix()
-    if as_json:
-        print(_json.dumps(matrix.to_json(), indent=2))
-    else:
-        print(format_support_matrix(matrix))
-    return 1 if matrix.problems else 0
 
 
 async def run_checks(settings: Settings, project_id: int | None = None) -> list[CheckResult]:
@@ -994,16 +787,10 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     # Q35-06: the legacy-credential window — configuration observability,
     # read-only, no credential values (anchor source, deadline, drain count).
     results.extend(await check_legacy_credential_window(settings))
-    # Q35-21: the checkpoint-authority preflight (migration coverage,
-    # active-pointer conflicts, blob-volume topology) — read-only and
-    # env-driven, appended before the offline capability manifest so the
-    # earlier ordering guarantees stay untouched.
+    # The repository fence and blob topology are read-only observations.
     results.extend(await check_checkpoint_authority(settings))
     if project_id is not None:
         results.extend(await check_gitlab_project(settings, project_id))
-    # NXT-02: offline honesty check, appended last so existing ordering
-    # guarantees (python.version, gitlab.token first) are untouched.
-    results.append(check_capabilities())
     return results
 
 
@@ -1026,36 +813,7 @@ def main(argv: list[str] | None = None) -> int:
         "--project", type=int, default=None, help="also check a target project (id)"
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
-    parser.add_argument(
-        "--capabilities",
-        action="store_true",
-        help="print the reachability-based capability matrix (NXT-02) and exit; offline",
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help=(
-            "with --capabilities: also run the promotion gate (R28-27) — a row"
-            " claiming a tier without the matching evidence class fails the run"
-        ),
-    )
-    parser.add_argument(
-        "--support-matrix",
-        action="store_true",
-        help=(
-            "print the per-(driver, provider, recipe) support matrix from"
-            " executed profile evidence (NEXT-26) and exit; offline"
-        ),
-    )
     args = parser.parse_args(argv)
-
-    if args.capabilities:
-        # Offline mode: no environment contacts, no Settings needed.
-        return _capabilities_mode(args.json, strict=args.strict)
-
-    if args.support_matrix:
-        # Offline mode: the support matrix owns its own exit verdict.
-        return _support_matrix_mode(args.json)
 
     try:
         settings = Settings()  # type: ignore[call-arg]

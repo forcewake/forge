@@ -112,7 +112,7 @@ def make_settings(**overrides) -> Settings:
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
-        FORGE_IMPLEMENTER_BACKEND="builtin",  # pinned: the dev .env sets ci_harness
+        FORGE_IMPLEMENTER_BACKEND="ci_harness:claude-code",
     )
     values.update(overrides)
     return Settings(**values)
@@ -134,6 +134,7 @@ async def db():
 @pytest.fixture()
 def fake_gitlab() -> FakeGitLab:
     fake = FakeGitLab()
+    fake.ci_configuration = {"valid": True, "jobs": [{"name": "forge-agent-claude-code"}]}
     fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
     fake.seed_commit("main", "base-sha-1", "initial")
     return fake
@@ -769,11 +770,3 @@ class TestCalibrationArtifact:
                 assert row["total_known_tokens"] == (
                     row["input_tokens_inclusive"] + row["output_tokens"]
                 )
-
-    def test_the_artifact_rebuilds_byte_identically(self):
-        """The report is a MEASUREMENT of the recorded captures — the
-        committed bytes and a fresh fold over the same inputs agree."""
-        from scripts.build_budget_calibration import build_document
-
-        rebuilt = json.dumps(build_document(), indent=2, sort_keys=True) + "\n"
-        assert rebuilt == ARTIFACT.read_text()
