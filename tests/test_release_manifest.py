@@ -113,7 +113,6 @@ FINDING_MARKERS: dict[str, str] = {
     "CTL-EPIC": "request_pause",
     "EXE-EPIC": "unknown_driver",
     "MRP-EPIC": "compile_dependencies",
-    "VER-EPIC": "evidence_aware_review",
     "OPS-EPIC": "usage_lineage",
     "WIRING": "DiscoveryService",
     "OPS-06": "TestEvidenceClasses",

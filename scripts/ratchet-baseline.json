@@ -73,7 +73,7 @@
   "src/forge/orchestrator/orchestrator.py": 1002,
   "src/forge/profile_qualification.py": 2603,
   "src/forge/reactive/github_review.py": 703,
-  "src/forge/release_manifest.py": 1269,
+  "src/forge/release_manifest.py": 1261,
   "src/forge/release_promotion.py": 1164,
   "src/forge/repository/changeset.py": 623,
   "src/forge/repository/writer.py": 681,

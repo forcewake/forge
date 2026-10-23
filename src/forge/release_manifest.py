@@ -650,15 +650,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         level="contract_tested",
         evidence=("tests/test_adaptive_workpackage.py",),
     ),
-    FindingClosure(
-        finding="VER-EPIC",
-        capability="runs/verification-contract",
-        level="contract_tested",
-        evidence=(
-            "tests/test_adaptive_verification_sets.py",
-            "tests/test_adaptive_benchmark.py",
-        ),
-    ),
+
     FindingClosure(
         finding="OPS-EPIC",
         capability="delivery-metrics",
