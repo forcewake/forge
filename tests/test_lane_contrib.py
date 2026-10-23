@@ -10,7 +10,7 @@ import pytest
 
 from forge_lane.cli import load_driver
 from forge_lane.contrib.codex import CodexDriver
-from forge_lane.contrib.common import SafeFiles, environment, grant_key
+from forge_lane.contrib.common import EventQueue, SafeFiles, environment, grant_key
 from forge_lane.contrib.grok import GrokDriver
 from forge_lane.contrib.opencode import ROUTES, RULES, OpenCodeDriver
 from forge_lane.driver import DriverEnv
@@ -436,16 +436,18 @@ async def test_opencode_grants_only_one_confined_file_operation(tmp_path):
     assert wire.closed and session.owner.done()
 
 
-@pytest.mark.parametrize("name", ["opencode", "grok"])
+@pytest.mark.parametrize("name", ["codex", "opencode", "grok"])
 async def test_interrupt_does_not_swallow_process_cleanup_failure(tmp_path, monkeypatch, name):
     workspace, brief, env = setup(tmp_path)
-    wire = Wire()
+    wire = CodexWire(env.model_key.gateway_url) if name == "codex" else Wire()
 
     async def cannot_stop():
         raise LaneFailure(ExitCode.DRIVER, "cleanup_failed", "synthetic process did not stop")
 
     wire.close = cannot_stop
-    if name == "opencode":
+    if name == "codex":
+        session = await CodexDriver(transport_factory=wire.spawn).start(brief, workspace, env)
+    elif name == "opencode":
         http = OpenCodeHTTP(workspace)
         session = await OpenCodeDriver(
             server_factory=wire.spawn, transport=httpx.MockTransport(http)
@@ -457,6 +459,87 @@ async def test_interrupt_does_not_swallow_process_cleanup_failure(tmp_path, monk
             brief, workspace, DriverEnv("model")
         )
         await asyncio.sleep(0)
-    with pytest.raises(LaneFailure, match="did not stop"):
-        await session.interrupt()
-    assert session.cleanup_task.done() and session.owner.done()
+    for _ in range(2):
+        with pytest.raises(LaneFailure, match="did not stop"):
+            await session.interrupt()
+        await asyncio.sleep(0)
+    await until(lambda: session.owner.done())
+    assert session.cleanup_task.done()
+
+
+@pytest.mark.parametrize("consume", [False, True])
+async def test_codex_completion_reports_cleanup_failure_without_success(tmp_path, consume):
+    workspace, brief, env = setup(tmp_path)
+    wire = CodexWire(env.model_key.gateway_url)
+    close_calls = 0
+
+    async def cannot_stop():
+        nonlocal close_calls
+        close_calls += 1
+        raise LaneFailure(ExitCode.DRIVER, "cleanup_failed", "synthetic process did not stop")
+
+    wire.close = cannot_stop
+    session = await CodexDriver(transport_factory=wire.spawn).start(brief, workspace, env)
+    wire.complete()
+    await until(lambda: session.owner.done())
+    assert session.owner.exception() is None
+    if consume:
+        with pytest.raises(LaneFailure) as caught:
+            await asyncio.wait_for(collect(session), 2)
+        assert caught.value.classification == "driver_cleanup_failed"
+        assert session.queue.get_nowait() is None and session.queue.empty()
+    else:
+        queued = [session.queue.get_nowait(), session.queue.get_nowait()]
+        assert session.queue.empty() and queued[-1] is None
+        assert isinstance(queued[0], LaneFailure)
+        assert queued[0].classification == "driver_cleanup_failed"
+        assert not any(getattr(item, "kind", "") == "completed" for item in queued)
+    for _ in range(2):
+        with pytest.raises(LaneFailure, match="did not stop"):
+            await session.interrupt()
+    assert close_calls == 1 and session.reader.done() and session.cleanup_task.done()
+    assert not Path(wire.received[0][2]["HOME"]).exists()
+
+
+async def test_codex_cancelled_interrupt_does_not_cancel_owned_cleanup(tmp_path):
+    workspace, brief, env = setup(tmp_path)
+    wire = CodexWire(env.model_key.gateway_url)
+    entered, release = asyncio.Event(), asyncio.Event()
+    close_calls = 0
+
+    async def slow_close():
+        nonlocal close_calls
+        close_calls += 1
+        entered.set()
+        await release.wait()
+        await Wire.close(wire)
+
+    wire.close = slow_close
+    session = await CodexDriver(transport_factory=wire.spawn).start(brief, workspace, env)
+    stopping = asyncio.create_task(session.interrupt())
+    await asyncio.wait_for(entered.wait(), 2)
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert not session.cleanup_task.done() and not session.cleanup_task.cancelled()
+    assert not session.owner.done() and not wire.closed
+    release.set()
+    await asyncio.wait_for(session.interrupt(), 2)
+    assert close_calls == 1 and session.reader.done() and session.owner.done() and wire.closed
+    assert not [event for event in await collect(session) if event.kind == "completed"]
+    assert not Path(wire.received[0][2]["HOME"]).exists()
+
+
+@pytest.mark.parametrize("cleanup_reported", [False, True])
+async def test_shared_stream_finalizer_never_swallows_cancellation(cleanup_reported):
+    session = EventQueue("")
+
+    async def cancel():
+        raise asyncio.CancelledError
+
+    session.interrupt = cancel
+    if cleanup_reported:
+        session.emit(LaneFailure(ExitCode.DRIVER, "driver_cleanup_failed", "cleanup failed"))
+    session.emit(None)
+    with pytest.raises(asyncio.CancelledError):
+        await collect(session)

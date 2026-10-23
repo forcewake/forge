@@ -82,6 +82,7 @@ class CodexSession(EventQueue):
         self.finished, self.closed = asyncio.Event(), False
         self.status, self.problem = "", None
         self.cleanup_lock = asyncio.Lock()
+        self.cleanup_task: asyncio.Task | None = None
 
     async def call(self, method, params):
         assert self.transport is not None
@@ -245,33 +246,40 @@ class CodexSession(EventQueue):
 
     async def finish(self):
         await self.finished.wait()
-        await self.cleanup()
-        if self.problem:
-            self.emit(self.problem)
-        elif self.status == "completed":
-            self.emit(DriverEvent("completed", terminal_reason="completed"))
-        elif self.status:
-            self.emit(DriverEvent("failed", terminal_reason="codex_turn_" + self.status))
-        self.emit(None)
+        try:
+            await self.cleanup()
+        except Exception:
+            self.emit(failure("driver_cleanup_failed", "Contrib process did not stop safely"))
+        else:
+            if self.problem:
+                self.emit(self.problem)
+            elif self.status == "completed":
+                self.emit(DriverEvent("completed", terminal_reason="completed"))
+            elif self.status:
+                self.emit(DriverEvent("failed", terminal_reason="codex_turn_" + self.status))
+        finally:
+            self.emit(None)
 
     async def cleanup(self):
         async with self.cleanup_lock:
-            if self.closed:
-                return
-            self.closed = True
-            for future in self.pending.values():
-                if not future.done():
-                    future.set_exception(
-                        failure("driver_connection_closed", "Codex session closed")
-                    )
-            try:
-                if self.transport:
-                    await self.transport.close()
-            finally:
-                if self.reader:
-                    self.reader.cancel()
-                    await asyncio.gather(self.reader, return_exceptions=True)
-                self.home.cleanup()
+            if self.cleanup_task is None:
+                self.closed = True
+                self.cleanup_task = asyncio.create_task(self.dispose())
+            cleanup = self.cleanup_task
+        await asyncio.shield(cleanup)
+
+    async def dispose(self):
+        for future in self.pending.values():
+            if not future.done():
+                future.set_exception(failure("driver_connection_closed", "Codex session closed"))
+        try:
+            if self.transport:
+                await self.transport.close()
+        finally:
+            if self.reader:
+                self.reader.cancel()
+                await asyncio.gather(self.reader, return_exceptions=True)
+            self.home.cleanup()
 
     async def interrupt(self):
         if not self.finished.is_set() and self.turn_id and self.transport:
@@ -291,7 +299,7 @@ class CodexSession(EventQueue):
         self.finished.set()
         await self.cleanup()
         if self.owner:
-            await self.owner
+            await asyncio.shield(self.owner)
 
     async def steer(self, text):
         if self.finished.is_set() or not self.turn_id:

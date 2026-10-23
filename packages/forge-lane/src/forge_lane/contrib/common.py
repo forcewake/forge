@@ -204,13 +204,19 @@ class EventQueue:
         self.queue.put_nowait(value)
 
     async def events(self) -> AsyncIterator[DriverEvent]:
+        cleanup_reported = False
         try:
             while (value := await self.queue.get()) is not None:
                 if isinstance(value, LaneFailure):
+                    cleanup_reported = value.classification == "driver_cleanup_failed"
                     raise value
                 yield value
         finally:
-            await self.interrupt()
+            try:
+                await self.interrupt()
+            except Exception:
+                if not cleanup_reported:
+                    raise
 
     async def interrupt(self) -> None:
         raise NotImplementedError
