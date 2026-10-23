@@ -209,6 +209,7 @@ tests/test_ops_limits.py,7,496,true,false,,,,ops,keep,-,
 tests/test_orphan_guard.py,1,61,false,false,,,,orphan,keep,-,
 tests/test_patch_differential.py,19,353,true,false,,invariant evidence; edge-case pin,,patch,keep,-,
 tests/test_pg_gate.py,42,992,false,false,,,,pg,keep,-,
+tests/test_planning_ports.py,9,439,true,true,,edge-case pin,,planning,keep,P3-11,Frozen repository research and resolved citations
 tests/test_ports.py,3,195,true,true,,edge-case pin,,ports,keep,P3-02,Engine port scope and recovery contracts
 tests/test_profile_bound_ops.py,4,56,false,true,,edge-case pin,,profile,keep,-,
 tests/test_project_config.py,23,369,true,false,,edge-case pin,,project,port-adapter,P3,

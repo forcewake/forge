@@ -1,0 +1,19 @@
+{
+  "summary": "Update the real parser and preserve the complete verification step.",
+  "steps": [
+    {
+      "step_id": "change",
+      "title": "Correct run",
+      "instructions": "Change the increment in run and preserve its complete input contract.",
+      "files": ["src/main.py"],
+      "citations": [{"repository": {"provider": "github", "connection_id": "installation-9", "repository_id": "123"}, "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "path": "src/main.py", "start_line": 1, "end_line": 2}]
+    },
+    {
+      "step_id": "test",
+      "title": "Verify the call site",
+      "instructions": "Add a regression for the real call site, run the required checks, and retain this entire final instruction.",
+      "files": ["tests/test_main.py"],
+      "citations": [{"repository": {"provider": "github", "connection_id": "installation-9", "repository_id": "123"}, "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "path": "src/main.py", "start_line": 4, "end_line": 4}]
+    }
+  ]
+}
