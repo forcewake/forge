@@ -95,14 +95,12 @@ DEFAULT_REVIEW_AUTHORITY_TTL_SECONDS = 24 * 3600
 #: the VERSIONED policy that sizes the closing share of the guard's numeric axes. v1's
 #: stated rule: the closing share of each limited axis is ``ceil(axis limit × closing
 #: fraction)`` — the same fraction record the USD reserve resolves from
-#: (class:`ClosingReservePolicy`), applied per-axis because the axes are DISTINCT (a USD
+#: (:class:`ClosingReservePolicy`), applied per-axis because the axes are DISTINCT (a USD
 #: allowance cannot be silently converted into calls); wall-clock is NOT partitioned under
 #: v1 (the closing review rides the run's own clock — the deadline is anchored at open time
 #: and an extension is an explicit wallclock-axis amendment).
 CLOSING_PARTITION_POLICY_VERSION = "closing-partition/1"
 
-#: The observables (issue 's observability scope, extended by /'s finality model and
-#: /'s amendment scope).
 OBSERVABLE_CLOSING_RESERVE = "budget.closing_reserve"
 OBSERVABLE_UNRESOLVED_UPPER_BOUND = "budget.unresolved_upper_bound"
 OBSERVABLE_REVIEW_ONLY_RECOVERY = "delivery.review_only_recovery"
@@ -361,7 +359,7 @@ class ClosingBudgetReport:
             "lower_bound_usd": round(self.lower_bound_usd, 6),
             "reserved_liability_usd": round(self.reserved_liability_usd, 6),
             "unknown_intervals": self.unknown_intervals,
-            # the finality split () — exact settled spend vs provisional accrued vs
+            # Keep settled spend, provisional accrued cost and retained liability separate:
             # remaining liability
             "settled_usd": round(self.settled_usd, 6),
             "accrued_unsettled_usd": round(self.accrued_unsettled_usd, 6),

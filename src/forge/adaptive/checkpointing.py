@@ -145,7 +145,7 @@ class CheckpointReceipt:
 
 @dataclass(frozen=True)
 class FileRestore:
-    """One manifest entry's restore outcome ('s per-file evidence)."""
+    """Verified restore outcome for one manifest entry."""
 
     path: str
     outcome: Literal["restored", "deleted", "already-absent", "failed"]
@@ -427,16 +427,9 @@ def _symlink_free_target_path(
     return None
 
 
-#: The staging prefix beside the target (a crash leaves these behind for
-#: func:`_recover_abandoned_promotions` to collect).: the name continues with the OWNING
-#: work's token, so recovery never mistakes a sibling workspace's staging for this work's.
+#: Include the owning work token so recovery cannot collect a sibling workspace's staging.
 _STAGING_PREFIX: Final = ".forge-restore-"
-#: The parked ORIGINAL of an interrupted promotion: present with the promoted path MISSING
-#: means the promotion died between its two renames — the next restore of the SAME work
-#: rolls the original back before doing anything else ('s crash semantics).: the name binds
-#: it to its owner, ``.forge-restore-backup-<work_id>[-<checkpoint_id[:8]>]-<pid>-<uuid>``,
-#: so a shared parent can hold several workspaces' leftovers without one workspace's
-#: recovery ever claiming another's.
+#: A work-owned backup restores an interrupted rename; another work's backup is untouched.
 _BACKUP_PREFIX: Final = ".forge-restore-backup-"
 #: The sibling generation a ``promote="generation"`` restore lands in:
 #: ``<parent>/.forge-workspace-gen-<checkpoint_id[:12]>`` — a STABLE path that is never the

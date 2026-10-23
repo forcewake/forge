@@ -1053,10 +1053,7 @@ def retry_rejection(
     return ""
 
 
-#: the explicit opt-in for the RETIRED legacy lookup chain (raw filesystem index + the
-#: generation-less work token over HTTP). ``FORGE_RETRY_LEGACY_LOOKUP=1`` re-enables it for
-#: deployments pinned to a versioned pre- build ONLY; the modern path (the configured async
-#: authority) is the default and the only supported one.
+#: Legacy filesystem/HTTP lookup is opt-in; the configured async authority is the default.
 LEGACY_LOOKUP_ENV: str = "FORGE_RETRY_LEGACY_LOOKUP"
 
 #: the observability label the legacy adapter answers under — unmistakable in logs and
@@ -1131,7 +1128,7 @@ async def durable_checkpoint_outcome(
 async def _legacy_http_lookup(
     run_id: str, *, env: Mapping[str, str] | None = None
 ) -> CheckpointLookupOutcome:
-    """The RETIRED pre- lookup chain, kept behind an explicit opt-in."""
+    """Legacy filesystem/HTTP lookup, available only through explicit opt-in."""
     from forge.adaptive.checkpoint_repository import (
         CheckpointLookupOutcome,
         LOOKUP_ABSENT,

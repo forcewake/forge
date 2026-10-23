@@ -632,7 +632,7 @@ PENDING_PROPOSAL_KEY = "revision_proposal"
 
 #: the ACTIVE-plan document's field carrying the activated revision's own content
 #: (``PlanRevision.model_dump``) — the bytes the activation CAS switched the digest over,
-#: read back by func:`resolve_approved_input` at every dispatch entry.
+#: read back by :func:`resolve_approved_input` at every dispatch entry.
 REVISION_CONTENT_KEY = "revision_content"
 
 PENDING_PROPOSAL_SCHEMA = "forge.revision.proposal-pending/1"
@@ -948,13 +948,8 @@ async def activate_pending_revision(
             **journal_raw,
             record.decision_id: _record_document(record),
         }
-        # the switched pointer remembers the digest it replaced, so the next dispatch can
-        # refuse a /go still carrying the OLD plan and the revised plan comment can say what
-        # it revised.: the same switch persists the activated revision's CONTENT — the exact
-        # ``proposed`` bytes the guard digested (the staged shape, not the returned copy
-        # whose parent was rewritten), so a later dispatch resolves the approved TEXT from
-        # the same source the CAS switched, and a tampered payload fails the digest
-        # comparison at resolution instead of dispatching quietly.
+        # Persist the approved bytes with the switched pointer so dispatch can reject
+        # superseded digests and tampered content.
         merged[ACTIVE_PLAN_KEY] = active_plan_document_of(
             current,
             record,
@@ -1583,7 +1578,7 @@ class RevisionRebindRefused(ValueError):
 
 
 def _bytes_digest(text: str) -> str:
-    """sha256 over the exact UTF-8 bytes of one text field ('s shape)."""
+    """sha256 over the exact UTF-8 bytes of one text field."""
     return sha256(text.encode("utf-8")).hexdigest()
 
 

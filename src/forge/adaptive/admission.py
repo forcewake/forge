@@ -212,10 +212,7 @@ def check_admission(
 # durable execution leases — the slot reservation at dispatch
 #
 
-#: The partial-index predicate making "one OPEN lease per (project, slot)" a database
-#: invariant: the unique index below fires ONLY while the lease is held (``released_at IS
-#: NULL``), so a released slot is immediately reusable while its row stays as the
-#: completed-attempt audit trail ('s ``execution_attempts.completed`` counter).
+#: Free released slots while retaining completed-attempt audit rows.
 _LEASE_OPEN = text("released_at IS NULL")
 
 #: the occupancy watchlist — OPEN leases that carry a native start intent (dispatched,
@@ -267,14 +264,14 @@ class ExecutionLease(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     #: the native-start INTENT — set BEFORE the provider call
-    #: (func:`record_native_start_intent`), NULL when no native job was ever dispatched (the
+    #: (:func:`record_native_start_intent`), NULL when no native job was ever dispatched (the
     #: builtin lane, a pre-call abort).
     native_intent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
     native_intent_ref: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
     #: the dispatched native job's correlation (pipeline/run id). NULL until the provider
-    #: answers dispatch with an id (func:`record_native_handle`); the reconciler's probe
+    #: answers dispatch with an id (:func:`record_native_handle`); the reconciler's probe
     #: key.
     native_handle: Mapped[str | None] = mapped_column(String(256), nullable=True, default=None)
     #: set when the RUN reached its local terminal verdict but the NATIVE job was still
@@ -497,8 +494,8 @@ async def _reclaim_terminal_run_leases(
             row.release_reason = f"reclaimed: run {run.status}"
             reclaimed += 1
             continue
-        # a dispatched intent (handle or not) may still be occupying a runner — park it
-        # draining for the reconciler's probe.: the terminal-run reclaim cannot bypass this.
+        # A dispatched intent may still occupy a runner; only the reconciler's probe
+        # can prove it safe to release.
         row.draining_at = now
         row.release_reason = f"reclaimed: run {run.status} — native occupancy unobserved"
         reclaimed += 1
@@ -894,8 +891,7 @@ async def reconcile_draining(
         for row in rows:
             key = str(row.native_handle or row.native_intent_ref or "")
             if not key:
-                # Legacy pre- shape: no intent was ever persisted, so never-dispatched is
-                # PROVEN — the local verdict is the whole truth.
+                # Without a native correlation, release against the local terminal verdict.
                 if await _cas_release(
                     session, row.id, "reconciled: no native correlation to observe", now=now
                 ):

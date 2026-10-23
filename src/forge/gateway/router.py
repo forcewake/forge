@@ -69,10 +69,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
 
     mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
     note_text = (event.object_attributes.note or "").strip()
-    # the adaptive control verbs (pause /resume /steer /answer) join the parsed set ONLY
-    # while FORGE_ADAPTIVE_COMMANDS_ENABLED is on — with the default OFF the verbs are not
-    # recognized at all (zero routing).: the review-feedback verbs (fix /ask) follow the
-    # same pattern behind FORGE_REVIEW_FEEDBACK_ENABLED.
+    # Disabled adaptive and review-feedback surfaces contribute no routable commands.
     commands = (
         _RUN_COMMANDS
         | adaptive_command_set()

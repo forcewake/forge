@@ -167,7 +167,7 @@ class EventInbox(Base):
     handler_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
-#: ADR-0017 (F12),: one active run per (provider, project, issue).
+#: ADR-0017: one active run per (provider, project, issue).
 _TERMINAL_STATUS_PREDICATE = text(
     "status NOT IN ('ready_for_human', 'blocked', 'failed', 'cancelled')"
 )
@@ -687,8 +687,7 @@ class CredentialRedemption(Base):
         nullable=False,
         index=True,
     )
-    #: The operation grant that authorized this redemption ('s grant type; a plain string
-    #: the grant owner populates).
+    #: Operation grant identity recorded by the redemption owner.
     grant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     attempt_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: The delivery route label (the provider the redemption served).

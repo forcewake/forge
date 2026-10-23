@@ -60,10 +60,7 @@ class VerificationResult:
     summary: str = ""
     #: Optional per-check details (name/status or name/result entries).
     surface: tuple[dict, ...] = field(default=())
-    #: the subject the verdict vouches for — the candidate digest / source OID / tested OID
-    #: / generation / plan+environment digests, as the ``verification.subject_identity``
-    #: evidence fragment. ``None`` (the default) keeps pre- verdicts byte-identical; a
-    #: verdict that names its subject renders it.
+    #: Exact candidate and execution identity; absent on verdicts that recorded no subject.
     subject_identity: Mapping[str, Any] | None = None
 
     def as_evidence(self) -> dict:

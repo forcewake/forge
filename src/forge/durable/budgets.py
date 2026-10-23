@@ -347,9 +347,7 @@ async def reserve(
         # visible in every later read.
         await _exhaust_open(session, budget.id)
         return None
-    # The implementation purpose reserves against limit − closing share (NULL share = fully
-    # shared axes, the pre- behavior); the closing purpose sees the full limits — the share
-    # is its authorized allowance.
+    # Implementation leaves the closing share available; a missing share means a shared axis.
     implementation_ceiling_calls = (
         RunBudget.max_calls - func.coalesce(RunBudget.closing_reserved_calls, 0)
         if purpose == RESERVE_IMPLEMENTATION
@@ -666,7 +664,7 @@ async def apply_budget_amendment(
     if command.axis == AXIS_USD:
         # The usd axis is enforced at the CLOSING GATE over the usage receipts, not by the
         # guard's counters — the durable APPLIED row IS the enforcement record (the
-        # effective cap rises by it in func:`usd_amendment_total`), so it needs no
+        # effective cap rises by it in :func:`usd_amendment_total`), so it needs no
         # ``run_budgets`` row.
         budget = await budget_for_run(session, command.run_id)
         before = _budget_limits_json(budget) if budget is not None else None

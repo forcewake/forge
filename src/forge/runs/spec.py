@@ -7,20 +7,12 @@ import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-#: Schema version of the EXECUTABLE RunSpec document (v3): adds the frozen task text, the
-#: plan artifact, the model route and the verification contract to the v2 shape. v1/v2
-#: documents carry digests only — they are not executable and a verified read refuses them
-#: (fail closed). keeps v3: the numeric budget ceilings (``max_calls``/``max_tokens``/
-#: ``wallclock_s``/``enforcement``) are ADDITIVE optional members of the ``budgets`` block
-#: —:meth:`ExecutableRunSpec.from_document` is tolerant of their absence, so pre- v3
-#: documents still parse unchanged.
+#: Schema v3 carries frozen task, plan, model route and verification policy.
+#: Digest-only v1/v2 documents are refused; numeric budget ceilings remain optional in v3.
 EXECUTABLE_SPEC_SCHEMA_VERSION = 3
 
-#: Honest budget enforcement levels ( §4), frozen with the ceilings: ``full`` remains
-#: readable for historical execution documents; ``partial`` describes current CI lanes: only
-#: the wall clock and the episode count are enforced forge-side, the harness's own model
-#: calls are never intercepted, so call/token ceilings are reconciled after the fact and
-#: never claimed as enforced.
+#: Current CI lanes enforce wall-clock and episode count, while call/token usage is
+#: reconciled afterward. Historical full-enforcement records remain readable.
 BUDGET_ENFORCEMENT_LEVELS = ("full", "partial")
 
 _DIGEST_LEN = 64
@@ -31,7 +23,7 @@ class SpecInvalid(Exception):
 
 
 class SpecLegacy(SpecInvalid):
-    """A stored RunSpec predates the executable schema ( legacy policy)."""
+    """A stored RunSpec predates the executable schema."""
 
 
 def canonical_json_digest(document: dict) -> str:
@@ -195,8 +187,7 @@ class ExecutableRunSpec:
                 raise SpecInvalid("a valid config provenance must carry its read ref")
         if self.config_status == "confirmed_absent" and self.config_sha256:
             raise SpecInvalid("a confirmed-absent config has no content digest")
-        # the profile digest is optional (pre- documents) but never partially-formed —
-        # present, it must be the sha256 it claims.
+        # A present profile digest must be a complete sha256 identity.
         if self.profile_digest:
             _digest_or_invalid(self.profile_digest, "profile_digest")
 
@@ -339,14 +330,11 @@ class ExecutableRunSpec:
                     if backend_config.get("lane_pipeline_id") is not None
                     else None
                 ),
-                # optional additive section — pre- documents carry none and parse with empty
-                # provenance; a malformed one is a corrupt spec (fail closed), never a
-                # silent drop.
+                # Missing provenance is allowed; malformed provenance must refuse.
                 config_status=str(_config_provenance(document).get("status") or "").strip(),
                 config_ref=str(_config_provenance(document).get("ref") or "").strip(),
                 config_sha256=str(_config_provenance(document).get("sha256") or "").strip().lower(),
-                # same additive convention — the frozen execution profile digest (absent on
-                # pre- documents).
+                # The execution profile digest is optional.
                 profile_digest=str(_execution_profile(document).get("digest") or "")
                 .strip()
                 .lower(),
@@ -416,17 +404,14 @@ class ExecutableRunSpec:
         }
         if self.allowed_paths:
             document["allowed_paths"] = list(self.allowed_paths)
-        # the frozen config provenance rides its own additive section (absent on pre-
-        # documents; the content digest only when a config was actually read and validated).
+        # Record a content digest only after configuration was read and validated.
         if self.config_status:
             document["project_config"] = {
                 "status": self.config_status,
                 "ref": self.config_ref,
                 **({"sha256": self.config_sha256} if self.config_sha256 else {}),
             }
-        # the frozen execution profile digest rides its own additive section (absent on pre-
-        # documents — the record itself lives in forge.runs.execution_profile; the spec pins
-        # its digest).
+        # Pin the optional execution profile by digest, without copying its record.
         if self.profile_digest:
             document["execution_profile"] = {"digest": self.profile_digest}
         return document

@@ -32,7 +32,7 @@ DEFAULT_MAX_REVIEW_ROUNDS: Final = 1
 _MAX_BOUND_REVIEW_ROUNDS: Final = 10
 
 #: The review-feedback verbs — the note shapes
-#: func:`forge.adaptive.revisions.parse_review_feedback_note` accepts.
+#: :func:`forge.adaptive.revisions.parse_review_feedback_note` accepts.
 REVIEW_FEEDBACK_NOTE_COMMANDS: Final = frozenset({"/fix", "/ask"})
 
 #: Truthy spellings — the same closed set ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` uses; anything

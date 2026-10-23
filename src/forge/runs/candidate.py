@@ -242,7 +242,7 @@ class HarnessUsage:
     #: re-dispatch is a legitimately distinct receipt.
     attempt_id: str = ""
     #: The receipt's identity, sha256 over (run id, attempt id, normalized usage JSON)
-    #: —:func:`usage_receipt_id`.
+    #: — :func:`usage_receipt_id`.
     receipt_id: str = ""
     #: The verbatim usage block as received (never normalized in place) — preserved on the
     #: ledger so spend stays reconstructable later.

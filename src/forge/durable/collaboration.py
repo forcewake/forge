@@ -329,7 +329,7 @@ def target_handle_mismatches(
     provider_mr_source_branch: str = "",
     project_ref: str | None = None,
 ) -> list[str]:
-    """Every disagreement between the recorded handles — the pre-write guard ('s ``collaboration.target_mismatch``)."""
+    """Find recorded-handle disagreements before a collaboration write."""
     mismatches: list[str] = []
     recorded: dict[str, int] = {}
     if target.mr_iid is not None:
