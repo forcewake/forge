@@ -401,3 +401,30 @@ async def test_root_draft_key_survives_child_round_without_cross_lineage_reuse(s
     (foreign_lease,) = await StepStore(store).claim_due("foreign-worker", now, 60)
     with pytest.raises(StoreConflict):
         await intent(store, foreign_lease, **options)
+
+
+async def test_identical_concurrent_admission_returns_the_winning_frozen_run(store, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from forge.store.models_runs import EngineRun
+
+    item = request()
+    barrier = asyncio.Barrier(2)
+    original = AsyncSession.get
+
+    async def synchronized_get(session, entity, ident, *args, **kwargs):
+        result = await original(session, entity, ident, *args, **kwargs)
+        if (
+            entity is EngineRun
+            and ident == item.id
+            and result is None
+            and session.get_bind().dialect.name == "postgresql"
+        ):
+            await barrier.wait()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "get", synchronized_get)
+    results = await asyncio.gather(
+        *(RunStore(store).admit(item) for _ in range(2)), return_exceptions=True
+    )
+    assert all(not isinstance(result, Exception) and result.id == item.id for result in results)
+    assert results[0] == results[1]

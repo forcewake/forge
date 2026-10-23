@@ -104,6 +104,25 @@ class RunStore:
                 await session.flush()
                 return run_record(row)
         except IntegrityError as exc:
+            winner = await self.load(request.id)
+            if winner is not None and (
+                winner.provider,
+                winner.connection_id,
+                winner.repository_id,
+                winner.subject_kind,
+                winner.subject_id,
+                winner.root_run_id,
+                winner.parent_run_id,
+            ) == (
+                request.provider,
+                request.connection_id,
+                request.repository_id,
+                request.subject_kind,
+                request.subject_id,
+                request.root_run_id or request.id,
+                request.parent_run_id,
+            ):
+                return winner
             raise StoreConflict(
                 "subject already has an active run or run identity collided"
             ) from exc
