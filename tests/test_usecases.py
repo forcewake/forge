@@ -257,16 +257,35 @@ class TestObserveVerification:
         assert decision.outcome == OUTCOME_REVIEW
         assert decision.verified is True
 
-    def test_code_failure_is_a_repair_that_records_no_verdict(self, kit):
-        """ADR-0008: a conclusion blaming the change drives the bounded
-        repair loop — and, exactly as before the extraction, the pass
-        records NO verification evidence (the repair is the answer)."""
-        decision = _decision(kit, ("tests",), {"tests": kit.code_red})
-
-        assert decision.outcome == OUTCOME_REPAIR
-        assert decision.verdict is None
-        assert decision.evidence() == {}
+    def test_code_failure_repairs_with_the_failed_native_verdict(self, kit):
+        surface = (
+            {
+                "name": "tests",
+                "conclusion": kit.code_red,
+                "workflow": "path:.github/workflows/tests.yml",
+                "run_id": 901,
+                "attempt": 1,
+            },
+        )
+        decision = observe_verification(
+            spec=_spec(("tests",)),
+            provider=kit.producer,
+            observations={"tests": kit.code_red},
+            candidate_sha=CANDIDATE,
+            subject_head_oid=OBSERVED_HEAD,
+            surface=surface,
+            success_conclusions=kit.success,
+            code_failure_conclusions=kit.code_failure,
+            infra_conclusions=kit.infra,
+            now=NOW,
+        )
+        assert decision.outcome == OUTCOME_REPAIR and not decision.verified
         assert decision.failing == ("tests",)
+        assert decision.verdict is not None and decision.verdict.status == "failed"
+        evidence = decision.evidence()
+        assert evidence["tested_oid"] == OBSERVED_HEAD and evidence["producer"] == kit.producer
+        assert evidence["observed_at"] == NOW.isoformat()
+        assert evidence["surface"] == list(surface)
 
     def test_infra_failure_blocks_and_never_repairs(self, kit):
         """A01 AC3: the execution died — the honest unknown verdict is

@@ -1663,16 +1663,22 @@ class PRHeadMover(StubPRReviewer):
         return await super().review(**kwargs)
 
 
+def seed_ci_workflow(fake: FakeGitHub, settings: Settings) -> str:
+    """The native repository has the workflow before its source/spec is frozen."""
+    workflow = settings.FORGE_GITHUB_HARNESS_WORKFLOW or "forge-harness.yml"
+    fake.files[REPO][".github/workflows/" + workflow] = (
+        "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n    steps: []\n"
+    )
+    settings.FORGE_GITHUB_HARNESS_WORKFLOW = workflow
+    return workflow
+
+
 async def drive_to_waiting_ci(db, service: GitHubRunService, fake: FakeGitHub) -> tuple[str, str]:
     """Dispatch the actual CI lane, collect its artifact and publish its candidate."""
     from forge.execution.github_actions import artifact_name_for
     from tests.fixtures.candidate import create_diff
 
-    workflow = service._settings.FORGE_GITHUB_HARNESS_WORKFLOW or "forge-harness.yml"
-    fake.files[REPO][".github/workflows/" + workflow] = (
-        "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n    steps: []\n"
-    )
-    service._settings.FORGE_GITHUB_HARNESS_WORKFLOW = workflow
+    workflow = seed_ci_workflow(fake, service._settings)
     run_id = await start(service)
     clear_comments(fake)
     await go(service, run_id)
@@ -1804,7 +1810,16 @@ class TestPositiveVerification:
         # the newer FAILURE is code-failure evidence — the repair loop (or
         # its exhaustion) fires on `tests`; NEVER verified-ready.
         assert run.status != FlowStatus.READY_FOR_HUMAN.value
-        assert "tests" in (run.status_reason or "") or run.status == FlowStatus.PROPOSING.value
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        assert run.candidate_shas == [candidate] and run.commit_cycle == 2
+        proof = run.evidence["verification"]
+        assert proof["status"] == "failed" and proof["tested_oid"] == candidate
+        (check,) = proof["surface"]
+        assert check["name"] == "tests" and check["conclusion"] == "failure"
+        assert check["run_id"] == 11 and check["attempt"] == 1
+        assert len(fake.dispatch_inputs) == 2
+        assert fake.dispatch_inputs[-1]["inputs"]["attempt_base_oid"] == candidate
+        assert "tests" in fake.dispatch_inputs[-1]["inputs"]["repair_context"]
 
     @pytest.mark.parametrize("order", ["new-first", "old-first"])
     async def test_the_api_response_order_never_decides_the_outcome(self, db, fake, order):
@@ -2025,13 +2040,12 @@ class TestPositiveVerification:
         )
         fake.seed_repo(REPO, {"src/app.py": "x\n"})
         service = make_service(db, fake, settings=settings, stack=make_stack(fake, planner=planner))
+        seed_ci_workflow(fake, settings)
         run_id = await start(service)
 
         async with db() as session:
             spec = (
-                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
-                .scalars()
-                .one()
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id))).scalars().one()
             )
             budget = await budget_for_run(session, run_id)
         doc = spec.document
@@ -2042,6 +2056,21 @@ class TestPositiveVerification:
         # the selection evidence records the pin honestly
         ev = (await get_run(db, run_id)).evidence["harness_selection"]
         assert "budget pinned" in str(ev.get("selection_reason") or ev.get("reason") or "")
+
+        original_digest = spec.digest
+        settings.FORGE_BUDGET_PROFILES = '{"standard":{"max_calls":1,"max_tokens":1,"wallclock_s":1}}'
+        await go(service, run_id)
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value, run.status_reason
+        assert fake.dispatch_inputs[0]["inputs"]["spec_digest"] == original_digest
+        async with db() as session:
+            frozen = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id))).scalars().one()
+            )
+            opened = await budget_for_run(session, run_id)
+        assert frozen.digest == original_digest and frozen.document == doc
+        assert opened is not None
+        assert {key: getattr(opened, key) for key in limits} == limits
 
     async def test_unproven_required_still_blocks_on_the_verification_deadline(self, db, fake):
         """Unknown is a WAITING verdict — the R17 deadline is the bound: a
@@ -2270,17 +2299,7 @@ class TestPositiveVerification:
             FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
         )
         service = make_service(db, fake, settings=settings)
-        run_id = await start(service)
-        clear_comments(fake)
-        await go(service, run_id)  # the frozen lane dispatch → waiting_harness
-        branch = f"forge/{ISSUE}/{run_id[:8]}"
-        candidate = "a" * 40
-        fake.seed_commit(REPO, branch, candidate, "lane candidate")
-        async with db() as session:
-            run = await session.get(FlowRun, run_id)
-            run.status = FlowStatus.WAITING_CI.value
-            run.candidate_shas = [candidate]
-            await session.commit()
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
         # The harness ran for the candidate sha and "succeeded" — but it is
         # EXECUTION, not verification. Its display name is NOT the filename.
         fake.seed_workflow_runs(
@@ -2317,17 +2336,7 @@ class TestPositiveVerification:
             FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
         )
         service = make_service(db, fake, settings=settings)
-        run_id = await start(service)
-        clear_comments(fake)
-        await go(service, run_id)
-        branch = f"forge/{ISSUE}/{run_id[:8]}"
-        candidate = "b" * 40
-        fake.seed_commit(REPO, branch, candidate, "lane candidate")
-        async with db() as session:
-            run = await session.get(FlowRun, run_id)
-            run.status = FlowStatus.WAITING_CI.value
-            run.candidate_shas = [candidate]
-            await session.commit()
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
         # A decoy whose DISPLAY NAME equals the frozen filename but whose
         # path is an unrelated workflow, and it is green.
         fake.seed_workflow_runs(
@@ -2361,7 +2370,14 @@ class TestPositiveVerification:
         run_id, candidate = await drive_to_waiting_ci(db, service, fake)
         fake.seed_workflow_runs(
             [
-                workflow_run(candidate, "tests", "failure"),
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "failure",
+                    path=".github/workflows/tests.yml",
+                    run_id=901,
+                    attempt=1,
+                ),
                 workflow_run(candidate, "documentation", "success"),
             ]
         )
@@ -2369,11 +2385,24 @@ class TestPositiveVerification:
         await service.evaluate_waiting_ci_one(run_id)
 
         run = await get_run(db, run_id)
-        # The frozen builtin lane has no repair dispatch — it blocks with
-        # the honest quality_contract reason naming the failed check.
-        assert run.status == FlowStatus.BLOCKED.value
-        assert "quality_contract" in (run.status_reason or "")
-        assert "tests" in (run.status_reason or "")
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        assert run.candidate_shas == [candidate] and run.commit_cycle == 2
+        proof = run.evidence["verification"]
+        assert proof["status"] == "failed" and proof["tested_oid"] == candidate
+        failed = next(check for check in proof["surface"] if check["name"] == "tests")
+        assert failed["conclusion"] == "failure" and failed["run_id"] == 901
+        assert failed["workflow"] == "path:.github/workflows/tests.yml"
+        assert len(fake.dispatch_inputs) == 2
+        dispatch = fake.dispatch_inputs[-1]["inputs"]
+        assert dispatch["run_id"] == run_id and dispatch["attempt_base_oid"] == candidate
+        assert "tests" in dispatch["repair_context"]
+        async with db() as session:
+            approvals = (
+                (await session.execute(select(GateApproval).where(GateApproval.flow_run_id == run_id)))
+                .scalars()
+                .all()
+            )
+        assert len(approvals) == 1
 
 
 def test_gateway_commands_are_reachable_through_the_dispatch_guard():

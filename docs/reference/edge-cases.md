@@ -312,6 +312,12 @@ When a pin breaks:
 | EC-651 | Missing usage becomes a zero-cost trace receipt | Emit usage only when the driver supplies it and close native folding once | `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_native_groups_have_bounded_redacted_output_and_close_once`, `tests/test_lane_trace.py::test_untrusted_text_cannot_emit_commands_or_credentials_and_suppression_is_counted` |
 | EC-652 | A driver completion trace claims a candidate exists or a broken output pipe fails execution | Render the post-collection classification and keep closed log output outside execution authority | `packages/forge-lane/src/forge_lane/runner.py`, `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_real_runner_trace_reports_empty_diff_instead_of_driver_success`, `tests/test_lane_trace.py::test_closed_log_output_is_not_an_execution_failure` |
 
+| EC-618 | Execution green can be mistaken for independent verification | Harness exclusion uses the frozen workflow path; a same-name decoy never grants verification | `src/forge/runs/github_service.py` | `tests/test_github_runs.py::TestPositiveVerification::test_a_display_name_decoy_is_never_treated_as_the_harness` |
+| EC-616 | A code-repair dispatch can erase the failure it is correcting | The next genuine CI dispatch retains the exact failed candidate and native check identity | `src/forge/runs/github_service.py` | `tests/test_github_runs.py::TestPositiveVerification::test_an_old_rerun_success_never_masks_a_newer_failure` |
+| EC-617 | Settings drift can silently replace approved budget ceilings | Dispatch stays bound to the originally frozen spec and opened budget after settings change | `src/forge/runs/github_service.py` | `tests/test_github_runs.py::TestPositiveVerification::test_a_class_change_freezes_one_set_of_numbers_everywhere` |
+
+| EC-615 | Failed native verification evidence was lost when repair dispatched | Code repair retains the failed verdict, original tested SHA, subject and full native check identity before dispatch | `src/forge/runs/usecases.py` | `tests/test_usecases.py::TestObserveVerification::test_code_failure_repairs_with_the_failed_native_verdict` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

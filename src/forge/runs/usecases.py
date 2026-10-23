@@ -59,6 +59,7 @@ from forge.runs.verification import (
     GITHUB_CODE_FAILURE_CONCLUSIONS,
     GITHUB_INFRA_CONCLUSIONS,
     GITHUB_SUCCESS_CONCLUSIONS,
+    STATUS_FAILED,
     STATUS_NOT_CONFIGURED,
     STATUS_PASSED,
     STATUS_UNKNOWN,
@@ -87,8 +88,8 @@ OUTCOME_WAIT = "wait"
 OUTCOME_REVIEW = "review"
 
 #: A conclusion that BLAMES THE CHANGE — the bounded repair cycle (ADR-0008).
-#: Never carries a verdict: the current gates record no verification
-#: evidence for a red run (the repair, not the evidence, is the answer).
+#: Carries the failed native verdict so the next repair retains the
+#: candidate identity and checks that caused it.
 OUTCOME_REPAIR = "repair"
 
 #: The EXECUTION died (cancelled/timed_out/canceled/abandoned) — block
@@ -129,9 +130,9 @@ class VerificationDecision:
 
     ``verdict`` is the :class:`~forge.runs.verification.VerificationResult`
     to record under ``flow_runs.evidence["verification"]`` — ``None`` when
-    the pass records nothing (a pending WAIT, or a REPAIR whose answer is
-    the repair itself). ``failing`` names the offending checks for the
-    caller's provider-worded blocked/repair reasons. ``reason`` is the
+    the pass has no completed observation. A repair records its failed proof.
+    ``failing`` names the offending checks for the caller's provider-worded
+    blocked/repair reasons. ``reason`` is the
     ``evaluating_ci`` transition reason for REVIEW outcomes (provider-neutral
     wording; the blocked/repair/timeout sentences stay at the call site).
     """
@@ -270,7 +271,7 @@ def observe_verification(
         # bounded repair loop.
         return VerificationDecision(
             outcome=OUTCOME_REPAIR,
-            verdict=None,
+            verdict=_verdict(STATUS_FAILED, tested_oid, provider, "checks failed", surface, now),
             failing=proof.code_failures,
         )
 
