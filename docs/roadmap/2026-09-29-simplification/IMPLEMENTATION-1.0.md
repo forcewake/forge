@@ -44,6 +44,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P2-07 Copilot driver | Implemented; pinned native ACP process, explicit token auth, permission boundary and cancellation ledger; real paid smoke unperformed |
 | P2-06 Claude driver | Implemented; scoped gateway auth, confined file capabilities, process-group interruption and usage; real paid smoke unperformed |
 | P2-05 lane runner | Implemented; authenticated brief, deadline/control supervisor, exact-WIP checkpoint, independent binary/untracked candidate capture and acknowledged reports; focused checks only |
+| P2-03 OIDC sessions | Implemented; trusted issuer/JWKS, exact workflow/job binding, durable global replay receipts and cancellation CAS; local JWT/SQLite and disposable PostgreSQL checks only |
 | P2-02 wire protocol | Implemented; immutable v1 bodies, bound approval/candidate/checkpoint identities, canonical serialization and exported schemas |
 
 The owner completed review of all 129 required ledger rows on 2026-10-23,

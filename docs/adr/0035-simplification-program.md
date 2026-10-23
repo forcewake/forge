@@ -130,3 +130,30 @@ are in the design document; the binding decisions are:
   - OIDC is required: GitLab ≥ 15.7, or GHES with OIDC.
   - Azure users stay on 0.42.x until the port adapter returns.
   - Historical qualification evidence is archived rather than maintained.
+
+## Lane authentication implementation clarification (2026-10-23)
+
+The original DESIGN §6.7 named `job_workflow_ref`, which GitHub emits for
+jobs using a reusable workflow. A directly dispatched workflow instead
+has `workflow_ref` ([GitHub OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)).
+The trusted dispatch composition explicitly chooses one claim name and
+pins its complete workflow path and ref. Missing or mismatched claims
+refuse authentication; there is no fallback to the other claim. Both
+GitHub run id and run attempt remain bound on reconnection.
+
+Lane sessions use a separate server-only signing key of at least 32 bytes
+and expire after five minutes by default (configurable from 30 to 900
+seconds). The provider JWT must have an integer expiry, issue time and
+not-before time, a lifetime of at most 24 hours and an exact audience.
+Configured HTTPS issuers and key endpoints are the only trust roots;
+redirects and token-selected key URLs are refused. Replay receipts store
+only a globally unique JTI hash and expiry in processed inbox rows. The
+binding and receipt are committed together on the current run row, with
+its cancellation counter captured separately from the lane generation.
+
+The pending-dispatch deadline limits the first exchange. Reconnection
+after that deadline still requires the already bound provider job, a
+fresh provider JWT and an active, current dispatch. Every bearer call
+rechecks the current dispatch and cancellation counter; API mutations
+repeat that check in their database transaction. This is an implementation
+clarification for review, not a claim of live provider acceptance.

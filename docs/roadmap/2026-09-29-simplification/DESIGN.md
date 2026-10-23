@@ -441,11 +441,16 @@ provider side. Binding works as follows:
   **audience** `"{FORGE_PUBLIC_URL}/lane/{nonce}"` (`permissions:
   id-token: write`). The server verifies the issuer, the JWKS signature,
   the expiry and `aud`. The audience must equal a pending, unexpired
-  dispatch nonce. `repository` and `job_workflow_ref` (path and allowed
-  ref) must match the dispatch record. On the first successful session,
+  dispatch nonce. `repository` and the explicitly registered workflow
+  claim (path and allowed ref) must match the dispatch record. Reusable
+  workflows use `job_workflow_ref`; directly dispatched workflows use
+  `workflow_ref`. The server never falls back between claims when the
+  registered claim is missing. GitHub documents this distinction in its
+  [OIDC reference](https://docs.github.com/en/actions/reference/security/oidc).
+  On the first successful session,
   the server records `gh_run_id`/`gh_run_attempt` and consumes the nonce
   (single use). Later sessions of the same attempt (reconnects) must
-  present tokens with the same `gh_run_id`. A token's `jti` is accepted
+  present tokens with the same `gh_run_id` and `gh_run_attempt`. A token's `jti` is accepted
   only once (replay cache until expiry).
 - **GitLab CI.** forge creates the pipeline through the API and records the
   returned `gl_pipeline_id`. The lane job requests `id_tokens` with

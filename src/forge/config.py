@@ -59,10 +59,8 @@ class Settings(BaseSettings):
     # approve a plan via `@forge /go <run-id>`. Empty — nobody may approve.
     FORGE_APPROVERS: str = ""
 
-    # Dedicated bot identity forge acts with (comments, commits, MRs).
-    # Never let forge speak with a human approver's credentials: its own
-    # comments (which contain /go instructions) would then come back as
-    # approver-authored webhooks and self-approve gates.
+    # Bot-only credentials: a human approver's identity would let forge's
+    # own /go instructions return as authorized self-approval webhooks.
     FORGE_BOT_TOKEN: SecretStr | None = None
 
     # M1 run loop: MR target branch and max seconds a run may wait for CI
@@ -70,10 +68,8 @@ class Settings(BaseSettings):
     FORGE_TARGET_BRANCH: str = "main"
     FORGE_CI_WAIT_SECONDS: int = 3600
 
-    # ADR-0008 quality contract: comma-separated CI job names that must exist
-    # AND succeed for a run to reach ready_for_human. Skipped/manual/missing
-    # required jobs fail the contract even when the pipeline icon is green.
-    # Empty — a successful pipeline status is enough.
+    # Required CI jobs must exist and succeed; skipped/manual/missing fails
+    # even on a green pipeline. Empty accepts a successful pipeline status.
     FORGE_REQUIRED_JOBS: str = ""
 
     # ADR-0004 budget semantics: max commit cycles per run — the initial
@@ -81,42 +77,28 @@ class Settings(BaseSettings):
     # failures never consume a cycle (they block instead of repairing).
     FORGE_MAX_COMMIT_CYCLES: int = 3
 
-    # Tier-1 auto-revive: how many times a run killed by a TRANSIENT failure
-    # (dispatch 5xx / network / timeout, rate limit, runner startup) may be
-    # re-dispatched on the same branch by the reconciler before it parks
-    # blocked for a human. 0 disables auto-revive. Fatal failures (config
-    # errors, driver quality signals, exhausted cycles) never auto-retry.
+    # Transient-only re-dispatch limit (5xx/network/timeout/rate-limit/startup).
+    # Zero disables; config, quality and exhausted-cycle failures never retry.
     FORGE_RUN_AUTO_REVIVE_LIMIT: int = 2
 
-    # Base of the auto-revive backoff ladder (60s → 120s → 240s …, capped in
-    # forge.runs.revival) — the worker-free wait between a transient death and
-    # its reconciler re-dispatch.
+    # Worker-free auto-revive backoff base; revival caps the doubling ladder.
     FORGE_RUN_REVIVE_BACKOFF_SECONDS: int = 60
 
-    # A12 effect-certainty window: how long a NEGATIVE publication-intent
-    # recovery probe parks the intent in `probing` before its re-probe. A
-    # provider may have accepted the first request and be applying it slowly,
-    # so one negative read never justifies a re-dispatch. The window backs
-    # off (×2) per still-negative round (bounded by the intents module's
-    # MAX_SETTLE_ROUNDS); on CAS-less GitLab an exhausted window parks
-    # unknown_outcome for an operator instead of ever re-dispatching, while
-    # on GitHub the branch-wide CAS makes the released redispatch
-    # inherently duplicate-safe.
+    # Negative publication probes wait and double their settle window up to
+    # MAX_SETTLE_ROUNDS: a slow accepted write must never be dispatched twice.
+    # GitLab exhaustion parks unknown_outcome; GitHub's branch-wide CAS makes
+    # its released re-dispatch duplicate-safe.
     FORGE_PUBLISH_SETTLE_SECONDS: int = 30
 
     # Implementation runs in target-project CI. The optional suffix selects
     # the driver; projects without an onboarded lane refuse before planning.
     FORGE_IMPLEMENTER_BACKEND: str = "ci_harness"
 
-    # ADR-0015 harness budgets: run-level wall-clock timeout for a harness
-    # job (enforced durably by the controller; GitLab's own maximum_timeout
-    # is the first line of defence) and the model passed to the harness job
-    # as FORGE_HARNESS_MODEL.
+    # Controller wall-clock timeout (behind GitLab's maximum_timeout) and
+    # model passed to the harness job as FORGE_HARNESS_MODEL.
     FORGE_HARNESS_TIMEOUT_SECONDS: int = 1800
-    # R17 liveness: bounded discovery for a dispatch whose response was lost
-    # (legacy empty-202). After this many discovery ticks that never found
-    # the Actions run, the run parks blocked ("dispatch never observed")
-    # instead of retrying until the harness timeout on a stalled API.
+    # Lost-response discovery ticks before blocked("dispatch never observed");
+    # never poll a stalled Actions API until the full harness timeout.
     FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS: int = 20
     FORGE_HARNESS_MODEL: str = "glm-5.3-flash[1m]"
 
@@ -192,6 +174,17 @@ class Settings(BaseSettings):
     # Supported ingress authorization and lane control remain explicit.
     FORGE_GITHUB_APPROVERS: str = ""
     FORGE_LANE_CONTROL_SECRET: SecretStr | None = None
+
+    # Lane v1 validates these when its authentication service is composed.
+    FORGE_SECRET_KEY: SecretStr | None = None
+    FORGE_PUBLIC_URL: str = ""
+    FORGE_GITHUB_OIDC_ISSUER: str = "https://token.actions.githubusercontent.com"
+    FORGE_GITHUB_OIDC_JWKS_URL: str = "https://token.actions.githubusercontent.com/.well-known/jwks"
+    FORGE_GITLAB_OIDC_ISSUER: str = ""
+    FORGE_GITLAB_OIDC_JWKS_URL: str = ""
+    FORGE_LANE_SESSION_TTL_SECONDS: int = 300
+    FORGE_LANE_OIDC_CLOCK_SKEW_SECONDS: int = 30
+    FORGE_LANE_OIDC_JWKS_CACHE_SECONDS: int = 300
 
     # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label
     # name matches (case-insensitive) starts the same run command as

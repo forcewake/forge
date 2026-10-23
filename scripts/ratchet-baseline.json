@@ -50,7 +50,7 @@
   "src/forge/api_operator.py": 940,
   "src/forge/candidate_collector.py": 687,
   "src/forge/capability_manifest.py": 787,
-  "src/forge/config.py": 704,
+  "src/forge/config.py": 697,
   "src/forge/doctor.py": 1084,
   "src/forge/durable/budgets.py": 1606,
   "src/forge/durable/controller.py": 702,
