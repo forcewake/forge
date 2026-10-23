@@ -169,6 +169,7 @@ tests/test_github_engine_client.py,8,193,false,true,,edge-case pin,,github,keep,
 tests/test_github_engine_ingress.py,7,138,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
 tests/test_github_flow.py,30,708,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_harness.py,18,720,true,false,,edge-case pin,,github,port-engine,P3,
+tests/test_github_native_commit.py,4,201,false,true,,,,github,keep,P3-16,Selected App authority with actual local native Git publication and recovery
 tests/test_github_reactive_review.py,25,635,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_reads.py,13,438,true,true,,edge-case pin,,github,keep,P3-16,"Frozen Git objects, native bot markers and approver authority"
 tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
@@ -211,6 +212,7 @@ tests/test_main.py,1,21,true,false,,edge-case pin,,main,keep,-,
 tests/test_mcp_runs_tools.py,7,101,true,false,,edge-case pin,,mcp,keep,-,
 tests/test_mcp_server.py,7,89,true,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
+tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,
 tests/test_operator_canonical_subjects.py,24,637,true,false,,edge-case pin,,operator,keep,-,

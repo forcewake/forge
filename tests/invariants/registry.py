@@ -37,6 +37,8 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_publisher.py",
             "tests/test_patch_differential.py",
             "tests/test_publication_manifest.py",
+            "tests/test_native_git_publication.py",
+            "tests/test_github_native_commit.py",
         ),
     ),
     Invariant(
