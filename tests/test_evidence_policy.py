@@ -13,7 +13,6 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
 from forge.durable import FlowRun, FlowStatus
-from forge.factory.implementer import LLMImplementer
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.models.base import Base
@@ -31,10 +30,10 @@ BASE_SHA = "base-sha-1"
 
 def make_settings(**overrides) -> Settings:
     values = dict(
+        _env_file=None,
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
-        FORGE_IMPLEMENTER_BACKEND="builtin",
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_MAX_COMMIT_CYCLES=3,
@@ -50,31 +49,6 @@ PLAN_JSON = json.dumps(
         "steps": ["bump x in src/app.py"],
         "risks": ["low risk"],
         "files_hint": ["src/app.py"],
-    }
-)
-
-CREATE_JSON = json.dumps(
-    {
-        "branch": "model/chose/this",
-        "commit_message": "model's own message",
-        "changes": [
-            {"path": "forge-demo/feature.md", "operation": "create", "content": "# feature\n"}
-        ],
-    }
-)
-
-REPAIR_JSON = json.dumps(
-    {
-        "branch": "model/chose/this",
-        "commit_message": "model's repair",
-        "changes": [
-            {
-                "path": "src/app.py",
-                "operation": "update",
-                "old_text": "x = 1\n",
-                "new_text": "x = 1\nFIXED = True\n",
-            }
-        ],
     }
 )
 
@@ -165,6 +139,7 @@ async def db():
 @pytest.fixture()
 def fake_gitlab() -> FakeGitLab:
     fake = FakeGitLab()
+    fake.ci_configuration = {"valid": True, "jobs": [{"name": "forge-agent-claude-code"}]}
     fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
     fake.seed_commit("main", BASE_SHA, "initial")
     fake.seed_file("src/app.py", "x = 1\ny = 2\n")
@@ -178,7 +153,6 @@ def make_service(db, fake_gitlab, llm, settings=None) -> RunService:
         gitlab=fake_gitlab,
         settings=settings,
         planner=LLMPlanner(llm, settings=settings),
-        implementer=LLMImplementer(llm, gitlab=fake_gitlab, settings=settings),
         reviewer=LLMReviewer(llm, gitlab=fake_gitlab, settings=settings),
     )
 
@@ -207,13 +181,11 @@ def seed_failed_pipeline(fake_gitlab: FakeGitLab, branch: str, sha: str, log: st
 
 class TestRepairContextCanary:
     async def test_failing_repair_run_stores_no_canary_secret(self, db, fake_gitlab):
-        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON, REPAIR_JSON])
-        service = make_service(db, fake_gitlab, llm)
+        from tests.test_runs_repair import finish_harness, repair_brief, start_and_go, update_diff
 
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
-        await service.handle_command_note(
-            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
-        )
+        llm = FakeLLM(db, script=[PLAN_JSON])
+        service = make_service(db, fake_gitlab, llm)
+        run_id = await start_and_go(service, fake_gitlab)
         first_sha = (await get_run(db, run_id)).candidate_shas[-1]
         seed_failed_pipeline(
             fake_gitlab,
@@ -221,19 +193,27 @@ class TestRepairContextCanary:
             first_sha,
             "E AssertionError: widget count 0 != 1\nexport DEPLOY_TOKEN=glpat-CANARY-SHORT\n",
         )
-
         await service.evaluate_waiting_ci()
-
-        # The repair cycle ran with the failure context — redacted.
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.WAITING_CI.value
-        assert run.commit_cycle == 2
-        repair_prompt = llm.calls_for("implementer")[1]["user"]
-        assert "AssertionError" in repair_prompt  # the diagnostics still flow
-        assert "glpat-" not in repair_prompt
-        assert "9xQeWvG816bUx9EPROMj" not in repair_prompt  # suffix-only
-        assert REDACTED_PLACEHOLDER in repair_prompt
-
-        # The MR repair note (the posted surface) is clean too.
-        (note,) = fake_gitlab.mr_notes_containing("Repair cycle 2")
-        assert "glpat-" not in note["body"]
+        assert run.status == FlowStatus.WAITING_HARNESS.value and run.commit_cycle == 2
+        brief = repair_brief(fake_gitlab)
+        assert "AssertionError" in brief and REDACTED_PLACEHOLDER in brief
+        assert "glpat-" not in brief and "CANARY-SHORT" not in brief
+        run = await finish_harness(
+            service,
+            fake_gitlab,
+            run_id,
+            diff=update_diff("src/app.py", "x = 1\ny = 2\n", "x = 1\nFIXED = True\ny = 2\n"),
+        )
+        assert run.status == FlowStatus.WAITING_CI.value and len(run.candidate_shas) == 2
+        assert len(fake_gitlab.mr_updates) == 1
+        durable = json.dumps(run.evidence)
+        posted = json.dumps(
+            [
+                *fake_gitlab.mr_updates,
+                *fake_gitlab.calls_of("create_issue_note"),
+                *fake_gitlab.calls_of("create_mr_note"),
+            ]
+        )
+        assert "CANARY-SHORT" not in durable + posted
+        assert llm.roles() == ["planner"]  # code ran only in the CI lane

@@ -1664,14 +1664,44 @@ class PRHeadMover(StubPRReviewer):
 
 
 async def drive_to_waiting_ci(db, service: GitHubRunService, fake: FakeGitHub) -> tuple[str, str]:
-    """start_run → /go on the builtin lane → the run parked in waiting_ci.
+    """Dispatch the actual CI lane, collect its artifact and publish its candidate."""
+    from forge.execution.github_actions import artifact_name_for
+    from tests.fixtures.candidate import create_diff
 
-    Returns (run_id, candidate_sha)."""
+    workflow = service._settings.FORGE_GITHUB_HARNESS_WORKFLOW or "forge-harness.yml"
+    fake.files[REPO][".github/workflows/" + workflow] = (
+        "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n    steps: []\n"
+    )
+    service._settings.FORGE_GITHUB_HARNESS_WORKFLOW = workflow
     run_id = await start(service)
     clear_comments(fake)
     await go(service, run_id)
     run = await get_run(db, run_id)
-    assert run.status == FlowStatus.WAITING_CI.value
+    assert run.status == FlowStatus.WAITING_HARNESS.value, run.status_reason
+    assert not run.candidate_shas and not fake.calls_of("create_commit_on_branch")
+    assert any(
+        call[1][1] == ".github/workflows/" + workflow and call[1][-1] == run.base_sha
+        for call in fake.calls_of("get_file")
+    )
+    native = fake.actions_runs[-1]
+    native.update(status="completed", conclusion="success")
+    fake.seed_candidate_artifact(
+        native["id"],
+        name=artifact_name_for(run_id),
+        diff_text=create_diff("forge-demo/verification.md", "verified candidate\n"),
+        meta={
+            "attempt_base": run.base_sha,
+            "run_id": run_id,
+            "driver": "claude-code",
+            "model": service._settings.FORGE_HARNESS_MODEL,
+            "exit": "completed",
+            "usage": {"input_tokens": 500, "output_tokens": 200},
+        },
+    )
+    await service.evaluate_waiting_harness()
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.WAITING_CI.value, run.status_reason
+    assert len(fake.calls_of("create_commit_on_branch")) == 1
     return run_id, run.candidate_shas[-1]
 
 
