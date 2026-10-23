@@ -1,59 +1,37 @@
+"""Legacy ORM retirement preserves the historical tables and constraints."""
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import text, inspect
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from forge.models import AgentRun, Base, ReviewState
+from tests.fixtures.historical_db import historical_engine as historical_engine
 
 
-@pytest.fixture()
-async def db_session():
-    """Create an in-memory SQLite database and yield a session."""
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
+async def test_historical_agent_rows_remain_readable(historical_engine):
+    async with historical_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO agent_runs(project_id,event_type,agent_name,status,created_at) VALUES(1,'note','historical','success','2026-09-01')"
+            )
+        )
+        row = (
+            await connection.execute(
+                text("SELECT agent_name,status FROM agent_runs WHERE project_id=1")
+            )
+        ).one()
+    assert tuple(row) == ("historical", "success")
+
+
+async def test_historical_review_identity_remains_unique(historical_engine):
+    statement = text(
+        "INSERT INTO review_states(project_id,mr_iid,last_reviewed_sha,created_at,updated_at) VALUES(1,7,:sha,'2026-09-01','2026-09-01')"
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        yield session
-
-    await engine.dispose()
+    async with historical_engine.begin() as connection:
+        await connection.execute(statement, {"sha": "a" * 40})
+        with pytest.raises(IntegrityError):
+            await connection.execute(statement, {"sha": "b" * 40})
 
 
-@pytest.mark.asyncio
-async def test_create_and_query_agent_run(db_session: AsyncSession):
-    run = AgentRun(
-        project_id=1,
-        event_type="merge_request",
-        target_iid=42,
-        agent_name="code_review",
-        model_used="strong",
-        input_tokens=500,
-        output_tokens=200,
-        duration_ms=1500,
-        status="success",
-    )
-    db_session.add(run)
-    await db_session.commit()
-
-    result = await db_session.execute(select(AgentRun).where(AgentRun.project_id == 1))
-    fetched = result.scalar_one()
-    assert fetched.agent_name == "code_review"
-    assert fetched.status == "success"
-    assert fetched.target_iid == 42
-
-
-@pytest.mark.asyncio
-async def test_review_state_unique_constraint(db_session: AsyncSession):
-    state1 = ReviewState(project_id=1, mr_iid=10, last_reviewed_sha="abc123")
-    db_session.add(state1)
-    await db_session.commit()
-
-    # Inserting a duplicate (same project_id + mr_iid) should raise
-    state2 = ReviewState(project_id=1, mr_iid=10, last_reviewed_sha="def456")
-    db_session.add(state2)
-    with pytest.raises(IntegrityError):
-        await db_session.commit()
+async def test_retired_tables_still_exist_without_orm_classes(historical_engine):
+    async with historical_engine.connect() as connection:
+        tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    assert {"agent_runs", "review_states", "conversations"} <= tables

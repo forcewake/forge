@@ -7,14 +7,9 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from forge import __version__
-from forge.agents.registry import AgentRegistry
 from forge.config import Settings, get_forge_config
 from forge.database import dispose_engine, get_session_factory, init_db
-from forge.flows.loader import FlowLoader
-from forge.flows.state import FlowStateManager
 from forge.gateway.router import router
-from forge.mcp_client.manager import MCPConnectionManager
-from forge.mcp_client.registry import MCPRegistry
 from forge.utils.logging import setup_logging
 from forge.utils.redis_client import RedisManager
 from forge.worker.queue import TaskQueue
@@ -68,40 +63,15 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — a startup log line never blocks the app
         logger.debug("checkpoint authority state unavailable at startup", exc_info=True)
 
-    # Load agent definitions
-    registry = AgentRegistry(settings.FORGE_AGENTS_DIR)
-    registry.load()
-    app.state.agent_registry = registry
-
     # Initialize Redis + TaskQueue (optional — falls back to BackgroundTasks)
     redis_manager = await RedisManager.from_settings(settings)
     app.state.redis_manager = redis_manager
     if redis_manager is not None:
         app.state.task_queue = TaskQueue(redis_manager, RetryPolicy())
-        app.state.flow_state_mgr = FlowStateManager(redis_manager)
         logger.info("Redis task queue enabled")
     else:
         app.state.task_queue = None
-        app.state.flow_state_mgr = None
         logger.info("Redis not configured — using in-process background tasks")
-
-    # Load flow definitions
-    flow_loader = FlowLoader("agents/flows")
-    flow_loader.load()
-    app.state.flow_loader = flow_loader
-
-    # Initialize MCP client (external MCP server connections)
-    forge_config = app.state.forge_config
-    mcp_registry = MCPRegistry(forge_config.mcp_servers)
-    mcp_manager = MCPConnectionManager(mcp_registry)
-    app.state.mcp_registry = mcp_registry
-    app.state.mcp_manager = mcp_manager
-    if mcp_registry.list_enabled():
-        logger.info(
-            "MCP client configured with %d server(s): %s",
-            len(mcp_registry.list_enabled()),
-            ", ".join(s.name for s in mcp_registry.list_enabled()),
-        )
 
     logger.info(
         "Forge v%s started — database: %s",
@@ -112,8 +82,6 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    if hasattr(app.state, "mcp_manager") and app.state.mcp_manager is not None:
-        await app.state.mcp_manager.close_all()
     if app.state.redis_manager is not None:
         await app.state.redis_manager.close()
     await dispose_engine()  # F26: close pooled connections, not just the cache

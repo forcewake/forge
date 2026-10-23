@@ -4,14 +4,7 @@ import re
 from dataclasses import dataclass
 
 KNOWN_COMMANDS = frozenset(
-    {
-        "/explain",
-        "/review",
-        "/debug",
-        "/security",
-        "/help",
-        "/summarize",
-    }
+    {"/implement", "/go", "/cancel", "/retry", "/status", "/why-blocked", "/reconcile", "/security"}
 )
 
 
@@ -44,8 +37,8 @@ def extract_mention(
         >>> extract_mention("@forge explain this function")
         MentionInfo(... mention_text='explain this function', slash_command=None ...)
 
-        >>> extract_mention("@forge /review focus on error handling")
-        MentionInfo(... slash_command='/review', command_args='focus on error handling' ...)
+        >>> extract_mention("@forge /status current run")
+        MentionInfo(... slash_command='/status', command_args='current run' ...)
 
         >>> extract_mention("Thanks @forge")
         MentionInfo(... is_mention=True, mention_text='' ...)

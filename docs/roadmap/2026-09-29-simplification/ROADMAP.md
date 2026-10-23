@@ -533,6 +533,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P1-12 Remove the Codeward legacy
+- **Status:** implemented locally on 2026-10-23; historical tables and migration versions retained.
 - **Goal:** one path for reactive work.
 - **Work:**
   - Delete `orchestrator/`, `flows/`, `src/forge/agents/`, the top-level

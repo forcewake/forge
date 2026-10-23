@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/forge.db"
     # Redis (optional)
     REDIS_URL: str | None = None
-    FORGE_AGENTS_DIR: str = "agents"
 
     FORGE_MENTION_PATTERN: str = "@forge"
     LOG_LEVEL: str = "INFO"
@@ -130,9 +129,6 @@ class Settings(BaseSettings):
     FORGE_API_READ_TOKEN: SecretStr | None = None
 
     FORGE_GITHUB_TOKEN: SecretStr | None = None
-
-    # Agno telemetry (disabled for self-hosted)
-    AGNO_TELEMETRY: bool = False
 
     # --- GitHub source adapter (ADR-0019 first slice) -----------------------
     # Fail closed: the GitHub webhook ingress is only mounted when enabled AND

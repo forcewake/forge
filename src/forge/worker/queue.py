@@ -21,14 +21,14 @@ class Task:
     """A unit of work to be processed by a worker."""
 
     task_id: str
-    event_type: str  # object_kind value (merge_request, note, pipeline, etc.)
-    event_data: dict  # Pydantic model_dump(mode="json") output
+    event_type: str
+    event_data: dict
     priority: int = 0  # Lower = higher priority (-1 = high, 0 = normal, 1 = low)
     created_at: float = field(default_factory=time.time)
     attempt: int = 0
     max_retries: int = 3
-    task_type: str = "event"  # "event" or "flow_step"
-    metadata: dict = field(default_factory=dict)  # Extra data (e.g. flow_id, step_index)
+    task_type: str = "unknown"  # Only explicitly stamped run commands execute.
+    metadata: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))

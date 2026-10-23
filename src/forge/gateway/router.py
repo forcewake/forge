@@ -37,7 +37,6 @@ from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
 from forge.gateway.validator import is_bot_event, validate_webhook_token
 from forge.gitlab.events import GitLabEvent, IssueEvent, NoteEvent, PipelineEvent
-from forge.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -778,7 +777,7 @@ async def webhook(
     logger.info("Webhook event: %s", event.object_kind, extra=log_extra)
 
     # M1 durable run loop: /implement and /go notes bypass the legacy
-    # orchestrator/flow dispatch entirely (they never need an LLM here).
+    # command dispatch commits durable acceptance without a model call here.
     run_command = _match_run_command(event, settings)
     if run_command is not None:
         if run_command.get("command") == "feature_unavailable":
@@ -830,66 +829,7 @@ async def webhook(
     if isinstance(event, PipelineEvent) and event.object_attributes.status == "failed":
         return unavailable_reply("ci_debug")
 
-    # enqueue to Redis if available
-    task_queue = getattr(request.app.state, "task_queue", None)
-    if task_queue is not None:
-        from forge.worker.tasks import compute_fingerprint, create_task
-
-        fingerprint = compute_fingerprint(event)
-        if await task_queue.is_duplicate(fingerprint):
-            logger.info("Duplicate event suppressed: %s", fingerprint[:16])
-            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
-
-        task = create_task(event)
-        await task_queue.submit(task)
-        return {"status": "accepted", "event": event.object_kind, "queued": True}
-
-    # fallback: in-process background task
-    session_factory = request.app.state.session_factory
-    if session_factory is not None and hasattr(request.app.state, "agent_registry"):
-        orchestrator = Orchestrator(
-            settings=settings,
-            forge_config=request.app.state.forge_config,
-            session_factory=session_factory,
-            registry=request.app.state.agent_registry,
-            mcp_manager=getattr(request.app.state, "mcp_manager", None),
-        )
-        background_tasks.add_task(orchestrator.handle_event, event)
-
-    return {"status": "accepted", "event": event.object_kind}
-
-
-@router.get("/mcp-tools")
-async def list_mcp_tools(request: Request) -> list[dict[str, Any]]:
-    """List all configured external MCP servers and their status."""
-    mcp_manager = getattr(request.app.state, "mcp_manager", None)
-    mcp_registry = getattr(request.app.state, "mcp_registry", None)
-
-    if mcp_registry is None:
-        return []
-
-    result: list[dict[str, Any]] = []
-    for config in mcp_registry.list_enabled():
-        entry: dict[str, Any] = {
-            "server": config.name,
-            "url": config.url,
-            "transport": config.transport,
-            "description": config.description,
-            "status": "unknown",
-        }
-        if mcp_manager is not None:
-            try:
-                mcp = await mcp_manager.get_tools(config.name)
-                if mcp:
-                    entry["status"] = "connected"
-                    entry["tools"] = list(mcp.functions.keys())
-                else:
-                    entry["status"] = "unavailable"
-            except Exception:
-                entry["status"] = "error"
-        result.append(entry)
-
-    return result
+    return {"status": "ignored", "event": event.object_kind, "reason": "no_supported_command"}
 
 
 def _require_api_read_auth(request: Request) -> None:

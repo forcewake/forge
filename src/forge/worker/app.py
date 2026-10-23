@@ -7,16 +7,9 @@ import signal
 import sys
 from uuid import uuid4
 
-from forge.agents.registry import AgentRegistry
 from forge.config import Settings, get_forge_config
 from forge.database import dispose_engine, get_session_factory, init_db
-from forge.flows.loader import FlowLoader
-from forge.flows.runner import FlowRunner
-from forge.flows.state import FlowStateManager
 from forge.gitlab.client import GitLabClient
-from forge.mcp_client.manager import MCPConnectionManager
-from forge.mcp_client.registry import MCPRegistry
-from forge.orchestrator.orchestrator import Orchestrator
 from forge.runs import RunService, execute_run_command, run_reconciler
 from forge.runs.github_service import (
     run_github_harness_reconciler,
@@ -34,7 +27,6 @@ from forge.worker.steps import (
     run_step_reaper,
     run_step_worker,
 )
-from forge.worker.tasks import deserialize_event
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +82,7 @@ async def _execute_run_command_task(
 async def bootstrap():
     """Initialize all dependencies needed by the worker.
 
-    Returns (settings, forge_config, session_factory, registry, task_queue, redis_manager).
+    Returns settings, configuration, sessions, queue and Redis.
     """
     settings = Settings()  # type: ignore[call-arg]
     setup_logging(settings.LOG_LEVEL)
@@ -101,10 +93,6 @@ async def bootstrap():
     await init_db(settings.DATABASE_URL)
     session_factory = get_session_factory(settings.DATABASE_URL)
 
-    # Agent registry
-    registry = AgentRegistry(settings.FORGE_AGENTS_DIR)
-    registry.load()
-
     # Redis (required for worker)
     redis_manager = await RedisManager.from_settings(settings)
     if redis_manager is None:
@@ -113,34 +101,7 @@ async def bootstrap():
 
     task_queue = TaskQueue(redis_manager, RetryPolicy())
 
-    # Flow system
-    flow_loader = FlowLoader(settings.FORGE_AGENTS_DIR.rstrip("/") + "/../agents/flows")
-    flow_loader.load()
-    flow_state_mgr = FlowStateManager(redis_manager)
-    flow_runner = FlowRunner(
-        state_mgr=flow_state_mgr,
-        loader=flow_loader,
-        registry=registry,
-        queue=task_queue,
-        settings=settings,
-        forge_config=forge_config,
-        session_factory=session_factory,
-    )
-
-    # MCP client
-    mcp_registry = MCPRegistry(forge_config.mcp_servers)
-    mcp_manager = MCPConnectionManager(mcp_registry)
-
-    return (
-        settings,
-        forge_config,
-        session_factory,
-        registry,
-        task_queue,
-        redis_manager,
-        flow_runner,
-        mcp_manager,
-    )
+    return settings, forge_config, session_factory, task_queue, redis_manager
 
 
 async def run_worker(
@@ -148,11 +109,8 @@ async def run_worker(
     settings,
     forge_config,
     session_factory,
-    registry,
     task_queue: TaskQueue,
     shutdown_event: asyncio.Event,
-    flow_runner: FlowRunner | None = None,
-    mcp_manager: MCPConnectionManager | None = None,
 ) -> None:
     """Main worker loop: claim tasks, execute, report results."""
     logger.info("Worker %s started", worker_id)
@@ -163,32 +121,16 @@ async def run_worker(
             continue  # Timeout, loop back
 
         try:
-            if task.task_type == "flow_step" and flow_runner is not None:
-                await flow_runner.execute_step(
-                    flow_id=task.metadata["flow_id"],
-                    step_index=task.metadata["step_index"],
-                )
-            elif task.task_type == "run_command":
-                # M1 durable run loop — ADR-0017: executed through the step
-                # runtime (claim → lease + fence → run), never concurrently
-                # with the step worker.
-                await _execute_run_command_task(
-                    settings,
-                    forge_config,
-                    session_factory,
-                    task.metadata,
-                    owner=worker_id,
-                )
-            else:
-                event = deserialize_event(task)
-                orchestrator = Orchestrator(
-                    settings=settings,
-                    forge_config=forge_config,
-                    session_factory=session_factory,
-                    registry=registry,
-                    mcp_manager=mcp_manager,
-                )
-                await orchestrator.handle_event(event)
+            if task.task_type != "run_command":
+                await task_queue.fail(task, "ValidationError: retired_task_type")
+                continue
+            await _execute_run_command_task(
+                settings,
+                forge_config,
+                session_factory,
+                task.metadata,
+                owner=worker_id,
+            )
             await task_queue.complete(task)
         except Exception as e:
             logger.error("Task %s failed: %s", task.task_id, e, exc_info=True)
@@ -247,11 +189,8 @@ async def main() -> None:
         settings,
         forge_config,
         session_factory,
-        registry,
         task_queue,
         redis_manager,
-        flow_runner,
-        mcp_manager,
     ) = await bootstrap()
 
     worker_id = f"worker-{os.getpid()}-{uuid4().hex[:6]}"
@@ -285,7 +224,7 @@ async def main() -> None:
 
     # Run worker, step runtime, reaper, heartbeat, and the run reconciler
     # concurrently (ADR-0017: the step runtime owns run commands; the Redis
-    # queue loop keeps serving the legacy event/flow_step path).
+    # queue carries only accelerators for persisted run commands).
     try:
         await asyncio.gather(
             run_worker(
@@ -293,11 +232,8 @@ async def main() -> None:
                 settings,
                 forge_config,
                 session_factory,
-                registry,
                 task_queue,
                 shutdown_event,
-                flow_runner=flow_runner,
-                mcp_manager=mcp_manager,
             ),
             run_step_worker(
                 session_factory,
@@ -331,7 +267,6 @@ async def main() -> None:
         )
     finally:
         await gitlab.close()
-        await mcp_manager.close_all()
         await redis_manager.close()
         await dispose_engine()  # F26: await engine disposal on shutdown
         logger.info("Worker %s exited cleanly", worker_id)

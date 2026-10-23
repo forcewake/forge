@@ -1,95 +1,44 @@
-from forge.context.redactor import Redactor
+"""Configured bounded evidence redaction; no claim of detecting every secret."""
+
+import pytest
+from forge.config import Settings
+from forge.policy.evidence import EvidencePolicy
 
 
-class TestRedactor:
-    def setup_method(self):
-        self.redactor = Redactor()
+@pytest.mark.parametrize("prefix", ["glpat-", "ghs_", "sk-", "xai-"])
+def test_configured_default_secret_prefixes_are_redacted(prefix):
+    secret = prefix + "fixture-only-secret"
+    value, changed = EvidencePolicy().apply_policy("failure " + secret)
+    assert changed and secret not in value and "[REDACTED:rule]" in value
 
-    def test_clean_text_unchanged(self):
-        text = "def hello():\n    return 'world'\n"
-        assert self.redactor.redact(text) == text
 
-    def test_aws_access_key(self):
-        text = "aws_key = AKIAIOSFODNN7EXAMPLE"
-        result = self.redactor.redact(text)
-        assert "AKIAIOSFODNN7EXAMPLE" not in result
-        assert "[REDACTED aws_key]" in result
+def test_deployment_deny_patterns_and_bounds_are_preserved():
+    settings = Settings(
+        _env_file=None,
+        FORGE_GITLAB_ENABLED=False,
+        FORGE_EVIDENCE_DENY_PATTERNS="vault-, customer-",
+        FORGE_EVIDENCE_MAX_CHARS=64,
+    )
+    policy = EvidencePolicy.from_settings(settings)
+    value, changed = policy.apply_policy("vault-credential customer-key " + "x" * 100)
+    assert changed and len(value) == 64
+    assert "credential" not in value and "customer-key" not in value
 
-    def test_aws_secret_key(self):
-        text = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        result = self.redactor.redact(text)
-        assert "wJalrXUtnFEMI" not in result
-        assert "[REDACTED aws_secret]" in result
 
-    def test_gitlab_pat(self):
-        text = "GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx"
-        result = self.redactor.redact(text)
-        assert "glpat-" not in result
-        assert "[REDACTED gitlab_token]" in result
+def test_redaction_is_idempotent():
+    policy = EvidencePolicy()
+    first, _ = policy.apply_policy("glpat-fixture-key")
+    second, changed = policy.apply_policy(first)
+    assert first == second and not changed
 
-    def test_github_token(self):
-        text = "token = ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
-        result = self.redactor.redact(text)
-        assert "ghp_" not in result
-        assert "[REDACTED github_token]" in result
 
-    def test_generic_sk_token(self):
-        text = "api_key = sk-abcdefghij1234567890xxxx"
-        result = self.redactor.redact(text)
-        assert "sk-abcdefghij" not in result
-        assert "REDACTED" in result
+def test_clean_context_is_unchanged_inside_the_bound():
+    assert EvidencePolicy().apply_policy("ordinary compiler error") == (
+        "ordinary compiler error",
+        False,
+    )
 
-    def test_password_redaction(self):
-        text = "password = super_secret_123"
-        result = self.redactor.redact(text)
-        assert "super_secret_123" not in result
-        assert "[REDACTED password]" in result
 
-    def test_private_key_block(self):
-        text = (
-            "-----BEGIN RSA PRIVATE KEY-----\n"
-            "MIIBogIBAAJBALz...\n"
-            "base64data==\n"
-            "-----END RSA PRIVATE KEY-----\n"
-        )
-        result = self.redactor.redact(text)
-        assert "MIIBogIBAAJBALz" not in result
-        assert "[REDACTED private_key]" in result
-
-    def test_connection_string(self):
-        text = "DATABASE_URL=postgres://admin:s3cret@db.host:5432/mydb"
-        result = self.redactor.redact(text)
-        assert "s3cret" not in result
-        assert "[REDACTED connection_string]" in result
-
-    def test_extra_patterns(self):
-        redactor = Redactor(
-            extra_patterns=[{"name": "internal_key", "pattern": r"INTERNAL-[A-Z]{10,}"}]
-        )
-        text = "key = INTERNAL-ABCDEFGHIJKLMNO"
-        result = redactor.redact(text)
-        assert "INTERNAL-ABCDEFGHIJKLMNO" not in result
-        assert "[REDACTED internal_key]" in result
-
-    def test_entropy_detection(self):
-        # High-entropy string in assignment context
-        text = "SECRET_KEY = a8f3k2m9x7q1w4e6r0t5y8u2i3o7p6"
-        result = self.redactor.redact(text)
-        assert "[REDACTED high-entropy]" in result
-
-    def test_entropy_normal_value_passes(self):
-        # Low-entropy string should not be flagged
-        text = "NAME = aaaaaaaaaaaaaaaa"
-        result = self.redactor.redact(text)
-        assert result == text
-
-    def test_multiple_secrets_in_one_text(self):
-        text = (
-            "GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx\n"
-            "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n"
-            "clean line here\n"
-        )
-        result = self.redactor.redact(text)
-        assert "glpat-" not in result
-        assert "AKIAIOSFODNN7EXAMPLE" not in result
-        assert "clean line here" in result
+def test_truncation_alone_does_not_claim_a_redacted_secret():
+    value, changed = EvidencePolicy(max_chars=20).apply_policy("a" * 200)
+    assert value == "a" * 20 and not changed

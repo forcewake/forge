@@ -42,29 +42,29 @@ class TestExtractMention:
         assert result.is_mention is True
         assert result.mention_text == "explain"
 
-    def test_slash_review(self):
-        result = extract_mention("@forge /review focus on security")
+    def test_slash_status(self):
+        result = extract_mention("@forge /status focus on security")
         assert result.is_mention is True
-        assert result.slash_command == "/review"
+        assert result.slash_command == "/status"
         assert result.command_args == "focus on security"
         assert result.mention_text == "focus on security"
 
-    def test_slash_debug_no_args(self):
-        result = extract_mention("@forge /debug")
+    def test_slash_retry_no_args(self):
+        result = extract_mention("@forge /retry")
         assert result.is_mention is True
-        assert result.slash_command == "/debug"
+        assert result.slash_command == "/retry"
         assert result.command_args is None
 
-    def test_slash_help(self):
-        result = extract_mention("@forge /help")
+    def test_slash_why_blocked(self):
+        result = extract_mention("@forge /why-blocked")
         assert result.is_mention is True
-        assert result.slash_command == "/help"
+        assert result.slash_command == "/why-blocked"
         assert result.command_args is None
 
-    def test_slash_explain(self):
-        result = extract_mention("@forge /explain this function")
+    def test_slash_cancel(self):
+        result = extract_mention("@forge /cancel this function")
         assert result.is_mention is True
-        assert result.slash_command == "/explain"
+        assert result.slash_command == "/cancel"
         assert result.command_args == "this function"
 
     def test_slash_security(self):
@@ -72,15 +72,15 @@ class TestExtractMention:
         assert result.is_mention is True
         assert result.slash_command == "/security"
 
-    def test_slash_summarize(self):
-        result = extract_mention("@forge /summarize the discussion")
+    def test_slash_reconcile(self):
+        result = extract_mention("@forge /reconcile the discussion")
         assert result.is_mention is True
-        assert result.slash_command == "/summarize"
+        assert result.slash_command == "/reconcile"
         assert result.command_args == "the discussion"
 
     def test_slash_command_case_insensitive(self):
-        result = extract_mention("@forge /REVIEW check this")
-        assert result.slash_command == "/review"
+        result = extract_mention("@forge /STATUS check this")
+        assert result.slash_command == "/status"
         assert result.command_args == "check this"
 
     def test_unknown_slash_command_treated_as_text(self):
@@ -100,11 +100,11 @@ class TestExtractMention:
 
     def test_custom_pattern_with_slash(self):
         result = extract_mention(
-            "@forge-bot /review this MR",
+            "@forge-bot /status this MR",
             mention_pattern="@forge-bot",
         )
         assert result.is_mention is True
-        assert result.slash_command == "/review"
+        assert result.slash_command == "/status"
         assert result.command_args == "this MR"
 
     def test_raw_text_preserved(self):
