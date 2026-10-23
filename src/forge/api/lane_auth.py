@@ -44,7 +44,9 @@ class LaneAuthService:
                 settings.FORGE_GITHUB_OIDC_JWKS_URL,
             )
         }
-        gitlab = settings.FORGE_GITLAB_OIDC_ISSUER or settings.GITLAB_URL
+        gitlab = settings.FORGE_GITLAB_OIDC_ISSUER or (
+            settings.GITLAB_URL if settings.FORGE_GITLAB_ENABLED else ""
+        )
         if gitlab:
             authorities["gitlab"] = (
                 gitlab,

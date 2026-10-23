@@ -216,6 +216,8 @@ When a pin breaks:
 | EC-378 | Legacy deletion can lose a safety lesson | Diff context is bounded deterministically and includes the largest patches first | `src/forge/reactive/github_review.py` | `tests/test_context_engine.py::test_context_is_deterministically_largest_first` |
 | EC-379 | Legacy deletion can lose a safety lesson | Application startup must not construct retired agent, YAML-flow or MCP-client registries | `src/forge/main.py` | `tests/test_legacy_retirement.py::test_application_does_not_construct_the_legacy_execution_engine` |
 
+| EC-292 | A disabled legacy HTTP GitLab URL breaks GitHub-only lane startup | The fallback GitLab issuer is configured only while GitLab is enabled; an explicit OIDC issuer remains a deliberate trust root | `src/forge/api/lane_auth.py` | `tests/test_lane_auth.py::test_disabled_legacy_gitlab_url_cannot_break_github_only_authentication` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

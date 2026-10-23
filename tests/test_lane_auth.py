@@ -53,6 +53,7 @@ def settings():
         FORGE_SECRET_KEY=SecretStr("test-session-signing-key-32-bytes-long"),
         FORGE_PUBLIC_URL=PUBLIC,
         GITLAB_URL=GL_ISSUER,
+        FORGE_GITLAB_OIDC_ISSUER=GL_ISSUER,
     )
 
 
@@ -560,3 +561,10 @@ async def test_reusable_workflow_pin_does_not_authorize_another_caller_ref(auth,
         )
     assert not (await service.store.load(pending.identity)).nonce_consumed
     await exchange(service, pending, oidc(signing_key, pending))
+
+
+def test_disabled_legacy_gitlab_url_cannot_break_github_only_authentication(settings):
+    settings.FORGE_GITLAB_OIDC_ISSUER = ""
+    settings.GITLAB_URL = "http://old-disabled-gitlab.invalid"
+    service = LaneAuthService(None, settings)
+    assert set(service.jwks.authorities) == {"github"}
