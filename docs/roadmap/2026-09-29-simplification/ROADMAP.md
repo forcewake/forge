@@ -391,6 +391,9 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P1-06 Remove the closure matrix
+- **Status:** implemented locally on 2026-10-23. The grading module,
+  generated publication and approved drop test are removed; lessons and
+  acceptance boundaries are recorded in the edge-case register.
 - **Goal:** evidence grading is no longer a runtime concern.
 - **Work:** delete `adaptive/closure_matrix.py`,
   `docs/operations/closure-matrix.md` and its tests.

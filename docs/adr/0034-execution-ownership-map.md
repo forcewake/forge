@@ -68,7 +68,7 @@ two spellings of the refused-status classification must agree exactly,
 a mechanical failure on drift in either direction. The evidence-level
 view (implemented / wired / native-executed / customer-accepted) is the
 closure matrix — `src/forge/adaptive/closure_matrix.py`, published at
-`docs/operations/closure-matrix.md` (the seventh capability,
+`historical closure-matrix publication (retired by ADR-0035 P1-06)` (the seventh capability,
 `budget-amendment`, is unchanged by #389 — no new capability was
 invented; the parity rule guards an existing decision).
 

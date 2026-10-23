@@ -123,7 +123,7 @@ The matrix validates against the repository (an evidence path that
 does not exist is a validation failure, so the matrix can never cite
 phantom traces) and renders the honest table per capability — pending
 levels render pending, never proven. It is published at
-`docs/operations/closure-matrix.md` and cross-linked from the
+`historical closure-matrix publication (retired by ADR-0035 P1-06)` and cross-linked from the
 profile-qualification records (the qualification store judges
 PROFILES; the closure matrix judges CAPABILITIES — the two views
 join on the live records but answer different questions).
