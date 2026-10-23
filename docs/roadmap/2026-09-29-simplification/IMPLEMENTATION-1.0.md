@@ -46,6 +46,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-13 deferred features | Implemented; MCP server, scanner/triage and standalone CI-debug removed; historical migration schema preserved and /security refuses explicitly |
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
+| P2-08 contrib drivers | Implemented as explicit opt-in experimental Codex/OpenCode/Grok ports; protocol fakes only, vendor sandbox and live acceptance unperformed |
 | P2-09 exact checkpoints | Implemented; binary/mode/symlink round trips, safe file/directory transitions, matched server limits and acknowledged blob deduplication; corrupt restore halts before writes |
 | P2-11 CI templates | Implemented; GitHub reusable/target workflows and GitLab OIDC job, verified lane-only requirements, frozen checkout and read-only repository authority; local YAML/actionlint validation only |
 | P2-07 Copilot driver | Implemented; pinned native ACP process, explicit token auth, permission boundary and cancellation ledger; real paid smoke unperformed |

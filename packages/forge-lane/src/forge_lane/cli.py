@@ -28,6 +28,10 @@ DRIVERS = {
 
 
 def load_driver(name: str) -> Driver:
+    if name in {"codex", "opencode", "grok"}:
+        from .contrib import require_enabled
+
+        require_enabled()
     try:
         module = importlib.import_module(DRIVERS[name])
         return module.create_driver()

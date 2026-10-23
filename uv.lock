@@ -566,7 +566,7 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "pydantic", specifier = ">=2.13.5,<3" },
 ]
-provides-extras = ["claude"]
+provides-extras = ["claude", "contrib"]
 
 [[package]]
 name = "forge-protocol"
