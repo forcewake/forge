@@ -439,8 +439,8 @@ class ResumeSpec:
         A payload without a ``resume_mode`` is the pre-NEXT-03 command
         (or not a resume spec at all): refused with the honest reason,
         never silently re-read as a fresh resume — the caller routes it
-        to the LABELLED legacy fallback instead
-        (:mod:`forge.adaptive.compat_fixtures` owns that document).
+        to the labelled legacy fallback instead. Historical serialized
+        examples live under tests/fixtures/compat_documents.json.
         """
         if not isinstance(payload, dict) or not payload.get("resume_mode"):
             raise CompositionBoundaryError(

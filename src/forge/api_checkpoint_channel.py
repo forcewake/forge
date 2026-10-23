@@ -975,23 +975,22 @@ class CheckpointStore:
 
     def _load_index(self, work_id: str) -> dict[str, Any]:
         path = self._index_path(work_id)
-        if not path.is_file():
-            return {"work_id": work_id, "checkpoints": []}
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {"work_id": work_id, "checkpoints": []}
-        if not isinstance(document, dict) or not isinstance(document.get("checkpoints"), list):
-            return {"work_id": work_id, "checkpoints": []}
+        except ValueError as exc:
+            raise ValueError(f"checkpoint index for {work_id!r} is unreadable") from exc
+        if (
+            not isinstance(document, dict)
+            or document.get("work_id") != work_id
+            or not isinstance(document.get("checkpoints"), list)
+        ):
+            raise ValueError(f"checkpoint index for {work_id!r} is malformed")
         return document
 
     def _save_index(self, work_id: str, document: dict[str, Any]) -> None:
-        """Write the index atomically — same crash discipline as the blobs.
-
-        Callers hold :meth:`_index_lock` for the read-modify-write this
-        write closes; the rename stays atomic regardless, so even a
-        caller that forgot the lock can never expose torn bytes.
-        """
+        """Atomically save the index while the caller holds its per-work lock."""
         path = self._index_path(work_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tmp-index-")

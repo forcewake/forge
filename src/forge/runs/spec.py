@@ -577,6 +577,12 @@ def load_verified_spec(
         raise SpecInvalid(
             f"spec digest {digest[:12]} is not the gate-approved digest {run_spec_digest[:12]}"
         )
+    if schema_version is not None and (
+        isinstance(schema_version, bool) or not isinstance(schema_version, int)
+    ):
+        raise SpecInvalid("spec schema version must be an integer")
+    if schema_version is not None and schema_version > EXECUTABLE_SPEC_SCHEMA_VERSION:
+        raise SpecInvalid(f"unsupported spec schema v{schema_version}")
     if schema_version is not None and schema_version < EXECUTABLE_SPEC_SCHEMA_VERSION:
         raise SpecLegacy(
             f"re-approval required — legacy spec schema v{schema_version} is not "

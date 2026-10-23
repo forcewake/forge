@@ -1,0 +1,220 @@
+{
+  "attempt_start/v1": {
+    "attempt_base": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "authority_epoch": 3,
+    "context_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+    "envelope_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "legacy": true,
+    "profile_source": "execution_profile",
+    "resume_mode": "required",
+    "subject_key": "github:acme/widgets#99183",
+    "version": 1
+  },
+  "attempt_start/v2": {
+    "attempt_base": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "attempt_ordinal": 3,
+    "authority_epoch": 3,
+    "context_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "continuation_ref_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "envelope_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+    "execution_attempt_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "legacy": false,
+    "profile_source": "execution_profile",
+    "resume_mode": "required",
+    "source_base_oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "subject_key": "github:acme/widgets#99183",
+    "version": 2
+  },
+  "checkpoint_lookup/v1": {
+    "authority": "legacy-http-opt-in",
+    "checkpoint_id": null,
+    "detail": "the legacy opt-in lookup answered no checkpoint (collapsed, as it always did)",
+    "digest": null,
+    "state": "absent"
+  },
+  "checkpoint_lookup/v2": {
+    "authority": "postgres",
+    "checkpoint_id": null,
+    "detail": "the checkpoint authority could not be reached (database outage)",
+    "digest": null,
+    "state": "unavailable"
+  },
+  "checkpoint_metadata/v1": {
+    "checkpoints": [
+      {
+        "checkpoint_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "files": 3,
+        "sequence": 1,
+        "uploaded_at": "2026-09-21T10:00:00+00:00"
+      },
+      {
+        "checkpoint_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "files": 4,
+        "sequence": 2,
+        "uploaded_at": "2026-09-21T11:00:00+00:00"
+      }
+    ],
+    "work_id": "run-77"
+  },
+  "continuation_decision/v1": {
+    "candidate_published": false,
+    "checkpoint_committed": null,
+    "decided_at": "2026-09-22T09:15:00+00:00",
+    "evidence_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "mode": "uncertain",
+    "mode_selected": "uncertain",
+    "no_checkpoint_baseline": false,
+    "operator_discard_requested": false,
+    "prior_mode_selected": null,
+    "reason": "no proof whether a vendor session started and no committed checkpoint is held \u2014 the recoverable state is unknown",
+    "uncertain": true,
+    "vendor_started": null
+  },
+  "continuation_decision/v2": {
+    "candidate_published": false,
+    "checkpoint_committed": true,
+    "checkpoint_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "decided_at": "2026-09-23T14:02:00+00:00",
+    "discard_authorized_by": null,
+    "evidence_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "evidence_version": 2,
+    "mode": "required",
+    "mode_selected": "required",
+    "native_command_id": "gh-delivery-9f2c1a",
+    "native_start_verdict": "dispatched",
+    "no_checkpoint_baseline": false,
+    "operator_discard_requested": false,
+    "prior_mode_selected": null,
+    "reason": "a committed checkpoint exists \u2014 the exact WIP checkpoint is the authorized continuation (the lane's required restore)",
+    "refusal_code": null,
+    "source_attempt": 3,
+    "uncertain": false,
+    "vendor_started": true
+  },
+  "control_command/v1": {
+    "actor_origin": "server_authenticated_human",
+    "actor_ref": "approver@acme",
+    "command_id": "cmd-legacyresume01",
+    "idempotency_key": "resume:run-77:1",
+    "kind": "resume",
+    "payload": {},
+    "schema": "forge.proposal.control-command/1",
+    "sequence": 4,
+    "status": "applied",
+    "work_id": "run-77"
+  },
+  "control_command/v2": {
+    "actor_origin": "server_authenticated_human",
+    "actor_ref": "approver@acme",
+    "command_id": "cmd-resume000002",
+    "idempotency_key": "resume:run-77:2",
+    "kind": "resume",
+    "payload": {
+      "checkpoint_ref": "run-77@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "checkpoint_sequence": 2,
+      "source_oid": "ffffffffffffffffffffffffffffffffffffffff"
+    },
+    "schema": "forge.proposal.control-command/1",
+    "sequence": 5,
+    "status": "applied",
+    "work_id": "run-77"
+  },
+  "run_spec/v1": {
+    "backend_config": {
+      "backend": "builtin",
+      "model": "forge-standard",
+      "target_branch": "main"
+    },
+    "budgets": {
+      "commit_cycles": 3,
+      "harness_timeout": 1800
+    },
+    "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policy_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_base_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "subject": {
+      "issue_iid": 7,
+      "project_id": 42
+    },
+    "task_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "run_spec/v2": {
+    "allowed_paths": [
+      "src/**"
+    ],
+    "backend_config": {
+      "backend": "ci_harness",
+      "budget_class": "standard",
+      "harness": "codex",
+      "harness_fallbacks": [
+        "claude"
+      ],
+      "harness_workflow": "forge-lane.yml",
+      "model": "forge-standard",
+      "selection_reason": "default",
+      "target_branch": "main"
+    },
+    "budgets": {
+      "commit_cycles": 3,
+      "harness_timeout": 1800
+    },
+    "plan_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "policy_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "source_base_oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "subject": {
+      "issue_iid": 12,
+      "project_id": 99183,
+      "provider": "github",
+      "repo_full_name": "acme/widgets"
+    },
+    "task_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "run_spec/v3": {
+    "backend_config": {
+      "backend": "builtin",
+      "budget_class": "standard",
+      "harness": "builtin",
+      "harness_fallbacks": [],
+      "model": "forge-standard",
+      "selection_reason": "default",
+      "target_branch": "main"
+    },
+    "budgets": {
+      "commit_cycles": 3,
+      "harness_timeout": 1800
+    },
+    "execution_profile": {
+      "digest": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "model_route": {
+      "tier": "forge-standard"
+    },
+    "plan": {
+      "digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "files_hint": [
+        "src/app/widgets.py"
+      ],
+      "summary": "Add the widget module plus tests."
+    },
+    "plan_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "policy_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+    "source_base_oid": "ffffffffffffffffffffffffffffffffffffffff",
+    "subject": {
+      "issue_iid": 7,
+      "project_id": 42,
+      "provider": "gitlab"
+    },
+    "task": {
+      "description": "Widgets make the app better.",
+      "digest": "6ed7627bdec6b11bc7f684daa348ac2500939e7eceaa73690d4ea9b6237a9d0a",
+      "title": "Add a widget"
+    },
+    "task_digest": "6ed7627bdec6b11bc7f684daa348ac2500939e7eceaa73690d4ea9b6237a9d0a",
+    "verification": {
+      "required_jobs": [
+        "test"
+      ],
+      "waived_conclusions": []
+    }
+  }
+}

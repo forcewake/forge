@@ -69,10 +69,7 @@ ATTEMPT_START_CONSTRUCTORS: tuple[str, ...] = (
 
 COMPOSED_DISPATCH_ENTRIES: tuple[str, ...] = ("forge.runs.github_service",)
 
-CONTINUATION_MODE_CONSTRUCTION_MODULES: tuple[str, ...] = (
-    "forge.adaptive.compat_fixtures",
-    "forge.adaptive.continuation",
-)
+CONTINUATION_MODE_CONSTRUCTION_MODULES: tuple[str, ...] = ("forge.adaptive.continuation",)
 
 MODE_VOCABULARY_HOME: str = "forge.runs.github_service"
 

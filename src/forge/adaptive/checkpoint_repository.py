@@ -1306,13 +1306,7 @@ class _StoreBackedRepository:
         return await asyncio.to_thread(self._store.pins.list, work_id)
 
     async def read_entry(self, entry: dict[str, Any]) -> tuple[bytes, dict[str, bytes]]:
-        """Serve one entry's manifest + blobs (digest-keyed), verified.
-
-        The mode-agnostic CAS half of the read: blobs are
-        content-addressed filesystem bytes under BOTH contracts, so the
-        verified read is the same call either way. Runs off the event
-        loop — it re-hashes every blob on the way out.
-        """
+        """Re-hash one entry's manifest and blobs off the event loop."""
         return await asyncio.to_thread(self._store.read_checkpoint, entry)
 
     async def read(
@@ -1332,14 +1326,9 @@ class _StoreBackedRepository:
         return manifest_bytes, [blobs[digest] for digest in sorted(blobs)]
 
     async def lookup_outcome(self, work_id: str) -> CheckpointLookupOutcome:
-        """The typed presence lookup, shared by both store-backed
-        authorities (R36-03 — see the protocol method).
+        """Return exact only for readable, digest-verified checkpoint bytes.
 
-        The verified read is deliberate: an ``exact`` answer must mean
-        the checkpoint is not merely INDEXED but READABLE — the decision
-        that pins it would otherwise dispatch a lane at bytes that rot.
-        The re-hash runs off the event loop (a worker thread), the same
-        as every other store read here.
+        Both authorities re-hash off the event loop before granting a pin.
         """
         from forge.api_checkpoint_channel import CheckpointCorruptError
 
@@ -1352,6 +1341,13 @@ class _StoreBackedRepository:
                 LOOKUP_UNAVAILABLE,
                 authority=authority,
                 detail=str(exc),
+                latency_s=time.monotonic() - started,
+            )
+        except (CheckpointCorruptError, ValueError) as exc:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_CORRUPT,
+                authority=authority,
+                detail=f"the checkpoint index for work {work_id!r} is corrupt: {exc}",
                 latency_s=time.monotonic() - started,
             )
         if entry is None:
@@ -1408,13 +1404,7 @@ class _StoreBackedRepository:
         manifest_bytes: bytes,
         blobs: dict[str, bytes],
     ) -> None:
-        """Land the checkpoint under its declared address (see the protocol).
-
-        The declared *checkpoint_id* is checked against the manifest's
-        own content address FIRST — a mismatch refuses before any write
-        — then the landing delegates to :meth:`put_checkpoint` with the
-        sequence the manifest itself declares.
-        """
+        """Verify the manifest address before any write, then land its sequence."""
         actual = hashlib.sha256(manifest_bytes).hexdigest()
         if checkpoint_id != actual:
             raise ValueError(
@@ -1466,7 +1456,12 @@ class FilesystemCheckpointRepository(_StoreBackedRepository):
         return AUTHORITY_FILESYSTEM
 
     async def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._store.entry, work_id, checkpoint_id)
+        try:
+            return await asyncio.to_thread(self._store.entry, work_id, checkpoint_id)
+        except OSError as exc:
+            raise CheckpointRepositoryUnavailable(
+                f"the filesystem checkpoint index cannot be read: {exc}"
+            ) from exc
 
     async def put_checkpoint(
         self,

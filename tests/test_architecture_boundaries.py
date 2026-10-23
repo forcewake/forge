@@ -85,7 +85,7 @@ REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
 )
 REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(REFERENCE_ENTRY_POINTS)
 FIXTURE_MODULES: tuple[str, ...] = tuple(
-    boundary_policy.IMPORT_CONTRACTS["fixture-isolation"]["protected_modules"]
+    boundary_policy.IMPORT_CONTRACTS["fixture-isolation"]["forbidden_modules"]
 )
 
 
@@ -844,7 +844,11 @@ def _check_fixture_isolation(modules: dict[str, _ModuleIndex]) -> list[str]:
     runtime authority."""
     violations: list[str] = []
     for index in modules.values():
-        hits = index.imported_modules() & set(FIXTURE_MODULES)
+        hits = {
+            module
+            for module in index.imported_modules()
+            if any(module == root or module.startswith(root + ".") for root in FIXTURE_MODULES)
+        }
         if hits:
             violations.append(
                 f"{index.module} imports {sorted(hits)} — the fixture modules "
@@ -1652,9 +1656,9 @@ class TestIntentionalViolationTraps:
         modules = _synthetic(
             "forge.runs.fixture_reading_leg",
             "def legacy_document():\n"
-            "    from forge.adaptive.compat_fixtures import compat_inventory\n"
+            "    from tests.fixtures import boundary_policy\n"
             "\n"
-            "    return compat_inventory()\n",
+            "    return boundary_policy\n",
         )
         violations = _check_fixture_isolation(modules)
         assert any(
@@ -2216,7 +2220,7 @@ class TestSyntheticFixtureIsolation:
             "import forge.main\n"
             "import forge.adaptive.wiring\n"
             "import forge.worker.queue\n"
-            "banned = ('forge.adaptive.compat_fixtures', 'forge.adaptive.reference')\n"
+            "banned = ('tests.fixtures', 'forge.adaptive.reference')\n"
             "leaked = sorted(\n"
             "    m for m in sys.modules if m.startswith(banned)\n"
             ")\n"

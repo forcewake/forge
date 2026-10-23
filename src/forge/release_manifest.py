@@ -601,7 +601,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="FND-03",
         capability="blob-reads",
         level="contract_tested",
-        evidence=("tests/test_adaptive_read_guards.py",),
+        evidence=("tests/test_blob_reads.py",),
     ),
     FindingClosure(
         finding="FND-04",
@@ -621,32 +621,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         level="contract_tested",
         evidence=("tests/test_adaptive_mailbox_db.py",),
         note="Runtime control-command deduplication only; the generic helper and its epoch value type are retired.",
-    ),
-    FindingClosure(
-        finding="FND-07",
-        capability="runs/spec-freeze",
-        level="contract_tested",
-        evidence=("tests/test_adaptive_compat.py",),
-    ),
-    FindingClosure(
-        finding="FND-08",
-        capability="durable-failure-injection",
-        level="contract_tested",
-        evidence=("tests/test_adaptive_compat.py",),
-    ),
-    FindingClosure(
-        finding="DSC-EPIC",
-        capability="runs/spec-freeze",
-        level="contract_tested",
-        evidence=(
-            "tests/test_adaptive_checkpointing.py",
-            "tests/test_adaptive_discovery_tools.py",
-            "tests/test_adaptive_project_map.py",
-            "tests/test_adaptive_discovery.py",
-            "tests/test_adaptive_system_manifest.py",
-            "tests/test_adaptive_impact.py",
-        ),
-        note="Discovery and content-addressed checkpoint contracts only; the multi-repository mount API is retired.",
     ),
     FindingClosure(
         finding="PLN-EPIC",

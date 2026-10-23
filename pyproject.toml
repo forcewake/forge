@@ -112,6 +112,7 @@ testpaths = ["tests"]
 # tests/test_import_contract_debt.py counts them).
 [tool.importlinter]
 root_packages = ["forge", "forge_protocol", "forge_lane"]
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "durable does not import runs, adaptive, gateway or integrations"
@@ -139,7 +140,7 @@ id = "authority-repository_identity_checkpoint_lifecycle"
 name = "repository_identity_checkpoint_lifecycle: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.checkpoint_repository", "forge.api_checkpoint_channel"]
-allowed_importers = ["forge.adaptive.checkpoint_migration", "forge.adaptive.checkpoint_repository", "forge.adaptive.compat_fixtures", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
+allowed_importers = ["forge.adaptive.checkpoint_migration", "forge.adaptive.checkpoint_repository", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -147,7 +148,7 @@ id = "authority-continuation_authorization"
 name = "continuation_authorization: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.continuation"]
-allowed_importers = ["forge.adaptive.compat_fixtures", "forge.adaptive.continuation", "forge.runs.github_service", "forge.runs.service"]
+allowed_importers = ["forge.adaptive.continuation", "forge.runs.github_service", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -239,11 +240,11 @@ allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 id = "fixture-isolation"
-name = "production modules do not import qualification fixtures"
-type = "protected"
-protected_modules = ["forge.adaptive.compat_fixtures"]
-allowed_importers = []
-as_packages = false
+name = "production modules do not import test fixtures"
+type = "forbidden"
+source_modules = ["forge", "forge_protocol", "forge_lane"]
+forbidden_modules = ["tests"]
+allow_indirect_imports = true
 
 [tool.uv.workspace]
 members = ["packages/forge-protocol", "packages/forge-lane"]
