@@ -47,6 +47,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-14 dependency diet | Implemented source cleanup; Agno/LiteLLM/MCP/tiktoken and orphan dependencies removed, three distribution dependency checks pass; 13 direct server requirements remain, above the target of ten |
 | P1-13 deferred features | Implemented; MCP server, scanner/triage and standalone CI-debug removed; historical migration schema preserved and /security refuses explicitly |
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
+| P3-01 pure domain | Foundation implemented: closed states, cumulative multi-axis pools, explicit unknown observations and candidate-bound verdicts; candidate/paths/spec extraction in progress; no runtime switch |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
 | P2-08 contrib drivers | Implemented as explicit opt-in experimental Codex/OpenCode/Grok ports; protocol fakes only, vendor sandbox and live acceptance unperformed |
 | P2-09 exact checkpoints | Implemented; binary/mode/symlink round trips, safe file/directory transitions, matched server limits and acknowledged blob deduplication; corrupt restore halts before writes |
@@ -58,6 +59,11 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P2-04 lane HTTP API | Implemented; bounded atomic blobs, dispatch-scoped checkpoints, idempotent candidates/reports, controls and heartbeats; successful model grants encrypted for retry/restart, minting unavailable until gateway integration |
 | P2-03 OIDC sessions | Implemented; trusted issuer/JWKS, exact workflow/job binding, durable global replay receipts and cancellation CAS; local JWT/SQLite and disposable PostgreSQL checks only |
 | P2-02 wire protocol | Implemented; immutable v1 bodies, bound approval/candidate/checkpoint identities, canonical serialization and exported schemas |
+
+The final 1.0 package has one engine, one schema and the new lane API.
+Old services, compatibility shims and fallback execution paths are removed
+at integration; they are not part of the target public API. No owner lab
+database is modified by source implementation.
 
 The owner completed review of all 129 required ledger rows on 2026-10-23,
 keeping existing dispositions. The source ledger hash and confirmation

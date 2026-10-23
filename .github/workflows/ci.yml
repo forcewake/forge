@@ -111,6 +111,9 @@ jobs:
           src/forge/factory src/forge/execution src/forge/integrations
           packages/forge-protocol/src/forge_protocol packages/forge-lane/src/forge_lane
 
+      - name: Mypy (pure domain, strict and blocking)
+        run: uv run mypy --strict src/forge/domain
+
       # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
       # gateway, agents, flows, stores, utils, harness_entry, main,
       # mcp_client, database) still carries ~46 mypy errors. They are

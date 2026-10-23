@@ -256,6 +256,18 @@ type = "forbidden"
 source_modules = ["forge"]
 forbidden_modules = ["forge_lane"]
 
+[[tool.importlinter.contracts]]
+name = "domain never imports server adapters or services"
+type = "forbidden"
+source_modules = ["forge.domain"]
+forbidden_modules = [
+    "forge.adaptive", "forge.api", "forge.config", "forge.database", "forge.doctor",
+    "forge.durable", "forge.execution", "forge.factory", "forge.gateway", "forge.gitlab",
+    "forge.harnesses", "forge.harness_entry", "forge.integrations", "forge.main", "forge.models",
+    "forge.project_config", "forge.reactive", "forge.repository", "forge.runs", "forge.utils",
+    "forge.worker",
+]
+
 [tool.deptry]
 known_first_party = ["forge"]
 
