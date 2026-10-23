@@ -3459,52 +3459,13 @@ class GitHubRunService:
         repair_reason: str | None = None,
         resume_mode: str = LANE_RESUME_MODE_FRESH,
     ) -> None:
-        """Dispatch the harness workflow and park the run in ``waiting_harness``.
+        """Dispatch the frozen CI workflow and park until its candidate arrives.
 
-        ``proposing`` = ensure the factory branch at the frozen attempt base
-        (idempotent 422) → workflow_dispatch with run_id / attempt_base_oid /
-        driver / model inputs → ``waiting_harness`` with the journaled
-        :class:`ActionsHandle` in the run's evidence. The reconciler polls
-        from here — the wait is worker-free, like ``waiting_ci``.
-
-        R13: an exhausted budget (or a spent wall clock) starts no new
-        episode — the dispatch is the only enforcement point a
-        non-intercepted lane has, so it is checked before any I/O.
-
-        A02/R04: the workflow filename, the model input and the dispatched
-        driver come from the digest-verified executable spec (ADR-0023 §6) —
-        never live settings. A missing/tampered spec blocks the run
-        (``spec_invalid``); a legacy v2 spec parks
-        ``spec_legacy: re-approval required``. *driver* overrides the frozen
-        selection for a fallback advance. Called for a fallback the run is
-        already ``waiting_harness`` — it stays parked, only the handle moves
-        (ADR-0004 has no waiting_harness self-loop).
-
-        R32-04: *resume_mode* is the WIP-continuity contract the dispatch
-        SELECTS for the lane (the ``lane_resume_mode`` workflow input; the
-        shipped template maps it onto the driver step's
-        ``FORGE_LANE_RESUME`` env). ``fresh`` (the default — the initial
-        dispatch and a repair cycle that re-implements from the attempt
-        base) restores nothing accidentally; ``required`` (``/retry``, the
-        revival recovery scan) makes the held checkpoint's restore a
-        precondition of the turn; ``restart`` is the operator's explicit
-        discard of the held WIP.
-
-        Q35-07 (the ADR-0029 adoption): this entry is the composition
-        boundary — before any effectful call it composes and asserts the
-        frozen ``AttemptStartSpec`` envelope
-        (:mod:`forge.adaptive.composition_adoption`) from the durable
-        dispatch facts and persists its digest on the run's evidence
-        (``attempt_start``). A construction or boundary refusal parks the
-        run ``blocked(composition_boundary: …)`` naming the exact field,
-        with zero provider calls. R36-06 (#265): the envelope is v2 —
-        the EXECUTION identity is the durable id derived from (run id,
-        attempt ordinal, source base), so two dispatches from the same
-        commit carry distinct execution identities while a repeat
-        delivery of one persisted intent reconstructs the identical
-        authority-bearing envelope; the cancellation epoch is inside the
-        envelope digest, and a checkpoint sequence or command watermark
-        is never accepted on any identity axis.
+        Check the approved spec, continuation, budget and execution capacity
+        before provider effects. Preserve the pinned attempt/checkpoint and
+        cancellation epoch in the composition envelope. Native dispatch is
+        journaled; ambiguous outcomes are discovered before another dispatch.
+        Infrastructure failures do not consume code-repair cycles.
         """
         if resume_mode not in LANE_RESUME_MODES:
             raise ValueError(
@@ -3656,7 +3617,6 @@ class GitHubRunService:
                 run_id[:8],
             )
             return
-
         # Q35-07 (the ADR-0029 adoption): the composition boundary — the
         # frozen AttemptStartSpec envelope EVERY GitHub dispatch constructs
         # and asserts BEFORE any effectful call (branch creation, the
@@ -3849,13 +3809,11 @@ class GitHubRunService:
             forge_run_id=run_id,
             started_at=datetime.now(timezone.utc).isoformat(),
         )
-
         # Intent-first journal for the harness dispatch (ADR-0005).
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(run_id, "harness_start")
             await session.commit()
-
         # Q35-04: the native-start intent marker, keyed for a probe that
         # may run in a FRESH process (owner/repo/workflow + the run-owned
         # branch — only this run's dispatches live on that branch).
@@ -3962,7 +3920,6 @@ class GitHubRunService:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
             return
-
         # Q35-04: the provider answered — attach the native correlation
         # (dispatched_unknown → native_running). Provider-shaped so a
         # fresh process can resolve the occupancy alone.

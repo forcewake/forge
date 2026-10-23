@@ -220,3 +220,18 @@ async def test_planner_cannot_select_a_driver_missing_from_project_ci(db):
     assert run.status == "waiting_approval"
     assert run.evidence["harness_selection"]["harness"] == "claude-code"
     assert run.evidence["harness_selection"]["harness_fallbacks"] == []
+
+
+async def test_frozen_retired_backend_never_dispatches():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from forge.runs.github_service import GitHubRunService
+
+    service = object.__new__(GitHubRunService)
+    service._spec_or_block = AsyncMock(return_value=SimpleNamespace(backend="builtin"))
+    service._refuse_lane = AsyncMock()
+    service._advance_harness = AsyncMock(side_effect=AssertionError("retired execution dispatched"))
+    await service._advance_publish("run", project_id=1, issue_number=1)
+    assert service._refuse_lane.await_args.args[1].code == "lane_not_onboarded"
+    service._advance_harness.assert_not_awaited()

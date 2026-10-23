@@ -76,10 +76,10 @@
   "src/forge/runs/candidate.py": 1000,
   "src/forge/runs/composition.py": 1034,
   "src/forge/runs/execution_profile.py": 1834,
-  "src/forge/runs/github_service.py": 7996,
+  "src/forge/runs/github_service.py": 7953,
   "src/forge/runs/publisher.py": 789,
   "src/forge/runs/revival.py": 1900,
-  "src/forge/runs/service.py": 10964,
+  "src/forge/runs/service.py": 10959,
   "src/forge/worker/steps.py": 1098
  },
  "functions": {
@@ -297,7 +297,7 @@
   "src/forge/runs/execution_profile.py::validate_profile_coherence": 102,
   "src/forge/runs/execution_profile.py::validate_runtime": 128,
   "src/forge/runs/execution_profile.py::verify_network_egress": 89,
-  "src/forge/runs/github_service.py::GitHubRunService._advance_harness": 669,
+  "src/forge/runs/github_service.py::GitHubRunService._advance_harness": 631,
   "src/forge/runs/github_service.py::GitHubRunService._build_run_spec_document": 87,
   "src/forge/runs/github_service.py::GitHubRunService._evaluate_harness_one": 188,
   "src/forge/runs/github_service.py::GitHubRunService._plan_and_publish": 357,

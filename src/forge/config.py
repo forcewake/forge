@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
     )
-
     # GitLab connection. Required while FORGE_GITLAB_ENABLED is true (the
     # default); a GitHub-only deployment sets FORGE_GITLAB_ENABLED=false.
     FORGE_GITLAB_ENABLED: bool = True
@@ -48,17 +47,11 @@ class Settings(BaseSettings):
 
     # LiteLLM proxy
     LITELLM_URL: str = "http://litellm:4000"
-
-    # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/forge.db"
-
     # Redis (optional)
     REDIS_URL: str | None = None
-
-    # Agents
     FORGE_AGENTS_DIR: str = "agents"
 
-    # Behaviour
     FORGE_MENTION_PATTERN: str = "@forge"
     LOG_LEVEL: str = "INFO"
 

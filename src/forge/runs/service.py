@@ -5571,7 +5571,6 @@ class RunService:
             )
             return
         await self._record_spec_drift(project_id, run_id, spec)
-
         # R41-04 (#359): the harness branch cut is the run's COLLABORATION
         # target source branch (resolved before any I/O — a modern round's
         # independent child id must fork nothing). A refused/unresolved
@@ -5579,7 +5578,6 @@ class RunService:
         collaboration_branch = await self._collaboration_branch_or_block(run_id)
         if collaboration_branch is None:
             return
-
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
@@ -5627,7 +5625,6 @@ class RunService:
             # the write authority; the ACTIVE revision is the brief text).
             spec_digest = str(run.spec_digest or "")
             issue_iid_for_notes = run.issue_iid
-
         if resume_mode == LANE_RESUME_MODE_REQUIRED and not continuation_ref_digest:
             # The dispatch-side half of the zero-model-turns contract: a
             # required resume MUST name the exact checkpoint it authorizes
@@ -5646,7 +5643,6 @@ class RunService:
                 "persisted decision's exact checkpoint digest",
             )
             return
-
         # Q39-02 (#321), the GitLab half of the R36-13 (#272) fence: the
         # WIP reuse decision a material revision's activation persisted is
         # a DISPATCH-BOUNDARY fence here too — a checkpoint that revision
@@ -5678,7 +5674,6 @@ class RunService:
                 "wip_reuse_refusal_note",
             )
             return
-
         # Q39-02 (#321) — the rebind: the executor's brief is generated
         # from ONE immutable ApprovedInput resolved from durable state at
         # EVERY dispatch entry (start, retry, revival, repair). The ACTIVE
