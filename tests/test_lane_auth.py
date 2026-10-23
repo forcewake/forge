@@ -156,6 +156,7 @@ def oidc(key, pending, *, changes=None, headers=None, algorithm="RS256"):
         **(
             {
                 "repository": "owner/repo",
+                "ref": "refs/heads/main",
                 "job_workflow_ref": WORKFLOW,
                 "run_id": "100",
                 "run_attempt": "1",
@@ -224,6 +225,7 @@ async def test_signed_exchange_reconnect_and_replay_survive_a_new_service(
         ("github", {"aud": PUBLIC}),
         ("github", {"aud": [PUBLIC]}),
         ("github", {"repository": "other/repo"}),
+        ("github", {"ref": "refs/heads/unapproved"}),
         ("github", {"job_workflow_ref": WORKFLOW.replace("main", "untrusted")}),
         ("github", {"job_workflow_ref": None, "workflow_ref": WORKFLOW}),
         ("github", {"run_id": None}),
@@ -546,3 +548,15 @@ async def test_concurrent_exchange_has_one_durable_winner(auth, settings, signin
             )
         ).all()
         assert len(receipts) == 1
+
+
+async def test_reusable_workflow_pin_does_not_authorize_another_caller_ref(auth, signing_key):
+    service, _, register, _ = auth
+    pending = await register()
+    assert pending.github_caller_ref == "refs/heads/main"
+    with pytest.raises(LaneAuthError, match="caller ref"):
+        await exchange(
+            service, pending, oidc(signing_key, pending, changes={"ref": "refs/heads/attacker"})
+        )
+    assert not (await service.store.load(pending.identity)).nonce_consumed
+    await exchange(service, pending, oidc(signing_key, pending))

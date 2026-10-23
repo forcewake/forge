@@ -185,6 +185,8 @@ When a pin breaks:
 | EC-289 | A session token is reused for a different run, attempt or generation | Short-lived HS256 sessions have an exact identity triple, issuer, audience, protocol and dedicated token type | `src/forge/api/lane_auth.py` | `tests/test_lane_auth.py::test_bearer_exact_identity_and_type_are_verified` |
 | EC-290 | Replay cleanup deletes unrelated durable events or forgets a still-valid receipt | Expiry pruning applies only to expired OIDC JTI rows and retains their allowed clock-skew lifetime | `src/forge/api/lane_auth_store.py` | `tests/test_lane_auth.py::test_replay_expiry_prunes_only_expired_auth_receipts` |
 
+| EC-291 | A pinned reusable workflow can be called from an unapproved ref | Independently require the GitHub caller ref to match the dispatch branch or explicit tag | `src/forge/api/lane_auth.py` | `tests/test_lane_auth.py::test_reusable_workflow_pin_does_not_authorize_another_caller_ref` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

@@ -37,6 +37,7 @@ class PendingDispatch(BaseModel):
     expires_at: AwareDatetime
     cancellation_generation: int = Field(strict=True, ge=0)
     github_workflow_ref: str | None = None
+    github_caller_ref: str | None = None
     github_workflow_claim: Literal["workflow_ref", "job_workflow_ref"] = "job_workflow_ref"
     gitlab_pipeline_id: str | None = None
     provider_run_id: str | None = None

@@ -447,6 +447,9 @@ provider side. Binding works as follows:
   `workflow_ref`. The server never falls back between claims when the
   registered claim is missing. GitHub documents this distinction in its
   [OIDC reference](https://docs.github.com/en/actions/reference/security/oidc).
+  The caller's `ref` must independently match the canonical branch ref
+  (`refs/heads/<branch>`) or explicit tag ref recorded by dispatch. Pinning
+  a reusable workflow's own ref does not authorize a different caller ref.
   On the first successful session,
   the server records `gh_run_id`/`gh_run_attempt` and consumes the nonce
   (single use). Later sessions of the same attempt (reconnects) must

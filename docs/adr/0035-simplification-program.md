@@ -140,6 +140,9 @@ The trusted dispatch composition explicitly chooses one claim name and
 pins its complete workflow path and ref. Missing or mismatched claims
 refuse authentication; there is no fallback to the other claim. Both
 GitHub run id and run attempt remain bound on reconnection.
+The caller `ref` is independently pinned to the dispatch's canonical
+branch ref or explicit tag ref; a reusable workflow pin alone grants no
+authority to run from another caller branch.
 
 Lane sessions use a separate server-only signing key of at least 32 bytes
 and expire after five minutes by default (configurable from 30 to 900

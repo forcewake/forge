@@ -96,6 +96,13 @@ class LaneAuthService:
             not gitlab_pipeline_id or "gitlab" not in self.jwks.authorities
         ):
             raise LaneAuthError("GitLab dispatch requires a configured issuer and pipeline id")
+        caller_ref = dispatch.ref
+        if dispatch.provider == "github":
+            if caller_ref.startswith("refs/"):
+                if not caller_ref.startswith(("refs/heads/", "refs/tags/")):
+                    raise LaneAuthError("GitHub caller ref must be a branch or explicit tag")
+            else:
+                caller_ref = "refs/heads/" + caller_ref
         return await self.store.register(
             PendingDispatch(
                 dispatch=dispatch,
@@ -103,6 +110,7 @@ class LaneAuthService:
                 expires_at=expires_at,
                 cancellation_generation=0,
                 github_workflow_ref=github_workflow_ref,
+                github_caller_ref=caller_ref if dispatch.provider == "github" else None,
                 github_workflow_claim=github_workflow_claim,
                 gitlab_pipeline_id=gitlab_pipeline_id,
             )
@@ -178,8 +186,11 @@ class LaneAuthService:
             if (
                 claims.get("repository") != pending.dispatch.repository
                 or claims.get(pending.github_workflow_claim) != pending.github_workflow_ref
+                or claims.get("ref") != pending.github_caller_ref
             ):
-                raise LaneAuthError("OIDC repository or workflow does not match dispatch")
+                raise LaneAuthError(
+                    "OIDC repository, caller ref or workflow does not match dispatch"
+                )
             return {
                 "provider_run_id": _provider_id(claims, "run_id"),
                 "provider_attempt": _provider_id(claims, "run_attempt"),
