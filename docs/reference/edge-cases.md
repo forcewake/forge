@@ -387,6 +387,14 @@ When a pin breaks:
 
 | EC-785 | Display aliases or equal native IDs cross SCM connection boundaries during neighbor authorization | Require the complete provider/connection/native-id triple in project authorization and catalog keys, and verify all three against the resolved immutable RepoRef | `src/forge/planning/snapshot.py` | `tests/test_planning_ports.py::test_neighbor_connections_remain_distinct_and_mismatched_catalog_identity_refuses` |
 
+| EC-770 | A worker dies between intent, dispatch, provider success and receipt | Resume the committed journal state; adopt a found native outcome and never repeat a known effect | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_crash_boundaries_recover_without_duplicate_write` |
+| EC-771 | A provider call starts before intent commits or while a database transaction remains open | Commit T1 and T2 separately before the call; an independent database write remains possible during external I/O | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_intent_is_committed_before_call_and_no_database_transaction_spans_network` |
+| EC-772 | A lost outcome is automatically retried or inconclusive absence is treated as success | Keep unknown parked until explicit reconciliation; preserve full typed native evidence on adoption | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_unknown_requires_explicit_reconcile_and_preserves_native_outcome` |
+| EC-773 | A negative probe races an earlier call still within its dispatch window | Refuse redispatch until the persisted call window has elapsed and the adapter proves absence | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_early_negative_probe_cannot_redispatch_inflight_call` |
+| EC-774 | A cancelled or expired worker starts a provider effect from an old intent | Repeat the exact lease/attempt/generation/cancellation fence before T2; no call after fence loss | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_lost_fence_after_intent_prevents_any_write` |
+| EC-775 | Cancellation discards a provider outcome already observed by a stale worker | Journal the observed outcome without the dispatch fence; cancellation still prevents new writes | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_late_observation_is_recorded_after_cancellation` |
+| EC-776 | Recovery depends on process-local closures or JSON loses strict Decimal/datetime outcome types | Reconstruct every probe from persisted canonical intent and decode each receipt through its exact JSON schema | `src/forge/engine/effects.py` | `tests/test_engine_effects.py::test_every_write_kind_recovers_from_only_the_persisted_intent` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

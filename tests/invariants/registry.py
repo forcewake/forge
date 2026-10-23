@@ -41,7 +41,11 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         "I3",
         "Intent before effect; unknown outcomes are probed, never retried blindly",
-        ("tests/test_publication_intents.py", "tests/test_failure_injection.py"),
+        (
+            "tests/test_publication_intents.py",
+            "tests/test_failure_injection.py",
+            "tests/test_engine_effects.py",
+        ),
     ),
     Invariant(
         "I4",
@@ -70,7 +74,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         "I7",
         "A killed worker loses no work and duplicates no effect",
-        ("tests/test_failure_injection.py",),
+        ("tests/test_failure_injection.py", "tests/test_engine_effects.py"),
     ),
     Invariant(
         "I8",
