@@ -327,11 +327,14 @@ interpreted by the engine.
 
 **Semantics the ports must not flatten.** The adapters keep these:
 
-- GitLab: the Commits API with settling and negative probes;
-  `ensure_branch` owns branch creation and `start_branch` is never passed
-  (GitLab CE 18.x returns 400).
-- GitHub: GraphQL `createCommitOnBranch` with `expectedHeadOid`; a stale
-  head is a `Conflict`, never retried blindly.
+- GitHub and GitLab: one bounded native Git publisher creates exact validated
+  bytes and modes with the expected head as its only parent. The receive-pack
+  update uses an exact expected-old-ref lease; a stale head is a `Conflict`,
+  never retried blindly. No API-only fallback or merge capability exists.
+  Recovery verifies complete parent/commit trees against the original
+  validated manifest, including unchanged leaves and mode transitions.
+  `ensure_branch` owns branch creation. See ADR-0035's native publication
+  clarification; historical API quirks remain registered with their tests.
 - GitHub: workflow identity is resolved by workflow path, not display
   name. App installation tokens and actor permissions are GitHub-specific.
 - GitLab: pipelines and jobs are normalized; occupancy excludes

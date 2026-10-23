@@ -1220,7 +1220,7 @@ local source deletion or require a dual-engine implementation. See the
   | `ingress.py` | HMAC verification; issue, comment, label, pull request, review comment and `workflow_run` events → `Command`s |
   | `subject.py` | Subject reads |
   | `repo.py` | Tree and blob at sha, marker search |
-  | `write.py` | `createCommitOnBranch` with `expectedHeadOid`, ensure-branch, draft PR ensure-by-head, reviews and replies, `workflow_dispatch` with the single-use nonce input |
+  | `write.py` | Shared native Git publisher with an exact expected-old-ref lease and manifest-bound recovery, ensure-branch, draft PR ensure-by-head, reviews and replies, `workflow_dispatch` with the single-use nonce input |
   | `review.py` | Draft PR lookup, head, feedback listing |
   | `ci.py` | Workflow-run lookup by nonce and path identity; checks for sha |
   | `actor.py` | Collaborator permission plus the approver list |
@@ -1276,8 +1276,9 @@ local source deletion or require a dual-engine implementation. See the
 - **Work:**
   - `ingress.py`: `X-Gitlab-Token`, note, issue, label, merge request and
     pipeline hooks.
-  - `write.py`: Commits API with settling and negative probes.
-    `ensure_branch` owns creation and `start_branch` is never passed.
+  - `write.py`: shared native Git publisher with an exact expected-old-ref
+    lease, manifest-bound recovery, settling and negative probes.
+    `ensure_branch` owns creation; no Commits API fallback is retained.
     Also draft MR, notes and discussions, and pipeline trigger with the
     lane include and variables.
   - `ci.py`: pipelines and jobs normalized; `merge_request_event`

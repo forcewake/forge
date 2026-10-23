@@ -71,8 +71,8 @@ are in the design document; the binding decisions are:
    Provider write methods are reachable only through an `effects` layer
    that journals intent before the call and resolves unknown outcomes by
    probing. This makes I3 structural. Provider-native semantics stay inside
-   the adapters: GitLab settling probes, GitHub `expectedHeadOid` and Azure
-   `oldObjectId`.
+   the adapters: exact native Git ref leases for GitHub and GitLab, settling
+   probes and Azure `oldObjectId` when that provider returns.
 6. **One contract for executor input:** `ApprovedInput`, identified by
    digest.
 7. **The lane talks to the server over one HTTP protocol (v1),
@@ -223,3 +223,34 @@ itself. Historical invariants and applicable edge-case pins are ported to
 these owners. No existing database, provider repository or hosted setting
 is changed by this source decision. Hosted, live and pilot acceptance
 remain separate from local implementation.
+
+## Native Git publication clarification (2026-10-23)
+
+The final GitHub and GitLab adapters publish exact validated blob bytes and
+modes through one bounded native Git implementation. GitHub's GraphQL file
+addition contract does not carry executable or symlink modes; GitLab's file
+action API cannot replace an exact whole-ref compare-and-swap with a branch
+preflight. Neither is retained as a fallback write path.
+
+The publisher constructs Git objects in an isolated temporary object store,
+without checking out or executing repository content. Its new commit has
+exactly the expected SHA as its only parent. A single receive-pack update
+uses `--force-with-lease=refs/heads/<factory-branch>:<expected-sha>`; the
+native receiver compares that old ref under its lock. No default/protected
+branch, merge, tag or unleased force update is available. Scoped credentials,
+trusted endpoints, disabled hooks and redirects, bounded process groups,
+output and disk limits are required. The runtime therefore requires Git.
+
+Recovery receives the original immutable validated candidate from the
+durable effect payload. A marker and expected parent alone cannot establish
+success: the complete native parent and commit trees must match every
+manifest post-image byte hash and mode, preserve every other leaf and apply
+the exact create/delete semantics. A copied marker on a different tree is
+inconclusive. A proven historical commit remains a valid effect receipt
+after a human push; the engine independently refuses continuation on a head
+that differs from that published candidate. This strengthens I2, I3 and I8.
+
+This amends ADR-0001's API-only backend choice and the provider mechanism in
+DESIGN §6.4 and P3-16/P3-19. It preserves the validated ChangeSet boundary,
+snapshot isolation and no-merge capability limits. Native local-server
+proofs do not claim hosted provider acceptance.
