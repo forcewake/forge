@@ -1,7 +1,6 @@
 """Native issue snapshots and bot-owned comment/label recovery observations."""
 
 from datetime import datetime
-from urllib.parse import urlsplit
 
 from forge_protocol import digest
 from pydantic import ValidationError
@@ -22,6 +21,8 @@ from forge.port_values import (
 )
 from forge.providers.github.client import API
 from forge.providers.github.repo import (
+    comment_bound,
+    comment_resource,
     evidence,
     list_doc,
     malformed,
@@ -170,14 +171,10 @@ class GitHubSubject:
                 reason="invalid native comment identity", evidence=evidence("probe_comment_update")
             )
         try:
-            reply = await request(
-                self.api, comment.subject.repo, "issues/comments/" + comment.native_id
-            )
+            reply = await request(self.api, comment.subject.repo, comment_resource(comment))
             row = object_doc(reply.document)
-            issue_path = urlsplit(text(row.get("issue_url"))).path
             if (
-                native_id(row.get("id")) != comment.native_id
-                or not issue_path.endswith(f"/issues/{comment.subject.number}")
+                not comment_bound(comment, row)
                 or not self._owned(row)
                 or digest({"body": text(row.get("body"), empty=True)}) != body_digest
             ):

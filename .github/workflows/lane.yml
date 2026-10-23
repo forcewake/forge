@@ -1,4 +1,5 @@
 name: forge-lane-v1
+run-name: 'forge-lane:${{ fromJSON(inputs.dispatch).forge_run_id }}:${{ fromJSON(inputs.dispatch).attempt }}:${{ fromJSON(inputs.dispatch).generation }}:${{ fromJSON(inputs.dispatch).nonce }}'
 on:
   workflow_call:
     inputs:
@@ -44,7 +45,7 @@ jobs:
           PYDISPATCH
       - uses: actions/checkout@v4
         with:
-          ref: ${{ fromJSON(inputs.dispatch).base_sha }}
+          ref: ${{ fromJSON(inputs.dispatch).repair.candidate_sha || fromJSON(inputs.dispatch).base_sha }}
           persist-credentials: false
       - name: Disable push
         run: git remote set-url --push origin FORBIDDEN

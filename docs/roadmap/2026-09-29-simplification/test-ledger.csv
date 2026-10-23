@@ -166,11 +166,13 @@ tests/test_github_actions_template.py,42,1036,false,false,,,,github,keep,-,
 tests/test_github_client.py,37,807,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_engine_auth.py,6,199,false,true,,edge-case pin,,github,keep,P3-16,Repository-scoped App authority and bounded transport
 tests/test_github_engine_client.py,8,193,false,true,,edge-case pin,,github,keep,P3-16,Native repository routing and explicit HTTP uncertainty
+tests/test_github_engine_ingress.py,7,138,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
 tests/test_github_flow.py,30,708,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_harness.py,18,720,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_reactive_review.py,25,635,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_reads.py,13,438,true,true,,edge-case pin,,github,keep,P3-16,"Frozen Git objects, native bot markers and approver authority"
 tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
+tests/test_github_rest.py,15,489,true,true,,edge-case pin,,github,keep,P3-16,"Native GitHub REST write, recovery and SHA-bound Actions fixtures"
 tests/test_github_runs.py,128,4762,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_webhook.py,45,974,true,false,,invariant evidence; edge-case pin,,github,keep,-,
 tests/test_gitlab_client.py,30,646,true,false,,,,gitlab,port-adapter,P3,

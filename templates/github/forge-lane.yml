@@ -1,4 +1,5 @@
 name: forge-lane
+run-name: 'forge-lane:${{ fromJSON(inputs.dispatch).forge_run_id }}:${{ fromJSON(inputs.dispatch).attempt }}:${{ fromJSON(inputs.dispatch).generation }}:${{ fromJSON(inputs.dispatch).nonce }}'
 on:
   workflow_dispatch:
     inputs:
