@@ -11,6 +11,7 @@ from .checkpoint import Checkpoints
 from .client import LaneClient
 from .driver import Driver, DriverEvent, Session
 from .errors import ExitCode, LaneFailure
+from .trace import Trace
 
 
 @dataclass(frozen=True)
@@ -43,9 +44,11 @@ class Supervisor:
         session: Session,
         checkpoints: Checkpoints,
         timings: Timings,
+        trace: Trace | None = None,
     ):
         self.client, self.driver, self.session = client, driver, session
         self.checkpoints, self.timings = checkpoints, timings
+        self.trace = trace
         self.usage: Usage | None = None
         self.resume_session: str | None = None
         self._stop_lock = asyncio.Lock()
@@ -79,6 +82,8 @@ class Supervisor:
                 raise LaneFailure(
                     ExitCode.DRIVER, "invalid_driver_event", "Driver emitted an invalid event"
                 )
+            if self.trace is not None:
+                self.trace.event(event)
             if event.usage is not None:
                 self.usage = event.usage
             if event.resume_session is not None:

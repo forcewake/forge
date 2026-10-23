@@ -58,3 +58,13 @@ References:
 - <https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server>
 - <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference>
 - <https://agentclientprotocol.com/protocol/v1/tool-calls>
+
+## Trace output
+
+The lane entry point renders normalized driver events with GitHub or GitLab
+folding. Tool results close their groups; assistant prose is bounded and
+suppression is counted. Scoped keys, session credentials and credential-shaped
+values are redacted before output. User text cannot introduce CI workflow
+commands. Unknown usage produces no receipt. A completed driver with an empty
+candidate is displayed as `empty_diff`; log output never grants publication
+authority, and a closed output pipe does not change the execution result.

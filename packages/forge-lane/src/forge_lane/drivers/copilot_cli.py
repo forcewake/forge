@@ -209,6 +209,8 @@ class CopilotSession:
                 content = update.get("content", {})
                 if isinstance(content, dict) and isinstance(content.get("text"), str):
                     self.emit(DriverEvent("message", text=redact(content["text"], self.token)))
+            elif update.get("sessionUpdate") in ("tool_call", "tool_call_update"):
+                self.trace_tool(update)
         elif "id" in frame:
             self.policy_refused = True
             await self.send(
@@ -216,6 +218,23 @@ class CopilotSession:
                     "id": frame["id"],
                     "error": {"code": -32601, "message": "Client capability is not available"},
                 }
+            )
+
+    def trace_tool(self, update: dict[str, Any]) -> None:
+        status = update.get("status")
+        if status in ("completed", "failed"):
+            self.emit(
+                DriverEvent(
+                    "tool_result",
+                    text=redact(str(update.get("title", "tool")), self.token),
+                    is_error=status == "failed",
+                )
+            )
+        elif update.get("sessionUpdate") == "tool_call":
+            self.emit(
+                DriverEvent(
+                    "tool_start", tool_name=redact(str(update.get("title", "tool")), self.token)
+                )
             )
 
     async def permission(self, identity: Any, params: dict[str, Any]) -> None:

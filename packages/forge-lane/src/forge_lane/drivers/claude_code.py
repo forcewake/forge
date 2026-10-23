@@ -191,12 +191,40 @@ class ClaudeSession:
                         )
             else:
                 for block in getattr(message, "content", ()):
+                    self._trace_block(block)
                     text = getattr(block, "text", None)
                     if isinstance(text, str):
                         self._emit(DriverEvent("message", text=redact(text, self.secret)))
         raise LaneFailure(
             ExitCode.DRIVER, "driver_stream_ended", "Claude stream ended without a result"
         )
+
+    def _trace_block(self, block: Any) -> None:
+        name, arguments = getattr(block, "name", None), getattr(block, "input", None)
+        if isinstance(name, str) and isinstance(arguments, dict):
+            hint = arguments.get("file_path", "")
+            self._emit(
+                DriverEvent(
+                    "tool_start",
+                    text=redact(hint if isinstance(hint, str) else "", self.secret),
+                    tool_name=redact(name, self.secret),
+                )
+            )
+        elif isinstance(getattr(block, "tool_use_id", None), str):
+            content = getattr(block, "content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    item["text"]
+                    for item in content
+                    if isinstance(item, dict) and isinstance(item.get("text"), str)
+                )
+            self._emit(
+                DriverEvent(
+                    "tool_result",
+                    text=redact(content if isinstance(content, str) else "", self.secret),
+                    is_error=getattr(block, "is_error", False) is True,
+                )
+            )
 
     def _record_usage(self, message: Any) -> None:
         usage = message.usage

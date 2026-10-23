@@ -12,6 +12,7 @@ from .client import LaneClient
 from .driver import Driver, DriverEnv
 from .errors import ExitCode, LaneFailure
 from .supervisor import Outcome, Supervisor, Timings
+from .trace import Platform, Trace
 from .workspace import Limits, Workspace
 
 
@@ -33,12 +34,15 @@ class Runner:
         *,
         timings: Timings = Timings(),
         limits: Limits = Limits(),
+        trace_platform: Platform | None = None,
     ):
         self.dispatch, self.client, self.driver = dispatch, client, driver
         self.workspace = Workspace(workspace, dispatch.base_sha, limits)
         self.timings = timings
         self.supervisor: Supervisor | None = None
         self.started = monotonic()
+        self.trace_platform = trace_platform
+        self.trace: Trace | None = None
 
     async def execute(self, oidc_token: str) -> RunResult:
         self.started = monotonic()
@@ -103,6 +107,16 @@ class Runner:
             resume if "resume_session" in self.driver.capabilities else None,
             note,
         )
+        if self.trace_platform is not None:
+            self.trace = Trace(
+                self.driver.name,
+                self.dispatch.model,
+                platform=self.trace_platform,
+                secrets=(
+                    grant.key if grant else "",
+                    self.client.token.access_token if self.client.token else "",
+                ),
+            )
         try:
             session = await asyncio.wait_for(
                 self.driver.start(brief, self.workspace.path, env), remaining
@@ -114,7 +128,9 @@ class Runner:
                 "wall_clock_exceeded",
                 "Driver start exceeded wall-clock budget",
             )
-        self.supervisor = Supervisor(self.client, self.driver, session, checkpoints, self.timings)
+        self.supervisor = Supervisor(
+            self.client, self.driver, session, checkpoints, self.timings, self.trace
+        )
         return await self.supervisor.run(
             self.dispatch.timeout_seconds - (monotonic() - self.started)
         )
@@ -152,6 +168,8 @@ class Runner:
                 exc.code, "failed", exc.classification, exc.detail, usage=outcome.usage
             )
             diff_id = None
+        if self.trace is not None:
+            self.trace.finish(outcome.classification, outcome.usage)
         report = LaneReport(
             **self.client.identity,
             approved_digest=self.dispatch.approved_digest,

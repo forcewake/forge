@@ -308,6 +308,10 @@ When a pin breaks:
 | EC-457 | An empty package extra is mistaken for a runtime activation boundary | Contrib modules remain in the wheel and require explicit FORGE_LANE_ENABLE_CONTRIB=1 activation | `packages/forge-lane/src/forge_lane/contrib/__init__.py` | `tests/test_lane_contrib.py::test_contrib_requires_explicit_runtime_activation` |
 | EC-458 | An owner task swallows a process cleanup failure during interrupt | Keep one shielded cleanup task and propagate its failure to interrupt; never emit success before quiescence | `packages/forge-lane/src/forge_lane/contrib/opencode.py`, `grok.py` | `tests/test_lane_contrib.py::test_interrupt_does_not_swallow_process_cleanup_failure` |
 
+| EC-650 | Driver text injects CI workflow commands or exposes lane credentials | Redact exact scoped credentials and credential-shaped values, strip terminal controls, and prefix every untrusted line | `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_untrusted_text_cannot_emit_commands_or_credentials_and_suppression_is_counted` |
+| EC-651 | Missing usage becomes a zero-cost trace receipt | Emit usage only when the driver supplies it and close native folding once | `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_native_groups_have_bounded_redacted_output_and_close_once`, `tests/test_lane_trace.py::test_untrusted_text_cannot_emit_commands_or_credentials_and_suppression_is_counted` |
+| EC-652 | A driver completion trace claims a candidate exists or a broken output pipe fails execution | Render the post-collection classification and keep closed log output outside execution authority | `packages/forge-lane/src/forge_lane/runner.py`, `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_real_runner_trace_reports_empty_diff_instead_of_driver_success`, `tests/test_lane_trace.py::test_closed_log_output_is_not_an_execution_failure` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

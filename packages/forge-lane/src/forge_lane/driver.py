@@ -20,11 +20,13 @@ class DriverEnv:
 
 @dataclass(frozen=True)
 class DriverEvent:
-    kind: Literal["message", "completed", "failed"]
+    kind: Literal["message", "tool_start", "tool_result", "completed", "failed"]
     text: str = ""
     terminal_reason: str = ""
     usage: Usage | None = None
     resume_session: str | None = None
+    tool_name: str = ""
+    is_error: bool = False
 
 
 class Session(Protocol):

@@ -97,7 +97,12 @@ async def run(args: argparse.Namespace) -> int:
         async with httpx.AsyncClient(timeout=30.0) as http:
             token = await oidc_token(dispatch, args.oidc_token_env, http)
             result = await Runner(
-                dispatch, LaneClient(dispatch, http), driver, workspace, timings=timings
+                dispatch,
+                LaneClient(dispatch, http),
+                driver,
+                workspace,
+                timings=timings,
+                trace_platform="actions" if dispatch.provider == "github" else "gitlab",
             ).execute(token)
         print(
             json.dumps(
