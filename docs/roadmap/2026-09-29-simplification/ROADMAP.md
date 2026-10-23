@@ -802,6 +802,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P2-07 The `copilot_cli` driver
+- **Status:** implemented locally on 2026-10-23; real vendor smoke remains unperformed.
 - **Goal:** the first-class Copilot CLI driver.
 - **Work:**
   - Port `adaptive/drivers/copilot_acp.py` to
