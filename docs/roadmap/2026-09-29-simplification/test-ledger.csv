@@ -192,6 +192,7 @@ tests/test_lane_closure.py,38,542,true,false,"P1-07,P1-15",,,lane,drop-with-code
 tests/test_lane_driver.py,120,2359,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_install_contract.py,60,1332,false,false,P1-07,,,lane,drop-with-code,P1-07,
 tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-engine,P3,
+tests/test_lane_runner_v1.py,13,500,false,false,,edge-case pin,,lane,keep,-,
 tests/test_legacy_credential_deadline.py,24,479,true,false,,,,legacy,keep,-,
 tests/test_lineage_view.py,39,1266,true,false,,,,lineage,keep,-,
 tests/test_liveness.py,12,629,true,false,,,,liveness,port-engine,P3,

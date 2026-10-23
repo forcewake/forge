@@ -40,6 +40,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-10 lane-only implementation | Source implemented; builtin execution removed and actual project CI checked before paid work; remaining lifecycle-test ports join engine integration |
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
+| P2-05 lane runner | Implemented; authenticated brief, deadline/control supervisor, exact-WIP checkpoint, independent binary/untracked candidate capture and acknowledged reports; focused checks only |
 | P2-02 wire protocol | Implemented; immutable v1 bodies, bound approval/candidate/checkpoint identities, canonical serialization and exported schemas |
 
 The owner completed review of all 129 required ledger rows on 2026-10-23,

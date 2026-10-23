@@ -755,6 +755,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** L
 
 ### P2-05 Lane runner core
+- **Status:** implemented locally on 2026-10-23; vendor/live smoke is not claimed.
 - **Goal:** `forge-lane run`.
 - **Work:**
   - CLI entry point.

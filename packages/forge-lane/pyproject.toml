@@ -6,6 +6,9 @@ requires-python = ">=3.13"
 license = "BSD-3-Clause"
 dependencies = ["forge-protocol>=0.1.0,<0.2.0", "httpx==0.28.1"]
 
+[project.scripts]
+forge-lane = "forge_lane.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
