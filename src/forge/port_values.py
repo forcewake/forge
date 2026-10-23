@@ -64,7 +64,7 @@ class TaskSnapshot(Value):
 class TreeEntry(Value):
     path: RepoPath
     sha: Sha
-    kind: Literal["blob", "tree"]
+    kind: Literal["blob", "tree", "commit"]
     mode: Literal["100644", "100755", "120000", "040000", "160000"]
     size: Annotated[int, Field(ge=0)] | None = None
 
