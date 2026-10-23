@@ -100,7 +100,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --frozen --all-packages --extra claude
 
       # Blocking since F29: the core packages (durable state machine, runs
       # services, repository, factory agents, execution, integrations) must
