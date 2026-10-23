@@ -49,6 +49,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
 | P3-01 pure domain | Implemented: closed states, exact cumulative multi-axis budgets, immutable candidate/path validation, RunSpec v2, plans and one approved-input contract; 436 focused checks and strict domain typing pass; engine integration follows |
 | P3-02 engine ports | Implemented: immutable native references, read/write and collaborator protocols, full typed probe outcomes, deterministic strict fakes and generated reference; strict typing is blocking |
+| P3-03 engine store | Core implemented: 17 additive table groups, canonical admission, fenced leases, atomic step/successors and monotonic effects; actual SQLite and disposable PostgreSQL checks pass; specialized budget/control/lane repositories follow with their consumers |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
 | P2-08 contrib drivers | Implemented as explicit opt-in experimental Codex/OpenCode/Grok ports; protocol fakes only, vendor sandbox and live acceptance unperformed |
 | P2-09 exact checkpoints | Implemented; binary/mode/symlink round trips, safe file/directory transitions, matched server limits and acknowledged blob deduplication; corrupt restore halts before writes |

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import forge.durable.models  # noqa: F401  (registers the durable tables in metadata)
+import forge.store.models  # noqa: F401  (registers the additive engine tables)
 from forge.migrate import build_alembic_config
 from forge.models.base import Base
 

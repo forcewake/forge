@@ -96,6 +96,25 @@ def main():
         "security_findings",
         "alembic_version",
     } <= tables(path)
+    assert {
+        "eng_runs",
+        "eng_run_specs",
+        "eng_approved_inputs",
+        "eng_gates",
+        "eng_steps",
+        "eng_effects",
+        "eng_candidates",
+        "eng_budget_pools",
+        "eng_budget_reservations",
+        "eng_budget_amendments",
+        "eng_usage",
+        "eng_gateway_keys",
+        "eng_control_commands",
+        "eng_checkpoints",
+        "eng_blobs",
+        "eng_review_rounds",
+        "eng_lane_sessions",
+    } <= tables(path)
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     accepted = check(url)
     assert accepted.returncode == 0, accepted.stderr
