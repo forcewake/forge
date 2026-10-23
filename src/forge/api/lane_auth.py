@@ -5,13 +5,13 @@ from __future__ import annotations
 import hmac
 import secrets
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import jwt
 from forge_protocol import Brief, LaneDispatch, RunIdentity, SessionRequest, SessionToken
 from pydantic import ValidationError
 
-from forge.api.lane_auth_store import (
+from forge.api.lane_auth_values import (
     LaneAuthError,
     LaneAuthStore,
     PendingDispatch,
@@ -156,7 +156,7 @@ class LaneAuthService:
             expires_at=datetime.fromtimestamp(now + self.ttl, timezone.utc),
         )
 
-    async def _oidc_claims(self, token: str, pending: PendingDispatch) -> dict:
+    async def _oidc_claims(self, token: str, pending: PendingDispatch) -> dict[str, Any]:
         header = _header(token, "RS256")
         kid = header.get("kid")
         if not isinstance(kid, str) or not 1 <= len(kid) <= 256:
@@ -189,7 +189,15 @@ class LaneAuthService:
             raise LaneAuthError("OIDC token is invalid") from None
 
     @staticmethod
-    def _binding(claims: dict, pending: PendingDispatch) -> dict[str, str]:
+    def _binding(claims: dict[str, Any], pending: PendingDispatch) -> dict[str, str]:
+        if (
+            pending.repository_id is not None
+            and _provider_id(
+                claims, "repository_id" if pending.dispatch.provider == "github" else "project_id"
+            )
+            != pending.repository_id
+        ):
+            raise LaneAuthError("OIDC native repository identity does not match dispatch")
         if pending.dispatch.provider == "github":
             if (
                 claims.get("repository") != pending.dispatch.repository
@@ -252,7 +260,7 @@ class LaneAuthService:
         return identity
 
 
-def _header(token: str, algorithm: str) -> dict:
+def _header(token: str, algorithm: str) -> dict[str, Any]:
     if len(token) > 32768:
         raise LaneAuthError("lane token is too large")
     try:
@@ -266,7 +274,7 @@ def _header(token: str, algorithm: str) -> dict:
     return header
 
 
-def _numeric_dates(claims: dict) -> None:
+def _numeric_dates(claims: dict[str, Any]) -> None:
     if (
         any(type(claims.get(name)) is not int for name in _DATES)
         or claims["exp"] <= claims["iat"]
@@ -275,7 +283,7 @@ def _numeric_dates(claims: dict) -> None:
         raise LaneAuthError("lane token dates are invalid")
 
 
-def _provider_id(claims: dict, name: str) -> str:
+def _provider_id(claims: dict[str, Any], name: str) -> str:
     value = claims.get(name)
     text = str(value)
     if (

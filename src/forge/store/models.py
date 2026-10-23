@@ -1,5 +1,6 @@
 """Register additive engine tables on the application's one declarative Base."""
 
+from forge.store.inbox_models import EventInbox
 from forge.store.models_budget import (
     EngineBudgetAmendment,
     EngineBudgetPool,
@@ -18,6 +19,7 @@ from forge.store.models_lane import (
 from forge.store.models_runs import EngineApprovedInput, EngineGate, EngineRun, EngineRunSpec
 
 __all__ = [
+    "EventInbox",
     "EngineApprovedInput",
     "EngineBlob",
     "EngineBudgetAmendment",

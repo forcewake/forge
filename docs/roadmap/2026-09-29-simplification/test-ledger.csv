@@ -138,7 +138,8 @@ tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,
 tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
-tests/test_engine_runner.py,17,426,false,true,,edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
+tests/test_engine_lane.py,14,551,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
+tests/test_engine_runner.py,17,426,false,true,,invariant evidence; edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
 tests/test_engine_store.py,14,430,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,
 tests/test_evidence_policy.py,7,219,true,false,,edge-case pin,,evidence,port-engine,P3,
@@ -180,7 +181,7 @@ tests/test_hygiene.py,6,67,false,false,,,,hygiene,keep,-,
 tests/test_implementer.py,7,105,true,false,,edge-case pin,,implementer,port-adapter,P3,
 tests/test_import_contract_debt.py,1,17,false,false,,,,import,keep,-,
 tests/test_inventory_lab.py,24,605,false,false,,,,inventory,keep,-,
-tests/test_lane_auth.py,18,570,true,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_auth.py,18,572,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_checkpoint_v1.py,5,198,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_claude_code.py,11,318,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,

@@ -4,50 +4,26 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Literal, Protocol, cast
+from typing import cast
 
-from forge_protocol import Brief, LaneDispatch, RunIdentity
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
+from forge_protocol import RunIdentity
+from pydantic import ValidationError
 from sqlalchemy import delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from forge.api.lane_auth_values import (
+    LaneAuthError as LaneAuthError,
+    LaneAuthStore as LaneAuthStore,
+    PendingDispatch as PendingDispatch,
+    identity_of as identity_of,
+    replay_hash as replay_hash,
+)
 from forge.durable.inbox import ingest_event, mark_processed
 from forge.durable.models import EventInbox, FlowRun
 
 AUTH_NAMESPACE = "lane_v1_auth"
 _TERMINAL = ("cancelled", "failed", "blocked", "ready_for_human")
-
-
-class LaneAuthError(ValueError):
-    """An authentication request was refused without exposing its credentials."""
-
-
-def identity_of(value: RunIdentity) -> RunIdentity:
-    return RunIdentity(
-        forge_run_id=value.forge_run_id, attempt=value.attempt, generation=value.generation
-    )
-
-
-class PendingDispatch(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    dispatch: LaneDispatch
-    brief: Brief
-    expires_at: AwareDatetime
-    cancellation_generation: int = Field(strict=True, ge=0)
-    github_workflow_ref: str | None = None
-    github_caller_ref: str | None = None
-    github_workflow_claim: Literal["workflow_ref", "job_workflow_ref"] = "job_workflow_ref"
-    gitlab_pipeline_id: str | None = None
-    provider_run_id: str | None = None
-    provider_attempt: str | None = None
-    gitlab_job_id: str | None = None
-    nonce_consumed: bool = False
-
-    @property
-    def identity(self) -> RunIdentity:
-        return identity_of(self.dispatch)
 
 
 def check_current(row: FlowRun | None, identity: RunIdentity) -> PendingDispatch:
@@ -81,20 +57,6 @@ def current_conditions(identity: RunIdentity, cancellation_generation: int) -> t
         auth["dispatch"]["attempt"].as_integer() == identity.attempt,
         auth["dispatch"]["generation"].as_integer() == identity.generation,
     )
-
-
-class LaneAuthStore(Protocol):
-    async def load(self, identity: RunIdentity) -> PendingDispatch: ...
-
-    async def register(self, pending: PendingDispatch) -> PendingDispatch: ...
-
-    async def claim(
-        self, identity: RunIdentity, *, jti_hash: str, expires_at: int, binding: dict[str, str]
-    ) -> PendingDispatch: ...
-
-
-def replay_hash(value: str) -> str:
-    return hashlib.sha256(("lane-oidc-jti:" + value).encode()).hexdigest()
 
 
 class SqlLaneAuthStore:

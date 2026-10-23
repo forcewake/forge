@@ -2,12 +2,13 @@
 
 import base64
 import secrets
+from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from forge_protocol import ModelKeyGrant, RunIdentity, canonical_json
 
-from forge.api.lane_auth_store import identity_of
+from forge.api.lane_auth_values import identity_of
 
 
 class VaultError(ValueError):
@@ -18,7 +19,7 @@ class ModelKeyVault:
     def __init__(self, key: bytes):
         self.cipher = AESGCM(key)
 
-    def seal(self, identity: RunIdentity, grant: ModelKeyGrant) -> dict:
+    def seal(self, identity: RunIdentity, grant: ModelKeyGrant) -> dict[str, Any]:
         body = canonical_json(grant)
         if len(body) > 16384 or identity_of(grant) != identity_of(identity):
             raise VaultError("invalid model grant for lane identity")
@@ -30,7 +31,7 @@ class ModelKeyVault:
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
         }
 
-    def open(self, identity: RunIdentity, record: dict) -> ModelKeyGrant:
+    def open(self, identity: RunIdentity, record: dict[str, Any]) -> ModelKeyGrant:
         try:
             if (
                 set(record) != {"version", "nonce", "ciphertext"}

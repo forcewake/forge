@@ -12,7 +12,7 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
-from forge.api.lane_auth_store import LaneAuthError
+from forge.api.lane_auth_values import LaneAuthError
 
 
 def trusted_https_url(value: str) -> str:

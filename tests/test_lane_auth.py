@@ -166,6 +166,8 @@ def oidc(key, pending, *, changes=None, headers=None, algorithm="RS256"):
             else {"project_path": "owner/repo", "ref": "main", "pipeline_id": "42", "job_id": "123"}
         ),
     }
+    if pending.repository_id is not None:
+        claims["repository_id" if is_gh else "project_id"] = pending.repository_id
     for name, value in (changes or {}).items():
         if value is None:
             claims.pop(name, None)

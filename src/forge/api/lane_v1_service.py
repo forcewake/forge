@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from forge_protocol import (
     CandidateBundle,
@@ -17,13 +18,13 @@ from forge_protocol import (
 )
 
 from forge.api.lane_auth import LaneAuthService
-from forge.api.lane_auth_store import PendingDispatch, identity_of
+from forge.api.lane_auth_values import PendingDispatch, identity_of
 from forge.api.lane_model_key_vault import ModelKeyVault, VaultError
 from forge.api.lane_v1_blobs import LaneBlobStore
-from forge.api.lane_v1_store import (
+from forge.api.lane_v1_values import (
     LaneConflict,
     LaneNotFound,
-    SqlLaneV1Store,
+    LaneV1Store,
     accept_once,
     bind_submission,
     blob_size,
@@ -41,7 +42,7 @@ class LaneV1Service:
     def __init__(
         self,
         auth: LaneAuthService,
-        store: SqlLaneV1Store,
+        store: LaneV1Store,
         blobs: LaneBlobStore,
         *,
         model_key_provider: ModelKeyProvider | None = None,
@@ -68,7 +69,9 @@ class LaneV1Service:
     async def acknowledge(self, identity: RunIdentity, ack: ControlAck) -> ControlAck:
         self.body_identity(identity, ack)
 
-        def apply(pending, state, namespace):
+        def apply(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> ControlAck:
             commands = {raw["command_id"]: raw for raw in state.get("controls", [])}
             command = commands.get(ack.command_id)
             if command is None or command["sequence"] != ack.sequence:
@@ -89,7 +92,9 @@ class LaneV1Service:
         return await self.store.access(identity, apply, write=True)
 
     async def record_blob(self, identity: RunIdentity, digest: str, size: int) -> None:
-        def record(pending, state, namespace):
+        def record(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> None:
             blobs = state.setdefault("blobs", {})
             if state.get("report") is not None and digest not in blobs:
                 raise LaneConflict("dispatch already has a terminal report")
@@ -121,7 +126,9 @@ class LaneV1Service:
                 if len(body) != entry.size_bytes:
                     raise LaneConflict("checkpoint blob size is incorrect")
 
-        def record(pending, state, namespace):
+        def record(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> bool:
             bind_submission(pending, manifest)
             checkpoints = namespace.setdefault("checkpoints", {})
             if state.get("report") is not None and checkpoint_id not in checkpoints:
@@ -140,7 +147,9 @@ class LaneV1Service:
         return await self.store.access(identity, record, write=True)
 
     async def latest_checkpoint(self, identity: RunIdentity) -> CheckpointManifest:
-        def latest(pending, state, namespace):
+        def latest(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> CheckpointManifest:
             key = state.get("latest_checkpoint")
             if key:
                 return CheckpointManifest.model_validate(namespace["checkpoints"][key])
@@ -156,7 +165,9 @@ class LaneV1Service:
         if len(await self.read_blob(identity, candidate.diff_sha256)) != candidate.diff_size_bytes:
             raise LaneConflict("candidate diff size is incorrect")
 
-        def record(pending, state, namespace):
+        def record(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> bool:
             bind_submission(pending, candidate)
             report = state.get("report")
             if report is not None and report.get("candidate_diff_sha256") != candidate.diff_sha256:
@@ -168,7 +179,9 @@ class LaneV1Service:
     async def report(self, identity: RunIdentity, report: LaneReport) -> bool:
         self.body_identity(identity, report)
 
-        def record(pending, state, namespace):
+        def record(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> bool:
             bind_submission(pending, report)
             candidate = state.get("candidate")
             if report.candidate_diff_sha256 is not None and (
@@ -195,7 +208,9 @@ class LaneV1Service:
     async def heartbeat(self, identity: RunIdentity, heartbeat: Heartbeat) -> Heartbeat:
         self.body_identity(identity, heartbeat)
 
-        def record(pending, state, namespace):
+        def record(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> Heartbeat:
             previous = state.get("heartbeat")
             raw = heartbeat.model_dump(mode="json")
             if previous is not None and heartbeat.sequence <= previous["sequence"]:
@@ -210,7 +225,9 @@ class LaneV1Service:
         return await self.store.access(identity, record, write=True)
 
     async def model_key(self, identity: RunIdentity) -> ModelKeyGrant:
-        def reserve(pending, state, namespace):
+        def reserve(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> ModelKeyGrant | PendingDispatch:
             if state.get("report") is not None:
                 raise LaneConflict("dispatch is terminal")
             if state.get("model_key_grant") is not None:
@@ -255,7 +272,9 @@ class LaneV1Service:
         except VaultError:
             raise ModelKeyUnavailable("model gateway returned an invalid attempt grant") from None
 
-        def cache(current, state, namespace):
+        def cache(
+            current: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> None:
             if state.get("report") is not None or not state.get("model_key_requested"):
                 raise LaneConflict("dispatch changed during model key mint")
             state["model_key_grant"] = encrypted

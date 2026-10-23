@@ -24,10 +24,10 @@ from forge_protocol import (
 )
 
 from forge.api.lane_auth import LaneAuthService
-from forge.api.lane_auth_store import LaneAuthError, SqlLaneAuthStore
+from forge.api.lane_auth_values import LaneAuthError
 from forge.api.lane_v1_blobs import BlobError, BlobTooLarge, LaneBlobStore
 from forge.api.lane_v1_service import LaneV1Service, ModelKeyUnavailable
-from forge.api.lane_v1_store import LaneConflict, LaneNotFound, SqlLaneV1Store
+from forge.api.lane_v1_values import LaneConflict, LaneNotFound
 
 
 class LaneRoute(APIRoute):
@@ -177,6 +177,9 @@ async def model_key(who: Identity, lane: Service) -> ModelKeyGrant:
 
 def configure_lane_v1(app: FastAPI) -> None:
     """Compose after database startup; no old shared-secret authentication fallback."""
+    from forge.api.lane_auth_store import SqlLaneAuthStore
+    from forge.api.lane_v1_store import SqlLaneV1Store
+
     settings = app.state.settings
     app.state.lane_v1_service = None
     if not settings.FORGE_SECRET_KEY or not settings.FORGE_PUBLIC_URL:

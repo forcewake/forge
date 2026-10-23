@@ -36,7 +36,7 @@
   "src/forge/candidate_collector.py": 687,
   "src/forge/doctor.py": 842,
   "src/forge/durable/budgets.py": 1178,
-  "src/forge/durable/models.py": 969,
+  "src/forge/durable/models.py": 946,
   "src/forge/execution/github_actions.py": 703,
   "src/forge/gateway/github_webhook.py": 655,
   "src/forge/gateway/router.py": 846,

@@ -24,6 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from forge.models.base import Base
+from forge.store.inbox_models import EventInbox as EventInbox
 
 #: Closed set of flow run lifecycle statuses (ADR-0004, extended by ADR-0015 with
 #: ``waiting_harness``). The linear order and the transition graph live in
@@ -47,7 +48,6 @@ FLOW_STATUSES: tuple[str, ...] = (
     "cancelled",
 )
 
-_INBOX_STATUSES: tuple[str, ...] = ("pending", "processed", "rejected")
 _STEP_STATUSES: tuple[str, ...] = (
     "scheduled",
     "running",
@@ -142,29 +142,6 @@ def _status_check(name: str, values: tuple[str, ...]) -> CheckConstraint:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-class EventInbox(Base):
-    """Durable webhook inbox (ADR-0005)."""
-
-    __tablename__ = "event_inbox"
-    __table_args__ = (_status_check("ck_event_inbox_status", _INBOX_STATUSES),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_event_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True, index=True
-    )
-    project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=_utcnow,
-    )
-    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    handler_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 #: ADR-0017: one active run per (provider, project, issue).

@@ -9,7 +9,7 @@ import yaml
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from forge.repository.changeset import BUILTIN_WRITE_PROFILES
+from forge.domain.paths import BUILTIN_WRITE_PROFILES
 
 
 class Settings(BaseSettings):
