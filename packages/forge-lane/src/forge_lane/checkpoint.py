@@ -3,18 +3,20 @@
 import os
 from pathlib import Path
 
-from forge_protocol import CheckpointManifest, LaneDispatch
+from forge_protocol import CheckpointManifest, LaneDispatch, canonical_json
 
 from .client import LaneClient
 from .errors import ExitCode, LaneFailure
 from .workspace import Workspace
 
 
-def _confined(root: Path, path: str) -> Path:
+def _confined(root: Path, path: str, removed: frozenset[str] = frozenset()) -> Path:
     target = root / path
-    for parent in target.parents:
-        if parent == root:
-            break
+    parent = root
+    for part in Path(path).parts[:-1]:
+        parent /= part
+        if parent.relative_to(root).as_posix() in removed:
+            break  # This ancestor is unlinked before any new entry is written.
         if parent.is_symlink():
             raise LaneFailure(
                 ExitCode.CHECKPOINT, "unsafe_checkpoint", "Checkpoint traverses a symlink"
@@ -28,22 +30,31 @@ class Checkpoints:
         self.client = client
         self.workspace = workspace
         self.sequence = 0
+        self.uploaded: set[str] = set()
 
     async def capture(self, resume_session: str | None = None) -> CheckpointManifest:
         entries, blobs = await self.workspace.capture()
-        for data in blobs.values():
-            await self.client.put_blob(data)
-        self.sequence += 1
         manifest = CheckpointManifest(
             **self.client.identity,
             base_sha=self.dispatch.base_sha,
             approved_digest=self.dispatch.approved_digest,
-            sequence=self.sequence,
+            sequence=self.sequence + 1,
             entries=entries,
             driver=self.dispatch.driver,
             resume_session=resume_session,
         )
+        if len(canonical_json(manifest)) > self.workspace.limits.manifest_bytes:
+            raise LaneFailure(
+                ExitCode.CHECKPOINT,
+                "checkpoint_too_large",
+                "Checkpoint manifest exceeds byte limit",
+            )
+        for identity, data in blobs.items():
+            if identity not in self.uploaded:
+                await self.client.put_blob(data)
+                self.uploaded.add(identity)
         await self.client.checkpoint(manifest)
+        self.sequence = manifest.sequence
         return manifest
 
     async def restore(self) -> tuple[str, str | None]:
@@ -70,6 +81,7 @@ class Checkpoints:
                 ExitCode.CHECKPOINT, "restore_failed", "Checkpoint could not be restored"
             ) from None
         self.sequence = manifest.sequence
+        self.uploaded.update(blobs)
         note = "Restored work in progress:\n" + "\n".join(
             f"{entry.state}: {entry.path}" for entry in manifest.entries
         )
@@ -79,6 +91,7 @@ class Checkpoints:
         limits = self.workspace.limits
         if (
             len(manifest.entries) > limits.entries
+            or len(canonical_json(manifest)) > limits.manifest_bytes
             or sum(entry.size_bytes for entry in manifest.entries) > limits.total_bytes
         ):
             raise LaneFailure(
@@ -86,9 +99,14 @@ class Checkpoints:
             )
         blobs = {}
         paths = {entry.path for entry in manifest.entries if entry.state != "deleted"}
+        removed = frozenset(entry.path for entry in manifest.entries if entry.state == "deleted")
         for entry in manifest.entries:
-            _confined(self.workspace.path, entry.path)
-            if any(
+            _confined(
+                self.workspace.path,
+                entry.path,
+                removed if entry.state != "deleted" else frozenset(),
+            )
+            if entry.state != "deleted" and any(
                 str(parent) in paths for parent in Path(entry.path).parents if str(parent) != "."
             ):
                 raise LaneFailure(
@@ -106,7 +124,12 @@ class Checkpoints:
                         ExitCode.CHECKPOINT, "corrupt_blob", "Checkpoint blob size differs"
                     )
                 if entry.mode == "120000":
-                    target = blobs[entry.sha256].decode("utf-8", errors="strict")
+                    try:
+                        target = blobs[entry.sha256].decode("utf-8", errors="strict")
+                    except UnicodeDecodeError:
+                        raise LaneFailure(
+                            ExitCode.CHECKPOINT, "unsafe_checkpoint", "Invalid symlink target"
+                        ) from None
                     if not target or "\x00" in target:
                         raise LaneFailure(
                             ExitCode.CHECKPOINT, "unsafe_checkpoint", "Invalid symlink target"

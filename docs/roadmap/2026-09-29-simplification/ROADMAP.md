@@ -833,6 +833,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P2-09 Checkpoint format in the lane
+- **Status:** implemented locally on 2026-10-23; real Git tree properties cover all entry states, binary data, modes and file/directory/symlink transitions.
 - **Goal:** exact-WIP resume with one format.
 - **Work:**
   - Capture: walk the workspace against the base; entries record new,

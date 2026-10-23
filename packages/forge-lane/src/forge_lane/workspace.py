@@ -19,7 +19,8 @@ from .errors import ExitCode, LaneFailure
 class Limits:
     blob_bytes: int = 16 * 1024 * 1024
     total_bytes: int = 64 * 1024 * 1024
-    entries: int = 10_000
+    entries: int = 4096
+    manifest_bytes: int = 1024 * 1024
     diff_bytes: int = 16 * 1024 * 1024
 
 

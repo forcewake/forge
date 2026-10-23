@@ -173,6 +173,7 @@ tests/test_implementer.py,7,105,true,false,,edge-case pin,,implementer,port-adap
 tests/test_import_contract_debt.py,1,17,false,false,,,,import,keep,-,
 tests/test_inventory_lab.py,24,605,false,false,,,,inventory,keep,-,
 tests/test_lane_auth.py,18,570,true,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_checkpoint_v1.py,5,198,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_claude_code.py,11,318,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_closure.py,34,458,true,false,P1-15,,,lane,drop-with-code,P1-15,
 tests/test_lane_copilot_cli.py,12,360,false,true,,edge-case pin,,lane,keep,-,

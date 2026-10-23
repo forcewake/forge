@@ -265,6 +265,10 @@ When a pin breaks:
 | EC-481 | A schema precheck can accidentally upgrade or initialize a database | The migration check refuses a fresh schema and leaves an existing current schema unchanged | `src/forge/migrate.py` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
 | EC-482 | Build-time source paths can hide missing release assets | Installed package migrations take precedence over Docker and source checkout paths | `src/forge/migrate.py` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
 
+| EC-560 | A valid checkpoint changes a file or symlink into a directory, or a directory into a file | Validate the planned tree before writes; delete old entries before creating replacements while refusing traversal through surviving symlinks | `packages/forge-lane/src/forge_lane/checkpoint.py` | `tests/test_lane_checkpoint_v1.py::test_random_tree_round_trip_preserves_binary_modes_links_and_all_three_states`, `tests/test_lane_checkpoint_v1.py::test_a_surviving_symlink_cannot_redirect_restore_writes` |
+| EC-561 | The lane uploads blobs for a checkpoint the server cannot accept | Match manifest and entry limits before uploading; record sequence and deduplication only after acknowledgment | `packages/forge-lane/src/forge_lane/checkpoint.py`, `packages/forge-lane/src/forge_lane/workspace.py` | `tests/test_lane_checkpoint_v1.py::test_manifest_limit_refuses_before_any_blob_upload`, `tests/test_lane_checkpoint_v1.py::test_unchanged_blobs_are_uploaded_once_per_generation` |
+| EC-562 | A malformed symlink blob escapes checkpoint classification or starts a partially restored tree | Validate all symlink bytes and every blob before changing any file | `packages/forge-lane/src/forge_lane/checkpoint.py` | `tests/test_lane_checkpoint_v1.py::test_invalid_symlink_blob_is_typed_and_refused_before_any_write` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |
