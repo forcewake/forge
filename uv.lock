@@ -842,11 +842,18 @@ dependencies = [
     { name = "httpx" },
 ]
 
+[package.optional-dependencies]
+claude = [
+    { name = "claude-agent-sdk" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.2.157" },
     { name = "forge-protocol", editable = "packages/forge-protocol" },
     { name = "httpx", specifier = "==0.28.1" },
 ]
+provides-extras = ["claude"]
 
 [[package]]
 name = "forge-protocol"

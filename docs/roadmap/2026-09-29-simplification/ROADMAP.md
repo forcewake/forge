@@ -786,6 +786,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** L
 
 ### P2-06 Driver interface and the `claude_code` driver
+- **Status:** implemented locally on 2026-10-23; real vendor smoke remains unperformed.
 - **Goal:** the first-class Claude Code driver.
 - **Work:**
   - Port `adaptive/drivers/claude_sdk.py` to
