@@ -237,7 +237,7 @@ tests/test_project_config_location.py,5,145,true,false,"P1-12,P1-13",edge-case p
 tests/test_prompts.py,15,148,true,false,P1-12,,,prompts,drop-with-code,P1-12,
 tests/test_protocol_v1.py,5,64,false,true,,,,protocol,keep,-,Protocol v1 wire contract for the separate shipped distribution
 tests/test_provider_namespaces.py,22,829,true,false,,,,provider,port-engine,P3,
-tests/test_provider_retirement.py,4,53,true,false,,,,provider,keep,-,
+tests/test_provider_retirement.py,5,65,true,false,,,,provider,keep,-,
 tests/test_publication_boundary.py,13,494,true,false,,invariant evidence; edge-case pin,,publication,port-adapter,P3,
 tests/test_publication_intents.py,39,1362,true,false,,invariant evidence; edge-case pin,,publication,port-engine,P3,
 tests/test_publisher.py,49,976,true,false,,invariant evidence,,publisher,port-adapter,P3,

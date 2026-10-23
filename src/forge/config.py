@@ -219,6 +219,13 @@ class Settings(BaseSettings):
     # it exists before any planner call; empty configuration refuses the run.
     FORGE_GITHUB_HARNESS_WORKFLOW: str = ""
 
+    # Supported ingress authorization and lane control remain explicit.
+    FORGE_GITHUB_APPROVERS: str = ""
+    FORGE_SECURITY_REMOTE_DISMISS: bool = False
+    FORGE_SECURITY_AUTO_ACCEPT: bool = False
+    FORGE_SECURITY_TRIAGERS: str = ""
+    FORGE_LANE_CONTROL_SECRET: SecretStr | None = None
+
     # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label
     # name matches (case-insensitive) starts the same run command as
     # /implement — the actor is the labeler, so admission still applies.

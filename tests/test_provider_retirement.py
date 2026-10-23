@@ -51,3 +51,15 @@ def test_retired_provider_has_no_ingress():
         ).routes
     }
     assert not any("azure" in route for route in routes)
+
+
+def test_supported_authorization_settings_are_not_retired_with_the_provider():
+    from forge.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        FORGE_GITHUB_APPROVERS="release-owner",
+        FORGE_LANE_CONTROL_SECRET="fixture-control-secret",
+    )
+    assert settings.FORGE_GITHUB_APPROVERS == "release-owner"
+    assert settings.FORGE_LANE_CONTROL_SECRET.get_secret_value() == "fixture-control-secret"
