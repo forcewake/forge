@@ -339,6 +339,10 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-03 Remove the test-only adaptive modules
+- **Status:** cluster A implemented locally: synthetic runtime,
+  work-package coordinator, dedup and snapshots are removed. Retained
+  lessons exercise the actual single-run publisher, mailbox and readiness
+  owners. Reader, topology, verifier and provider clusters follow separately.
 - **Goal:** delete the rest of the 19.4K test-only lines.
 - **Work:**
   - Delete `workpackage_service`, `runtime`, `compat`, `compat_fixtures`,
@@ -351,8 +355,9 @@ run last so that they do not churn code about to be deleted.
     entry points, templates) and for the module name in `ci/`,
     `.github/` and `scripts/`.
   - One PR per 3–4 modules.
-- **Done when:** `scripts/metrics.py` reports 0 test-only modules (except
-  explicit test helpers).
+- **Done when:** all 18 named modules are absent; no additional test-only
+  module is left without a later task; list the remaining explicit
+  P1-04/P1-05/P1-06 modules. Phase 1 still requires zero test-only modules.
 - **Depends:** P1-02
 - **Size:** M
 

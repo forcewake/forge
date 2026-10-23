@@ -180,10 +180,6 @@ class FindingClosure:
 
 
 # --------------------------------------------------------------------------
-# The seeded registry — HONEST state of the tree at manifest inception.
-# Levels are derived from the actual suite (grep which test files cover which
-# capability), not from aspirational prose. tests/test_release_manifest.py
-# holds this file to every pointer below.
 # --------------------------------------------------------------------------
 
 _CI_TEST: Final[tuple[str, ...]] = ("test",)
@@ -623,7 +619,8 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="FND-06",
         capability="durable-failure-injection",
         level="contract_tested",
-        evidence=("tests/test_adaptive_dedup.py",),
+        evidence=("tests/test_adaptive_mailbox_db.py",),
+        note="Runtime control-command deduplication only; the generic helper and its epoch value type are retired.",
     ),
     FindingClosure(
         finding="FND-07",
@@ -642,13 +639,14 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="runs/spec-freeze",
         level="contract_tested",
         evidence=(
-            "tests/test_adaptive_snapshots.py",
+            "tests/test_adaptive_checkpointing.py",
             "tests/test_adaptive_discovery_tools.py",
             "tests/test_adaptive_project_map.py",
             "tests/test_adaptive_discovery.py",
             "tests/test_adaptive_system_manifest.py",
             "tests/test_adaptive_impact.py",
         ),
+        note="Discovery and content-addressed checkpoint contracts only; the multi-repository mount API is retired.",
     ),
     FindingClosure(
         finding="PLN-EPIC",
@@ -667,9 +665,10 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="harness-selection",
         level="contract_tested",
         evidence=(
-            "tests/test_adaptive_runtime.py",
+            "tests/test_lane_driver.py",
             "tests/test_adaptive_adapters.py",
         ),
+        note="Shipped lane and adapter contracts only; the synthetic restart runtime is retired.",
     ),
     FindingClosure(
         finding="MRP-EPIC",

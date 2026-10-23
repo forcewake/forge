@@ -11,8 +11,7 @@ identity in the schema rather than in caller discipline.
 
 Dedup BEFORE any state change (NXT-09): :meth:`PostgresMailbox.submit`
 INSERTs against ``UNIQUE (work_id, dedup_key)`` — a redelivered command
-loses the insert race and READS the winner (first-result-wins, the
-:func:`forge.adaptive.dedup.insert_or_read` semantics), so a duplicate is
+loses the insert race and READS the winner (first-result-wins), so a duplicate is
 refused atomically BEFORE the caller bumps an epoch, spends an iteration,
 or records a pause. The key is WORK-SCOPED: the same provider event
 number in two works is two commands, never a collision.
