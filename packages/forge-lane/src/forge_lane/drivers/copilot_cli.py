@@ -11,6 +11,7 @@ from forge_protocol import Brief
 
 from ..driver import Capability, DriverEnv, DriverEvent
 from ..errors import ExitCode, LaneFailure
+from ..mcp import public_servers, unavailable
 from .claude_policy import FilePolicy, redact
 from .copilot_transport import StdioTransport, Transport
 
@@ -24,7 +25,30 @@ class CopilotCLIDriver:
         self.binary = binary
         self.factory = transport_factory or StdioTransport.spawn
 
+    async def prepare(self, brief: Brief, workspace: Path) -> None:
+        if public_servers(brief.execution_policy):
+            # ACP does not expose a proven required-server readiness/tool inventory.
+            raise unavailable()
+        for path in (
+            ".mcp.json",
+            ".github/mcp.json",
+            ".vscode/mcp.json",
+            ".copilot",
+            ".github/copilot",
+            ".github/hooks",
+            ".github/skills",
+            ".github/agents",
+        ):
+            target = workspace / path
+            if target.exists() or target.is_symlink():
+                raise LaneFailure(
+                    ExitCode.DRIVER,
+                    "repository_driver_config_refused",
+                    "Copilot cannot prove isolation from repository driver configuration",
+                )
+
     async def start(self, brief: Brief, workspace: Path, env: DriverEnv) -> "CopilotSession":
+        await self.prepare(brief, workspace)
         token = os.environ.get("COPILOT_GITHUB_TOKEN", "")
         if not token:
             raise LaneFailure(
@@ -34,6 +58,8 @@ class CopilotCLIDriver:
             )
         config = tempfile.TemporaryDirectory(prefix="forge-copilot-")
         session = CopilotSession(workspace, token, config)
+        spec = brief.frozen_spec
+        session.policy = FilePolicy(workspace, None, scope=spec.write_policy if spec else None)
         try:
             session.transport = await self.factory(
                 self.binary,

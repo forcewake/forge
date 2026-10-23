@@ -18,7 +18,7 @@ from pydantic import (
 
 from .canonical import approved_input_digest, digest
 from .policy import ExecutionPolicy
-from .spec import frozen_execution_policy
+from .spec import FrozenRunSpec, frozen_specification
 
 PROTOCOL: Literal["forge.lane/1"] = "forge.lane/1"
 Text = Annotated[str, Field(strict=True, min_length=1)]
@@ -118,14 +118,19 @@ class Brief(RunIdentity):
         if expected != self.approved_digest:
             raise ValueError("approved input digest mismatch")
         if self.spec_json is not None:
-            self.execution_policy
+            self.frozen_spec
         return self
 
     @property
     def execution_policy(self) -> ExecutionPolicy:
+        spec = self.frozen_spec
+        return spec.execution_policy if spec is not None else ExecutionPolicy()
+
+    @property
+    def frozen_spec(self) -> FrozenRunSpec | None:
         if self.spec_json is None:
-            return ExecutionPolicy()
-        return frozen_execution_policy(
+            return None
+        return frozen_specification(
             self.spec_json,
             spec_digest=self.spec_digest,
             plan_digest=self.plan_digest,

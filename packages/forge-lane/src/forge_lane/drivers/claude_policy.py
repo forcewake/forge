@@ -1,16 +1,27 @@
-"""A fixed file-tool policy until the protocol carries approved typed policy."""
+"""Fixed credential boundaries plus the exact frozen write and MCP grants."""
 
 import os
 import re
 from pathlib import Path
 from typing import Any
 
+from forge_protocol import ExecutionPolicy
+from forge_protocol.spec import FrozenWriteScope
+
+from ..mcp import claude_tools
+from ..write_scope import writable
+
 TOOLS = ("Read", "Write", "Edit")
 DENIED = ("Bash", "Glob", "Grep", "Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit", "Skill")
-PRIVATE_PARTS = frozenset({".git", ".forge", ".github", ".claude", ".ssh", ".aws", ".kube"})
+PRIVATE_PARTS = frozenset(
+    {".git", ".forge", ".github", ".claude", ".copilot", ".ssh", ".aws", ".kube"}
+)
 PRIVATE_NAMES = frozenset(
     {
         ".forge.yml",
+        ".mcp.json",
+        ".gitconfig",
+        ".gitmodules",
         ".gitlab-ci.yml",
         ".git-credentials",
         ".netrc",
@@ -25,12 +36,23 @@ PRIVATE_NAMES = frozenset(
 
 
 class FilePolicy:
-    def __init__(self, workspace: Path, sdk: Any):
+    def __init__(
+        self,
+        workspace: Path,
+        sdk: Any,
+        *,
+        scope: FrozenWriteScope | None = None,
+        execution: ExecutionPolicy = ExecutionPolicy(),
+    ):
         self.workspace = workspace.resolve()
         self.sdk = sdk
         self.denials: set[str] = set()
+        self.scope = scope
+        self.mcp_tools = claude_tools(execution)
 
     def permitted(self, name: str, arguments: dict[str, Any]) -> bool:
+        if name in self.mcp_tools and isinstance(arguments, dict):
+            return True
         if name not in TOOLS or not isinstance(arguments.get("file_path"), str):
             return False
         raw = Path(arguments["file_path"])
@@ -47,6 +69,12 @@ class FilePolicy:
             if any(
                 part.startswith(".env") or part.endswith((".pem", ".key")) or part in PRIVATE_NAMES
                 for part in parts
+            ):
+                return False
+            if (
+                name != "Read"
+                and self.scope is not None
+                and not writable(self.scope, path.as_posix())
             ):
                 return False
         return bool(lexical.parts)

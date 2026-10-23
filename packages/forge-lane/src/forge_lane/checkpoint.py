@@ -89,6 +89,14 @@ class Checkpoints:
 
     async def _verified_blobs(self, manifest: CheckpointManifest) -> dict[str, bytes]:
         limits = self.workspace.limits
+        if self.workspace.write_allowed is not None and any(
+            not self.workspace.write_allowed(entry.path) for entry in manifest.entries
+        ):
+            raise LaneFailure(
+                ExitCode.APPROVAL,
+                "write_policy_refused",
+                "Checkpoint is outside the approved write scope",
+            )
         if (
             len(manifest.entries) > limits.entries
             or len(canonical_json(manifest)) > limits.manifest_bytes

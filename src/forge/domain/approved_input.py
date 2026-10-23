@@ -59,4 +59,8 @@ class ApprovedInput(Value):
     def to_brief(self, identity: RunIdentity, spec: RunSpec2) -> Brief:
         if self != type(self).from_spec(spec):
             raise ValueError("approved input does not match this frozen specification")
-        return Brief(**identity.model_dump(), **self.model_dump(), spec_json=spec.spec_json)
+        return Brief(
+            **identity.model_dump(include={"forge_run_id", "attempt", "generation"}),
+            **self.model_dump(),
+            spec_json=spec.spec_json,
+        )

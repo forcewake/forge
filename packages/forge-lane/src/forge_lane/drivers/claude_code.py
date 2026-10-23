@@ -1,4 +1,4 @@
-"""Claude Agent SDK lifecycle; file tools only, no ambient credentials or MCP."""
+"""Claude Agent SDK lifecycle with frozen file and public HTTPS MCP authority."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -6,10 +6,19 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from forge_protocol import Brief, Usage
 
 from ..driver import Capability, DriverEnv, DriverEvent
 from ..errors import ExitCode, LaneFailure
+from ..mcp import (
+    for_claude,
+    public_servers,
+    unavailable,
+    verify_native_status,
+    verify_public_servers,
+)
 from .claude_policy import DENIED, TOOLS, FilePolicy, child_environment, redact
 from .claude_process import OwnedCLI
 
@@ -19,10 +28,30 @@ class ClaudeCodeDriver:
     capabilities: frozenset[Capability] = frozenset({"interrupt", "steer"})
     requires_model_key = True
 
-    def __init__(self, sdk: Any = None):
+    def __init__(self, sdk: Any = None, *, mcp_transport: httpx.AsyncBaseTransport | None = None):
         self.sdk = sdk
+        self.mcp_transport = mcp_transport
+        self.prepared: tuple[str, Path] | None = None
+
+    async def prepare(self, brief: Brief, workspace: Path) -> None:
+        policy = brief.execution_policy
+        servers = public_servers(policy)
+        for_claude(policy)
+        if servers and self.prepared != (brief.approved_digest, workspace.resolve()):
+            if self.sdk is None:
+                try:
+                    import claude_agent_sdk
+
+                    self.sdk = claude_agent_sdk
+                except ImportError:
+                    raise unavailable() from None
+            if not callable(getattr(self.sdk.ClaudeSDKClient, "get_mcp_status", None)):
+                raise unavailable()
+            await verify_public_servers(policy, transport=self.mcp_transport)
+        self.prepared = (brief.approved_digest, workspace.resolve())
 
     async def start(self, brief: Brief, workspace: Path, env: DriverEnv) -> "ClaudeSession":
+        await self.prepare(brief, workspace)
         grant = env.model_key
         if (
             grant is None
@@ -60,7 +89,13 @@ class ClaudeSession:
         self.sdk, self.brief, self.workspace, self.env = sdk, brief, workspace, env
         self.secret = env.model_key.key if env.model_key is not None else ""
         self.owned = OwnedCLI(sdk)
-        self.policy = FilePolicy(workspace, sdk)
+        spec = brief.frozen_spec
+        self.policy = FilePolicy(
+            workspace,
+            sdk,
+            scope=spec.write_policy if spec else None,
+            execution=brief.execution_policy,
+        )
         self.ready, self.done, self.stopping = asyncio.Event(), asyncio.Event(), asyncio.Event()
         self.queue: asyncio.Queue[DriverEvent | LaneFailure | None] = asyncio.Queue(maxsize=256)
         self.failure: LaneFailure | None = None
@@ -91,7 +126,7 @@ class ClaudeSession:
             permission_mode="default",
             can_use_tool=self.policy.permission,
             hooks={"PreToolUse": [self.sdk.HookMatcher(hooks=[self.policy.pre_tool])]},
-            mcp_servers={},
+            mcp_servers=for_claude(self.brief.execution_policy),
             strict_mcp_config=True,
             setting_sources=[],
             skills=[],
@@ -108,6 +143,10 @@ class ClaudeSession:
         try:
             self.client = self.sdk.ClaudeSDKClient(options=self._options())
             await self.client.connect()
+            if self.brief.execution_policy.mcp_servers:
+                verify_native_status(
+                    self.brief.execution_policy, await self.client.get_mcp_status()
+                )
             prompt = "Approved implementation request:\n" + self.brief.brief_text
             prompt += (
                 "\n\n"
@@ -115,7 +154,7 @@ class ClaudeSession:
                 + "\n\nAvailable workspace files:\n"
                 + self.policy.inventory()
             )
-            prompt += "\nOnly Read, Write and Edit are available. Shell, repository writes, MCP and authority files are denied."
+            prompt += "\nOnly confined file tools and the explicitly approved MCP tools are available. Shell, repository writes and authority files are denied."
             await self.client.query(prompt)
             self.ready.set()
             receive = asyncio.create_task(self._receive())

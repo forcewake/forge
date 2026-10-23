@@ -4,12 +4,47 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from decimal import Decimal
+from typing import Annotated, Any
+
+from pydantic import ConfigDict, Field
 
 from .canonical import canonical_json, digest
-from .policy import ExecutionPolicy
+from .policy import ExecutionPolicy, PolicyValue
 
 MAX_SPEC_BYTES = 1024 * 1024
+
+
+class FrozenWriteScope(PolicyValue):
+    """Transport view of the domain PathPolicy's exact serialized knobs."""
+
+    name: Annotated[str, Field(min_length=1)]
+    denied_paths: tuple[str, ...]
+    denied_prefixes: tuple[str, ...]
+    sensitive_paths: tuple[str, ...]
+    denied_globs: tuple[str, ...]
+    permitted_globs: tuple[str, ...]
+    allowed_globs: tuple[str, ...]
+    deny_lockfiles: bool
+    require_special_approval: bool
+
+
+class FrozenLimits(PolicyValue):
+    usd: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    calls: Annotated[int, Field(ge=0)]
+    tokens: Annotated[int, Field(ge=0)]
+    wallclock_seconds: Annotated[int, Field(gt=0)]
+
+
+class FrozenRunSpec(PolicyValue):
+    """A consumer projection; the raw complete document remains digest-bound."""
+
+    model_config = ConfigDict(extra="ignore")
+    driver: Annotated[str, Field(min_length=1, max_length=64)]
+    model: Annotated[str, Field(min_length=1, max_length=1024)]
+    limits: FrozenLimits
+    write_policy: FrozenWriteScope
+    execution_policy: ExecutionPolicy
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -25,14 +60,14 @@ def _finite_only(value: str) -> None:
     raise ValueError("non-finite number in frozen specification")
 
 
-def frozen_execution_policy(
+def frozen_specification(
     spec_json: str,
     *,
     spec_digest: str,
     plan_digest: str,
     base_sha: str,
     revision: int,
-) -> ExecutionPolicy:
+) -> FrozenRunSpec:
     """Refuse alternate bytes, unknown schemas and mismatched approved artifacts."""
     raw = spec_json.encode("utf-8")
     if len(raw) > MAX_SPEC_BYTES:
@@ -57,4 +92,4 @@ def frozen_execution_policy(
         raise ValueError("frozen specification plan mismatch")
     if not isinstance(document.get("execution_policy"), dict):
         raise ValueError("frozen specification requires an explicit execution policy")
-    return ExecutionPolicy.model_validate_json(canonical_json(document["execution_policy"]))
+    return FrozenRunSpec.model_validate_json(raw)

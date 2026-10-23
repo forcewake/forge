@@ -7,9 +7,11 @@ from time import monotonic
 
 from forge_protocol import CandidateBundle, LaneDispatch, LaneReport
 
+from .approved import prepare_policy
 from .checkpoint import Checkpoints
 from .client import LaneClient
 from .driver import Driver, DriverEnv
+from .drivers.claude_policy import FilePolicy
 from .errors import ExitCode, LaneFailure
 from .supervisor import Outcome, Supervisor, Timings
 from .trace import Platform, Trace
@@ -50,7 +52,12 @@ class Runner:
             await self.client.exchange(oidc_token)
             outcome = await self._execute_approved()
         except LaneFailure as exc:
-            outcome = Outcome(exc.code, "failed", exc.classification, exc.detail)
+            outcome = Outcome(
+                exc.code,
+                "timed_out" if exc.code == ExitCode.DEADLINE else "failed",
+                exc.classification,
+                exc.detail,
+            )
         except asyncio.CancelledError:
             outcome = await self._stop_after_error(
                 Outcome(
@@ -73,6 +80,16 @@ class Runner:
 
     async def _execute_approved(self) -> Outcome:
         brief = await self.client.brief()
+        await prepare_policy(
+            brief,
+            self.dispatch,
+            self.driver,
+            self.workspace.path,
+            timeout=max(0, self.dispatch.timeout_seconds - (monotonic() - self.started)),
+        )
+        spec = brief.frozen_spec
+        policy = FilePolicy(self.workspace.path, None, scope=spec.write_policy if spec else None)
+        self.workspace.write_allowed = lambda path: policy.permitted("Write", {"file_path": path})
         await self.workspace.validate()
         if self.driver.name != self.dispatch.driver or "interrupt" not in self.driver.capabilities:
             raise LaneFailure(

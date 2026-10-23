@@ -117,6 +117,7 @@ class StdioTransport:
             "--no-custom-instructions",
             "--no-ask-user",
             "--disallow-temp-dir",
+            "--secret-env-vars=COPILOT_GITHUB_TOKEN",
         ]
         for tool in ("shell", "url", "memory"):
             argv.append(f"--deny-tool={tool}")

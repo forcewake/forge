@@ -3,7 +3,7 @@
 import asyncio
 import os
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -29,6 +29,7 @@ class Workspace:
         self.path = path.resolve()
         self.base_sha = base_sha
         self.limits = limits
+        self.write_allowed: Callable[[str], bool] | None = None
 
     async def git(self, *arguments: str, index: str | None = None) -> bytes:
         env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -110,6 +111,28 @@ class Workspace:
             index = str(Path(directory) / "index")
             await self.git("read-tree", self.base_sha, index=index)
             await self.git("add", "-A", "--", ".", ":!.forge", index=index)
+            if self.write_allowed is not None:
+                changed = await self.git(
+                    "diff",
+                    "--cached",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    self.base_sha,
+                    index=index,
+                )
+                try:
+                    paths = [
+                        raw.decode("utf-8", errors="strict") for raw in changed.split(b"\0") if raw
+                    ]
+                    if any(not self.write_allowed(path) for path in paths):
+                        raise ValueError("write scope refused")
+                except ValueError:
+                    raise LaneFailure(
+                        ExitCode.APPROVAL,
+                        "write_policy_refused",
+                        "Candidate is outside the approved write scope",
+                    ) from None
             yield index
 
     async def diff(self) -> bytes:

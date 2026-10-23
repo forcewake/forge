@@ -11,6 +11,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 def _no_controls(value: str) -> str:
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError("policy strings cannot contain control characters")
+    if "${" in value:
+        raise ValueError("policy strings cannot interpolate ambient environment variables")
     return value
 
 
