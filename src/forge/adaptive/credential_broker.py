@@ -511,7 +511,7 @@ def _receipt_document(
     ref, the env var, the provider route, the resolved version AND ITS
     KIND (a presence stamp displays as one; R38-04), and the deployment
     policy in force; a broker that smuggles the value into ``extra`` is
-    refused by the allowlist exports (:mod:`forge.adaptive.audit_export`)
+    refused by the allowlist exports (:mod:`forge.adaptive.operator_redaction`)
     and by the dispatch seam's own slot check.
     """
     receipt: dict[str, Any] = {

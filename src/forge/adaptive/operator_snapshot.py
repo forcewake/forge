@@ -1,8 +1,7 @@
 """The authorized snapshot reader (R36-15, R37-02/R37-03) — projection
 inputs from live rows.
 
-The pure projection (:mod:`forge.adaptive.operator_view`) and the export
-pack (:mod:`forge.adaptive.support_bundle`) are shapes over durable rows;
+The pure projection (:mod:`forge.adaptive.operator_view`) is a shape over durable rows;
 this module is the ONE subject-scoped async reader that assembles those
 rows from the durable authorities — the run row, the initial execution
 synthesized from it, the revival-attempt records, the control commands
@@ -22,8 +21,7 @@ artificial GitHub-column population) followed by an EXACT canonical
 match that also compares the recorded connection. A display name is
 presentation-only: the same full name on two connections, or the same
 name across provider families, is two different subjects, and a grant
-for one never selects the other's runs on the list, detail or
-support-bundle path (pinned by tests). Out-of-scope and unknown are the
+for one never selects the other's runs on the list or detail path (pinned by tests). Out-of-scope and unknown are the
 same answer (``None`` / an absent page entry). Listing is BOUNDED: the
 candidate query runs with a LIMIT window, the page fills from in-scope
 members only, and per-run section reads (the expensive checkpoint /
@@ -61,9 +59,8 @@ effects, open leases) are read whole up to :data:`MAX_PENDING_ROWS`.
 Every windowed section records its authority ``total_count`` and whether
 the window cut anything, and no method ever reads artifact BYTES —
 checkpoints surface their content-addressed digest only.
-``section_limit = None`` is the explicit full-history opt-in the
-support-bundle export uses (evidence completeness, bounded at the EXPORT
-by the byte cap instead).
+``section_limit = None`` is an explicit internal full-history read. The
+operator HTTP routes always pass a bounded window.
 
 The documented row mappings (durable column → view shape):
 
@@ -463,7 +460,7 @@ MAX_PAGE_SIZE: int = 200
 #: deliveries / publications / approvals / leases keep the LAST K, and
 #: every bounded section reports its ``total_count`` so an operator sees
 #: how much history exists beyond the window. ``None`` (the explicit
-#: full-evidence opt-in the support-bundle export uses) reads everything.
+#: explicit internal full-history read) reads everything.
 DEFAULT_SECTION_LIMIT: int = 20
 MAX_SECTION_LIMIT: int = 100
 
@@ -580,7 +577,7 @@ class OperatorSnapshot:
     ``section_totals`` says how many rows each windowed section holds in
     the AUTHORITY, ``section_truncated`` whether the window cut any, and
     ``section_limit`` the window size served (``None`` = the full-history
-    read the support-bundle export asks for).
+    internal read).
     """
 
     run_id: str

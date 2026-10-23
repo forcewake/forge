@@ -17,13 +17,10 @@ from tests.fixtures.operator_http import (
 )
 
 
-@pytest.mark.parametrize("suffix", ["", "/support-bundle"])
-async def test_a_foreign_run_is_indistinguishable_from_a_missing_run(
-    operator_app, operator_client, suffix
-):
+async def test_a_foreign_run_is_indistinguishable_from_a_missing_run(operator_app, operator_client):
     run_id = "a" * 32
     params, headers = scope()
-    path = f"/operator/runs/{run_id}{suffix}"
+    path = f"/operator/runs/{run_id}"
     absent = await operator_client.get(path, params=params, headers=headers)
     await seed_run(operator_app, run_id, subject=SUBJECT_B)
     denied = await operator_client.get(path, params=params, headers=headers)

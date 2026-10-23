@@ -241,15 +241,13 @@ async def test_an_empty_scope_sees_nothing(session_factory):
 async def test_the_bundle_path_is_scoped_too(session_factory):
     """The support bundle builds from the SAME scoped snapshot — a B run
     under an A scope never reaches SupportBundle at all."""
-    from forge.adaptive.support_bundle import SupportBundle
 
     await _seed(session_factory, _run(RUN_A, REPO_A), _run(RUN_B, REPO_B))
     reader = _reader(session_factory)
 
     snapshot = await reader.snapshot(RUN_A, [SUBJECT_A])
     assert snapshot is not None
-    bundle = SupportBundle.build(RUN_A, snapshot.rows, now=NOW)
-    assert bundle.run_id == RUN_A
+    assert snapshot.projection().run_id == RUN_A
 
     assert await reader.snapshot(RUN_B, [SUBJECT_A]) is None
 
@@ -478,7 +476,6 @@ async def test_at04_current_projection_after_historical_resume_and_verification(
     passed. CP-B shows NO borrowed activation; attempt 1 keeps its
     generation; B is unverified (A's pass is historical); the support
     bundle built from the SAME rows agrees with the status."""
-    from forge.adaptive.support_bundle import SupportBundle
 
     cp_a, cp_b = "a" * 64, "b" * 64
     cand_a, cand_b = "a" * 40, "b" * 40
@@ -554,12 +551,8 @@ async def test_at04_current_projection_after_historical_resume_and_verification(
     assert projection.identity["active_candidate"] == cand_b
     assert [entry["candidate_sha"] for entry in projection.verification_history] == [cand_a]
     assert [entry["verdict"] for entry in projection.verification_history] == ["historical_pass"]
-    # the bundle agrees with the status view on the current identities
-    bundle = SupportBundle.build(RUN_A, snapshot.rows, now=NOW)
-    assert bundle.projection["state"] == projection.state
-    assert bundle.projection["identity"]["active_candidate"] == cand_b
-    assert bundle.verifications[0]["candidate_sha"] == cand_a
-    assert bundle.checkpoints[0]["activated_at"] == ""
+    assert snapshot.rows["verifications"][0]["candidate_sha"] == cand_a
+    assert checkpoint["activated_at"] is None
 
 
 async def test_a_stable_source_version_renders_consistent(session_factory):

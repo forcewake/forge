@@ -2,7 +2,7 @@
 honesty, zero writes.
 
 The authenticated, subject-scoped projection surface mounted in the app:
-list, detail and support-bundle over the SAME snapshot reader, fail-closed
+list and detail over the SAME snapshot reader, fail-closed
 like every adaptive route. Pinned here:
 
 - the credential family: the lane-control HMAC under
@@ -42,14 +42,14 @@ from sqlalchemy import func, select
 
 from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
-from forge.adaptive.operator_snapshot import CanonicalSubject
+from forge.adaptive.operator_snapshot import CanonicalSubject, OperatorSnapshotReader
 from forge.adaptive.operator_view import RecoveryActions, status_note_lines
 from forge.adaptive.pause_fence import PauseFenceRow
 from forge.api_lane_control import lane_control_token
 from forge.api_operator import operator_subject_scope_token
 from forge.config import Settings
 from forge.database import reset_engine
-from forge.durable.models import ActionLog, FlowRun, PublicationIntent, ReviewRound
+from forge.durable.models import ActionLog, FlowRun, ReviewRound
 from forge.main import create_app
 
 SECRET = "operator-secret"  # noqa: S105 — fake value for tests
@@ -271,7 +271,7 @@ async def test_a_legacy_name_token_is_not_a_canonical_subject_token(client):
     assert response.status_code == 403
 
 
-async def test_list_detail_and_bundle_are_all_subject_scoped(app, client, repository):
+async def test_list_and_detail_are_subject_scoped(app, client, repository):
     await _seed(app, _run(RUN_A, REPO_A), _run(RUN_B, REPO_B))
     headers = _scope_headers([SUBJECT_A])
 
@@ -283,20 +283,12 @@ async def test_list_detail_and_bundle_are_all_subject_scoped(app, client, reposi
         f"/operator/runs/{RUN_B}?{_subject_query([SUBJECT_A])}", headers=headers
     )
     assert detail.status_code == 404
-    bundle = await client.get(
-        f"/operator/runs/{RUN_B}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
-    )
-    assert bundle.status_code == 404
 
     # the same bearer reads its OWN run on every surface
     own_detail = await client.get(
         f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=headers
     )
     assert own_detail.status_code == 200
-    own_bundle = await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
-    )
-    assert own_bundle.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +376,7 @@ async def test_the_detail_renders_the_projection_contract(app, client, repositor
     assert "hints" in document["actions_advisory"]
 
 
-async def test_the_bundle_carries_failed_attempts_and_explicit_coverage(app, client, repository):
+async def test_detail_and_reader_preserve_failed_attempt_history(app, client, repository):
     await _seed(
         app,
         _run(RUN_A, REPO_A, status="failed", candidate_shas=[]),
@@ -407,25 +399,22 @@ async def test_the_bundle_carries_failed_attempts_and_explicit_coverage(app, cli
     )
 
     response = await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}",
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}",
         headers=_scope_headers([SUBJECT_A]),
     )
-
     assert response.status_code == 200
-    bundle = response.json()
-    assert bundle["schema"] == "forge.support.bundle/1"
-    assert bundle["run_id"] == RUN_A
-    assert bundle["digest"].startswith("sha256:")
-    outcomes = [attempt["outcome"] for attempt in bundle["attempts"]]
-    # the initial execution (failed terminal) + both revival rows — history
-    # preserved, order kept, failed attempts included
-    assert outcomes == ["failed", "failed", "succeeded"]
-    assert bundle["coverage"]["attempts"] == "present"
-    assert bundle["coverage"]["checkpoints"] == "present"
-    assert bundle["coverage"]["questions"] == "unknown"
-    assert bundle["projection"]["run_id"] == RUN_A
-    assert bundle["subject_id"] == REF_A
-    assert bundle["projection_inconsistent"] is False
+    document = response.json()
+    reader = OperatorSnapshotReader(app.state.session_factory, clock=lambda: NOW)
+    snapshot = await reader.snapshot(RUN_A, [SUBJECT_A])
+    assert snapshot is not None
+    assert [attempt["status"] for attempt in snapshot.rows["attempts"]] == [
+        "failed",
+        "failed",
+        "succeeded",
+    ]
+    assert document["source_coverage"]["attempts"] == "present"
+    assert document["subject_id"] == snapshot.subject_id == REF_A
+    assert document["projection_inconsistent"] is False
 
 
 async def test_at04_the_http_render_matches_the_reader_projection(app, client, repository):
@@ -507,14 +496,6 @@ async def test_at04_the_http_render_matches_the_reader_projection(app, client, r
     assert detail["identity"]["active_candidate"] == cand_b
     assert [entry["verdict"] for entry in detail["verification_history"]] == ["historical_pass"]
 
-    bundle = (
-        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
-    ).json()
-    assert bundle["projection"]["state"] == detail["state"]
-    assert bundle["projection"]["identity"]["active_candidate"] == cand_b
-    assert bundle["checkpoints"][0]["activated_at"] == ""  # no borrowed activation
-    assert bundle["verifications"][0]["candidate_sha"] == cand_a
-
 
 # ---------------------------------------------------------------------------
 # Redaction — credential material never reaches an operator
@@ -537,10 +518,9 @@ async def test_credential_looking_values_are_redacted_on_every_surface(app, clie
     assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in str(detail)
     assert detail["blocked_reason"] == "[redacted]"
 
-    bundle = (
-        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
-    ).json()
-    assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in str(bundle)
+    listing = await client.get(f"/operator/runs?{query}", headers=headers)
+    assert listing.status_code == 200
+    assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in listing.text
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +542,6 @@ async def test_rendering_performs_zero_writes(app, client, repository):
     for path in (
         f"/operator/runs?{_subject_query([SUBJECT_A])}",
         f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}",
-        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}",
     ):
         response = await client.get(path, headers=headers)
         assert response.status_code == 200, path
@@ -884,66 +863,6 @@ async def test_the_detail_renders_the_recovery_section(app, client, repository):
     assert all("stale" not in entry for entry in document["actions"])
 
 
-async def test_the_bundle_export_carries_bounded_allowlisted_diagnostics(app, client, repository):
-    """The export's diagnostics slice rides the bundle: entry-bounded,
-    field-allowlisted, and raw operational backup names excluded (the
-    #304 receipts referenced at most) — the whole document still under
-    the export's byte accounting."""
-    await _seed(
-        app,
-        _run(
-            RUN_A,
-            REPO_A,
-            status="failed",
-            status_reason=(
-                "restore failed: pre-r3708-alignment-1.dump unreadable "
-                "(credential revoked, token expired)"
-            ),
-        ),
-        *[
-            PublicationIntent(
-                run_id=RUN_A,
-                provider="github",
-                repo=REPO_A,
-                operation="commit",
-                target_ref="refs/heads/forge/run",
-                idempotency_scope=f"cycle-{index}",
-                operation_key=f"op-{RUN_A[:6]}-{index}",
-                status="unknown",
-                created_at=NOW - timedelta(minutes=40 - index),
-                updated_at=NOW - timedelta(minutes=5),
-            )
-            for index in range(15)  # more uncertain effects than the diagnostics cap
-        ],
-    )
-    headers = _scope_headers([SUBJECT_A])
-
-    response = await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
-    )
-
-    assert response.status_code == 200
-    bundle = response.json()
-    diagnostics = bundle["diagnostics"]
-    assert diagnostics["schema"] == "forge.operator.diagnostics/1"
-    # bounded: the 15 uncertain effects render as at most the cap blocked reasons
-    assert len(diagnostics["sections"]["blocked_reasons"]) == 10
-    assert diagnostics["export"]["truncated"]["blocked_reasons"] is True
-    # allowlisted: every section key is a declared field
-    from forge.adaptive.operator_view import DIAGNOSTIC_SECTION_FIELDS
-
-    for entry in diagnostics["sections"]["blocked_reasons"]:
-        assert set(entry) <= DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"]
-    # backup-free: the raw dump name never reaches the diagnostics slice,
-    # and its exclusion is counted (the bundle's evidence sections are the
-    # R38-03 surface, not the diagnostics slice)
-    rendered = json.dumps(diagnostics)
-    assert "alignment-1.dump" not in rendered
-    assert diagnostics["export"]["raw_backups_excluded"] >= 1
-    # the byte accounting includes the diagnostics slice
-    assert bundle["export"]["bytes"] == len(response.content)
-
-
 # ---------------------------------------------------------------------------
 # R40-13 (#349) — the five linked facts on the API surface, the
 # foreign-subject matrix over the round linkage, and the three-surface
@@ -1090,7 +1009,6 @@ async def test_a_foreign_subject_cannot_list_or_guess_the_round_lineage(app, cli
     for path in (
         f"/operator/runs/{RUN_A}?{foreign_query}",
         f"/operator/runs/{RUN_CHILD}?{foreign_query}",  # the guessed child id
-        f"/operator/runs/{RUN_A}/support-bundle?{foreign_query}",
     ):
         response = await client.get(path, headers=foreign)
         assert response.status_code == 404, path
@@ -1127,8 +1045,6 @@ async def test_one_snapshot_consistent_across_api_comment_and_native_lines(app, 
     assert api_delivery["facts"]["candidate"]["role"] == "historical"
     assert api_delivery["facts"]["verification"]["binding"] == "historical"
     assert api_delivery["facts"]["acceptance"]["state"] == "none"
-    # the ops_limits read-model arm agrees on the same subject
-    assert api_detail["ops_limits"]["delivery_round"]["round_ref"] == f"round:2:{DECISION_A}"
 
     # 2. the comment surface: the SAME five facts, compactly
     assert f"round:2:{DECISION_A}" in comment
@@ -1145,12 +1061,8 @@ async def test_one_snapshot_consistent_across_api_comment_and_native_lines(app, 
     assert "HISTORICAL" in round_line
 
 
-async def test_the_bundle_stays_allowlisted_and_value_free_with_rounds_present(
-    app, client, repository
-):
-    """R40-13 (#349): the support bundle's evidence sections keep their
-    allowlisted shapes with round data present, and no reviewer-note
-    VALUE (a pasted credential sentinel) reaches any export surface."""
+async def test_detail_stays_allowlisted_and_value_free_with_rounds_present(app, client, repository):
+    """Reviewer text stays outside delivery facts, including round history."""
     sentinel = "glpat-round-secret-987654321"
     await _seed(
         app,
@@ -1176,13 +1088,8 @@ async def test_the_bundle_stays_allowlisted_and_value_free_with_rounds_present(
     headers = _scope_headers([SUBJECT_A])
     query = _subject_query([SUBJECT_A])
 
-    bundle = (
-        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
-    ).json()
     detail = (await client.get(f"/operator/runs/{RUN_A}?{query}", headers=headers)).json()
 
-    assert bundle["schema"] == "forge.support.bundle/1"
-    assert sentinel not in json.dumps(bundle)
     assert sentinel not in json.dumps(detail)
     assert sentinel not in detail["delivery"]["facts"]["candidate"].get("note", "")
     # the reviewer's TEXT never rides the delivery facts — ids + statuses only
@@ -1195,3 +1102,18 @@ async def test_the_bundle_stays_allowlisted_and_value_free_with_rounds_present(
         "head_sha",
         "created_at",
     }
+
+
+async def test_removed_support_export_has_no_operator_route(app, client, repository):
+    from forge.api_operator import operator_router
+
+    assert {route.path for route in operator_router.routes} == {
+        "/operator/runs",
+        "/operator/runs/{run_id}",
+    }
+    await _seed(app, _run(RUN_A, REPO_A))
+    response = await client.get(
+        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}",
+        headers=_scope_headers([SUBJECT_A]),
+    )
+    assert response.status_code == 404

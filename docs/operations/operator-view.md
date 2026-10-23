@@ -1,25 +1,14 @@
 # The operator view (R32-23) — attempts, decisions and recovery
 
-This document covers the persistent operator view: the versioned
-projection over a run's durable rows (`forge.adaptive.operator_view`), the
-state vocabulary and what proves each state, the replay protection on
-updates, the recovery-action validity matrix, the exportable support
-bundle (`forge.adaptive.support_bundle`), the authorized snapshot reader
-(`forge.adaptive.operator_snapshot`) and the authenticated read API
-(`forge.api_operator`) that surface them live — including the R37-02
-canonical repository subjects that scope every operator read, the
-R37-03 current-state projection rules (exact activation receipts,
-per-attempt generations, current-candidate binding, the source-version
-fence), the R37-16 bounded operator experience (bounded drill-down,
-typed blocked-reason diagnostics, pending-command/occupancy surfaces,
-bounded bundle export, time-to-diagnose observability) the R38-15
-recovery surface (the delivery outcome as a first-class field, the
-five-milestone pause/resume ladder, advisory recovery hints and the
-bounded, allowlisted, backup-free export diagnostics) and the R42-07
-command-to-delivery progress view (the command-OUTCOME axis over the
-#374 journals, the five-condition next-step distinction set, the one
-coherent current subject, the command-outcome action fence and the
-bounded, redaction-counted command support slice).
+The current operator surface is the authenticated, read-only run list and
+run detail in `forge.api_operator`. It uses the canonical-subject snapshot
+reader and the existing projection, recovery, lineage and command-progress
+views. These documents describe observed facts and advisory actions; GET
+requests never start a model, write to a provider or transition a run.
+
+The optional support-bundle route, audit exporter and report-grade folds
+were retired in ADR-0035 P1-15. Historical export formats do not describe
+an available endpoint. Their source and tests remain in git history.
 
 For the control commands themselves, see
 [operator-commands.md](operator-commands.md) and
@@ -46,8 +35,7 @@ questions. It is not a second truth store:
 - **It composes, it does not fork.** Command rows classify through
   `operator_timeline.timeline_from_journal`; the blocked/waiting/summary
   line is `ops.status_projection` verbatim — the SAME summary semantics
-  the classic `/status` renders; the credential guard is audit_export's
-  `_redact`, imported, not copied.
+  the classic `/status` renders; the credential guard is the recursive `operator_redaction.redact`, imported, not copied.
 - **Freshness belongs in the projection.** Every projection carries
   `source_digest` (a digest over every row it was derived from),
   `computed_at`, and a per-source `rows_observed` freshness map — a
@@ -176,36 +164,13 @@ the world as it now is, never against the comment they are staring at.
 The same refusal answers a version ahead of the stored truth and an
 action whose state has since changed (or whose role never allowed it).
 
-## 6. The support bundle
+## 6. Credential redaction
 
-`SupportBundle.build(run_id, rows)` (`forge.support.bundle/1`) is the
-exportable evidence pack for handoff and audit:
-
-- **attempts** — ALL attempts, failed ones included; recovery never
-  resets history. An outcome forge cannot prove exports as `unknown`,
-  never a guess.
-- **commands** and **deliveries** — the control history with actors and
-  ladder statuses.
-- **checkpoints** — ids and digests only; the bundle points at the
-  content-addressed store, it never carries workspace blobs.
-- **verifications** and **publications** — the independent-check records
-  and the publication intents (unknown stays unknown).
-- **projection** — the `render()` document the bundle was built under.
-- **coverage** — every section is marked `present | missing | unknown`:
-  a section the collector never looked at is `unknown`, an observed
-  empty one is `missing`; missing data stays EXPLICIT, never filled or
-  assumed.
-- **digest + timestamp** — the digest covers the CONTENT (sections,
-  projection state, source digest) and never the generation timestamp,
-  so the same rows always digest identically whatever clock built the
-  bundle.
-
-**Redaction policy** (both the projection and the bundle): identity and
-evidence are ids and digests by construction — no payloads, no prompts —
-and the finished document passes the audit-export credential guard
-regardless: token/secret/password/key-looking VALUES are replaced with
-`[redacted]` before an operator or an export ever sees them. See
-[audit-retention.md](audit-retention.md) for the retention side.
+List and detail use the shared recursive credential guard in
+`forge.adaptive.operator_redaction`. Credential-shaped keys and secret
+values are redacted, including nested values. Declared credential metadata
+schemas may retain reference fields; they never exempt secret values.
+The support-bundle exporter and its route have been removed.
 
 ## 7. One state, every surface
 
@@ -252,7 +217,7 @@ Four rules pin its contract:
   the exact canonical match BEFORE any per-run checkpoint/artifact read,
   in bounded pages (`limit` + a scope-bound cursor; default 50, max
   200). A run outside the scope is `None` — indistinguishable from
-  unknown — on the list, detail and support-bundle paths.
+  unknown — on the list and detail paths.
 - **Coverage honesty.** The snapshot carries `source_coverage` per
   section (`present | missing | unknown`) and `projection_age` (how old
   the newest observed row is). A source never queried is `unknown` —
@@ -292,7 +257,7 @@ is the applied resume command that named THAT checkpoint.
 
 ## 9. The read API (R36-15, R37-02/R37-03)
 
-`forge.api_operator` mounts three GET routes, read-only by construction
+`forge.api_operator` mounts two GET routes, read-only by construction
 (zero write endpoints; rendering performs no provider writes, no model
 calls, no state transitions):
 
@@ -300,7 +265,6 @@ calls, no state transitions):
 |---|---|
 | `GET /operator/runs?subject=<family>/<connection>/<native>&limit=&cursor=` | A bounded page of thin summaries per run: state, underlying state, blocked/waiting line, `updated_at`, `projection_age_seconds`, `projection_inconsistent`, unresolved-effect count, plus the page bound and the scope-bound continuation cursor |
 | `GET /operator/runs/{run_id}?subject=…&limit=&sections=` | The full `render()` document plus `subject`, `subject_id`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice), `source_version` / `projection_inconsistent` (the consistency fence), `recovery` (the R38-15 recovery section, §11), `actions` — the ADVISORY hints — and the R37-16 diagnostics sections: `sections` (the read bounds), `pending_commands`, `occupancy_summary` and `blocked_reasons` |
-| `GET /operator/runs/{run_id}/support-bundle?subject=…&max_bytes=&sections=` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on, with the same `subject_id` and fence marks, plus the `export` block stating its scope and size (see §10) and the bounded `diagnostics` slice (§11.4) |
 
 **Authentication** is the lane-control credential family, reused: the
 same `HMAC-SHA256` under `FORGE_LANE_CONTROL_SECRET`, presented as a
@@ -413,18 +377,6 @@ The detail renders the actionable slices as their own sections:
   honest unknown), the per-occupancy-word counts, and the AGES of the
   leases whose occupancy is uncertain.
 
-### Bounded support-bundle export
-
-The bundle reads FULL history (evidence completeness — windows live on
-the detail route) and is bounded at the EXPORT: the `export` block
-states the scope, the byte size, the cap and the hard maximum
-(`?max_bytes=`, default 1 MiB, hard max 8 MiB). A serialized bundle
-over the cap is REFUSED with the typed `operator.bundle_too_large`
-(413) naming the actual size — never silently truncated; narrow with
-`?sections=` (unselected sections read coverage `unknown`) or raise the
-cap within the hard maximum. Redaction is unchanged: no bearer tokens,
-model keys or raw payloads (pinned by tests on every export shape).
-
 ### Time-to-diagnose observability
 
 Every operator response carries two headers — `operator.query_duration`
@@ -525,42 +477,18 @@ state's safe alternative (`probe`) when the snapshot's consistency fence
 moved — the display half of the refusal the guarded routes already
 enforce (CTL-04 CAS); the block also states why it is stale.
 
-### 11.4 The bounded export diagnostics
+## 12. Admission and occupancy
 
-The support-bundle export carries a `diagnostics` slice
-(`forge.operator.diagnostics/1`), structurally bounded three ways:
+Detail exposes `occupancy`, `occupancy_summary` and `admission` directly
+from their runtime authorities. The admission report keeps rejected
+requests, admitted work and execution attempts as distinct populations.
+Slots held, draining and completed describe execution; intake totals do
+not prove capacity. Without a mounted policy or readable authority the
+admission field is `null`, rather than a zero-filled report.
 
-- **SIZE** — at most 10 entries per list section (`truncated` names what
-  was cut) on top of the export's byte cap;
-- **ALLOWLIST** — every section serializes only its declared
-  `DIAGNOSTIC_SECTION_FIELDS` (the audit-export `CREDENTIAL_DOCUMENT_FIELDS`
-  pattern); anything else a source row carried is dropped;
-- **BACKUP EXCLUSION** — raw operational backup names (the R38-03/#304
-  world: `*.dump`, `*.pgdump`, `*.sql`, `backups/…`) are scrubbed from
-  every string the slice carries, counted as
-  `export.raw_backups_excluded`; a sanitized RECEIPT reference (a value
-  naming a receipt) is referenced at most.
-
-## 12. The operating-limits read-model (Q39-15)
-
-The detail route's `ops_limits` block (`forge.ops.limits/1`, folded by
-`forge.adaptive.ops_limits`) is the supported customer profile's one
-look at the operating limits: the six quantities (current attempt,
-native occupancy, exact checkpoint, unresolved effects, required
-checks, accounting coverage), the customer state on the six-word
-vocabulary (queued / progressing / paused / unverified / verified /
-blocked — the `wedged`/`dead` overlays re-classify to blocked), the
-four `ops.*` observability quantities as SEPARATE records
-(`ops.command_application_latency`, `ops.native_occupancy`,
-`ops.recovery_duration`, `ops.manual_intervention_minutes` — never
-blended; an unmatched window is counted, never zero-filled; an
-unselected section's measure reads `unknown`), the admission accounting
-(intake counters and execution slots as different populations, the
-capped verdict derived from occupancy only), and the review-budget
-distinction (a FAILED REVIEW BUDGET renders as exactly that — never
-lost code, never failed independent checks). The measured limits
-themselves, response ownership and the excluded failure domains live in
-the [support agreement](support-agreement.md).
+The optional `ops_limits` grades and derived report measurements have
+been removed. Recovery, required-check identity, lineage, budget amendments
+and command progress retain their own runtime fields.
 
 ## 13. Diagnosing the pilot failure cases
 
@@ -579,7 +507,6 @@ noted here (API availability is not usability proof).
 | Nothing progresses, capacity suspected (`capacity_wait`) | Detail → `occupancy_summary.unknown_ages` (the uncertain leases' ages) and `occupied_vs_limit` | Wait for the reconciler's probe; escalate only when the age grows past the agreed threshold |
 | Green checks but the run reads `unverified` (`verification_stale`) | Detail → `identity.active_candidate` vs `verification_history` | Run independent verification for the CURRENT candidate |
 | The view itself looks wrong | Detail → `projection_age_seconds`, `source_version`, `projection_inconsistent`, `rows_observed` | Refresh (probe); an inconsistent fence means a repair landed mid-read — re-read before acting |
-| You need everything for handoff | Bundle → `export` block (scope + size), `coverage` map | Export whole, or narrow with `?sections=` when the byte cap refuses |
 
 All of this is diagnosable from the supported surfaces without database
 edits; the action verbs route through the guarded command routes and
@@ -653,26 +580,8 @@ comparing its identity against the current rows.
 
 **Scope**: the round linkage changes nothing about the fail-closed
 matrix — a foreign-repository operator gets the same 404 on the parent,
-the guessed child id and the bundle, and neither run appears in their
+the guessed child id, and neither run appears in their
 listing (pinned by the scope-matrix tests).
-
-### 14.1 The read-model arm (Q39-15 extension)
-
-`ops_limits.delivery_round` folds the same facts into the read-model:
-the round subject, the supersession, the LINEAGE customer state (an
-open round makes the lineage `progressing` whatever the parent's own
-record says; a superseded parent never reports its old `verified`
-readiness as current) and the typed next-actions. Three additional
-`operator.*` observability records ride the read-model as their own
-keys: `operator.recovery_rounds` (the lineage's recorded rounds —
-`unknown` when the rounds authority was not queried, never a confident
-zero), `operator.unresolved_effect_age` (per unresolved publication
-intent, the seconds it has stood unresolved) and
-`operator.time_to_safe_action` (how long the current world has stood —
-a stated LOWER BOUND on how long a safe action has been decidable;
-human reaction time is recorded nowhere and is never invented).
-`operator.stale_action_refusal` is the typed refusal code above — an
-event, not a quantity, so it renders in refusal reasons only.
 
 ## 15. The lineage view (R41-12, #367) — ONE work lineage, acknowledgement-aware recovery
 
@@ -773,7 +682,7 @@ guarded route or runbook, and whether it is available NOW:
   (`runbook:token-rotation`); a retry can never restore withdrawn
   authority.
 
-### 15.5 The MR comment and the credential-free support export
+### 15.5 The MR comment
 
 `render_lineage_comment` is the ONE concise MR status comment: the
 round reference, the target (branch → branch, MR), the current run and
@@ -781,19 +690,6 @@ state, the candidate's role, the honest command ladder, the occupancy
 word and the next action — one block, bounded, ending in the stable
 `forge-status` identity marker (a replayed delivery of the same world
 carries the SAME identity).
-
-`export_lineage_support` (the bundle's `lineage_support` section) is
-the credential-free slice: bounded per section, ALLOWLISTED per field
-(`LINEAGE_SUPPORT_FIELDS`) — secrets, raw reviewer briefs and
-checkpoint CONTENTS are omitted by construction, never rescued — and
-redaction-counted: `support_export.redactions` states how many
-secret-looking values the guard caught anyway. The observability set
-this adds: `operator.time_to_safe_action` (already in the read-model),
-`support_export.redactions` (the export), and
-`projection.stale_or_inconsistent` (the read-model's lineage fold — a
-flag, never a blended measure; the manual DB-repair surface is the
-prerequisites + actions above, which link the guarded routes and
-runbooks).
 
 ### 15.6 The runbook — recovering a stale-head round (the blinded-operator walk)
 
@@ -897,31 +793,3 @@ NOT.
   `operator.action_refused_stale` — an alias, one code) once the
   outcome settles OR a different command becomes the newest unresolved
   one. A stale action can never mutate a different current attempt.
-
-### 16.4 The bounded command support slice and the observability
-
-The bundle's `command_support` section
-(`export_command_support`) is bounded (12 entries per section),
-ALLOWLISTED per field (`COMMAND_SUPPORT_FIELDS`) and carries: the
-outcome ladder, the distinction set, the RELEVANT typed errors (the
-retry trail's bounded provider excerpts — a provider error string,
-never the reviewer's prompt) and the recovery settings NAMES
-(`FORGE_MAX_REVIEW_ROUNDS`, `FORGE_APPROVERS`, `STEP_MAX_ATTEMPTS` —
-names only, never values). Redactions are counted
-(`support.bundle_redactions`, stated as `export.redactions`); the
-reviewer's note text never enters by construction. The slice's two
-source sections (`run`, `feedback_events`) are read even under a
-narrowed `?sections=` export — the command axis never silently reads
-unknown.
-
-The observability set (the read-model's `command_progress` fold,
-`command_progress_limits_fold` — three records, never blended with the
-four `ops.*` measures): `command.accepted_to_applied_seconds` (per
-applied command, first observed → the applied journal; not-yet-applied
-counted, never zero-filled), `operator.manual_rescue_minutes` (the
-minutes an exhausted/refused command has awaited the human rescue
-decision — a lower bound, a WAIT, never active work; pending commands
-belong to the backoff, not to rescue) and `status.projection_lag` (the
-gauge from the reading moment back to the NEWEST durable command-axis
-fact — a fence observation is a different record,
-`projection.stale_or_inconsistent`).

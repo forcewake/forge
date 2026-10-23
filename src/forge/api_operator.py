@@ -1,133 +1,8 @@
-"""The operator read API (R36-15, R37-02/R37-03, R37-16) — authorized
-projection reads, zero writes.
+"""Authenticated read-only operator runs list and detail.
 
-The operator view was a pure model; this router is its live, authenticated
-read surface. Three GET routes, all subject-scoped by the caller's token,
-all read-only by construction:
-
-- ``GET /operator/runs?subject=<canonical>…&limit=&cursor=`` — a BOUNDED
-  page of the runs inside the authorized scope, each with its derived
-  state and the blocked/waiting line (the list an operator scans
-  first);
-- ``GET /operator/runs/{run_id}?subject=<canonical>&limit=&sections=`` —
-  the full projection render under R37-16's BOUNDED drill-down: state,
-  exact identities, unresolved external effects, the blocked/waiting
-  line, thin evidence links, per-section source coverage, projection
-  age, admission/lease occupancy, the source-version fence, the ADVISORY
-  action hints — plus the diagnostics sections: the per-section read
-  bounds (``total_count`` / ``truncated`` / the window served), the
-  PENDING commands (kind, age, the CTL-04 world they must still match),
-  the native occupancy summary (``occupied_vs_limit`` and the ages of
-  the uncertain leases) and the TYPED blocked reasons
-  (:func:`~forge.adaptive.operator_view.explain_blocked` — each with its
-  evidence link and the safe, non-generic next action) — plus the R38-15
-  RECOVERY section (:func:`~forge.adaptive.operator_view.
-  recovery_document`): the delivery outcome (a failed/no-effect delivery
-  displays AS a failure — an empty resumed diff is never a successful
-  resume), the five-milestone pause/resume ladder (each
-  present/absent/unknown independently) and the advisory recovery hint
-  naming the guarded route that executes it — plus the Q39-15
-  ``ops_limits`` block (:func:`~forge.adaptive.ops_limits.
-  ops_limits_read_model`): the six operating-limit quantities, the
-  customer state, the four ``ops.*`` measures as separate records, the
-  admission accounting (intake counters never claimed as execution
-  slots) and the review-budget distinction — plus the R40-13 (#349)
-  ``delivery`` block (:func:`~forge.adaptive.operator_view.
-  delivery_view`): the FIVE linked facts — CURRENT execution, review
-  round, candidate, verification, acceptance — each from its canonical
-  store, with the #338 head-fence refusals and the #340 limiting axis
-  rendered as explicit next-actions, superseded deliveries labelled
-  HISTORICAL, and acceptance attributed only to a real human decision.
-  Action hints rendered from a snapshot whose consistency fence MOVED
-  carry ``stale: true`` plus the current state's safe alternative;
-  R42-07 (#380) adds the ``command_progress`` block
-  (:func:`~forge.adaptive.operator_view.command_progress`): the
-  command-OUTCOME axis (accepted / pending / applied / refused /
-  exhausted — the #374 journals, an axis SEPARATE from execution and
-  human-review state; the R42-01 transient renders VISIBLY pending,
-  never apparently complete), the next-step distinction set (an
-  unresolved required discussion ≠ failed CI ≠ an exhausted review
-  budget ≠ a provider outage ≠ a spent observation budget — each its
-  own reason and safe action, the budget case naming the limiting axis
-  and the amendment route), the ONE current subject (the open round's
-  child after a superseding round) and the STALE labelling with the
-  projection version;
-- ``GET /operator/runs/{run_id}/support-bundle?subject=<canonical>
-  &max_bytes=&sections=`` — the exportable
-  :class:`~forge.adaptive.support_bundle.SupportBundle` document
-  (coverage + digest + every attempt, failed ones included), redaction
-  on, its EXPORT SCOPE AND SIZE stated in the ``export`` block, refused
-  with a typed ``operator.bundle_too_large`` (413) when the serialized
-  document exceeds the requested ``max_bytes`` (default 1 MiB, hard cap
-  8 MiB) — narrow with ``?sections=`` instead of truncating evidence —
-  and carrying the R38-15 bounded DIAGNOSTICS slice (allowlisted fields
-  per section, entry caps, raw operational backup names excluded — the
-  #304 receipts referenced at most) plus the R42-07 (#380) bounded
-  ``command_support`` slice
-  (:func:`~forge.adaptive.operator_view.export_command_support`): the
-  command-outcome ladder, the next-step distinction set, the RELEVANT
-  typed errors (the retry trail's bounded excerpts) and the recovery
-  settings NAMES — scoped ids and evidence refs only, no raw code, no
-  reviewer prompts, no credential values by default, the redactions
-  COUNTED (``support.bundle_redactions``); its two source sections
-  (``run``, ``feedback_events``) are read even under a narrowed
-  ``?sections=`` selection so the command axis never silently renders
-  unknown.
-
-Every response carries the R37-16 time-to-diagnose observability as
-headers: ``operator.query_duration`` (seconds) and
-``operator.page_payload_bytes`` (the serialized response body) — the two
-numbers the pilot reads to trust that the surface stays bounded as
-history accumulates.
-
-**Authentication is the lane-control credential family, reused** (the
-same scheme the other adaptive surfaces mount): ``HMAC-SHA256`` under the
-server-side ``FORGE_LANE_CONTROL_SECRET``, presented as a bearer token.
-R37-02 versions the grant: a v2 token signs the CANONICAL SERIALIZED
-SUBJECT SET — ``operator-scope-v2:`` + the canonical JSON of the sorted
-:class:`~forge.adaptive.operator_snapshot.CanonicalSubject` ids
-(:func:`operator_subject_scope_token`). A canonical subject is provider
-family + connection identity + native repository identity (``github/
-github.example/owner/repo``, ``gitlab/gitlab.test/123``) — a grant names
-THAT, never a display name: the same display name on two connections,
-or across provider families, is two different subjects, and the token
-for one cannot declare the other's scope. The caller DECLARES the scope
-it is asking about (exactly as the lane declares its ``work_id``) and
-the server verifies the token signs exactly that scope.
-
-**Legacy grants (v1, name-only) work ONLY through resolution**: a v1
-token (``operator:`` + repo full names, :func:`operator_scope_token`)
-is accepted only when EVERY declared name resolves to EXACTLY ONE
-canonical subject among the CONFIGURED repositories
-(``app.state.operator_subjects``) — an ambiguous or unknown name fails
-closed with ``operator.legacy_grant_refused`` (403) and the reissue
-instruction; never a silent fan-out across connections.
-
-The reader filters by canonical subject BEFORE the expensive per-run
-checkpoint/artifact reads, and listing is bounded (``limit`` capped,
-``cursor`` continuation bound to the serving scope — replayed under a
-different grant it is refused, never reinterpreted). R37-16 bounds the
-drill-down the same way: the detail's section reads run under an
-explicit ``?limit=`` window (default 20, max 100) with the authority
-totals reported beside them, ``?sections=`` selects which sections are
-read at all (unselected sections are never queried — their coverage
-reads ``unknown``), and NO per-run artifact bytes are ever read (blob
-digests only).
-
-Fail-closed like every adaptive surface: mounted unconditionally, but no
-secret or no session factory → **503**, never an unauthenticated open;
-no bearer → 401; empty declared scope → 400 (there is no wildcard —
-least authority); token/scope mismatch → 403; a run outside the
-verified scope is a 404 (indistinguishable from unknown). The read-only
-actor carries NO control privileges: the action hints render with the
-``observer`` role (probe only) and remain hints — execution goes through
-the EXISTING guarded command routes, which revalidate authority and the
-expected world (a stale action is refused there with the current state
-and a safe alternative). The rendered projection is EPHEMERAL (a fresh
-version-1 value over rows just read), never a durable CAS ticket.
-Rendering performs zero provider writes, zero model calls and zero state
-transitions (pinned by a test with a recording checkpoint repository and
-row-count checks).
+Canonical subject grants are verified before repository reads. Foreign runs
+are indistinguishable from missing runs. Projection/actions are advisory;
+these GET routes never drive a model, provider write or state transition.
 """
 
 from __future__ import annotations
@@ -154,30 +29,22 @@ from forge.adaptive.operator_snapshot import (
     subject_from_ref,
 )
 from forge.adaptive.admission import admission_report
+from forge.adaptive.operator_redaction import redact
 from forge.adaptive.operator_view import (
     action_hint_block,
     command_progress,
     delivery_view,
     explain_blocked,
-    export_command_support,
-    export_diagnostics,
-    export_lineage_support,
     lineage_view,
     recovery_document,
     render,
 )
-from forge.adaptive.ops_limits import admission_accounting, ops_limits_read_model
-from forge.adaptive.support_bundle import COVERAGE_SECTIONS as _SUPPORT_COVERAGE_SECTIONS
-from forge.adaptive.support_bundle import SupportBundle
 from forge.api_lane_control import _bearer, _secret, lane_control_token, verify_lane_token
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "BUNDLE_TOO_LARGE",
-    "DEFAULT_MAX_BUNDLE_BYTES",
     "LEGACY_GRANT_REFUSED",
-    "MAX_BUNDLE_BYTES",
     "OPERATOR_SCOPE_PREFIX",
     "OPERATOR_SCOPE_V2_PREFIX",
     "OPERATOR_SUBJECTS_STATE",
@@ -223,25 +90,6 @@ OPERATOR_ADMISSION_POLICY_STATE: Final = "operator_admission_policy"
 #: EXACTLY ONE configured canonical subject answers with (R37-02
 #: observability).
 LEGACY_GRANT_REFUSED: Final = "operator.legacy_grant_refused"
-
-#: The typed refusal code when a support-bundle export exceeds the
-#: requested byte cap (R37-16): the export is REFUSED, never silently
-#: truncated — the operator narrows the scope (``?sections=``) or raises
-#: the cap within the hard maximum.
-BUNDLE_TOO_LARGE: Final = "operator.bundle_too_large"
-
-#: The default and hard-maximum support-bundle export sizes (bytes). The
-#: default keeps an unattended export bounded; ``?max_bytes=`` may raise
-#: it up to the hard cap and never beyond.
-DEFAULT_MAX_BUNDLE_BYTES: Final = 1_048_576
-MAX_BUNDLE_BYTES: Final = 8_388_608
-
-#: The bundle sections an export may select (the bundle's coverage
-#: vocabulary minus ``questions`` — no durable authority, never
-#: selectable). The default export takes them all.
-BUNDLE_SECTIONS: Final[tuple[str, ...]] = tuple(
-    name for name in _SUPPORT_COVERAGE_SECTIONS if name != "questions"
-)
 
 #: The R37-16 time-to-diagnose observability, on every response: the
 #: wall-clock seconds the query took and the serialized payload size.
@@ -463,16 +311,6 @@ def _finish(document: dict[str, Any], started: float, *, route: str) -> JSONResp
     return response
 
 
-def _export_json(document: dict[str, Any]) -> bytes:
-    """The export measurement — serialized EXACTLY the way the response
-    body renders (``JSONResponse.render``'s separators and
-    ``ensure_ascii=False``), so the stated ``export.bytes`` is the size
-    of the body the operator receives."""
-    return json.dumps(
-        document, default=str, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-    ).encode("utf-8")
-
-
 def _age_seconds(at: str, now: str) -> float | None:
     """Seconds between *now* and the ISO *at* — ``None`` when either
     carries no readable clock (never a synthesized age)."""
@@ -571,17 +409,6 @@ def _occupancy_summary(request: Request, snapshot: OperatorSnapshot) -> dict[str
     }
 
 
-def _occupancy_limit(request: Request) -> int | None:
-    """The deployment's active-per-project bound from the mounted
-    admission policy — ``None`` when none is mounted (the read-model
-    renders the limit unknown, never an invented bound)."""
-    policy = getattr(request.app.state, OPERATOR_ADMISSION_POLICY_STATE, None)
-    if policy is None:
-        return None
-    bound = int(getattr(policy, "max_active_per_project", 0) or 0)
-    return bound if bound > 0 else None
-
-
 async def _admission_accounting_for(
     request: Request, snapshot: OperatorSnapshot
 ) -> dict[str, Any] | None:
@@ -607,15 +434,7 @@ async def _admission_accounting_for(
     except Exception:  # noqa: BLE001 — an unreadable authority renders unknown
         logger.warning("admission accounting for project %s unreadable", project_id)
         return None
-    attempts = report.get("execution_attempts") or {}
-    return admission_accounting(
-        rejected_requests=report.get("rejected_requests"),
-        admitted_work=report.get("admitted_work"),
-        held=attempts.get("held"),
-        draining=attempts.get("draining"),
-        completed=attempts.get("completed"),
-        limit=attempts.get("limit"),
-    )
+    return report
 
 
 @operator_router.get("/operator/runs")
@@ -642,20 +461,22 @@ async def list_operator_runs(
     for snapshot in page.snapshots:
         projection = snapshot.projection()
         runs.append(
-            {
-                "run_id": snapshot.run_id,
-                "subject": snapshot.subject,
-                "subject_id": snapshot.subject_id,
-                "state": projection.state,
-                "underlying_state": projection.underlying_state,
-                "blocked_reason": projection.blocked_reason,
-                "waiting_on": projection.waiting_on,
-                "summary": projection.summary,
-                "updated_at": snapshot.rows["run"].get("updated_at", ""),
-                "projection_age_seconds": snapshot.projection_age_s,
-                "projection_inconsistent": snapshot.projection_inconsistent,
-                "unresolved_effects": len(projection.unresolved_effects),
-            }
+            redact(
+                {
+                    "run_id": snapshot.run_id,
+                    "subject": snapshot.subject,
+                    "subject_id": snapshot.subject_id,
+                    "state": projection.state,
+                    "underlying_state": projection.underlying_state,
+                    "blocked_reason": projection.blocked_reason,
+                    "waiting_on": projection.waiting_on,
+                    "summary": projection.summary,
+                    "updated_at": snapshot.rows["run"].get("updated_at", ""),
+                    "projection_age_seconds": snapshot.projection_age_s,
+                    "projection_inconsistent": snapshot.projection_inconsistent,
+                    "unresolved_effects": len(projection.unresolved_effects),
+                }
+            )
         )
     return _finish(
         {
@@ -695,12 +516,6 @@ async def get_operator_run(
     ``pending_commands``, ``occupancy_summary`` and the typed
     ``blocked_reasons`` with their evidence links and safe next actions.
 
-    Q39-15 (#334) adds the ``ops_limits`` block: the six-quantity
-    read-model (current attempt, native occupancy, exact checkpoint,
-    unresolved effects, required checks, accounting coverage), the
-    customer state, the four ``ops.*`` measures as SEPARATE records and
-    the review-budget distinction —
-    :func:`~forge.adaptive.ops_limits.ops_limits_read_model`.
     """
     started = time.perf_counter()
     scope, _ = await _authorized_subjects(request, authorization, subject, repo)
@@ -750,22 +565,7 @@ async def get_operator_run(
         occupancy=snapshot.occupancy,
         projection_inconsistent=snapshot.projection_inconsistent,
     )
-    # The Q39-15 read-model: the six quantities (current attempt, native
-    # occupancy, exact checkpoint, unresolved effects, required checks,
-    # accounting coverage), the customer state, the four ops.* measures as
-    # SEPARATE records and the review-budget distinction — one fold over
-    # the rows this render already read, coverage-honest (an unselected
-    # section's measure reads unknown, never an empty success).
-    document["ops_limits"] = ops_limits_read_model(
-        snapshot.rows,
-        occupancy=snapshot.occupancy,
-        coverage=snapshot.source_coverage,
-        projection=projection,
-        limit=_occupancy_limit(request),
-        as_of=snapshot.computed_at,
-        admission=await _admission_accounting_for(request, snapshot),
-        projection_inconsistent=snapshot.projection_inconsistent,
-    )
+    document["admission"] = await _admission_accounting_for(request, snapshot)
     # The R40-13 five linked facts: CURRENT execution, review round,
     # candidate, verification and acceptance as SEPARATE but LINKED
     # records over the canonical rows this render already read — after a
@@ -818,123 +618,3 @@ async def get_operator_run(
     if "actions_stale_reason" in hints:
         document["actions_stale_reason"] = hints["actions_stale_reason"]
     return _finish(document, started, route="detail")
-
-
-@operator_router.get("/operator/runs/{run_id}/support-bundle")
-async def get_operator_support_bundle(
-    request: Request,
-    run_id: str,
-    subject: list[str] | None = Query(None),
-    repo: list[str] | None = Query(None),
-    max_bytes: int | None = Query(None, ge=1, le=MAX_BUNDLE_BYTES),
-    sections: str | None = Query(None),
-    authorization: str | None = Header(None),
-) -> Any:
-    """The exportable support bundle — every attempt (failed included),
-    explicit coverage, content digest, redaction on.
-
-    R37-16 export bounds: the document STATES its export scope and size
-    in the ``export`` block; a serialized bundle exceeding ``?max_bytes=``
-    (default 1 MiB, hard max 8 MiB) is refused with the typed
-    ``operator.bundle_too_large`` (413) — narrow with ``?sections=``
-    instead of truncating evidence. The bundle reads FULL history
-    (evidence completeness — the drill-down windows live on the detail
-    route), digests only, never artifact bytes.
-    """
-    started = time.perf_counter()
-    scope, _ = await _authorized_subjects(request, authorization, subject, repo)
-    selected = _parse_sections(sections, BUNDLE_SECTIONS)
-    cap = int(max_bytes) if max_bytes is not None else DEFAULT_MAX_BUNDLE_BYTES
-    # R42-07 (#380): the command support slice rides the SAME snapshot —
-    # its two source sections (``run`` for the request documents,
-    # ``feedback_events`` for the #374 journals) are read even under a
-    # narrowed ``?sections=`` selection, so the command axis never
-    # silently renders unknown because the caller narrowed the BUNDLE's
-    # scope. The declared selection still governs the BUNDLE's own
-    # export scope (stated in the ``export`` block).
-    snapshot_sections = (
-        tuple(dict.fromkeys((*selected, "run", "feedback_events")))
-        if selected is not None
-        else None
-    )
-    try:
-        snapshot = await _reader(request).snapshot(
-            run_id, scope, sections=snapshot_sections, section_limit=None
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    if snapshot is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no run {run_id!r} within the authorized scope",
-        )
-    bundle = SupportBundle.build(snapshot.run_id, snapshot.rows)
-    document = bundle.as_document()
-    document["subject"] = snapshot.subject
-    document["subject_id"] = snapshot.subject_id
-    document["source_version"] = snapshot.source_version
-    document["projection_inconsistent"] = snapshot.projection_inconsistent
-    # The R38-15 diagnostics slice — bounded (max entries per section, and
-    # the whole document still under the export's byte cap), ALLOWLISTED
-    # per section (the audit_export pattern) and free of raw operational
-    # backup names (the R38-03/#304 receipts referenced at most). It rides
-    # the SAME rows the bundle read — no second collector.
-    document["diagnostics"] = export_diagnostics(
-        snapshot.rows,
-        coverage=snapshot.source_coverage,
-        occupancy=snapshot.occupancy,
-        projection=snapshot.projection(),
-        projection_inconsistent=snapshot.projection_inconsistent,
-    )
-    # The R41-12 (#367) CREDENTIAL-FREE lineage support slice: the one
-    # lineage snapshot bounded and allowlisted per section — secrets, raw
-    # reviewer briefs and checkpoint contents omitted by default, with
-    # the redaction count stated (``support_export.redactions``).
-    document["lineage_support"] = export_lineage_support(
-        snapshot.rows,
-        coverage=snapshot.source_coverage,
-        occupancy=snapshot.occupancy,
-        projection_inconsistent=snapshot.projection_inconsistent,
-    )
-    # The R42-07 (#380) bounded COMMAND support slice: the command-outcome
-    # ladder, the next-step distinction set, the RELEVANT typed errors
-    # (the retry trail's bounded provider-error excerpts) and the settings
-    # NAMES the recovery routes name — scoped ids and evidence refs only,
-    # no raw code, no reviewer prompts, no credential values by default,
-    # with the redactions COUNTED (``support.bundle_redactions``). The
-    # same snapshot the bundle read — no second collector, no extra I/O.
-    document["command_support"] = export_command_support(
-        snapshot.rows,
-        coverage=snapshot.source_coverage,
-        projection_inconsistent=snapshot.projection_inconsistent,
-        retry_details=snapshot.rows.get("feedback_events"),
-    )
-    export: dict[str, Any] = {
-        "scope": list(selected) if selected is not None else list(BUNDLE_SECTIONS),
-        "sections_selected": selected is not None,
-        "bytes": 0,
-        "max_bytes": cap,
-        "hard_max_bytes": MAX_BUNDLE_BYTES,
-        "truncated": False,
-    }
-    document["export"] = export
-    size = 0
-    for _ in range(3):  # converge on the byte count the block itself states
-        export["bytes"] = size
-        size = len(_export_json(document))
-    export["bytes"] = size
-    if size > cap:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "code": BUNDLE_TOO_LARGE,
-                "bytes": size,
-                "max_bytes": cap,
-                "hard_max_bytes": MAX_BUNDLE_BYTES,
-                "hint": (
-                    "refused, not truncated — narrow the export with ?sections="
-                    f" (from {list(BUNDLE_SECTIONS)}) or raise ?max_bytes= within the hard cap"
-                ),
-            },
-        )
-    return _finish(document, started, route="support-bundle")

@@ -171,7 +171,7 @@ id = "authority-operator_projection"
 name = "operator_projection: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.operator_view", "forge.adaptive.operator_snapshot"]
-allowed_importers = ["forge.adaptive.credential_broker", "forge.adaptive.credential_preflight", "forge.adaptive.operator_snapshot", "forge.adaptive.operator_view", "forge.adaptive.ops_limits", "forge.adaptive.project_credentials", "forge.adaptive.support_bundle", "forge.api_operator", "forge.runs.service"]
+allowed_importers = ["forge.adaptive.credential_broker", "forge.adaptive.credential_preflight", "forge.adaptive.operator_snapshot", "forge.adaptive.operator_view", "forge.adaptive.project_credentials", "forge.api_operator", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]

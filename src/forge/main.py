@@ -119,7 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(checkpoint_channel_router)
 
     # The operator read API (R36-15) — the authenticated, subject-scoped
-    # projection reads (list / detail / support-bundle). Same fail-closed
+    # projection reads (list / detail). Same fail-closed
     # posture as the lane-control surface: mounted unconditionally, every
     # route answers 503 unless FORGE_LANE_CONTROL_SECRET is configured, and
     # the router is read-only by construction (no write endpoints).

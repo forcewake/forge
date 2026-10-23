@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from forge.adaptive.delivery_measurement import ProviderRoute
+from forge.adaptive.usage_types import ProviderRoute
 from forge.adaptive.usage_ingestion import (
     COST_BASIS_BILLING,
     COST_BASIS_PROVIDER_REPORTED,

@@ -28,7 +28,6 @@ never hand-assembled ideal snapshots):
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -46,13 +45,9 @@ from forge.adaptive.operator_snapshot import (
 from forge.adaptive.operator_view import (
     ACTION_VIA,
     DELIVERY_OUTCOMES,
-    DIAGNOSTIC_MAX_ENTRIES,
-    DIAGNOSTIC_SECTION_FIELDS,
     OPERATOR_STATES,
     RECOVERY_MILESTONES,
-    _allowlisted,
     action_hint_block,
-    export_diagnostics,
     initial_projection,
     recovery_document,
     recovery_hint,
@@ -671,99 +666,6 @@ def test_hints_from_a_moved_fence_render_stale_with_the_safe_alternative():
 # ---------------------------------------------------------------------------
 # The export diagnostics slice — bounded, allowlisted, backup-free
 # ---------------------------------------------------------------------------
-
-
-def _diagnostics_rows(blocked_reason: str = "", publications: int = 0) -> dict:
-    return {
-        "run": {
-            "id": RUN_COM,
-            "status": "failed" if blocked_reason else "proposing",
-            "base_sha": "b" * 40,
-            "candidate_shas": [],
-            "plan_digest": "p" * 64,
-            "evidence": {},
-            "blocked_reason": blocked_reason,
-            "cancel_requested": False,
-            "created_at": "2026-09-24T09:00:00+00:00",
-            "updated_at": "2026-09-24T09:30:00+00:00",
-        },
-        "publications": [
-            {
-                "operation_key": f"op-{index}",
-                "status": "unknown",
-                "operation": "commit",
-                "target_ref": "refs/heads/forge/run",
-                "at": "2026-09-24T09:20:00+00:00",
-            }
-            for index in range(publications)
-        ],
-    }
-
-
-def test_diagnostics_entries_are_bounded_per_section():
-    document = export_diagnostics(_diagnostics_rows(publications=DIAGNOSTIC_MAX_ENTRIES + 5))
-
-    reasons = document["sections"]["blocked_reasons"]
-    assert len(reasons) == DIAGNOSTIC_MAX_ENTRIES
-    assert document["export"]["truncated"]["blocked_reasons"] is True
-    assert len(document["sections"]["recovery_ladder"]) == len(RECOVERY_MILESTONES)
-    assert document["export"]["truncated"]["recovery_ladder"] is False
-
-
-def test_diagnostics_sections_serialize_allowlisted_fields_only():
-    document = export_diagnostics(_diagnostics_rows(blocked_reason="credential revoked"))
-
-    sections = document["sections"]
-    assert set(sections["delivery"]) <= DIAGNOSTIC_SECTION_FIELDS["delivery"]
-    for entry in sections["recovery_ladder"]:
-        assert set(entry) <= DIAGNOSTIC_SECTION_FIELDS["recovery_ladder"]
-    for entry in sections["recovery_hint"]:
-        assert set(entry) <= DIAGNOSTIC_SECTION_FIELDS["recovery_hint"]
-    for entry in sections["blocked_reasons"]:
-        assert set(entry) <= DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"]
-
-
-def test_unlisted_fields_are_dropped_entirely():
-    over_full = {
-        "code": "capacity_wait",
-        "explanation": "held by lease",
-        "secret_payload": "glpat-should-never-serialize",
-        "raw_log": "PostgreSQL custom-format dump bytes",
-    }
-
-    cleaned = _allowlisted(over_full, DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"])
-
-    assert set(cleaned) == {"code", "explanation"}
-
-
-def test_raw_operational_backup_names_are_excluded_receipts_referenced_at_most():
-    """The #304 world: a blocked reason naming raw dump files and a
-    backups/ path — the diagnostics export carries NEITHER name, counts
-    what it excluded, and a sanitized RECEIPT reference survives whole."""
-    rows = _diagnostics_rows(
-        blocked_reason=(
-            "restore failed: pre-r3708-alignment-1.dump unreadable after copying "
-            "backups/pre-r3708-alignment-2.dump.gz (revoked token)"
-        )
-    )
-
-    document = export_diagnostics(rows)
-    rendered = json.dumps(document)
-
-    assert "alignment-1.dump" not in rendered
-    assert "alignment-2.dump.gz" not in rendered
-    assert "backups/" not in rendered
-    assert document["export"]["raw_backups_excluded"] >= 3
-    assert "[backup-excluded]" in rendered
-
-    receipt_rows = _diagnostics_rows(
-        blocked_reason=(
-            "restore verified per pre-r3708-alignment-1.dump.receipt.json (credential revoked)"
-        )
-    )
-    receipt_document = export_diagnostics(receipt_rows)
-    assert "alignment-1.dump.receipt.json" in json.dumps(receipt_document)
-    assert receipt_document["export"]["raw_backups_excluded"] == 0
 
 
 # ---------------------------------------------------------------------------

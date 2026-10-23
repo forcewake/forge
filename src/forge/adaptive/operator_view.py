@@ -16,7 +16,7 @@ signals, never asserted by workers. This module is that projection:
   through :func:`~forge.adaptive.operator_timeline.timeline_from_journal`,
   the blocked/waiting/summary line is
   :func:`~forge.adaptive.ops.status_projection` verbatim, and the
-  credential guard is audit_export's ``_redact`` (imported, not copied).
+  credential guard is the shared recursive operator redactor.
 - :func:`derive_state` — the pure derivation of the closed
   :data:`OperatorState` vocabulary. Every state is justified by a specific
   durable row and the derivation carries those row digests as thin
@@ -105,7 +105,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal
 
-from forge.adaptive.audit_export import _redact as redact
+from forge.adaptive.operator_redaction import redact
 from forge.adaptive.operator_timeline import _view_of as row_view
 from forge.adaptive.operator_timeline import timeline_from_journal
 from forge.adaptive.ops import status_projection
@@ -122,24 +122,14 @@ __all__ = [
     "COMMAND_OUTCOME_PROOF",
     "COMMAND_OUTCOME_UNRESOLVED",
     "COMMAND_PROGRESS_SCHEMA",
-    "COMMAND_RECOVERY_SETTINGS",
-    "COMMAND_SUPPORT_FIELDS",
-    "COMMAND_SUPPORT_MAX_ENTRIES",
-    "COMMAND_SUPPORT_SCHEMA",
     "DELIVERY_FAILED_OUTCOMES",
     "DELIVERY_OUTCOMES",
     "DELIVERY_VIEW_SCHEMA",
-    "DIAGNOSTIC_MAX_ENTRIES",
-    "DIAGNOSTIC_SECTION_FIELDS",
-    "DIAGNOSTICS_SCHEMA",
     "DeliveryOutcome",
     "FEEDBACK_OUTCOME_EVENT",
     "FEEDBACK_REFUSAL_NEXT_ACTIONS",
     "LINEAGE_PREREQUISITE_CODES",
     "LINEAGE_REFERENCE_DELIVERY",
-    "LINEAGE_SUPPORT_FIELDS",
-    "LINEAGE_SUPPORT_MAX_ENTRIES",
-    "LINEAGE_SUPPORT_SCHEMA",
     "LINEAGE_VIEW_SCHEMA",
     "NEXT_STEP_CODES",
     "NON_RETRYABLE_CODES",
@@ -152,7 +142,6 @@ __all__ = [
     "RECOVERY_MILESTONES",
     "RECOVERY_SCHEMA",
     "REVIEW_ROUND_OPEN_STATUSES",
-    "SUPPORT_BUNDLE_REDACTIONS",
     "REVIEW_ROUND_SUPERSEDING_STATUSES",
     "RecoveryActions",
     "RecoveryHint",
@@ -176,9 +165,6 @@ __all__ = [
     "delivery_outcome_of",
     "delivery_view",
     "derive_state",
-    "export_command_support",
-    "export_diagnostics",
-    "export_lineage_support",
     "explain_blocked",
     "initial_projection",
     "lineage_prerequisites",
@@ -2466,166 +2452,6 @@ def action_hint_block(
 
 
 # ---------------------------------------------------------------------------
-# The export diagnostics slice (R38-15) — bounded, allowlisted, backup-free
-# ---------------------------------------------------------------------------
-
-#: The diagnostics document's schema discriminator.
-DIAGNOSTICS_SCHEMA: Final = "forge.operator.diagnostics/1"
-
-#: The per-section FIELD ALLOWLISTS (the audit_export
-#: ``CREDENTIAL_DOCUMENT_FIELDS`` pattern): each diagnostics section
-#: serializes ONLY its declared fields — anything else a source row ever
-#: carried is dropped, never rescued into the export.
-DIAGNOSTIC_SECTION_FIELDS: Final[Mapping[str, frozenset[str]]] = {
-    "delivery": frozenset({"outcome", "failed", "headline", "reason", "evidence"}),
-    "recovery_ladder": frozenset({"milestone", "status", "evidence", "at"}),
-    "recovery_hint": frozenset({"advisory", "commands", "retryable"}),
-    "blocked_reasons": frozenset(
-        {"code", "explanation", "evidence", "suggested_action", "via", "retryable"}
-    ),
-}
-
-#: The per-section ENTRY bound: the diagnostics slice of a support-bundle
-#: export stays small whatever the history (the evidence sections carry
-#: the full story under the export's byte cap; diagnostics summarize it).
-DIAGNOSTIC_MAX_ENTRIES: Final[int] = 10
-
-#: Raw operational backup NAME shapes (the R38-03/#304 world: PostgreSQL
-#: custom-format dumps, SQL/SQLite exports, backup directories) — a
-#: filename-shaped token carrying one of these extensions, or a backups/
-#: path. A diagnostics render never carries a raw backup name or path;
-#: the sanitized RECEIPTS are referenced at most (a value naming a
-#: receipt passes; the bytes never exist here to begin with).
-_RAW_BACKUP_NAME_RE: Final[re.Pattern[str]] = re.compile(
-    r"[\w./\\-]+\.(?:dump|pgdump|backup|bak|sql|sqlite3?|db)(?:\.(?:gz|zst|xz|bz2))?(?![\w.-])"
-    r"|(?:^|[/\\])backups?[/\\][\w./\\-]*",
-    re.IGNORECASE,
-)
-
-
-def _allowlisted(document: Mapping[str, Any], fields: frozenset[str]) -> dict[str, Any]:
-    """One document reduced to its declared fields (unknown keys dropped)."""
-    return {str(key): document[key] for key in document if key in fields}
-
-
-def _bounded(rows: Sequence[Mapping[str, Any]], cap: int) -> tuple[list[dict[str, Any]], bool]:
-    """The first *cap* entries + whether the bound cut anything."""
-    entries = [dict(row) for row in rows]
-    if len(entries) <= cap:
-        return entries, False
-    return entries[:cap], True
-
-
-def _scrub_raw_backups(value: Any) -> tuple[Any, int]:
-    """Recursively replace raw operational backup NAMES with the exclusion
-    marker, counting what was excluded (a #304 receipt reference — a value
-    naming a receipt — survives whole; the raw backup name never does)."""
-    if isinstance(value, str):
-        if "receipt" in value.lower():
-            return value, 0
-        return _RAW_BACKUP_NAME_RE.subn("[backup-excluded]", value)
-    if isinstance(value, Mapping):
-        cleaned: dict[Any, Any] = {}
-        excluded = 0
-        for key, item in value.items():
-            cleaned[key], dropped = _scrub_raw_backups(item)
-            excluded += dropped
-        return cleaned, excluded
-    if isinstance(value, (list, tuple)):
-        items: list[Any] = []
-        excluded = 0
-        for item in value:
-            scrubbed, dropped = _scrub_raw_backups(item)
-            items.append(scrubbed)
-            excluded += dropped
-        return items, excluded
-    return value, 0
-
-
-def export_diagnostics(
-    source_rows: Mapping[str, Any],
-    *,
-    state: str | None = None,
-    coverage: Mapping[str, str] | None = None,
-    occupancy: Sequence[Mapping[str, Any]] | None = None,
-    projection: OperatorProjection | None = None,
-    projection_inconsistent: bool = False,
-    max_entries: int = DIAGNOSTIC_MAX_ENTRIES,
-) -> dict[str, Any]:
-    """The support-bundle export's DIAGNOSTICS slice (R38-15).
-
-    Three bounds, all structural:
-
-    - SIZE — every list section carries at most *max_entries* entries
-      (``truncated`` names what was cut; the byte cap at the export route
-      bounds the whole document on top);
-    - ALLOWLIST — every section serializes ONLY its declared
-      :data:`DIAGNOSTIC_SECTION_FIELDS` (the audit_export pattern);
-    - BACKUP EXCLUSION — raw operational backup names (R38-03/#304) are
-      scrubbed from every string the slice carries; the sanitized
-      receipts are referenced at most (``raw_backups_excluded`` counts).
-
-    Pure: derives from the same rows the bundle reads, writes nothing.
-    """
-    recovery = recovery_document(
-        source_rows,
-        state=state,
-        coverage=coverage,
-        occupancy=occupancy,
-        projection_inconsistent=projection_inconsistent,
-    )
-    if projection is None:
-        projection = initial_projection(source_rows)
-    blocked_reasons = [
-        reason.as_document()
-        for reason in explain_blocked(
-            projection,
-            coverage=coverage,
-            occupancy=occupancy,
-            checkpoints=source_rows.get("checkpoints"),
-        )
-    ]
-    ladder_rows, ladder_cut = _bounded(
-        [
-            _allowlisted(dict(entry), DIAGNOSTIC_SECTION_FIELDS["recovery_ladder"])
-            for entry in recovery["ladder"].values()
-        ],
-        max_entries,
-    )
-    hint = recovery["hint"]
-    blocked_rows, blocked_cut = _bounded(
-        [
-            _allowlisted(reason, DIAGNOSTIC_SECTION_FIELDS["blocked_reasons"])
-            for reason in blocked_reasons
-        ],
-        max_entries,
-    )
-    sections: dict[str, Any] = {
-        "delivery": _allowlisted(dict(recovery["delivery"]), DIAGNOSTIC_SECTION_FIELDS["delivery"]),
-        "recovery_ladder": ladder_rows,
-        "recovery_hint": (
-            [_allowlisted(dict(hint), DIAGNOSTIC_SECTION_FIELDS["recovery_hint"])]
-            if isinstance(hint, Mapping)
-            else []
-        ),
-        "blocked_reasons": blocked_rows,
-    }
-    sections, excluded = _scrub_raw_backups(sections)
-    return redact(
-        {
-            "schema": DIAGNOSTICS_SCHEMA,
-            "sections": sections,
-            "export": {
-                "max_entries_per_section": max_entries,
-                "truncated": {"recovery_ladder": ladder_cut, "blocked_reasons": blocked_cut},
-                "fields": "allowlisted",
-                "raw_backups_excluded": excluded,
-            },
-        }
-    )
-
-
-# ---------------------------------------------------------------------------
 # R40-13 (#349) — the five linked facts: execution, review round,
 # candidate, verification, acceptance — and the stable status comment
 # ---------------------------------------------------------------------------
@@ -3499,7 +3325,6 @@ def with_status_comment_identity(body: str, snapshot: Mapping[str, Any]) -> str:
 LINEAGE_VIEW_SCHEMA: Final = "forge.operator.lineage/1"
 
 #: The lineage support export's schema discriminator.
-LINEAGE_SUPPORT_SCHEMA: Final = "forge.operator.lineage-support/1"
 
 #: The root delivery's human reference spelling — round 1 IS the root
 #: delivery (the #338 convention: no round row exists for it), so its
@@ -4454,151 +4279,15 @@ def render_lineage_comment(source_rows: Mapping[str, Any], **kwargs: Any) -> str
     return "\n".join(lines)
 
 
-#: The lineage support export's per-section FIELD ALLOWLISTS (the
-#: audit_export pattern): the credential-free slice serializes ONLY its
-#: declared fields — a secret, a raw reviewer brief or a checkpoint
-#: CONTENTS field a source row ever carried is dropped by construction,
-#: never rescued into the export.
-LINEAGE_SUPPORT_FIELDS: Final[Mapping[str, frozenset[str]]] = {
-    "lineage": frozenset({"root_run_id", "reference", "deliveries", "current", "rounds_recorded"}),
-    "target": frozenset(
-        {
-            "status",
-            "provider",
-            "project_ref",
-            "source_branch",
-            "target_branch",
-            "mr_iid",
-            "provenance",
-            "refusal_reason",
-            "available",
-        }
-    ),
-    "candidate": frozenset({"sha", "role", "superseded_by", "history_count"}),
-    "checkpoint": frozenset(
-        {
-            "checkpoint_id",
-            "digest",
-            "committed_at",
-            "activated_at",
-            "activation",
-            "fence",
-            "coverage",
-        }
-    ),
-    "occupancy": frozenset({"native", "basis", "leases"}),
-    "budget": frozenset(
-        {"status", "axes", "closing_partition", "amendments", "amendments_refused"}
-    ),
-    "command_states": frozenset(
-        {"command_id", "kind", "rung", "command_state", "at", "proven_by", "honest_note"}
-    ),
-    "unresolved_effects": frozenset({"operation_key", "operation", "target_ref", "status"}),
-    "prerequisites": frozenset({"code", "description", "available", "via"}),
-}
-
-#: The per-section entry bound of the lineage support slice (the
-#: diagnostics bound's precedent).
-LINEAGE_SUPPORT_MAX_ENTRIES: Final[int] = 12
-
-
-def _redaction_count(before: Any, after: Any) -> int:
-    """How many secret-looking VALUES the redaction guard dropped — the
-    ``support_export.redactions`` observability (recursive over the two
-    trees the guard's copy-on-write produced)."""
-    if isinstance(before, dict) and isinstance(after, dict):
-        counted = 0
-        for key, value in before.items():
-            if key not in after:
-                continue  # the allowlist dropped the field, not the guard
-            counted += _redaction_count(value, after[key])
-        return counted
-    if isinstance(before, list) and isinstance(after, list):
-        return sum(
-            _redaction_count(left, right) for left, right in zip(before, after, strict=False)
-        )
-    if isinstance(before, str) and after == "[redacted]":
-        return 1
-    return 0
-
-
-def export_lineage_support(
-    source_rows: Mapping[str, Any],
-    *,
-    projection: OperatorProjection | None = None,
-    now: datetime | str | None = None,
-    coverage: Mapping[str, str] | None = None,
-    occupancy: Sequence[Mapping[str, Any]] | None = None,
-    projection_inconsistent: bool = False,
-    max_entries: int = LINEAGE_SUPPORT_MAX_ENTRIES,
-) -> dict[str, Any]:
-    """The CREDENTIAL-FREE lineage support export (R41-12): the one
-    lineage snapshot bounded (per-section entry caps), ALLOWLISTED (only
-    the declared :data:`LINEAGE_SUPPORT_FIELDS` serialize — secrets, raw
-    briefs and checkpoint CONTENTS are dropped by construction) and
-    redaction-counted (``support_export.redactions`` — how many
-    secret-looking values the guard dropped anyway, the observability
-    the issue names). Pure."""
-    view = lineage_view(
-        source_rows,
-        projection=projection,
-        now=now,
-        coverage=coverage,
-        occupancy=occupancy,
-        projection_inconsistent=projection_inconsistent,
-    )
-    sections: dict[str, Any] = {}
-    for name, fields in LINEAGE_SUPPORT_FIELDS.items():
-        raw = view.get(name)
-        if isinstance(raw, list):
-            bounded, _ = _bounded(
-                [_allowlisted(dict(entry), fields) for entry in raw if isinstance(entry, dict)],
-                max_entries,
-            )
-            sections[name] = bounded
-        elif isinstance(raw, dict):
-            sections[name] = _allowlisted(dict(raw), fields)
-    document = {
-        "schema": LINEAGE_SUPPORT_SCHEMA,
-        "run_id": view["run_id"],
-        "computed_at": view["computed_at"],
-        "operator_state": view["operator_state"],
-        "stale_or_inconsistent": view["stale_or_inconsistent"],
-        "sections": sections,
-        "export": {
-            "fields": "allowlisted",
-            "max_entries_per_section": max_entries,
-            "credential_free": (
-                "secrets, raw reviewer briefs and checkpoint contents are omitted by "
-                "default — the allowlisted fields never carry them"
-            ),
-            "redactions": 0,
-        },
-    }
-    redacted_doc = redact(document)
-    redacted_doc["export"]["redactions"] = _redaction_count(document, redacted_doc)
-    return redacted_doc
-
-
 # ---------------------------------------------------------------------------
 # R42-07 (#380) — command-to-delivery progress: the outcome axis as a
 # first-class projection, the next-step distinction set, the command-outcome
-# action fence, and the bounded support slice
+# action fence
 # ---------------------------------------------------------------------------
 
 #: The command-progress document's schema discriminator (versioned like the
 #: view's).
 COMMAND_PROGRESS_SCHEMA: Final = "forge.operator.command-progress/1"
-
-#: The support slice's schema discriminator.
-COMMAND_SUPPORT_SCHEMA: Final = "forge.operator.command-support/1"
-
-#: R42-07 (#380): the issue's observability spelling for the redaction
-#: COUNT the support slice states (``export.redactions``) — what the
-#: guard caught and replaced, never a silent scrub. An alias-name, not a
-#: second counter: the export block names this measure beside the count
-#: so a metric reader can find the number without knowing the schema.
-SUPPORT_BUNDLE_REDACTIONS: Final = "support.bundle_redactions"
 
 #: R42-01 (#374): the step-level outcome stream of a feedback command —
 #: one outbox row per CHANGED ``(outcome, reason)`` per note. These are
@@ -4711,11 +4400,6 @@ NEXT_STEP_CODES: Final[tuple[str, ...]] = (
 #: bundle never carries configured values): the bounded round policy, the
 #: authorized reviewer set and the step runtime's retry bound (the
 #: code-level default the outbox rows record their budget against).
-COMMAND_RECOVERY_SETTINGS: Final[tuple[Mapping[str, str], ...]] = (
-    {"name": "FORGE_MAX_REVIEW_ROUNDS", "governs": "the bounded review-round count per lineage"},
-    {"name": "FORGE_APPROVERS", "governs": "the authorized reviewer set (refused_unauthorized)"},
-    {"name": "STEP_MAX_ATTEMPTS", "governs": "the step runtime's bounded retry attempts"},
-)
 
 
 def _feedback_event_rows(source_rows: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -5231,128 +4915,3 @@ def command_progress(
         ),
     }
     return redact(document)
-
-
-#: The command support slice's per-section FIELD ALLOWLISTS (the
-#: audit_export pattern): the bounded export serializes ONLY its declared
-#: fields — the reviewer's note TEXT, a raw reviewer brief and any
-#: credential-shaped value a source row ever carried are dropped by
-#: construction, and what the redaction guard catches anyway is COUNTED.
-COMMAND_SUPPORT_FIELDS: Final[Mapping[str, frozenset[str]]] = {
-    "commands": frozenset(
-        {
-            "note_id",
-            "outcome",
-            "reason",
-            "source",
-            "retries",
-            "first_observed_at",
-            "last_event_at",
-            "complete",
-            "proven_by",
-            "honest_note",
-        }
-    ),
-    "next_steps": frozenset(
-        {"code", "binding", "reason", "distinct_from", "safe_action", "retryable", "evidence"}
-    ),
-}
-
-#: The per-section entry bound of the command support slice.
-COMMAND_SUPPORT_MAX_ENTRIES: Final[int] = 12
-
-
-def export_command_support(
-    source_rows: Mapping[str, Any],
-    *,
-    projection: OperatorProjection | None = None,
-    now: datetime | str | None = None,
-    coverage: Mapping[str, str] | None = None,
-    projection_inconsistent: bool = False,
-    retry_details: Sequence[Mapping[str, Any]] | None = None,
-    max_entries: int = COMMAND_SUPPORT_MAX_ENTRIES,
-) -> dict[str, Any]:
-    """The bounded SUPPORT slice of the command axis (R42-07): scoped
-    ids, the RELEVANT typed errors, the settings NAMES and the evidence
-    references — no raw code, no reviewer prompts and no credential
-    values by default, with the redactions COUNTED.
-
-    Bounded (per-section entry caps), ALLOWLISTED (only the declared
-    :data:`COMMAND_SUPPORT_FIELDS` serialize) and redaction-counted —
-    the ``support.bundle_redactions`` observability the issue names. The
-    *retry_details* parameter is the DEFERRED-ERROR surface: the typed
-    provider-error excerpts the retry trail journaled (one bounded row
-    per deferral — a relevant error, scrubbed by the redaction guard and
-    counted); the caller passes the rows the reader already read, never
-    a second collector.
-    """
-    progress = command_progress(
-        source_rows,
-        projection=projection,
-        now=now,
-        coverage=coverage,
-        projection_inconsistent=projection_inconsistent,
-    )
-    bounded_commands, commands_cut = _bounded(
-        [
-            _allowlisted(dict(row), COMMAND_SUPPORT_FIELDS["commands"])
-            for row in progress["commands"]
-        ],
-        max_entries,
-    )
-    bounded_steps, steps_cut = _bounded(
-        [
-            _allowlisted(dict(row), COMMAND_SUPPORT_FIELDS["next_steps"])
-            for row in progress["next_steps"]
-        ],
-        max_entries,
-    )
-    errors: list[dict[str, Any]] = []
-    for row in retry_details or ():
-        view = _norm(row)
-        if not view or str(view.get("event_type") or "") != PROVIDER_OBSERVATION_RETRY_EVENT:
-            continue
-        errors.append(
-            {
-                "note_id": str(view.get("note_id") or ""),
-                "reason": str(view.get("reason") or ""),
-                "status_code": view.get("status_code"),
-                "observed": bool(view.get("observed")),
-                "detail": str(view.get("detail") or "")[:200],
-                "at": _iso(view.get("at")),
-            }
-        )
-    bounded_errors, errors_cut = _bounded(errors, max_entries)
-    sections: dict[str, Any] = {
-        "commands": bounded_commands,
-        "next_steps": bounded_steps,
-        "relevant_errors": bounded_errors,
-        "settings_names": [dict(entry) for entry in COMMAND_RECOVERY_SETTINGS],
-    }
-    document = {
-        "schema": COMMAND_SUPPORT_SCHEMA,
-        "run_id": progress["run_id"],
-        "computed_at": progress["computed_at"],
-        "current_subject": dict(progress["current_subject"]),
-        "stale": progress["stale"],
-        "sections": sections,
-        "export": {
-            "fields": "allowlisted",
-            "max_entries_per_section": max_entries,
-            "truncated": {
-                "commands": commands_cut,
-                "next_steps": steps_cut,
-                "relevant_errors": errors_cut,
-            },
-            "credential_free": (
-                "scoped ids, typed reasons, settings NAMES and evidence references "
-                "only — no raw code, no reviewer prompts, no credential values by "
-                "default; what the redaction guard caught anyway is counted"
-            ),
-            "redactions": 0,
-            "redactions_measure": SUPPORT_BUNDLE_REDACTIONS,
-        },
-    }
-    redacted_doc = redact(document)
-    redacted_doc["export"]["redactions"] = _redaction_count(document, redacted_doc)
-    return redacted_doc

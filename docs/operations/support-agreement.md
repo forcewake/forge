@@ -86,39 +86,20 @@ with each one's observable, threshold basis and recovery step, live in
 
 ## The operator surface (what a supported operator reads)
 
-ONE authorized surface answers "is this queued / progressing / paused /
-unverified / verified / blocked, and what is the next SAFE action":
-`GET /operator/runs/{run_id}` (the operator read API, lane-control
-credential family). Its `ops_limits` block carries the six quantities —
-current attempt, native occupancy, exact checkpoint, unresolved effects,
-required checks, accounting coverage — plus:
+The authenticated run list and detail are read-only. Detail exposes the
+current projection, native occupancy, exact checkpoint, verification,
+recovery, delivery, lineage and command progress as distinct fields.
+When a policy is mounted, `admission` reads its actual intake and execution
+counters; missing authority is `null`, never invented free capacity.
 
-- the **four observability quantities, always separate records**:
-  `ops.command_application_latency` (per command, received→applied),
-  `ops.native_occupancy` (the lease gauge by occupancy state),
-  `ops.recovery_duration` (pause applied → the matched checkpoint
-  activation — the exact restore observed),
-  `ops.manual_intervention_minutes` (WAIT-for-human windows only; active
-  human working time is recorded nowhere and is never invented). They are
-  never summed, averaged or divided into one another; an unmatched window
-  is counted, never zero-filled;
-- the **admission accounting**: intake counters (refused requests /
-  admitted-to-queue) and execution counters (slots held / draining /
-  completed) side by side, with the capped-admission verdict derived from
-  EXECUTION OCCUPANCY ONLY — the intake count is never a claim about
-  execution slots (pinned: a forged intake-derived verdict raises);
-- the **review-budget distinction**: a FAILED REVIEW BUDGET renders as
-  exactly that — never lost code, never failed independent checks — with
-  the #325 review-only continuation and the auditable top-up named beside
-  it;
-- **history separation**: current fields derive from the LATEST row of
-  each section; an applied resume that named a different checkpoint never
-  activates the current one (`activation: unmatched-command`), and every
-  historical sample carries its own `from`/`to` moments.
+The optional `ops_limits` report and support-bundle exporter have been
+removed. The measured historical operating limits above remain historical
+evidence, rather than a currently emitted grading schema. See
+[the operator view](operator-view.md) for the current API contract.
 
-Repositories outside the operator token's canonical-subject scope never
-enter any of it: out-of-scope is a 404 indistinguishable from unknown, on
-the list, the detail and the bundle paths (pinned in code).
+Canonical-subject scope is checked before reading either list or detail.
+An out-of-scope run is indistinguishable from an unknown run, and reading
+these routes never launches work or writes to a provider.
 
 ## The recovery drills (code-proven, disposable infrastructure)
 

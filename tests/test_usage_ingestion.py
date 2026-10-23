@@ -67,11 +67,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from forge.adaptive.delivery_measurement import (
-    MeasurementLinker,
-    ProviderRoute,
-    ledger_records_from_ingested_usage,
-)
+from forge.adaptive.usage_types import ProviderRoute
+
 from forge.adaptive.usage_ingestion import (
     ATTRIBUTION_REFUSED,
     COST_BASIS_ESTIMATED,
@@ -394,19 +391,13 @@ def test_partial_receipt_never_certifies_an_exact_ledger_total():
         source="lane/.forge/usage.json",
         final=False,
     )
-    # the lane artifact's own attempt identity ("386:2") is the row's —
-    # the ledger must know the attempt under that id
-    records = ledger_records_from_ingested_usage(
-        store.documents(),
-        works=[{"work_id": RUN_ID, "outcome": ""}],
-        attempts=[{"work_id": RUN_ID, "attempt_id": "386:2"}],
-    )
-    ledger = MeasurementLinker().link(**records)
-    usage = ledger.works[0].attempts[0].usage
-    assert usage.exact is False
-    assert usage.cost_usd is None
-    # the lower bound is the partial's own claim — never zero
-    assert usage.known_cost_lower_bound_usd == pytest.approx(0.1498992)
+    row = store.rows()[0]
+    assert row.attempt_id == "386:2"
+    assert row.final is False
+    assert row.cost_usd == pytest.approx(0.1498992)
+    exposure = spend_cap_check(store.rows(), cap_usd=1, projection_usd=0.1)
+    assert exposure["settled_usd"] == 0
+    assert exposure["accrued_unsettled_usd"] == pytest.approx(0.1498992)
 
 
 # ----------------------------------------------------------------------
@@ -446,27 +437,14 @@ def _live_cohort_store() -> UsageIngestStore:
 
 def test_ledger_join_three_distinct_measures_from_mixed_sources():
     store = _live_cohort_store()
-    records = ledger_records_from_ingested_usage(
-        store.documents(),
-        works=[{"work_id": "w", "outcome": "accepted"}, {"work_id": "x", "outcome": "rejected"}],
-        attempts=[
-            {"work_id": "w", "attempt_id": "w/a1", "outcome": "rejected"},
-            {"work_id": "w", "attempt_id": "w/a2", "outcome": "accepted"},
-            {"work_id": "x", "attempt_id": "x/a1", "outcome": "rejected"},
-        ],
-    )
-    ledger = MeasurementLinker().link(**records)
-    # the planner row kept its OWN population (work-level calls, never an
-    # attempt receipt)
-    work = ledger.work_by_id("w")
-    assert work.planner_call_ids == (f"{RUN_ID}:planner:1",)
-    assert len(work.attempts) == 2
-
-    by_id = {attempt.attempt_id: attempt for attempt in work.attempts}
-    assert by_id["w/a1"].usage.cost_usd == pytest.approx(0.30)
-    assert by_id["w/a2"].usage.cost_usd == pytest.approx(0.70)
-    assert ledger.work_by_id("x").attempts[0].usage.cost_usd == pytest.approx(0.20)
-    assert len(store.rows()) == 4  # planner population remains distinct
+    rows = store.rows()
+    attempts = {row.attempt_id: row.cost_usd for row in rows if row.attempt_id}
+    assert attempts["w/a1"] == pytest.approx(0.30)
+    assert attempts["w/a2"] == pytest.approx(0.70)
+    assert attempts["x/a1"] == pytest.approx(0.20)
+    assert len(rows) == 4
+    planner = [row for row in rows if not row.attempt_id]
+    assert len(planner) == 1 and planner[0].work_id == "w"
 
 
 def test_same_receipt_name_across_attempts_preserves_both_scoped_identities():
@@ -490,24 +468,11 @@ def test_same_receipt_name_across_attempts_preserves_both_scoped_identities():
             attempt_id=attempt,
             source="sdk-receipt",
         )
-    records = ledger_records_from_ingested_usage(
-        store.documents(),
-        works=[{"work_id": "w", "outcome": ""}],
-        attempts=[
-            {"work_id": "w", "attempt_id": "w/a1"},
-            {"work_id": "w", "attempt_id": "w/a2"},
-        ],
-    )
-    ledger = MeasurementLinker().link(**records)
-    attempts = ledger.works[0].attempts
-    assert len(attempts) == 2
-    assert {attempt.attempt_id for attempt in attempts} == {"w/a1", "w/a2"}
-    assert {receipt.attempt_id for attempt in attempts for receipt in attempt.receipts} == {
-        "w/a1",
-        "w/a2",
-    }
-    assert all(attempt.receipts[0].receipt_id == "dup-1" for attempt in attempts)
-    assert len(store.rows()) == 2
+    rows = store.rows()
+    assert len(rows) == 2
+    assert {row.attempt_id for row in rows} == {"w/a1", "w/a2"}
+    assert {row.receipt_id for row in rows} == {"dup-1"}
+    assert len({(row.work_id, row.attempt_id, row.receipt_id, row.source) for row in rows}) == 2
 
 
 # ----------------------------------------------------------------------
@@ -554,13 +519,6 @@ def test_rate_card_and_route_changes_create_new_segments_history_intact():
     assert rows[0].rate_card_id == "card-v1" and rows[1].rate_card_id == "card-v2"
     assert rows[0].segment != rows[1].segment
     # the economics fold shows BOTH segments — the historical one untouched
-    records = ledger_records_from_ingested_usage(
-        store.documents(),
-        works=[{"work_id": "w", "outcome": ""}],
-        attempts=[{"work_id": "w", "attempt_id": "w/a1"}, {"work_id": "w", "attempt_id": "w/a2"}],
-    )
-    linked = MeasurementLinker().link(**records)
-    assert len(linked.works[0].attempts) == 2
     assert {row.rate_card_id for row in store.rows()} == {"card-v1", "card-v2"}
 
 
@@ -603,17 +561,6 @@ def test_estimated_vs_provider_reported_vs_billing_reconciliation_distinguished(
         source="billing-export",
         cost_basis="billing-reconciliation",
     )
-    records = ledger_records_from_ingested_usage(
-        store.documents(),
-        works=[{"work_id": "w", "outcome": ""}],
-        attempts=[
-            {"work_id": "w", "attempt_id": "w/a1"},
-            {"work_id": "w", "attempt_id": "w/a2"},
-            {"work_id": "w", "attempt_id": "w/a3"},
-        ],
-    )
-    linked = MeasurementLinker().link(**records)
-    assert len(linked.works[0].attempts) == 3
     by_basis = {row.cost_basis: row.cost_usd for row in store.rows()}
     assert by_basis == {
         "provider-reported": pytest.approx(0.1498992, abs=1e-6),

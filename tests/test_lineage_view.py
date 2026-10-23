@@ -51,7 +51,6 @@ from forge.adaptive.operator_view import (
     OperatorAction,
     RecoveryActions,
     command_state_rows,
-    export_lineage_support,
     initial_projection,
     lineage_prerequisites,
     lineage_reference,
@@ -805,71 +804,6 @@ class TestMrCommentAndSupportExport:
         second = render_lineage_comment(rows, now=NOW, occupancy=OCCUPANCY_UNKNOWN)
         assert first == second  # replayed delivery collapses to ONE status
 
-    def test_the_support_export_omits_secrets_raw_briefs_and_checkpoint_contents(self):
-        """AC (sentinel-tested): secrets, raw reviewer briefs and
-        checkpoint CONTENTS never ride the export — dropped by the
-        allowlist by construction, and the redaction count states what
-        the guard caught anyway."""
-        rows = _blocked_round4_rows()
-        # the sentinels a careless export would leak
-        rows["run"] = _run(
-            blocked_reason="401 unauthorized: the broker credential was rejected (glpat-xyz987654321)"
-        )
-        rows["verifications"] = []
-        rows["checkpoints"] = [
-            {
-                "checkpoint_id": "ck-1",
-                "digest": "d" * 64,
-                "committed_at": "2026-09-27T11:30:00+00:00",
-                "fence": "held",
-                "contents": "SECRET PLAN TEXT AND RAW BRIEF: sk-live-abcdef123456",
-                "brief": "the reviewer's raw brief text",
-            }
-        ]
-        rows["amendments"] = [_amendment(reason="RAW OPERATOR TEXT with glpat-xyz987654321 inside")]
-        export = export_lineage_support(rows, now=NOW, occupancy=OCCUPANCY_UNKNOWN)
-        rendered = repr(export)
-        assert export["schema"] == "forge.operator.lineage-support/1"
-        # secrets never ride
-        assert "glpat-" not in rendered
-        assert "sk-live-" not in rendered
-        # raw briefs and checkpoint contents never ride
-        assert "RAW OPERATOR TEXT" not in rendered
-        assert "reviewer's raw brief" not in rendered
-        assert "SECRET PLAN TEXT" not in rendered
-        assert "brief" not in export["sections"]["checkpoint"]
-        # the amendment rows carry the audit fields only (no free-text reason)
-        assert set(export["sections"]["budget"]["amendments"][0]) >= {
-            "command_id",
-            "axis",
-            "status",
-        }
-        assert "reason" not in export["sections"]["budget"]["amendments"][0]
-        # the observability: the guard's redactions are counted
-        assert export["export"]["redactions"] >= 1
-
-    def test_the_support_export_stays_allowlisted_and_bounded(self):
-        rows = _blocked_round4_rows(
-            commands=[
-                _command(seq, "steer", "applied", applied_at="2026-09-27T11:50:00+00:00")
-                for seq in range(1, 30)
-            ]
-        )
-        export = export_lineage_support(rows, now=NOW)
-        assert (
-            len(export["sections"]["command_states"]) == export["export"]["max_entries_per_section"]
-        )
-        # every serialized section field is declared
-        from forge.adaptive.operator_view import LINEAGE_SUPPORT_FIELDS
-
-        for name, fields in LINEAGE_SUPPORT_FIELDS.items():
-            section = export["sections"].get(name)
-            if isinstance(section, dict):
-                assert set(section) <= set(fields), name
-            elif isinstance(section, list):
-                for entry in section:
-                    assert set(entry) <= set(fields), name
-
 
 # ---------------------------------------------------------------------------
 # THE BLINDED-OPERATOR WALK (AC-7) — recovery using ONLY the view + the
@@ -1237,22 +1171,6 @@ class TestLiveSurface:
         assert document["source_coverage"]["budget"] == "present"
         assert document["source_coverage"]["amendments"] == "present"
         assert document["source_coverage"]["inbox"] == "present"
-        # the read-model's lineage fold rides the same render
-        ops_lineage = document["ops_limits"]["lineage"]
-        assert ops_lineage["reference"] == "round 4 of 7319478e"
-        assert ops_lineage["command_state_counts"]["received"] == 1
-        assert ops_lineage["projection.stale_or_inconsistent"]["stale_or_inconsistent"] is False
-
-        # the support bundle carries the credential-free lineage slice
-        bundle = await client.get(
-            f"/operator/runs/{ROOT}/support-bundle?{query}",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert bundle.status_code == 200
-        support = bundle.json()["lineage_support"]
-        assert support["sections"]["target"]["source_branch"] == BRANCH
-        assert "amount" in support["sections"]["budget"]["amendments"][0]
-        assert support["export"]["redactions"] >= 0
 
     async def test_an_unknown_section_selection_is_refused(self, app, client):
         from forge.api_operator import operator_subject_scope_token

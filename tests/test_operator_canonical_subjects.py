@@ -127,11 +127,10 @@ def test_a_gitlab_row_derives_its_subject_without_any_github_column():
     assert subject.subject_id() == f"gitlab/{UNRECORDED_CONNECTION}/77"
 
 
-def test_an_azure_row_derives_its_subject_from_the_project_id():
+def test_a_retired_azure_subject_is_outside_every_supported_scope():
     run = FlowRun(id="4" * 32, project_id=909, provider="azure_devops")
     subject = subject_of_run(run)
-    assert subject is not None
-    assert subject.subject_id() == f"azure_devops/{UNRECORDED_CONNECTION}/909"
+    assert subject is None
 
 
 def test_rows_without_a_nameable_subject_are_outside_every_scope():
@@ -350,10 +349,7 @@ async def test_at03_the_gitlab_row_is_visible_through_its_own_identity(
     """The R37-02 headline: a run with NO github_repo_full_name is a
     first-class subject — readable on every surface through its canonical
     GitLab identity, while the GitHub-A grant still cannot see it."""
-    for path in (
-        f"/operator/runs/{RUN_GITLAB}",
-        f"/operator/runs/{RUN_GITLAB}/support-bundle",
-    ):
+    for path in (f"/operator/runs/{RUN_GITLAB}",):
         own = await client.get(f"{path}?{_query([GITLAB_TEST])}", headers=_headers([GITLAB_TEST]))
         assert own.status_code == 200, path
         foreign = await client.get(f"{path}?{_query([GITHUB_COM])}", headers=_headers([GITHUB_COM]))
@@ -363,8 +359,7 @@ async def test_at03_the_gitlab_row_is_visible_through_its_own_identity(
 async def test_at03_the_same_display_name_on_two_connections_stays_isolated(
     app, client, repository, collision
 ):
-    """The P03 probe, closed: connection A's grant cannot list, read or
-    export the identically-NAMED connection-B repository — and vice
+    """The P03 probe, closed: connection A's grant cannot list or read the identically-NAMED connection-B repository — and vice
     versa."""
     for grant, own, foreign in (
         (GITHUB_COM, RUN_COM, RUN_GHE),
@@ -377,11 +372,6 @@ async def test_at03_the_same_display_name_on_two_connections_stays_isolated(
             f"/operator/runs/{foreign}?{_query([grant])}", headers=_headers([grant])
         )
         assert detail.status_code == 404
-        bundle = await client.get(
-            f"/operator/runs/{foreign}/support-bundle?{_query([grant])}",
-            headers=_headers([grant]),
-        )
-        assert bundle.status_code == 404
         own_detail = await client.get(
             f"/operator/runs/{own}?{_query([grant])}", headers=_headers([grant])
         )
@@ -611,8 +601,7 @@ async def test_the_page_size_is_capped(app, client, repository):
 
 
 async def test_reads_never_pin_mutate_or_launch(app, client, repository, collision):
-    """The read-only charter at the API boundary: across list, detail and
-    bundle GETs the checkpoint authority sees only ``entry`` reads, and
+    """The read-only charter at the API boundary: across list and detail GETs the checkpoint authority sees only ``entry`` reads, and
     the durable FlowRun rows are untouched."""
     from sqlalchemy import func, select
 
@@ -620,10 +609,7 @@ async def test_reads_never_pin_mutate_or_launch(app, client, repository, collisi
         listing = await client.get(f"/operator/runs?{_query([grant])}", headers=_headers([grant]))
         assert listing.status_code == 200
         for run in listing.json()["runs"]:
-            for path in (
-                f"/operator/runs/{run['run_id']}",
-                f"/operator/runs/{run['run_id']}/support-bundle",
-            ):
+            for path in (f"/operator/runs/{run['run_id']}",):
                 response = await client.get(f"{path}?{_query([grant])}", headers=_headers([grant]))
                 assert response.status_code == 200, path
 

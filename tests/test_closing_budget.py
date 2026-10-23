@@ -64,7 +64,7 @@ from forge.adaptive.closing_budget import (
     review_only_continuation,
     rows_from_durable_receipts,
 )
-from forge.adaptive.delivery_measurement import ProviderRoute
+from forge.adaptive.usage_types import ProviderRoute
 from forge.adaptive.usage_ingestion import (
     COST_BASIS_ESTIMATED,
     COST_BASIS_PROVIDER_REPORTED,

@@ -1,5 +1,5 @@
 """The bounded operator experience (R37-16) — bounded drill-down,
-typed diagnostics, bounded export, observable pages.
+typed diagnostics and observable pages.
 
 The read API over the corrected read model, pinned end to end:
 
@@ -18,10 +18,6 @@ The read API over the corrected read model, pinned end to end:
   occupancy summary (``occupied_vs_limit`` against the mounted
   admission policy, the uncertain leases' ages) render as their own
   sections;
-- **bounded export**: the support bundle states its export scope and
-  size, refuses (typed ``operator.bundle_too_large``, 413) when the
-  serialized document exceeds ``?max_bytes=``, narrows by ``?sections=``
-  instead of truncating, and stays redacted;
 - **time-to-diagnose observability**: every response carries
   ``operator.query_duration`` and ``operator.page_payload_bytes``;
 - **bounded listing**: thousands of historical runs list in pages whose
@@ -239,12 +235,6 @@ async def _seed_bulk(app, rows) -> None:
 
 async def _detail(client, **params):
     return await client.get(f"/operator/runs/{RUN_A}?{_query(**params)}", headers=_scope_headers())
-
-
-async def _bundle(client, **params):
-    return await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?{_query(**params)}", headers=_scope_headers()
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +585,10 @@ async def test_occupancy_summary_reports_occupied_vs_limit_and_unknown_ages(
     summary = document["occupancy_summary"]
     assert summary["occupied_vs_limit"] == {"occupied": 1, "limit": 3}
     assert summary["counts"] == {"dispatched_unknown": 1}
+    assert document["admission"]["execution_attempts"]["held"] == 1
+    assert document["admission"]["execution_attempts"]["limit"] == 3
+    assert document["admission"]["rejected_requests"] == 0
+    assert document["admission"]["admitted_work"] == 0
     assert summary["unknown_ages"][0]["lease_id"] == "lease-open"
     assert summary["unknown_ages"][0]["occupancy"] == "dispatched_unknown"
     # the age is measured against the render's own clock (computed_at)
@@ -611,99 +605,12 @@ async def test_occupancy_limit_reads_null_without_a_mounted_policy(app, client, 
     summary = document["occupancy_summary"]
     assert summary["occupied_vs_limit"] == {"occupied": 0, "limit": None}  # honest unknown
     assert summary["unknown_ages"] == []
+    assert document["admission"] is None
 
 
 # ---------------------------------------------------------------------------
-# The bounded support-bundle export
+# The retired export has no route; see test_api_operator
 # ---------------------------------------------------------------------------
-
-
-async def test_the_bundle_states_its_export_scope_and_size(app, client, repository):
-    await _seed(app, _run(RUN_A), _revival(RUN_A, 1))
-
-    response = await _bundle(client)
-
-    assert response.status_code == 200
-    document = response.json()
-    export = document["export"]
-    assert export["bytes"] == len(response.content)  # the stated size IS the body size
-    assert export["bytes"] <= export["max_bytes"]
-    assert export["max_bytes"] == 1_048_576  # the default cap
-    assert export["hard_max_bytes"] == 8_388_608
-    assert export["truncated"] is False
-    assert export["sections_selected"] is False
-    assert "attempts" in export["scope"]
-    assert document["coverage"]["attempts"] == "present"
-
-
-async def test_an_oversized_bundle_is_refused_with_the_typed_code(app, client, repository):
-    await _seed(
-        app,
-        _run(RUN_A, status="failed"),
-        *[_revival(RUN_A, number, status="failed") for number in range(1, 60)],
-    )
-    full = await _bundle(client)
-    assert full.status_code == 200
-    full_size = full.json()["export"]["bytes"]
-
-    # the narrowed export first — its size sets the boundary that must fit
-    narrowed = await _bundle(client, sections="verifications")
-    assert narrowed.status_code == 200
-    narrowed_document = narrowed.json()
-    narrowed_size = narrowed_document["export"]["bytes"]
-    assert narrowed_size < full_size  # the 59 failed attempts are the bulk
-    cap = (narrowed_size + full_size) // 2  # above the narrowed, below the full
-
-    # the FULL bundle under that cap: the typed refusal, never truncation
-    refused = await _bundle(client, max_bytes=cap)
-    assert refused.status_code == 413
-    detail = refused.json()["detail"]
-    assert detail["code"] == "operator.bundle_too_large"
-    assert detail["bytes"] > detail["max_bytes"] == cap
-    assert "?sections=" in detail["hint"]
-
-    # narrowing the scope is the bounded way to fit under the same cap
-    fits = await _bundle(client, max_bytes=cap, sections="verifications")
-    assert fits.status_code == 200
-    assert fits.json()["export"]["scope"] == ["verifications"]
-    assert fits.json()["export"]["sections_selected"] is True
-    assert fits.json()["export"]["bytes"] <= cap
-    # the unselected sections were never queried — unknown, never invented
-    assert fits.json()["coverage"]["attempts"] == "unknown"
-    assert fits.json()["coverage"]["commands"] == "unknown"
-    assert fits.json()["coverage"]["verifications"] == "missing"  # queried, empty
-
-
-async def test_the_bundle_byte_cap_hard_maximum_is_enforced(app, client, repository):
-    await _seed(app, _run(RUN_A))
-    assert (await _bundle(client, max_bytes=0)).status_code == 422
-    assert (await _bundle(client, max_bytes=9_999_999)).status_code == 422
-    assert (await _bundle(client, max_bytes=8_388_608)).status_code == 200
-
-
-async def test_bundle_sections_validation_refuses_unknown_names(app, client, repository):
-    await _seed(app, _run(RUN_A))
-    response = await _bundle(client, sections="attempts,occupancy")
-    assert response.status_code == 400
-    assert "unknown section" in response.json()["detail"]
-
-
-async def test_the_bundle_export_never_leaks_credentials(app, client, repository):
-    await _seed(
-        app,
-        _run(
-            RUN_A,
-            status_reason="pipeline failed: Bearer ghp_aaaaaaaaaaaaaaaaaaaa rejected",
-            status="failed",
-        ),
-        _revival(RUN_A, 1, status="failed"),
-    )
-    for params in ({}, {"sections": "attempts"}, {"max_bytes": 1_048_576}):
-        response = await _bundle(client, **params)
-        assert response.status_code == 200, params
-        assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in response.text
-        assert "glpat-test" not in response.text  # no model/provider keys either
-        assert "operator-secret" not in response.text  # and not the lane secret
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +624,6 @@ async def test_every_response_carries_the_query_duration_and_payload_bytes(app, 
     for response in (
         await client.get(f"/operator/runs?{_query()}", headers=_scope_headers()),
         await _detail(client),
-        await _bundle(client),
     ):
         assert response.status_code == 200
         duration = float(response.headers["operator.query_duration"])

@@ -2551,13 +2551,11 @@ async def composed_a06_run_mirror_scoped_token() -> None:
                             },
                         )
 
-                    for suffix in ("", "/support-bundle"):
-                        denied = await read(f"/operator/runs/{run_id}{suffix}", foreign)
-                        assert denied.status_code == 404
-                        assert (
-                            denied.json()["detail"]
-                            == f"no run {run_id!r} within the authorized scope"
-                        )
+                    denied = await read(f"/operator/runs/{run_id}", foreign)
+                    assert denied.status_code == 404
+                    assert (
+                        denied.json()["detail"] == f"no run {run_id!r} within the authorized scope"
+                    )
                     listed = await read("/operator/runs", foreign)
                     assert listed.status_code == 200 and listed.json()["runs"] == []
                     own_list = await read("/operator/runs", own)

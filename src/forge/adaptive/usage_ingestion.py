@@ -63,11 +63,8 @@ front door, and every rule here is pinned by
   infinite/negative costs, bounds and projections surface as typed
   findings, never silent defaults.
 - **Duplicate call identities never false-join** — the same model-call id
-  under two attempts is ingested under BOTH natural keys but the ledger
-  join (:func:`forge.adaptive.delivery_measurement.
-  ledger_records_from_ingested_usage`) passes each to its own attempt and
-  the linker's duplicate/cross-join guards surface it — one receipt id is
-  never summed twice.
+  under two attempts is ingested under BOTH natural keys. Receipt identity
+  includes its attempt; replay of one attempt cannot overwrite another.
 
 - **The durable identity, ONE contract (Q39-05/#324)** — the durable
   ``usage_receipts`` row keys on the SAME four components the store
@@ -100,7 +97,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from forge.adaptive.delivery_measurement import ProviderRoute
+from forge.adaptive.usage_types import ProviderRoute
 
 __all__ = [
     "ATTRIBUTION_REFUSED",
@@ -219,7 +216,7 @@ BLOCKING_FINDINGS = frozenset(
 
 
 # ----------------------------------------------------------------------
-# Small helpers (the delivery_measurement spelling — shared, not re-derived)
+# Small helpers for receipt and spend accounting
 # ----------------------------------------------------------------------
 
 

@@ -27,18 +27,12 @@ sqlite (the reader + the API):
   a provider observation was RETRYING (``pending``) is refused once the
   outcome settles or a different command becomes the newest unresolved
   one — a stale action can never mutate a different current attempt;
-- the bounded SUPPORT slice: scoped ids, the relevant TYPED errors, the
-  settings NAMES and evidence refs — no raw code, no reviewer prompts,
-  no credential values by default, the redactions COUNTED;
 - the replay-stable MR status comment: the same facts on CLI, API and
   the native comment, one identity per world.
 
 The pure folds live in
 :mod:`forge.adaptive.operator_view` (:func:`command_outcome_rows`,
-:func:`next_step_rows`, :func:`command_progress`,
-:func:`export_command_support`); the observability fold in
-:mod:`forge.adaptive.ops_limits`
-(:func:`command_progress_limits_fold`).
+:func:`next_step_rows`, :func:`command_progress`).
 """
 
 from __future__ import annotations
@@ -56,9 +50,6 @@ from forge.adaptive.operator_view import (
     COMMAND_OUTCOMES,
     COMMAND_OUTCOME_PROOF,
     COMMAND_PROGRESS_SCHEMA,
-    COMMAND_RECOVERY_SETTINGS,
-    COMMAND_SUPPORT_FIELDS,
-    COMMAND_SUPPORT_SCHEMA,
     FEEDBACK_OUTCOME_EVENT,
     NEXT_STEP_CODES,
     PROVIDER_OBSERVATION_RETRY_EVENT,
@@ -67,18 +58,12 @@ from forge.adaptive.operator_view import (
     RecoveryActions,
     command_outcome_rows,
     command_progress,
-    export_command_support,
     initial_projection,
     next_step_rows,
     render_status_comment,
     status_note_lines,
 )
-from forge.adaptive.ops_limits import (
-    COMMAND_ACCEPTED_TO_APPLIED,
-    MANUAL_RESCUE_MINUTES,
-    PROJECTION_LAG,
-    command_progress_limits_fold,
-)
+
 
 NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
 RUN_ID = "f" * 32
@@ -681,132 +666,6 @@ class TestCommandOutcomeActionFence:
 # ---------------------------------------------------------------------------
 
 
-class TestCommandSupportSlice:
-    def _rows(self) -> dict:
-        return _rows(
-            feedback_events=[
-                _retry(NOTE, at="2026-09-26T11:00:00+00:00", detail="GitLab 503 boom " + "x" * 300),
-                _journal(NOTE, "pending", at="2026-09-26T11:00:05+00:00"),
-            ]
-        )
-
-    def test_the_slice_schema_and_sections(self):
-        rows = self._rows()
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        assert document["schema"] == COMMAND_SUPPORT_SCHEMA
-        assert sorted(document["sections"]) == [
-            "commands",
-            "next_steps",
-            "relevant_errors",
-            "settings_names",
-        ]
-        assert document["export"]["fields"] == "allowlisted"
-
-    def test_only_the_declared_fields_serialize(self):
-        rows = self._rows()
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        for row in document["sections"]["commands"]:
-            assert set(row) <= set(COMMAND_SUPPORT_FIELDS["commands"])
-        for row in document["sections"]["next_steps"]:
-            assert set(row) <= set(COMMAND_SUPPORT_FIELDS["next_steps"])
-
-    def test_relevant_errors_carry_the_typed_reason_bounded(self):
-        rows = self._rows()
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        (error,) = document["sections"]["relevant_errors"]
-        assert error["note_id"] == NOTE
-        assert error["reason"] == "head_unavailable"
-        assert error["status_code"] == 503
-        assert error["observed"] is False
-        assert len(error["detail"]) == 200  # the bounded excerpt
-
-    def test_only_retry_rows_become_relevant_errors(self):
-        rows = self._rows()
-        document = export_command_support(
-            rows,
-            coverage={"feedback_events": "present"},
-            retry_details=[*rows["feedback_events"], _journal(NOTE, "pending", at="x")],
-        )
-        assert all(
-            error["reason"] and error["observed"] is False
-            for error in document["sections"]["relevant_errors"]
-        )
-
-    def test_redactions_are_counted(self):
-        """A credential-shaped excerpt the guard catches is replaced and
-        COUNTED — ``support.bundle_redactions`` never a silent scrub."""
-        rows = _rows(
-            feedback_events=[
-                _retry(
-                    NOTE,
-                    at="2026-09-26T11:00:00+00:00",
-                    detail="provider said glpat-9428abcdef0123456789",
-                ),
-            ]
-        )
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        assert document["export"]["redactions"] >= 1
-        assert document["export"]["redactions_measure"] == "support.bundle_redactions"
-        assert "glpat-9428" not in json.dumps(document)
-        assert "[redacted]" in json.dumps(document)
-
-    def test_settings_names_never_values(self):
-        rows = self._rows()
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        names = [entry["name"] for entry in document["sections"]["settings_names"]]
-        assert names == [entry["name"] for entry in COMMAND_RECOVERY_SETTINGS]
-        assert set(names) == {"FORGE_MAX_REVIEW_ROUNDS", "FORGE_APPROVERS", "STEP_MAX_ATTEMPTS"}
-        for entry in document["sections"]["settings_names"]:
-            assert set(entry) == {"name", "governs"}
-
-    def test_entries_are_bounded(self):
-        many = _rows(
-            feedback_events=[
-                _journal(f"9{i:03d}", "pending", at=f"2026-09-26T1{i % 10}:00:00+00:00")
-                for i in range(20)
-            ]
-        )
-        document = export_command_support(
-            many,
-            coverage={"feedback_events": "present"},
-            retry_details=many["feedback_events"],
-            max_entries=5,
-        )
-        assert len(document["sections"]["commands"]) == 5
-        assert document["export"]["max_entries_per_section"] == 5
-        assert document["export"]["truncated"]["commands"] is True
-
-    def test_the_slice_is_value_free(self):
-        """The reviewer's note TEXT never rides: the request document's
-        body is dropped by the allowlist (the bounded provider-error
-        excerpt IS the slice's declared error surface — a provider error
-        string, never the reviewer's prompt)."""
-        rows = _rows(
-            run=_run(
-                evidence={
-                    "review_feedback_requests": {
-                        NOTE: {**_request(NOTE, "recorded"), "text": NOTE_TEXT}
-                    }
-                }
-            ),
-            feedback_events=[_retry(NOTE, at="2026-09-26T11:00:00+00:00")],
-        )
-        document = export_command_support(
-            rows, coverage={"feedback_events": "present"}, retry_details=rows["feedback_events"]
-        )
-        assert NOTE_TEXT not in json.dumps(document)
-
-
 # ---------------------------------------------------------------------------
 # The MR status comment — one identity per world, pending is visible
 # ---------------------------------------------------------------------------
@@ -873,87 +732,6 @@ class TestStatusCommentParity:
 # The observability fold — three separate records, never blended
 # ---------------------------------------------------------------------------
 
-
-class TestCommandProgressLimitsFold:
-    def _rows(self) -> dict:
-        return _rows(
-            feedback_events=[
-                _retry("9400", at="2026-09-26T10:00:00+00:00"),
-                _journal("9400", "completed", at="2026-09-26T10:10:00+00:00", reason="staged"),
-                _journal("9500", "exhausted", at="2026-09-26T10:30:00+00:00"),
-                _journal(NOTE, "pending", at="2026-09-26T11:00:05+00:00"),
-            ]
-        )
-
-    def _fold(self) -> dict:
-        return command_progress_limits_fold(
-            self._rows(),
-            projection={"state": "executing"},
-            as_of="2026-09-26T12:00:00+00:00",
-            coverage={"feedback_events": "present"},
-        )
-
-    def test_accepted_to_applied_seconds_over_the_journal_windows(self):
-        record = self._fold()[COMMAND_ACCEPTED_TO_APPLIED]
-        assert record["measure"] == "command.accepted_to_applied_seconds"
-        assert record["population"] == 1
-        (sample,) = record["samples"]
-        assert sample["note_id"] == "9400"
-        assert sample["from"] == "2026-09-26T10:00:00+00:00"
-        assert sample["seconds"] == 600.0
-        assert record["not_yet_applied"] == 2  # exhausted + pending, never zero-filled
-
-    def test_manual_rescue_minutes_counts_only_settled_seams(self):
-        record = self._fold()[MANUAL_RESCUE_MINUTES]
-        assert record["measure"] == "operator.manual_rescue_minutes"
-        (window,) = record["open_windows"]
-        assert window["note_id"] == "9500"
-        assert window["outcome"] == "exhausted"
-        assert window["open_wait_minutes"] == 90.0
-        assert "lower bound" in record["definition"]
-
-    def test_projection_lag_is_its_own_gauge(self):
-        lag = self._fold()[PROJECTION_LAG]
-        assert lag["measure"] == "status.projection_lag"
-        assert lag["kind"] == "gauge"
-        (sample,) = lag["samples"]
-        assert sample["from"] == "2026-09-26T11:00:05+00:00"  # the newest fact
-        assert sample["seconds"] == 3595.0
-        assert lag["projection_inconsistent"] is False
-
-    def test_an_unobserved_authority_renders_unknown_records(self):
-        fold = command_progress_limits_fold(
-            _rows(), projection={"state": "executing"}, as_of="2026-09-26T12:00:00+00:00"
-        )
-        for name in (COMMAND_ACCEPTED_TO_APPLIED, MANUAL_RESCUE_MINUTES, PROJECTION_LAG):
-            assert fold[name]["coverage"] == "unknown", name
-            assert fold[name]["samples"] == [], name
-
-    def test_the_fold_rides_the_read_model(self):
-        from forge.adaptive.ops_limits import ops_limits_read_model
-
-        document = ops_limits_read_model(
-            self._rows(),
-            occupancy=[],
-            coverage={"feedback_events": "present", "attempts": "present"},
-            projection={"state": "executing", "unresolved_effects": ()},
-            as_of="2026-09-26T12:00:00+00:00",
-        )
-        block = document["command_progress"]
-        assert block[COMMAND_ACCEPTED_TO_APPLIED]["population"] == 1
-        assert block[PROJECTION_LAG]["kind"] == "gauge"
-        # the four ops.* measures stay four — the command records never join
-        assert set(document["measures"]) - {"schema", "as_of", "separation"} == {
-            "ops.command_application_latency",
-            "ops.native_occupancy",
-            "ops.recovery_duration",
-            "ops.manual_intervention_minutes",
-        }
-
-
-# ---------------------------------------------------------------------------
-# The reader section — the #374 journals through the live snapshot reader
-# ---------------------------------------------------------------------------
 
 SUBJECT = CanonicalSubject(provider_family="github", connection="", native_id="owner/alpha")
 
@@ -1200,47 +978,7 @@ class TestCommandProgressApiSurface:
         # the journal outranks the recorded request: pending, not accepted
         assert progress["next_steps"][0]["code"] == "unresolved_required_discussion"
         assert progress["next_steps"][-1]["code"] == "provider_outage"
-        # the observability fold rides the ops_limits block
-        block = document["ops_limits"]["command_progress"]
-        assert block[PROJECTION_LAG]["measure"] == "status.projection_lag"
-        assert block[COMMAND_ACCEPTED_TO_APPLIED]["not_yet_applied"] >= 1
         assert NOTE_TEXT not in json.dumps(progress)  # value freedom end to end
-
-    async def test_the_bundle_carries_the_command_support_slice(self, app, client):
-        await self._seed_transient(app)
-        headers, query = self._auth()
-        response = await client.get(
-            f"/operator/runs/{RUN_ID}/support-bundle?{query}", headers=headers
-        )
-        assert response.status_code == 200
-        document = response.json()
-        support = document["command_support"]
-        assert support["schema"] == COMMAND_SUPPORT_SCHEMA
-        assert support["sections"]["commands"][0]["outcome"] == "pending"
-        (error,) = support["sections"]["relevant_errors"]
-        assert error["reason"] == "head_unavailable"
-        assert error["status_code"] == 503
-        assert error["detail"].startswith("GitLab 503")  # the bounded excerpt rides
-        names = [entry["name"] for entry in support["sections"]["settings_names"]]
-        assert "FORGE_APPROVERS" in names
-        assert support["export"]["redactions_measure"] == "support.bundle_redactions"
-        # the reviewer's task TEXT never enters the bundle — a scoped
-        # reader cannot infer it from the export (allowlists by construction)
-        assert NOTE_TEXT not in json.dumps(document)
-
-    async def test_a_narrowed_bundle_still_carries_the_command_axis(self, app, client):
-        """``?sections=`` narrows the BUNDLE's export scope, never the
-        command slice's sources — the axis never silently renders
-        unknown because the caller narrowed the export."""
-        await self._seed_transient(app)
-        headers, query = self._auth()
-        response = await client.get(
-            f"/operator/runs/{RUN_ID}/support-bundle?{query}&sections=attempts", headers=headers
-        )
-        assert response.status_code == 200
-        document = response.json()
-        assert document["export"]["scope"] == ["attempts"]
-        assert document["command_support"]["sections"]["commands"][0]["outcome"] == "pending"
 
     async def test_a_scoped_reader_cannot_read_another_repositorys_run(self, app, client):
         from forge.durable.models import FlowRun
