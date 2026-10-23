@@ -462,15 +462,9 @@ def validate_changeset(
     ADR-0001 existence rules are enforced on top of the path policy: an
     ``update``/``delete`` must address a file that exists in the snapshot.
 
-    When *allowed_paths* (v0.7 monorepo path scoping, complex-projects.md §1)
-    is non-empty, every change must fall under at least one glob — a change
-    outside the work package's scope is rejected with a clear reason (the
-    publisher and the builtin validation both enforce this; the plan prompt
-    carries the same restriction so agents aim inside it from the start).
-    Nested per-directory instruction files (CLAUDE.md / AGENTS.md) need no
-    forge-side resolution: coding CLIs load them natively for the paths they
-    touch (complex-projects.md §1.3) — the scope check stays purely on the
-    write boundary.
+    A non-empty *allowed_paths* list restricts every change to its frozen
+    glob scope at the write boundary. Coding CLIs resolve nested instruction
+    files themselves; this validation handles only paths and policy.
 
     *policy* (R18) selects the write profile; ``None`` resolves the default
     ``no_dependencies`` profile, which is exactly the historical hardcoded
@@ -498,6 +492,8 @@ def validate_changeset(
             continue
 
         canonical = normalize_repo_path(change.path)
+        if canonical == ".forge" or canonical.startswith(".forge/"):
+            violations.append(f"{where}: reserved forge runtime namespace")
 
         if canonical and canonical in seen_paths:
             violations.append(f"{where}: duplicate path ({canonical!r} is changed more than once)")

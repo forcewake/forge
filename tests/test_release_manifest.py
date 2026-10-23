@@ -115,7 +115,6 @@ FINDING_MARKERS: dict[str, str] = {
     "MRP-EPIC": "compile_dependencies",
     "OPS-EPIC": "usage_lineage",
     "WIRING": "DiscoveryService",
-    "OPS-06": "TestEvidenceClasses",
     "OPS-08": "Postgres controller",
     "OPS-07": "checks passed",
     "R36-22": "test_fixture_only_evidence_caps_the_record_at_declared_only",

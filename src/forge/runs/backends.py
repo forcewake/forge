@@ -36,6 +36,7 @@ from forge.runs.candidate import (
     CandidateError,
     HarnessUsage,
     attempt_base_for,
+    candidate_base_from_meta,
     parse_unified_diff,
 )
 from forge.runs.ci_contract import classify_failure
@@ -413,7 +414,10 @@ class CITharnessBackend:
             meta = await self._download_meta(project_id, job.id)
         except _ArtifactMissing:
             return HarnessOutcome.failed("code", "harness_artifact_missing")
-        reported_base = str(meta.get("attempt_base") or "")
+        try:
+            reported_base = candidate_base_from_meta(meta)
+        except CandidateError as exc:
+            return HarnessOutcome.failed("code", f"harness_attempt_base_mismatch: {exc}")
         if reported_base != attempt_base:
             return HarnessOutcome.failed(
                 "code",

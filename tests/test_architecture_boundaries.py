@@ -1633,7 +1633,7 @@ class TestIntentionalViolationTraps:
         assert any("hidden_leg" in text for text in violations)
 
     def test_a_drained_compat_home_registration_is_caught(self) -> None:
-        modules = _synthetic("forge.adaptive.system_verification", "X = 1\n")
+        modules = _synthetic("forge.adaptive.steering_causality", "X = 1\n")
         violations = _check_reference_separation(modules)
         assert any("drained" in text or "does not exist" in text for text in violations)
 

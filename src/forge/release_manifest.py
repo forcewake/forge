@@ -579,12 +579,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         evidence=("docs/operations/adaptive-runbook.md",),
     ),
     FindingClosure(
-        finding="OPS-06",
-        capability="release-artifact-canary",
-        level="contract_tested",
-        evidence=("tests/test_adaptive_executed_evidence.py",),
-    ),
-    FindingClosure(
         finding="OPS-07",
         capability="real-provider-e2e",
         level="live_canary_tested",

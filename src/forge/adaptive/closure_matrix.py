@@ -505,11 +505,11 @@ def closure_matrix() -> ClosureMatrix:
                     ),
                     _ev(
                         "executed-process",
-                        "pe-proven",
-                        "tests/production_entry/test_system_verification_executor.py",
-                        "the trusted executor routes every applicability decision "
-                        "through the owner (freeze_tested_world / record_evidence / "
-                        "applicable_to)",
+                        "pending",
+                        "docs/adr/0035-simplification-program.md",
+                        "the standalone multi-service verifier process is retired; "
+                        "per-run domain and wired-caller evidence remain, without "
+                        "a replacement process trace claim",
                     ),
                     _ev(
                         "native-execution",

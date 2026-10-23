@@ -4,12 +4,9 @@ scenario system verification executes (R36-19 #278 → R37-19 #300).
 **This module is REFERENCE material** (label:
 :data:`forge.adaptive.reference.REFERENCE_PACKAGE_LABEL`): the
 in-process, synthetic-services, deterministic-by-construction scenario
-the runtime verifier (:mod:`forge.adaptive.system_verification`) EXECUTES
-against. It was extracted therefrom so that importing the runtime
-contracts never turns the scenario's assumptions into deployed
-guarantees — the twin pins the mechanism's semantics cheaply; the
-verified executor (``verification_executor.py``, #296) proves them
-against real artifacts and processes.
+the retired verifier originally executed. It remains reference material
+until the reference-package retirement task; importing it makes no
+production verification claim.
 
 What lives here (the scenario + its two synthetic dependencies):
 
@@ -20,8 +17,7 @@ What lives here (the scenario + its two synthetic dependencies):
   models (``freeze()`` → :func:`freeze_tested_world`), plus the
   negative-combination and stale-evidence mutations;
 - :class:`SystemEdge` — the edge DECLARATIONS a scenario judges
-  (the executed :class:`~forge.adaptive.system_verification.EdgeResult`
-  vocabulary stays runtime);
+  used by this reference scenario;
 - the REAL sqlite schema-upgrade path (:class:`TwinMigration`,
   :func:`execute_schema_upgrade` — real DDL, seeded data, preservation
   fingerprints);

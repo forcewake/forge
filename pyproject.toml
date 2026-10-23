@@ -164,7 +164,7 @@ id = "authority-verification_applicability"
 name = "verification_applicability: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
-allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
+allowed_importers = ["forge.adaptive.reference.system_twin", "forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -228,7 +228,7 @@ id = "reference-importers"
 name = "reference package has only registered compatibility importers"
 type = "protected"
 protected_modules = ["forge.adaptive.reference"]
-allowed_importers = ["forge.adaptive.system_verification", "forge.adaptive.steering_causality"]
+allowed_importers = ["forge.adaptive.steering_causality"]
 
 [[tool.importlinter.contracts]]
 id = "reference-direction"

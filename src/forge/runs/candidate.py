@@ -1,36 +1,16 @@
-"""CandidateBundle: the proposal-only deliverable of a harness job (ADR-0016).
+"""Parse the proposal-only candidate artifact at the trusted boundary.
 
-A harness lane never receives write credentials; its result is a **candidate
-artifact** — a ``git diff --binary --full-index <attempt_base>`` capture plus a
-small meta JSON (attempt base, driver id/model, exit classification, usage
-receipt). This module is the trusted parser of that artifact:
+A candidate contains a binary/full-index diff and attempt/driver/usage
+metadata. Each file has one representation: create, delete, replacement or
+unified patch. New files carry full bytes; modifications apply strictly to
+the authoritative attempt-base blob without fuzz.
 
-- :func:`parse_unified_diff` turns the diff text into a
-  :class:`CandidateBundle` of discriminated entries (:class:`CreateFile`,
-  :class:`DeleteFile`, :class:`FullReplacement`, :class:`UnifiedPatch`) —
-  exactly ONE representation per file (R08). Created files are reconstructed
-  to FULL contents directly from the diff (a new-file diff is the whole
-  file); modified files keep their raw unified hunks and are completed at
-  publish time by applying them to the authoritative attempt-base blobs
-  (:meth:`CandidateBundle.materialize`, strict line matching, no fuzz —
-  on any mismatch the bundle is rejected with ``patch_does_not_apply``).
-- Every patch/replacement entry carries ``base_blob_digest`` (a digest of the
-  authoritative base content, verified BEFORE anything is applied — mismatch
-  rejects with ``stale_base``) and ``intended_digest`` (a digest of the
-  expected result, verified AFTER application — mismatch is an internal
-  error, ``result_digest_mismatch``, and never publishes). Digests are
-  tagged: ``sha256:<hex>`` of the content, or ``blob:<oid>`` — the full
-  pre/post-image blob OIDs the ``--full-index`` capture itself carries.
-- Every :class:`DiffHunk` stores ``old_count``/``new_count`` and the parser
-  cross-checks them against the hunk body (R09): a deviation is
-  ``corrupt_patch``. Placement follows POSIX: an empty old range
-  (``@@ -3,0 ...``) inserts AFTER line 3, not before it.
-- Binary deltas (``GIT binary patch``), renames/copies and mode-only changes
-  are rejected with a typed reason — never silently dropped (R09).
-
-Rejected parses raise :class:`CandidateError` with a machine-readable
-``reason`` — the caller (backend/publisher) decides what the rejection means
-for the run; nothing here trusts the harness's claims.
+Base and intended digests bind bytes before and after application. Tagged
+digests are sha256 content hashes or full pre/post-image blob object ids.
+Every hunk must match its declared old/new counts. Empty old ranges insert
+after the specified line. Binary deltas, renames, copies and mode-only
+changes fail explicitly. CandidateError gives the backend or publisher a
+machine-readable reason; harness claims never grant publication authority.
 """
 
 from __future__ import annotations
@@ -357,6 +337,11 @@ class HarnessUsage:
             value is None for value in (input_tokens, cached, cache_write, output_tokens, reasoning)
         ):
             completeness = "unknown"
+        if completeness != "unknown" and not any(
+            (input_tokens, cached, cache_write, output_tokens, reasoning)
+        ):
+            input_tokens = cached = cache_write = output_tokens = reasoning = None
+            completeness = "unknown"
         return cls(
             driver=str(data.get("driver") or driver or ""),
             model=str(data.get("model") or model or ""),
@@ -613,6 +598,15 @@ class AttemptContext:
             "source_base": self.source_base,
             "previous_candidate": self.previous_candidate,
         }
+
+
+def candidate_base_from_meta(meta: dict[str, Any]) -> str:
+    """Read the lane's base claim without accepting conflicting aliases."""
+    primary = str(meta.get("attempt_base") or "")
+    alias = str(meta.get("attempt_base_oid") or "")
+    if primary and alias and primary != alias:
+        raise CandidateError("attempt_base_conflict", "candidate attempt base aliases disagree")
+    return primary or alias
 
 
 def attempt_base_for(run: object) -> str:

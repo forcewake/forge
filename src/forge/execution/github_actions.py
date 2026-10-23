@@ -1,25 +1,13 @@
-"""GitHub Actions execution adapter (ADR-0020, Stage E3b).
+"""Run proposal-only harness jobs on GitHub Actions.
 
-The second execution adapter (ADR-0019): the coding harness runs in the
-TARGET repository's ephemeral Actions runner — no write token, no forge
-secret — and the candidate comes back as an Actions artifact that the
-trusted publisher validates and publishes (ADR-0016). Contract per ADR-0020
-§1: ``launch`` (workflow_dispatch) → ``poll`` (run status + artifact
-collection, mapped onto :class:`~forge.runs.backends.HarnessOutcome`) →
-``cancel`` → ``reconcile_launch``, over a typed, JSON-serializable
-:class:`ActionsHandle` journaled in the run's evidence.
+The target runner receives no write token or forge secret. Its candidate
+artifact crosses the trusted parser and publisher before any write.
+Launch, poll, cancel and reconciliation share a journaled ActionsHandle.
 
-Correlation (research github-actions-executor.md §1): the dispatch response
-carries the run id since 2026-02-19 — used directly. Legacy/GHES answers an
-empty 202: the run is discovered via
-``GET .../workflows/{wf}/runs?event=workflow_dispatch`` filtered by
-``head_sha`` (the attempt base the factory branch was cut from) plus a
-created window — ordering alone is never trusted.
-
-Failure classification mirrors the GitLab lane
-(:mod:`forge.runs.backends`): auth/quota/connectivity patterns in the job
-log mean infrastructure; the workflow conclusion classifies the rest;
-deadline breaches are ``harness_timeout`` — never the code's fault.
+Dispatch responses carrying a run id bind directly. Legacy empty responses
+require discovery by event, frozen head and creation window; ordering alone
+never identifies a run. Authentication, quota, connectivity and timeouts are
+infrastructure failures, rather than candidates for code repair.
 """
 
 from __future__ import annotations
@@ -41,7 +29,12 @@ from forge.runs.backends import (
     HarnessFailureKind,
     HarnessOutcome,
 )
-from forge.runs.candidate import CandidateError, HarnessUsage, parse_unified_diff
+from forge.runs.candidate import (
+    CandidateError,
+    HarnessUsage,
+    candidate_base_from_meta,
+    parse_unified_diff,
+)
 from forge.runs.execution_profile import bootstrap_failed
 
 logger = logging.getLogger(__name__)
@@ -396,7 +389,7 @@ class GitHubActionsExecutor:
 
         # The template writes attempt_base_oid (contracts naming); accept
         # the short historical key too.
-        reported_base = str(meta.get("attempt_base_oid") or meta.get("attempt_base") or "")
+        reported_base = candidate_base_from_meta(meta)
         if reported_base != handle.attempt_base:
             return HarnessOutcome.failed(
                 "code",
@@ -542,7 +535,7 @@ class GitHubActionsExecutor:
                 _, meta = await self._download_and_extract(handle, artifact)
             except CandidateArchiveError:
                 return None
-        reported_base = str(meta.get("attempt_base_oid") or meta.get("attempt_base") or "")
+        reported_base = candidate_base_from_meta(meta)
         if reported_base != handle.attempt_base:
             return None
         attempt_identity = str(meta.get("attempt_id") or "")
@@ -674,6 +667,10 @@ def _check_meta_schema(meta: dict[str, Any], diff_bytes: bytes) -> None:
     bytes — so a substituted archive entry cannot pass silently (R16).
     Unknown versions reject: fail closed.
     """
+    try:
+        candidate_base_from_meta(meta)
+    except CandidateError as exc:
+        raise CandidateArchiveError(str(exc)) from exc
     raw: Any = meta.get("schema_version", 1)
     if isinstance(raw, str):
         try:

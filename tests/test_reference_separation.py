@@ -70,7 +70,6 @@ RUNTIME_ENTRY_MODULES: tuple[str, ...] = (
 #: callers are drained to the reference paths).
 REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
     {
-        "forge.adaptive.system_verification",
         "forge.adaptive.steering_causality",
     }
 )
@@ -84,31 +83,6 @@ REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(RUNTIME_ENTRY_MODULES)
 #: reference module's) fails the pinned tests below. Drain the callers,
 #: then shrink this list together with the re-export.
 MOVED_SYMBOLS: dict[str, tuple[tuple[str, str], ...]] = {
-    # system_verification → reference/system_twin.py
-    "forge.adaptive.system_verification": tuple(
-        (name, "forge.adaptive.reference.system_twin")
-        for name in (
-            "TWIN_CONTRACT_BUNDLE_SCHEMA",
-            "TWIN_TEST_BUNDLE_SCHEMA",
-            "TWIN_ENVIRONMENT_PROFILE_SCHEMA",
-            "TWIN_REFERENCE_LABEL",
-            "BASELINE_API_V2",
-            "BASELINE_API_V3",
-            "CrashWindowOpened",
-            "DeliveryOutcome",
-            "DoubleDeliveryHarness",
-            "SchemaUpgradeOutcome",
-            "SystemEdge",
-            "TwinContract",
-            "TwinMigration",
-            "TwinScenario",
-            "TwinService",
-            "default_twin_scenario",
-            "execute_schema_upgrade",
-            # private pre-move attributes the tests import directly
-            "_synthetic_seed_rows",
-        )
-    ),
     # steering_causality → reference/reactive_vendor.py (the pure grader
     # stays; the scenario constants, the grammar and the executable moved)
     "forge.adaptive.steering_causality": tuple(
@@ -251,11 +225,6 @@ class TestCompatibilitySurface:
 
     def test_the_old_from_import_spellings_still_work(self) -> None:
         """The exact from-import forms the pre-move callers used."""
-        from forge.adaptive.system_verification import (  # noqa: F401
-            TWIN_REFERENCE_LABEL,
-            TwinMigration,
-            _synthetic_seed_rows,
-        )
         from forge.adaptive.steering_causality import (  # noqa: F401
             SCRIPTED_CAUSAL_PROVENANCE,
             vendor_main,

@@ -465,15 +465,6 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         "pure rules; the production waiting_ci path still verifies per-run "
         "candidates, not frozen multi-repo candidate sets (review §12).",
     ),
-    Capability(
-        name="adaptive/executed-evidence-claims",
-        tier="domain_contract",
-        entry_point=None,
-        evidence=("tests/test_adaptive_executed_evidence.py",),
-        note="The executed/skipped/unsupported classifier over GitHub Actions "
-        "runs is a library (gh CLI, read-only); nothing in the release or "
-        "dispatch path consumes it yet.",
-    ),
 )
 
 

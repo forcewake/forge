@@ -83,7 +83,6 @@ def test_required_capabilities_are_covered():
         "adaptive/steering-bridge",
         "adaptive/work-package-coordination",
         "adaptive/candidate-set-verification",
-        "adaptive/executed-evidence-claims",
         "operator-commands/classic",
         "operator-commands/adaptive",
         "adaptive/pause-resume-checkpoint",
