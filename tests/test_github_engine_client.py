@@ -13,6 +13,13 @@ from tests.test_github_engine_auth import key as key, response
 from tests.test_ports import NOW, REPO
 
 
+def selected_repository(**changes):
+    return httpx.Response(
+        200,
+        json={"total_count": 1, "repositories": [{"id": 42, "full_name": "owner/repo", **changes}]},
+    )
+
+
 def api_fixture(key, handler):
     _, pem = key
     clock = FixedClock(NOW)
@@ -32,8 +39,9 @@ def api_fixture(key, handler):
 
 async def test_rest_resolves_native_id_for_each_call_and_uses_current_name(key):
     def handler(request):
-        if request.url.path == "/repositories/42":
-            return httpx.Response(200, json={"id": 42, "full_name": "new-owner/renamed"})
+        if request.url.path == "/installation/repositories":
+            assert request.url.params["per_page"] == "1"
+            return selected_repository(full_name="new-owner/renamed")
         assert request.url.path == "/repos/new-owner/renamed/git/ref/heads/fix/issue"
         assert request.headers["Authorization"] == "Bearer synthetic-installation-token"
         return httpx.Response(200, json={"object": {"sha": "a" * 40}})
@@ -43,7 +51,7 @@ async def test_rest_resolves_native_id_for_each_call_and_uses_current_name(key):
         reply = await api.request(REPO, "GET", "git/ref/heads/fix%2Fissue")
         assert reply.document == {"object": {"sha": "a" * 40}}
         await api.request(REPO, "GET", "git/ref/heads/fix/issue")
-        assert sum(request.url.path == "/repositories/42" for request in requests) == 2
+        assert sum(request.url.path == "/installation/repositories" for request in requests) == 2
         assert all("old" not in request.url.path for request in requests)
     finally:
         await transport.close()
@@ -52,8 +60,8 @@ async def test_rest_resolves_native_id_for_each_call_and_uses_current_name(key):
 @pytest.mark.parametrize("stage", ["metadata", "resource"])
 async def test_only_authorized_resource_absence_is_classified_as_resource_not_found(key, stage):
     def handler(request):
-        if request.url.path == "/repositories/42" and stage == "resource":
-            return httpx.Response(200, json={"id": 42, "full_name": "owner/repo"})
+        if request.url.path == "/installation/repositories" and stage == "resource":
+            return selected_repository()
         return httpx.Response(404)
 
     api, transport, _ = api_fixture(key, handler)
@@ -72,8 +80,8 @@ async def test_only_an_explicit_unauthenticated_response_retries_a_write(key, st
     writes = []
 
     def handler(request):
-        if request.url.path == "/repositories/42":
-            return httpx.Response(200, json={"id": 42, "full_name": "owner/repo"})
+        if request.url.path == "/installation/repositories":
+            return selected_repository()
         writes.append(request)
         return httpx.Response(status, json={"message": "synthetic-private-error"})
 
@@ -125,9 +133,7 @@ async def test_unsafe_resource_path_refuses_before_http(key, path):
 
 
 async def test_metadata_id_mismatch_and_implicit_write_authority_refuse(key):
-    api, transport, requests = api_fixture(
-        key, lambda request: httpx.Response(200, json={"id": 43, "full_name": "owner/repo"})
-    )
+    api, transport, requests = api_fixture(key, lambda request: selected_repository(id=43))
     try:
         with pytest.raises(ValueError, match="write authority"):
             await api.request(REPO, "POST", "issues/1/comments", body={})
@@ -143,8 +149,8 @@ async def test_metadata_id_mismatch_and_implicit_write_authority_refuse(key):
 @pytest.mark.parametrize("label", ["needs%20review", "why%3F", "C%23"])
 async def test_encoded_native_label_spaces_remain_in_the_path(key, label):
     def handler(request):
-        if request.url.path == "/repositories/42":
-            return httpx.Response(200, json={"id": 42, "full_name": "owner/repo"})
+        if request.url.path == "/installation/repositories":
+            return selected_repository()
         assert request.url.raw_path == b"/repos/owner/repo/issues/1/labels/" + label.encode()
         assert not request.url.query
         return httpx.Response(204)
@@ -154,5 +160,34 @@ async def test_encoded_native_label_spaces_remain_in_the_path(key, label):
         assert (
             await api.request(REPO, "DELETE", "issues/1/labels/" + label, write=True)
         ).document is None
+    finally:
+        await transport.close()
+
+
+async def test_documented_installation_metadata_discards_clone_credentials_and_rejects_scope_growth(
+    key,
+):
+    count = 1
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "total_count": count,
+                "repositories": [
+                    {"id": 42, "full_name": "owner/repo", "temp_clone_token": "synthetic-secret"}
+                ],
+            },
+        )
+
+    api, transport, requests = api_fixture(key, handler)
+    try:
+        metadata = await api.metadata(REPO)
+        assert metadata.document == {"id": 42, "full_name": "owner/repo"}
+        assert "synthetic-secret" not in repr(metadata)
+        count = 2
+        with pytest.raises(TransportFailure, match="identity_mismatch"):
+            await api.metadata(REPO)
+        assert all("/repositories/42" not in request.url.path for request in requests)
     finally:
         await transport.close()

@@ -61,14 +61,25 @@ class API:
 
     async def metadata(self, repo: RepoRef) -> Reply:
         try:
-            reply = await self._request(repo, "GET", f"/repositories/{repo.identity.repository_id}")
+            reply = await self._request(
+                repo, "GET", "/installation/repositories", params={"per_page": 1}
+            )
         except TransportFailure as error:
             if error.status == 404:
                 raise TransportFailure(
                     "repository_unavailable", status=404, request_id=error.request_id
                 ) from None
             raise
-        value = reply.document
+        document = reply.document
+        if (
+            not isinstance(document, dict)
+            or type(document.get("total_count")) is not int
+            or document["total_count"] != 1
+            or not isinstance(document.get("repositories"), list)
+            or len(document["repositories"]) != 1
+        ):
+            raise TransportFailure("repository_identity_mismatch", request_id=reply.request_id)
+        value = document["repositories"][0]
         if (
             not isinstance(value, dict)
             or type(value.get("id")) is not int
@@ -78,7 +89,16 @@ class API:
             or any(part in (".", "..") for part in value["full_name"].split("/"))
         ):
             raise TransportFailure("repository_identity_mismatch", request_id=reply.request_id)
-        return reply
+        # Native metadata can contain a temporary clone credential. Retain only
+        # the identity and policy fields consumed by these adapters.
+        return Reply(
+            {
+                key: value[key]
+                for key in ("id", "node_id", "full_name", "default_branch", "archived", "disabled")
+                if key in value
+            },
+            reply.request_id,
+        )
 
     async def request(
         self,

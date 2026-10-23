@@ -139,9 +139,11 @@ class Wire:
                     "permissions": body["permissions"],
                 },
             )
-        if request.url.path == "/repositories/123":
+        if request.url.path == "/installation/repositories":
             return httpx.Response(
-                self.metadata_status, json=self.metadata, headers={"x-github-request-id": "AB:12"}
+                self.metadata_status,
+                json={"total_count": 1, "repositories": [self.metadata]},
+                headers={"x-github-request-id": "AB:12"},
             )
         prefix = "/repos/" + self.metadata["full_name"] + "/"
         assert request.url.path.startswith(prefix), request.url
@@ -190,7 +192,7 @@ async def test_frozen_tree_keeps_commit_identity_and_native_repo_resolution(prov
     assert (await repo.read_tree(REPO, COMMIT)).entries[-1].kind == "commit"
     paths = [request.url.path for request in wire.calls if request.method == "GET"]
     assert all("old/name" not in value for value in paths)
-    assert paths.count("/repositories/123") == 4
+    assert paths.count("/installation/repositories") == 4
     assert all(
         request.url.params.get("recursive") == "1"
         for request in wire.calls
