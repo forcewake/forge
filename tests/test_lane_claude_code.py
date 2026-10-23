@@ -305,3 +305,14 @@ async def test_stderr_and_message_output_redact_the_grant_before_events(tmp_path
     events = [event async for event in session.events()]
     assert any("[REDACTED]" in event.text for event in events)
     assert all(grant().key not in event.text for event in events)
+
+
+async def test_missing_sdk_keeps_a_typed_unavailable_result(tmp_path, monkeypatch):
+    workspace = tmp_path / "work"
+    base = checkout(workspace)
+    _, brief = inputs(base)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    with pytest.raises(LaneFailure) as caught:
+        await ClaudeCodeDriver().start(brief, workspace, DriverEnv("test-model", grant()))
+    assert caught.value.classification == "driver_unavailable"
+    assert "forge-lane[claude]" in str(caught.value)

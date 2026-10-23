@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "CI execution lane, independent of the Forge control plane."
 requires-python = ">=3.13"
 license = "BSD-3-Clause"
-dependencies = ["forge-protocol>=0.1.0,<0.2.0", "httpx==0.28.1"]
+dependencies = ["forge-protocol>=0.1.0,<0.2.0", "httpx==0.28.1", "pydantic>=2.13.5,<3"]
 
 [project.optional-dependencies]
 claude = ["claude-agent-sdk==0.2.157"]
@@ -21,3 +21,6 @@ packages = ["src/forge_lane"]
 
 [tool.uv.sources]
 forge-protocol = { workspace = true }
+
+[tool.deptry]
+known_first_party = ["forge_lane"]

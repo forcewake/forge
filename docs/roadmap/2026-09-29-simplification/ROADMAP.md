@@ -575,6 +575,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P1-14 Dependency diet
+- **Status:** source cleanup implemented locally on 2026-10-23, with clean dependency analysis for all three distributions. The server still has 13 direct requirements (12 external and forge-protocol); the target of ten is unmet and needs the shared-engine reduction. Default SQLite, Redis and server startup remain supported.
 - **Goal:** a smaller and safer supply chain.
 - **Work:**
   - Drop `agno[litellm]`, `litellm`, `mcp`, `tiktoken` (if `deptry` shows

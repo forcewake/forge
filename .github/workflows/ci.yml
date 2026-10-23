@@ -38,6 +38,12 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      - name: Dependency graph (all distributions)
+        run: |
+          uv run deptry src/forge
+          uv run deptry packages/forge-protocol/src/forge_protocol --config packages/forge-protocol/pyproject.toml
+          uv run deptry packages/forge-lane/src/forge_lane --config packages/forge-lane/pyproject.toml
+
       - name: Import contracts
         run: uv run lint-imports
 

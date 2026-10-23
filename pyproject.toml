@@ -11,19 +11,14 @@ dependencies = [
     "uvicorn[standard]==0.42.0",
     "httpx==0.28.1",
     "pydantic-settings==2.13.1",
+    "pydantic>=2.13.5,<3",
     "pyyaml==6.0.3",
     "sqlalchemy[asyncio]==2.0.48",
     "alembic==1.18.4",
     "aiosqlite==0.22.1",
-    "agno[litellm]==2.5.0",
-    "tiktoken==0.12.0",
     "redis==7.4.0",
-    "litellm<=1.82.0",
-    "mcp==1.26.0",
-    # GitHub App auth (ADR-0019 slice): JWT minting + RS256 signing.
-    # pyjwt already arrives transitively (agno/litellm), so this direct
-    # dependency is trivially safe — forge.integrations.github imports it.
     "pyjwt[crypto]>=2.10",
+    "cryptography>=42",
 ]
 
 [dependency-groups]
@@ -41,11 +36,11 @@ dev = [
     "import-linter==2.15",
     "pytest-cov==7.1.0",
     "diff-cover==10.6.0",
+    "deptry==0.25.1",
 ]
 
 [project.optional-dependencies]
 postgres = ["asyncpg==0.31.0"]
-mysql = ["aiomysql==0.3.2"]
 # GitHub source adapter (ADR-0019): RS256 JWT signing needs the crypto extra.
 github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
 # Real interactive-driver clients (forge.adaptive.drivers). Only the Claude
@@ -271,3 +266,14 @@ name = "server never imports lane"
 type = "forbidden"
 source_modules = ["forge"]
 forbidden_modules = ["forge_lane"]
+
+[tool.deptry]
+known_first_party = ["forge"]
+
+# These modules are loaded by their owning libraries rather than imported by Forge.
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "aiosqlite", # SQLAlchemy's default sqlite+aiosqlite URL.
+    "asyncpg", # SQLAlchemy's postgres extra URL.
+    "uvicorn", # The production Docker command invokes its console entry point.
+]

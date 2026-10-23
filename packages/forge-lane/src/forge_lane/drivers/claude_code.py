@@ -1,7 +1,6 @@
 """Claude Agent SDK lifecycle; file tools only, no ambient credentials or MCP."""
 
 import asyncio
-import importlib
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -36,7 +35,11 @@ class ClaudeCodeDriver:
                 "Claude requires this attempt's gateway grant",
             )
         try:
-            sdk = self.sdk or importlib.import_module("claude_agent_sdk")
+            sdk = self.sdk
+            if not sdk:
+                import claude_agent_sdk
+
+                sdk = claude_agent_sdk
         except ImportError:
             raise LaneFailure(
                 ExitCode.DRIVER, "driver_unavailable", "Install forge-lane[claude] for Claude Code"
