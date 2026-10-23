@@ -328,16 +328,6 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         "coexist.",
     ),
     ManifestEntry(
-        capability="mcp-authorization",
-        provider="*",
-        backend="*",
-        level="contract_tested",
-        evidence_class="contract_suite",
-        evidence=("tests/test_mcp_server.py", "tests/test_mcp_runs_tools.py"),
-        ci_jobs=_CI_TEST,
-        note="R19: default-deny tool wrapper, repo-target allowlist, denial auditing.",
-    ),
-    ManifestEntry(
         capability="harness-selection",
         provider="*",
         backend="*",
@@ -386,7 +376,7 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         evidence_class="contract_suite",
         evidence=("tests/test_mcp_runs_tools.py",),
         ci_jobs=_CI_TEST,
-        note="R24: honest delivery metrics via the forge_delivery_ladder MCP tool.",
+        note="Durable delivery-stage counters are exposed through the HTTP metrics surface.",
     ),
     # ---- real-runtime evidence classes (kept SEPARATE from the contract suite) ----
     ManifestEntry(
@@ -977,12 +967,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="durable-liveness",
         level="contract_tested",
         evidence=("tests/test_liveness.py",),
-    ),
-    FindingClosure(
-        finding="R19",
-        capability="mcp-authorization",
-        level="contract_tested",
-        evidence=("tests/test_mcp_server.py", "tests/test_mcp_runs_tools.py"),
     ),
     FindingClosure(
         finding="R24",

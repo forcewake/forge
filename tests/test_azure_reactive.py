@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from forge.config import ForgeConfig, Settings
 from forge.reactive.github_review import GitHubReactiveReviewEngine
-from forge.reactive.ci_debug import is_forge_harness_run
+from forge.gateway.github_webhook import normalize_pull_request_event
 
 
 @pytest.mark.parametrize(
@@ -33,13 +33,18 @@ async def test_self_trigger_guard_precedes_every_provider_and_model_call(metadat
     assert reviewer.mock_calls == []
 
 
-@pytest.mark.parametrize(
-    ("branch", "workflow", "expected"),
-    [
-        ("forge/42/candidate", "forge-harness.yml", True),
-        ("feature", "forge-harness.yml", False),
-        ("forge/42/candidate", "human-ci.yml", False),
-    ],
-)
-def test_only_the_owned_lane_is_excluded_from_reactive_debug(branch, workflow, expected):
-    assert is_forge_harness_run(branch, workflow, "forge-harness.yml") is expected
+@pytest.mark.parametrize("branch", ["forge/42/candidate", "feature/human-change"])
+def test_owned_output_cannot_reenter_the_current_reactive_review(branch):
+    import json
+    from pathlib import Path
+
+    payload = json.loads(
+        (
+            Path(__file__).parent / "fixtures/github_payloads/pull_request_synchronize.json"
+        ).read_text()
+    )
+    payload["pull_request"]["head"]["ref"] = branch
+    payload["sender"]["type"] = "User"
+    payload["pull_request"]["user"]["type"] = "User"
+    result = normalize_pull_request_event(payload)
+    assert (result is None) == branch.startswith("forge/")

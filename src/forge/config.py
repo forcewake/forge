@@ -147,29 +147,6 @@ class Settings(BaseSettings):
     # flow state without auth); /runs is the single durable read model.
     FORGE_API_READ_TOKEN: SecretStr | None = None
 
-    # MCP server (optional). Fail closed: the MCP app is only mounted when
-    # FORGE_MCP_ENABLED is true AND FORGE_MCP_KEY is set — an unauthenticated
-    # endpoint is never exposed. Set FORGE_MCP_ENABLED=false only when the
-    # deployment fronts /mcp with its own authentication.
-    FORGE_MCP_ENABLED: bool = True
-    FORGE_MCP_KEY: SecretStr | None = None
-    # ADR-0021 §4: scoped MCP principals — JSON object token → scope list
-    # (closed set: forge:read, forge:runs:write, forge:approvals:write,
-    # forge:admin; "*" grants the full set). FORGE_MCP_KEY remains the
-    # all-scope master. Malformed JSON or unknown scopes fail startup.
-    FORGE_MCP_SCOPED_TOKENS: SecretStr | None = None
-    # R19: optional repository-target allowlist for scoped MCP principals —
-    # JSON object token (or its audit label "tok-<hash>") → list of fnmatch
-    # patterns matched against the caller-supplied project path
-    # ({"tok-abc...": ["group/app-*"]}; an empty list denies every target).
-    # Unset (default) leaves scoped tokens unrestricted, so existing configs
-    # keep working. FORGE_MCP_KEY master is unrestricted by design.
-    FORGE_MCP_TOKEN_REPOS: SecretStr | None = None
-    # Host headers the MCP endpoint accepts when mounted behind a proxy
-    # (comma-separated; e.g. "forge.example.com"). Empty keeps the SDK's
-    # localhost-only DNS-rebinding protection — a deployment MUST list its
-    # public host or /mcp answers 421 to every proxied request.
-    FORGE_MCP_ALLOWED_HOSTS: str = ""
     FORGE_GITHUB_TOKEN: SecretStr | None = None
 
     # Agno telemetry (disabled for self-hosted)
@@ -205,7 +182,7 @@ class Settings(BaseSettings):
     # conclusions (those blame the change or the infrastructure).
     FORGE_VERIFICATION_WAIVE_CONCLUSIONS: str = ""
     # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
-    # ingress disabled (503), matching the fail-closed MCP pattern above.
+    # ingress disabled (503), an unsigned delivery is never accepted.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None
 
     # The workflow installed in this target repository. Admission verifies
@@ -214,9 +191,6 @@ class Settings(BaseSettings):
 
     # Supported ingress authorization and lane control remain explicit.
     FORGE_GITHUB_APPROVERS: str = ""
-    FORGE_SECURITY_REMOTE_DISMISS: bool = False
-    FORGE_SECURITY_AUTO_ACCEPT: bool = False
-    FORGE_SECURITY_TRIAGERS: str = ""
     FORGE_LANE_CONTROL_SECRET: SecretStr | None = None
 
     # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label
@@ -240,7 +214,7 @@ class Settings(BaseSettings):
     # names fall back to the "standard" profile. Unset/empty — no numeric
     # ceilings anywhere (runs are unlimited; no budget rows are opened),
     # byte-compatible with pre-R13 behavior. Malformed JSON fails startup
-    # (fail closed, like FORGE_MCP_SCOPED_TOKENS) — a silently unlimited
+    # (fail closed) — a silently unlimited
     # budget would defeat the point of configuring one. The forge.yml form
     # (``budget_profiles:``) wins when both are set.
     FORGE_BUDGET_PROFILES: str = ""
@@ -325,7 +299,7 @@ def validate_budget_profiles(raw: object) -> dict[str, dict[str, Any]]:
 def parse_budget_profiles(raw: str | None) -> dict[str, dict[str, Any]]:
     """The FORGE_BUDGET_PROFILES JSON form — ``ValueError`` when malformed.
 
-    Fail closed like FORGE_MCP_SCOPED_TOKENS: a profile JSON that does not
+    Fail closed: a profile JSON that does not
     parse must abort startup, never degrade to unlimited runs.
     """
     text = str(raw or "").strip()

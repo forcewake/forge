@@ -42,10 +42,6 @@ annotated in `.env.example`):
 - `FORGE_WRITE_PROFILES` / `FORGE_PIPELINE_ENTRYPOINTS` — custom write
   profiles and per-project pipeline entrypoints (denied under every
   profile).
-- `FORGE_MCP_TOKEN_REPOS` — per-token repository-target allowlist for
-  scoped MCP principals.
-- `FORGE_SECURITY_TRIAGERS` / `FORGE_SECURITY_AUTO_ACCEPT` — who may
-  confirm AI triage verdicts; machine auto-accept is off by default.
 - `FORGE_VERIFICATION_GRACE_SECONDS` — grace before a fresh PR's missing
   checks conclude "no CI configured".
 - `FORGE_MAX_THINKING_TOKENS` — lane-side: caps Claude thinking on repair
@@ -119,9 +115,7 @@ src/forge/
                the lane side: CLI and SDK drivers inside the target's CI
   factory/     LLM planner / reviewer (LiteLLM HTTP)
   context/     context assembly, diff and log parsing, redaction
-  reactive/    durable review and CI-debug bots on the step lane
-  findings/    security findings and /security triage
-  mcp_server/  forge's MCP server (token-scoped tools)
+  reactive/    durable reactive review on the step lane
   project_config.py
                the project's .forge.yml reader, shared by every RunService
   orchestrator/, flows/, agents/, mcp_client/, stores/

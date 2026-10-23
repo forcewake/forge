@@ -12,7 +12,6 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -2461,8 +2460,6 @@ HARNESS_MODEL = "glm-5.3-flash[1m]"
 #: MCP mount identities for the A06 composed scenario: one token scoped to
 #: THIS repo's namespace (acme/*) and one scoped to a foreign namespace —
 #: the same run, the same mount, opposite object-level verdicts.
-MIRROR_ALLOWED_TOKEN = "forge-mirror-allowed"
-MIRROR_FOREIGN_TOKEN = "forge-mirror-foreign"
 
 
 def _engine(db_path: Path):
@@ -2488,130 +2485,90 @@ async def _go_resumes(service: GitHubRunService, run_id: str) -> None:
 
 
 async def composed_a06_run_mirror_scoped_token() -> None:
-    """A06 composed: scoped token → run mirror over a REAL service leg.
+    """A real service run is read through canonical subject-scoped HTTP.
 
-    The run is produced by the production ``start_run`` → ``/go`` leg (its
-    durable subject is the real ``github_repo_full_name`` the service
-    stamps), then read through the REAL streamable-HTTP MCP mount with a
-    scoped, repo-allowlisted token. A token allowlisted for ``acme/*``
-    reads the run, its frozen plan and its evidence; a token scoped to a
-    foreign namespace gets the byte-exact NOT FOUND a missing run produces
-    on every tool and cannot even discover the run via ``run_list``. The
-    mirror never writes: zero provider calls before/after the denied reads.
+    Foreign grants cannot list or inspect it, and its absence is identical
+    to denial for the same requested identity. Reads perform no provider I/O.
     """
     from forge.database import reset_engine
     from forge.main import create_app
+    from forge.adaptive.operator_snapshot import CanonicalSubject
+    from forge.api_operator import operator_subject_scope_token
 
+    secret = "operator-mirror-fixture"
+    own = CanonicalSubject(provider_family="github", connection="", native_id=REPO)
+    foreign = CanonicalSubject(provider_family="github", connection="", native_id="other/repo")
     with tempfile.TemporaryDirectory(prefix="forge-a06-") as tmp:
         db_path = Path(tmp) / "a06.db"
-        # The MCP app boots FIRST: its lifespan bootstraps the fresh sqlite
-        # schema (alembic-stamped); the service leg then runs on the same
-        # file through its own engine.
         reset_engine()
+        service_engine = _engine(db_path)
         try:
             application = create_app(
                 settings=Settings(
+                    _env_file=None,
                     GITLAB_URL="https://gitlab.test",
-                    GITLAB_TOKEN=SecretStr("glpat-test"),
-                    GITLAB_WEBHOOK_SECRET=SecretStr("whsec"),
+                    GITLAB_TOKEN="fixture-token",
+                    GITLAB_WEBHOOK_SECRET="fixture-hook",
                     DATABASE_URL=f"sqlite+aiosqlite:///{db_path}",
-                    FORGE_MCP_ENABLED=True,
-                    FORGE_MCP_KEY=SecretStr("forge-a06-master"),
-                    FORGE_MCP_SCOPED_TOKENS=SecretStr(
-                        json.dumps(
-                            {
-                                MIRROR_ALLOWED_TOKEN: ["forge:read"],
-                                MIRROR_FOREIGN_TOKEN: ["forge:read"],
-                            }
-                        )
-                    ),
-                    FORGE_MCP_TOKEN_REPOS=SecretStr(
-                        json.dumps(
-                            {
-                                MIRROR_ALLOWED_TOKEN: ["acme/*"],
-                                MIRROR_FOREIGN_TOKEN: ["other/*"],
-                            }
-                        )
-                    ),
-                    FORGE_MCP_ALLOWED_HOSTS="testserver",
+                    FORGE_LANE_CONTROL_SECRET=SecretStr(secret),
+                    REDIS_URL=None,
                 )
             )
             async with application.router.lifespan_context(application):
-                application.state.task_queue = AsyncMock()
-                session_factory = async_sessionmaker(_engine(db_path), expire_on_commit=False)
+                session_factory = async_sessionmaker(service_engine, expire_on_commit=False)
                 fake = FakeGitHub()
-                fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+                fake.seed_repo(
+                    REPO,
+                    {
+                        "src/app.py": "print('hi')\n",
+                        ".github/workflows/forge-harness.yml": "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n    steps: []\n",
+                    },
+                )
                 fake.heads[REPO]["main"] = BASE_HEAD
                 fake.seed_issue(REPO, ISSUE, ISSUE_TITLE, ISSUE_DESC)
-                service = make_service(db=session_factory, fake=fake)
-
+                service = make_service(
+                    db=session_factory,
+                    fake=fake,
+                    settings=make_settings(FORGE_GITHUB_HARNESS_WORKFLOW="forge-harness.yml"),
+                )
                 run_id = await start(service)
                 await go(service, run_id)
                 run = await get_run(session_factory, run_id)
-                assert run.status == FlowStatus.WAITING_CI.value
+                assert run.status == FlowStatus.WAITING_HARNESS.value
                 assert run.github_repo_full_name == REPO
                 provider_calls_before = len(fake.calls)
+                async with AsyncClient(
+                    transport=ASGITransport(app=application), base_url="http://forge.test"
+                ) as client:
 
-                transport = ASGITransport(app=application)
-                async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-
-                    async def call(name: str, arguments: dict[str, Any], token: str):
-                        return await ac.post(
-                            "/mcp/mcp",
-                            json={
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "tools/call",
-                                "params": {"name": name, "arguments": arguments},
-                            },
+                    async def read(path, subject):
+                        return await client.get(
+                            path,
+                            params={"subject": subject.subject_id()},
                             headers={
-                                "Authorization": f"Bearer {token}",
-                                "Accept": "application/json, text/event-stream",
+                                "Authorization": "Bearer "
+                                + operator_subject_scope_token(secret, [subject]),
                             },
                         )
 
-                    async def result_text(response) -> str:
-                        ctype = response.headers.get("content-type", "")
-                        if ctype.startswith("text/event-stream"):
-                            for line in response.text.splitlines():
-                                if line.startswith("data:"):
-                                    payload = json.loads(line[5:].strip())
-                                    return str(payload["result"]["content"][0]["text"])
-                            raise AssertionError(f"no SSE data line: {response.text[:200]}")
-                        payload = response.json()
-                        return str(payload["result"]["content"][0]["text"])
-
-                    # The foreign-scoped token: every read tool answers with
-                    # the MISSING-run text — forbidden is indistinguishable
-                    # from absent — and run_list does not even discover it.
-                    not_found = f"NOT FOUND: no run '{run_id}'"
-                    for tool, args in (
-                        ("run_get", {"run_id": run_id}),
-                        ("plan_get", {"run_id": run_id}),
-                        ("run_evidence_get", {"run_id": run_id}),
-                    ):
-                        text = await result_text(await call(tool, args, MIRROR_FOREIGN_TOKEN))
-                        assert text == not_found, tool
-                    listed = await result_text(await call("run_list", {}, MIRROR_FOREIGN_TOKEN))
-                    assert run_id not in listed
-                    assert REPO not in listed
-
-                    # The acme-scoped token: the same run mirror is fully
-                    # readable — status, subject, frozen spec document.
-                    mirrored = await result_text(
-                        await call("run_get", {"run_id": run_id}, MIRROR_ALLOWED_TOKEN)
-                    )
-                    assert f"acme/acme-widget#{ISSUE}" in mirrored
-                    assert FlowStatus.WAITING_CI.value in mirrored
-                    plan = await result_text(
-                        await call("plan_get", {"run_id": run_id}, MIRROR_ALLOWED_TOKEN)
-                    )
-                    assert run.spec_digest in plan
-
-                    # Zero provider calls: the denied reads never probed the
-                    # fake (the object-level check ran on durable state).
+                    for suffix in ("", "/support-bundle"):
+                        denied = await read(f"/operator/runs/{run_id}{suffix}", foreign)
+                        assert denied.status_code == 404
+                        assert (
+                            denied.json()["detail"]
+                            == f"no run {run_id!r} within the authorized scope"
+                        )
+                    listed = await read("/operator/runs", foreign)
+                    assert listed.status_code == 200 and listed.json()["runs"] == []
+                    own_list = await read("/operator/runs", own)
+                    assert [row["run_id"] for row in own_list.json()["runs"]] == [run_id]
+                    detail = await read(f"/operator/runs/{run_id}", own)
+                    assert detail.status_code == 200
+                    assert detail.json()["run_id"] == run_id
+                    assert detail.json()["subject_id"] == own.subject_id()
                     assert len(fake.calls) == provider_calls_before
         finally:
+            await service_engine.dispose()
             reset_engine()
 
 

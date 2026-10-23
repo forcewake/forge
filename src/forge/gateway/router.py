@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from forge import __version__
+from forge.deferred import DEFERRED_NOTE_COMMANDS, unavailable_reply
 from forge.adaptive.command_router import (
     ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
     adaptive_command_set,
@@ -47,15 +48,9 @@ router = APIRouter()
 # set — fail closed.
 router.include_router(github_router)
 
-#: Commands served by the durable run service (M1), not the legacy flow engine.
-#: ``/security`` (v0.7) joins them — the durable triage step — and is the ONLY
-#: run command also accepted on MR notes (triage targets MRs, issues and PRs;
-#: /implement, /go, /cancel and /retry stay issue-bound).
-#: R29 adds the operator surface around dead/stuck runs: ``/status`` and
-#: ``/why-blocked`` are read-only, ``/reconcile`` drives the publication-intent
-#: recovery path — all three issue-bound like /retry.
+#: Active durable run commands; deferred verbs are recognized only to refuse them.
 _RUN_COMMANDS = frozenset(
-    {"/implement", "/go", "/cancel", "/retry", "/security", "/status", "/why-blocked", "/reconcile"}
+    {"/implement", "/go", "/cancel", "/retry", "/status", "/why-blocked", "/reconcile"}
 )
 
 #: R40-01 (#337): the review-feedback verbs (``/fix``/``/ask``) join the
@@ -69,20 +64,11 @@ _RUN_COMMANDS = frozenset(
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
-    """Detect note events that belong to the durable run loop (M1 + v0.7).
+    """Parse issue commands, MR feedback and explicit deferred-feature refusals.
 
-    - ``<mention> /implement`` on an issue → ``start_run``.
-    - ``<mention> /go <run-id>`` on an issue → ``handle_command_note``.
-    - ``<mention> /security`` on an issue **or MR** → ``security_triage``
-      (the provider-neutral durable triage step, v0.7).
-    - ``/fix`` / ``/ask`` on an MR note → ``review_feedback`` (R40-01,
-      behind ``FORGE_REVIEW_FEEDBACK_ENABLED``): a reviewer's bounded
-      correction request or clarification, served by the same durable
-      dispatch. A malformed body is the typed ``review_feedback_refused``
-      ingress refusal, never a run command.
-
-    Respects ``FORGE_MENTION_PATTERN``. Returns the run_command metadata dict,
-    or None when the event should take its legacy path.
+    The mention pattern and bare first-token forms are equivalent. Bot
+    authors never trigger work. Feedback stays MR-bound and flag-gated;
+    malformed feedback returns its typed refusal before durable acceptance.
     """
     if not isinstance(event, NoteEvent):
         return None
@@ -100,7 +86,12 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     # the default OFF the verbs are not recognized at all (zero routing).
     # R40-01: the review-feedback verbs (/fix /ask) follow the same pattern
     # behind FORGE_REVIEW_FEEDBACK_ENABLED.
-    commands = _RUN_COMMANDS | adaptive_command_set() | review_feedback_command_set()
+    commands = (
+        _RUN_COMMANDS
+        | adaptive_command_set()
+        | review_feedback_command_set()
+        | DEFERRED_NOTE_COMMANDS
+    )
     mention = extract_mention(note_text, mention_pattern, extra_commands=commands)
 
     slash_command: str | None = None
@@ -129,7 +120,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         feedback_mr_iid = event.merge_request.iid
     elif not on_issue and slash_command != "/security":
         # Gate notes are posted on issues; MR notes keep the legacy paths —
-        # except /security, which is MR/issue/PR-neutral by contract, and
+        # except the unavailable /security reply and
         # the review-feedback verbs (R40-01), which are MR-bound BY design.
         return None
 
@@ -144,7 +135,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     }
     if feedback_command:
         # R40-01 (#337): the reviewer's comment ON the Draft MR — the same
-        # durable run-command dispatch /security travels, carrying the note
+        # durable run-command dispatch, carrying the note
         # identity (project + note id — a GitLab note id is unique inside a
         # project, the logical request identity), the MR and the discussion
         # the request binds to. The head binding is read LIVE by the service
@@ -183,7 +174,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         }
     if slash_command == "/security":
         common["mr_iid"] = event.merge_request.iid if not on_issue and event.merge_request else None
-        return {**common, "command": "security_triage", "note_text": note_text}
+        return {**common, "command": "feature_unavailable", "feature": "/security"}
     if slash_command == "/implement":
         # M1 cutover: /implement takes the durable RunService path, not flows.
         return {**common, "command": "start_run"}
@@ -207,35 +198,6 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         # new command; approver-gated at the executor like /retry).
         return {**common, "command": "reconcile", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
-
-
-def _match_pipeline_debug(event: GitLabEvent, settings) -> dict[str, Any] | None:
-    """Detect failed pipeline events that belong to the durable CI debug lane.
-
-    v0.7 (research F3 port): a ``pipeline`` hook with ``status == "failed"``
-    is normalized to a ``debug_pipeline`` command and routed through the
-    SAME durable step path as the run commands — the durable equivalent of
-    the legacy reactive pipeline-debugger (which no longer sees failed
-    pipeline events; successful/active pipelines keep the legacy path).
-    The executor (:mod:`forge.reactive.ci_debug`) skips forge's own
-    ``factory/`` branches — the run's bounded repair loop already fetches
-    failed-job logs and posts the repair-cycle MR note — and correlates the
-    remaining failures to their MR for the root-cause comment.
-    """
-    if not isinstance(event, PipelineEvent):
-        return None
-    attrs = event.object_attributes
-    if (attrs.status or "") != "failed":
-        return None
-    return {
-        "command": "debug_pipeline",
-        "project_id": event.project.id if event.project else 0,
-        "pipeline_id": attrs.id,
-        "branch": attrs.ref or "",
-        "sha": attrs.sha or "",
-        "mr_iid": event.merge_request.iid if event.merge_request else None,
-        "author_username": event.user.username if event.user else "",
-    }
 
 
 def _label_title(label: Any) -> str:
@@ -393,7 +355,7 @@ async def _ingest_run_command(
     session_factory = getattr(request.app.state, "session_factory", None)
     queue = getattr(request.app.state, "task_queue", None)
     # Only the two dispatchers above reach this ingest path — note events
-    # (run commands) and pipeline events (the CI debug lane), the two
+    # (run commands), the
     # GitLabEvent models that carry ``object_attributes.id``.
     if isinstance(event, (NoteEvent, PipelineEvent)):
         note_id: int | str = event.object_attributes.id
@@ -819,6 +781,8 @@ async def webhook(
     # orchestrator/flow dispatch entirely (they never need an LLM here).
     run_command = _match_run_command(event, settings)
     if run_command is not None:
+        if run_command.get("command") == "feature_unavailable":
+            return unavailable_reply(run_command["feature"])
         if run_command.get("command") == "review_feedback_refused":
             # R40-01: the typed ingress refusal for a malformed feedback
             # verb — a 2xx WITH the reason (a 4xx spike counts toward
@@ -863,11 +827,8 @@ async def webhook(
     if lifecycle_command is not None:
         return await _ingest_run_command(request, background_tasks, event, lifecycle_command)
 
-    # v0.7 durable CI debug lane: failed pipelines bypass the legacy
-    # orchestrator the same way (the durable step IS the replacement).
-    pipeline_debug = _match_pipeline_debug(event, settings)
-    if pipeline_debug is not None:
-        return await _ingest_run_command(request, background_tasks, event, pipeline_debug)
+    if isinstance(event, PipelineEvent) and event.object_attributes.status == "failed":
+        return unavailable_reply("ci_debug")
 
     # enqueue to Redis if available
     task_queue = getattr(request.app.state, "task_queue", None)

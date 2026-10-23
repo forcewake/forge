@@ -60,6 +60,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
+from forge.deferred import REMOVED_COMMANDS
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     ActionLog,
@@ -7233,22 +7234,17 @@ async def execute_github_run_command(
     *stack_factory* hook exists for tests to run the service over a fake
     client + stub agents (no network, no model).
 
-    ``review_pr`` dispatches to the reactive review lane
-    (:mod:`forge.reactive.github_review`) and ``debug_ci`` to the CI debug
-    lane (:mod:`forge.reactive.ci_debug`) — separate lanes beside the
-    durable run path below: no FlowRun, no RunSpec, one step in/one comment
-    out. RunService/GitHubRunService state is untouched by them.
+    Reactive PR review remains separate from durable implementation runs.
+    Deferred feature commands left in an old queue have no effect.
     """
     command = metadata.get("command")
+    if command in REMOVED_COMMANDS:
+        logger.info("command.refused reason=feature_not_available command=%s", command)
+        return
     if command == "review_pr":
         from forge.reactive.github_review import execute_reactive_review
 
         await execute_reactive_review(settings, forge_config, session_factory, metadata)
-        return
-    if command == "debug_ci":
-        from forge.reactive.ci_debug import execute_debug_ci_command
-
-        await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
     if command not in {
         "start_run",

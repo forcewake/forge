@@ -126,6 +126,7 @@ from forge.adaptive.revisions import (
     review_obligation_digest,
     stage_review_correction,
 )
+from forge.deferred import REMOVED_COMMANDS
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -897,39 +898,12 @@ async def execute_run_command(
     FlowRun-backed GitHub gate path; RunService stays GitLab-bound until the
     v0.5 contracts extraction.
 
-    v0.7: ``security_triage`` commands dispatch to
-    :mod:`forge.findings.triage` BEFORE the gate machinery — findings are a
-    separate subsystem wired into the same durable step runtime (they never
-    touch RunService state). ``debug_pipeline`` commands dispatch to
-    :mod:`forge.reactive.ci_debug` the same way — the durable pipeline
-    failure debugger (factory/ branches are skipped there: the run's own
-    repair loop owns those failures).
+    Deferred feature commands left in a pre-upgrade queue are inert.
     """
-    if metadata.get("command") == "security_triage":
-        from forge.findings.triage import execute_security_command
-
-        if metadata.get("provider") in ("github",):
-            await execute_security_command(settings, forge_config, session_factory, metadata)
-            return
-        async with GitLabClient(
-            base_url=settings.GITLAB_URL,
-            token=forge_token(settings),
-        ) as gitlab:
-            await execute_security_command(
-                settings, forge_config, session_factory, metadata, gitlab=gitlab
-            )
-        return
-
-    if metadata.get("command") == "debug_pipeline":
-        from forge.reactive.ci_debug import execute_debug_pipeline_command
-
-        async with GitLabClient(
-            base_url=settings.GITLAB_URL,
-            token=forge_token(settings),
-        ) as gitlab:
-            await execute_debug_pipeline_command(
-                settings, forge_config, session_factory, metadata, gitlab=gitlab
-            )
+    if metadata.get("command") in REMOVED_COMMANDS:
+        logger.info(
+            "command.refused reason=feature_not_available command=%s", metadata.get("command")
+        )
         return
 
     if metadata.get("provider") == "github":

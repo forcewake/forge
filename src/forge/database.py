@@ -171,6 +171,7 @@ async def _bootstrap_fresh(engine: AsyncEngine, script: ScriptDirectory, head: s
 
             def _create_and_stamp(sync_conn) -> None:
                 Base.metadata.create_all(sync_conn)
+                _create_retired_findings_schema(sync_conn, script)
                 MigrationContext.configure(sync_conn).stamp(script, head)
 
             await conn.run_sync(_create_and_stamp)
@@ -178,6 +179,18 @@ async def _bootstrap_fresh(engine: AsyncEngine, script: ScriptDirectory, head: s
 
         logger.info("fresh database: applying alembic chain up to %s", head)
         await conn.run_sync(lambda sync_conn: _run_migrations_sync(sync_conn, script))
+
+
+def _create_retired_findings_schema(sync_conn, script: ScriptDirectory) -> None:
+    """Keep the retired feature's historical tables in fresh SQLite installs."""
+    if "security_findings" in inspect(sync_conn).get_table_names():
+        return
+    revisions = {revision.revision: revision for revision in script.walk_revisions()}
+    if not {"010", "016"} <= revisions.keys():
+        return
+    with Operations.context(MigrationContext.configure(sync_conn)):
+        for revision in ("010", "016"):
+            revisions[revision].module.upgrade()
 
 
 def _run_migrations_sync(sync_conn, script: ScriptDirectory) -> None:

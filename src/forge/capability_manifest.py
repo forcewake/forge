@@ -116,7 +116,6 @@ CLASSIC_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
     "/go",
     "/cancel",
     "/retry",
-    "/security",
     "/status",
     "/why-blocked",
     "/reconcile",
@@ -240,7 +239,7 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         commands=REVIEW_FEEDBACK_OPERATOR_COMMANDS,
         note="R40-01 (#337): /fix and /ask on a GitLab Draft-MR note parse "
         "into the durable review_feedback run command (the same ingress → "
-        "inbox+step → worker dispatch /security travels), the staged "
+        "inbox+step → worker dispatch), the staged "
         "correction re-drives through run_reconciler's registered "
         "evaluate_review_corrections pass, and one logical note identity "
         "(project + note id; two dedup layers — delivery uuid at ingress, "

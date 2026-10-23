@@ -6,26 +6,30 @@ and a bare `/go <run-id>` are equally valid; hyphenated commands parse as
 one token. Forge's own comments contain command lines, so a bot-authored
 note is never a trigger or an approval.
 
-Commands live on the run's subject. `/security` is the one exception: it is
-MR/PR-neutral by contract and also accepted on merge-request and pull-
-request notes (triage targets MRs, issues and PRs). The review-feedback
-verbs (`/fix`, `/ask`) are the second exception, in the other direction:
-they are **MR-discussion-bound** — a reviewer comments on the Draft MR the
-candidate opened — and currently **GitLab-only** (see
+Commands live on the run's subject. Review-feedback verbs (`/fix`, `/ask`)
+are MR-discussion-bound: a reviewer comments on the Draft MR the candidate
+opened. They are currently GitLab-only (see
 [Review feedback on the Draft MR](#review-feedback-on-the-draft-mr-gitlab)).
+
+Security triage, the standalone CI-debug lane and the forge MCP server are
+deferred until after 1.0 (ADR-0035). `/security` on an issue, MR or PR gets
+`feature_not_available` with the message `/security is not available in this
+version.` The authenticated webhook returns that refusal without accepting
+or scheduling work, calling a provider or spending model tokens. Existing
+queued security/CI-debug run commands are inert. The candidate's ordinary
+bounded CI repair loop and the lane-side MCP client configuration remain.
 
 ## The command table
 
 | Command | Effect | Authorization | Provider parity |
 |---|---|---|---|
 | `/implement` | Starts a durable run: task snapshot → plan → plan comment with the Implementation block → pending gate decision; run parks `waiting_approval` | Admission gate before the first paid call: the actor must be on the connection's approver list, or the run parks `blocked(admission_denied)` — the planner is never constructed | GitLab issue comment · GitHub issue comment **or** the `forge` label |
-| `/go <run-id>` | Consumes the gate decision exactly once and advances: frozen RunSpec verified by digest → harness/builtin lane → candidate → Draft MR/PR | Approver list only; requires a pending, unconsumed decision that is still inside its TTL and whose plan/base/spec digests still match — expired or drifted decisions block the run with an explanatory comment, never a silent ignore | Both providers |
+| `/go <run-id>` | Consumes the gate decision exactly once and advances: frozen RunSpec verified by digest → CI lane → candidate → Draft MR/PR | Approver list only; requires a pending, unconsumed decision that is still inside its TTL and whose plan/base/spec digests still match — expired or drifted decisions block the run with an explanatory comment, never a silent ignore | Both providers |
 | `/cancel [run-id]` | Cancel-as-revoke (F13): the publication grant is revoked FIRST, scheduled steps are withdrawn, then the run is cancelled durably. Bare = the latest active run on the subject; terminal runs are never touched | Approver list only | Both providers |
 | `/retry [run-id]` | Tier-2 operator revival of a dead run (see [below](#revival-and-retry-tier-1-auto-tier-2-operator)) | Approver list only; rejection table below | Both providers |
 | `/status [run-id]` | **Read-only** snapshot from durable state: status, reason, commit cycle, candidates, budget headroom, verification evidence, publication-intent states, revive/retry counters. Bare = the issue's latest run, any state | None — any authenticated webhook actor; the only write is the journaled reply note | Both providers |
 | `/why-blocked [run-id]` | **Read-only** explanation of a terminal/blocked cause: the parked reason, its transient/fatal classification, and the honest revive/retry verdict — quoting the SAME rejection table `/retry` enforces | None — read-only, as `/status` | Both providers |
 | `/reconcile <run-id>` | Drives the publication-intent recovery pass explicitly: probe → adopt / report duplicate / report unknown with manual instruction. Refuses runs with no publication intent — revival is `/retry`'s job, not this command's | Approver list only (it is the one mutating R29 command) | Both providers |
-| `/security` | Runs the durable triage pass over security findings for the subject; the AI verdict is a SUGGESTION (`suggested_verdict`) | Confirming/rejecting a suggestion requires a triager (`FORGE_SECURITY_TRIAGERS`); `FORGE_SECURITY_AUTO_ACCEPT=true` is the explicit opt-out of that human confirm — default OFF | Issue/MR/PR-neutral on both providers |
 | `/fix <bounded description>` | Review feedback on the Draft MR (GitLab only, behind `FORGE_REVIEW_FEEDBACK_ENABLED`): classifies against the frozen write scope — every explicitly claimed path (backticked) inside it stages a bounded input revision through the EXISTING human gate; a human `/approve-revision` activates it and the reconciler's registered correction pass re-drives the run through the repair edge with the reviewer's text in the executor brief | Approver list only (the same authority as `/go`); unauthorized, deleted-discussion, conflicting, stale-head and closed-window cases are typed refusals with an operator-visible MR reply | GitLab MR note only |
 | `/ask <question>` | Review feedback, clarification class: a durable clarification record + a reply routed to the approvers — **no coding attempt, no coder reservation, no dispatch** (reviewer-only recovery consumes no implementation budget) | Approver list only, like `/fix` | GitLab MR note only |
 
