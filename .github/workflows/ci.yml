@@ -111,8 +111,8 @@ jobs:
           src/forge/factory src/forge/execution src/forge/integrations
           packages/forge-protocol/src/forge_protocol packages/forge-lane/src/forge_lane
 
-      - name: Mypy (pure domain, strict and blocking)
-        run: uv run mypy --strict src/forge/domain
+      - name: Mypy (domain and ports, strict and blocking)
+        run: uv run mypy --strict src/forge/domain src/forge/ports.py src/forge/port_values.py
 
       # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
       # gateway, agents, flows, stores, utils, harness_entry, main,
