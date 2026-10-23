@@ -74,6 +74,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Build every distribution
         run: uv build --all
+      - name: Verify installed-wheel database bootstrap
+        run: |
+          uv sync --all-packages
+          uv run pytest -q tests/test_wheel_migrations.py
       - uses: actions/upload-artifact@v4
         with:
           name: workspace-distributions

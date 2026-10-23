@@ -75,6 +75,10 @@ packages = ["src/forge"]
 # assets ship with the code they belong to.
 include = ["src/forge"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"alembic" = "forge/_migrations"
+"alembic.ini" = "forge/_migrations/alembic.ini"
+
 [tool.ruff]
 target-version = "py313"
 line-length = 100

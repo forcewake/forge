@@ -264,5 +264,6 @@ tests/test_verification_binding.py,48,1083,true,false,P1-15,invariant evidence,p
 tests/test_verification_executor.py,7,133,true,false,P1-15,edge-case pin,partly deleted,verification,keep,-,
 tests/test_webhook_auth.py,4,60,false,false,,,,webhook,keep,-,
 tests/test_webhook_capture.py,3,99,true,false,,,,webhook,keep,-,
+tests/test_wheel_migrations.py,1,63,false,false,,edge-case pin,,wheel,keep,-,
 tests/test_worker.py,4,54,true,false,,edge-case pin,,worker,keep,-,
 tests/test_write_profiles.py,30,257,true,false,,,,write,keep,-,

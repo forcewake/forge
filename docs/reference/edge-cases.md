@@ -261,6 +261,10 @@ When a pin breaks:
 
 | EC-444 | A plugin dependency can become invisible to supply-chain analysis | The Claude SDK is imported only when its driver is selected and missing packages keep their typed unavailable outcome | `packages/forge-lane/src/forge_lane/drivers/claude_code.py` | `tests/test_lane_claude_code.py::test_missing_sdk_keeps_a_typed_unavailable_result` |
 
+| EC-480 | A wheel can import successfully while losing its database migrations | The installed server wheel ships the exact original migration chain and bootstraps outside the checkout | `src/forge/migrate.py` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
+| EC-481 | A schema precheck can accidentally upgrade or initialize a database | The migration check refuses a fresh schema and leaves an existing current schema unchanged | `src/forge/migrate.py` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
+| EC-482 | Build-time source paths can hide missing release assets | Installed package migrations take precedence over Docker and source checkout paths | `src/forge/migrate.py` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |
