@@ -653,10 +653,10 @@ class GitHubRunService:
         ``blocked(config_…)`` BEFORE any paid call).
         """
         if not self._harness_workflow():
-            refusal = LaneRefusal("project has no configured GitHub Actions workflow")
-            await self._refuse_lane(run_id, refusal)
+            missing = LaneRefusal("project has no configured GitHub Actions workflow")
+            await self._refuse_lane(run_id, missing)
             await self._post_journaled_note(
-                project_id, issue_number, refusal.reason, run_id, "lane_not_onboarded"
+                project_id, issue_number, missing.reason, run_id, "lane_not_onboarded"
             )
             return
         base_sha = await self._read_base_sha()
