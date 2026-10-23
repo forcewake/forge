@@ -90,14 +90,17 @@ class EngineGate(RunBound, Timestamps, Base):
     __table_args__ = (
         UniqueConstraint("run_id", "decision_key", name="uq_eng_gate_decision"),
         CheckConstraint(
-            "state IN ('open','consumed','expired','refused')", name="ck_eng_gate_state"
+            "state IN ('prepared','open','consumed','expired','refused')", name="ck_eng_gate_state"
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     decision_key: Mapped[str] = mapped_column(String(200))
-    state: Mapped[str] = mapped_column(String(20), default="open", server_default="open")
+    state: Mapped[str] = mapped_column(String(20), default="prepared", server_default="prepared")
     approved_digest: Mapped[str] = mapped_column(String(64))
     actor_scope_json: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consumed_by: Mapped[str | None] = mapped_column(String(200))
+    consumed_step_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("eng_steps.id", name="fk_eng_gate_consuming_step")
+    )

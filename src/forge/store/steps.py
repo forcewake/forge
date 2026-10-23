@@ -1,6 +1,7 @@
 """Fenced step claims; completion and successor scheduling commit together."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -8,6 +9,8 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.states import TERMINAL, Handler, State, transition
+from forge.store.approval import apply_approval_commit
+from forge.store.approval_values import ApprovalCommit, ConsumeGate, OpenGate
 from forge.store.models_execution import EngineStep
 from forge.store.models_runs import EngineRun
 from forge.store.records import Lease, StepRecord, StepRequest, StepState, StoreConflict
@@ -223,6 +226,7 @@ class StepStore:
         transition_to: State | None = None,
         reason: str | None = None,
         outcome: Literal["succeeded", "failed"] = "succeeded",
+        approval: ApprovalCommit | None = None,
     ) -> StepRecord:
         canonical_json(result_json)
         for request in successors:
@@ -230,6 +234,42 @@ class StepStore:
         async with transaction(self.factory) as session:
             row = await fence(session, lease, now or datetime.now(timezone.utc))
             run = await locked_run(session, lease.run_id)
+            if approval is not None:
+                if isinstance(approval, OpenGate) and (
+                    lease.handler != Handler.PLAN
+                    or transition_to != State.AWAITING_APPROVAL
+                    or successors
+                ):
+                    raise StoreConflict("gate opening requires atomic plan completion")
+                if isinstance(approval, ConsumeGate) and (
+                    lease.handler != Handler.APPROVE
+                    or transition_to != State.RUNNING
+                    or len(successors) != 1
+                    or successors[0].handler != Handler.DISPATCH
+                ):
+                    raise StoreConflict("approval requires one atomic dispatch successor")
+                decision = await apply_approval_commit(
+                    session, lease, approval, now or datetime.now(timezone.utc)
+                )
+                if decision.accepted and isinstance(approval, ConsumeGate):
+                    expected = json.dumps(
+                        {
+                            "approved_digest": approval.claim.approved_digest,
+                            "revision": approval.claim.revision,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if successors[0].payload_json != expected:
+                        raise StoreConflict("dispatch successor changed approved input")
+                if not decision.accepted:
+                    result_json = json.dumps(
+                        {"refused": decision.reason}, sort_keys=True, separators=(",", ":")
+                    )
+                    successors = ()
+                    transition_to = State.BLOCKED if decision.block else None
+                    reason = decision.reason if decision.block else None
+                    outcome = "failed" if decision.block else "succeeded"
             for request in successors:
                 await enqueue_in(session, run, request)
             if transition_to is not None:

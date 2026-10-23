@@ -11,6 +11,7 @@ from typing import Generic, Protocol, TypeVar
 
 from forge.domain.states import Handler, State
 from forge.ports import Clock
+from forge.store.approval_values import ApprovalCommit
 from forge.store.records import Lease, StepRecord, StepRequest, StaleLease
 from forge.store.steps import StepStore
 from forge.store.transactions import canonical_json
@@ -68,11 +69,14 @@ class StepResult:
     successors: tuple[StepRequest, ...] = ()
     park: Park | None = None
     next_state: State | None = None
+    approval: ApprovalCommit | None = None
 
     def __post_init__(self) -> None:
         canonical_json(self.result_json)
         object.__setattr__(self, "successors", tuple(self.successors))
-        if self.park is not None and (self.successors or self.next_state is not None):
+        if self.park is not None and (
+            self.successors or self.next_state is not None or self.approval is not None
+        ):
             raise ValueError("a parked step cannot schedule successors or another state")
 
 
@@ -197,15 +201,16 @@ class StepRunner(Generic[E]):
                 with suppress(asyncio.CancelledError):
                     await task
         try:
-            await self.store.complete_and_enqueue(
+            completed = await self.store.complete_and_enqueue(
                 holder.current,
                 result.result_json,
                 result.successors,
                 now=self.clock.now(),
                 transition_to=result.park.state if result.park else result.next_state,
                 reason=result.park.reason if result.park else None,
+                approval=result.approval,
             )
-            return "parked" if result.park else "completed"
+            return "parked" if result.park or completed.state == "failed" else "completed"
         except StaleLease:
             return "lost"
 

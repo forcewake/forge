@@ -27,15 +27,9 @@ class VerificationContract(Value):
         return self
 
 
-class RunSpec2(Value):
-    model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True)
+class RunPolicy(Value):
+    """Server-resolved policy frozen before research and inherited by the final spec."""
 
-    schema_version: Literal["forge.run-spec/2"] = Field(default="forge.run-spec/2", alias="schema")
-    task_title: ShortText
-    task_description: Annotated[str, Field(max_length=131072)] = ""
-    plan: Plan
-    base_sha: Sha
-    revision: Annotated[int, Field(gt=0)] = 1
     driver: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")]
     model: ShortText
     target_branch: ShortText
@@ -67,6 +61,17 @@ class RunSpec2(Value):
             "deny_lockfiles": policy.deny_lockfiles,
             "require_special_approval": policy.require_special_approval,
         }
+
+
+class RunSpec2(RunPolicy):
+    model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True)
+
+    schema_version: Literal["forge.run-spec/2"] = Field(default="forge.run-spec/2", alias="schema")
+    task_title: ShortText
+    task_description: Annotated[str, Field(max_length=131072)] = ""
+    plan: Plan
+    base_sha: Sha
+    revision: Annotated[int, Field(gt=0)] = 1
 
     @property
     def spec_json(self) -> str:
