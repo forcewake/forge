@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from forge import __version__
+from forge.api.lane_v1 import configure_lane_v1, router as lane_v1_router
 from forge.config import Settings, get_forge_config
 from forge.database import dispose_engine, get_session_factory, init_db
 from forge.gateway.router import router
@@ -24,7 +25,6 @@ async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
     setup_logging(settings.LOG_LEVEL)
 
-    # Ensure data directory exists for SQLite
     db_url = settings.DATABASE_URL
     if db_url.startswith("sqlite"):
         db_path = db_url.split("///")[-1]
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
 
     await init_db(db_url)
     app.state.session_factory = get_session_factory(db_url)
+    configure_lane_v1(app)
 
     # R36-05 (issue #264): the checkpoint authority marker's state is
     # observable at startup — one line naming the CONFIGURED checkpoint
@@ -110,6 +111,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from forge.api_lane_control import lane_control_router
 
     application.include_router(lane_control_router)
+
+    application.include_router(lane_v1_router)
 
     from forge.api_checkpoint_channel import checkpoint_channel_router
 

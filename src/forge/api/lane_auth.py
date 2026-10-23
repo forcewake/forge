@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import secrets
 from datetime import datetime, timezone
 from typing import Literal
@@ -66,6 +67,11 @@ class LaneAuthService:
     @staticmethod
     def new_nonce() -> str:
         return secrets.token_urlsafe(32)
+
+    def model_key_encryption_key(self) -> bytes:
+        return hmac.digest(
+            self._secret.encode(), b"forge-lane/v1/model-key-vault/AEAD/v1", "sha256"
+        )
 
     async def register_pending(
         self,

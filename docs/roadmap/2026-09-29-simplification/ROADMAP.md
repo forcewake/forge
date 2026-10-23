@@ -737,6 +737,7 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P2-04 Server lane API v1
+- **Status:** implemented locally on 2026-10-23. Real gateway minting remains unavailable until P3-12; successful injected grants are encrypted and idempotent across retries/restarts.
 - **Goal:** one HTTP surface for lanes.
 - **Work:**
   - Implement the `/lane/v1/*` endpoints of DESIGN §6.7 over the current

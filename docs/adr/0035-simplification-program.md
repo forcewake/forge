@@ -160,3 +160,42 @@ fresh provider JWT and an active, current dispatch. Every bearer call
 rechecks the current dispatch and cancellation counter; API mutations
 repeat that check in their database transaction. This is an implementation
 clarification for review, not a claim of live provider acceptance.
+
+## Lane API implementation (2026-10-23)
+
+The `/lane/v1` router uses the shared protocol models and the OIDC service.
+Its run evidence namespace is `lane_v1_api`; the authentication namespace
+is retained separately. Controls are produced only by trusted server
+composition. Every write locks the run row and conditionally updates the
+current identity and captured cancellation generation. SQLite reserves a
+write transaction before the read; PostgreSQL locks the row. Receipts,
+including conflicting terminal submissions, survive service restart.
+
+Blob uploads stream to a private temporary file, enforce a 16 MiB per-blob
+limit, verify the complete SHA-256 digest, sync and link atomically. Reads
+refuse symlinks, non-regular files, oversize files and corrupt digests.
+Database references authorize each dispatch's reads; knowledge of a hash
+alone grants no access. An interrupted or fenced upload may leave an
+unreferenced immutable blob, never an authorized reference. Blob cleanup
+and total storage quotas remain separate work. JSON requests are limited
+to 1 MiB; dispatch references and checkpoint entries to 4,096; controls and
+retained checkpoint manifests to 256 each. Limit violations refuse writes.
+
+Checkpoint restore serves only the dispatch's explicitly named previous
+generation from the same run and attempt, with matching base, approved
+digest and driver. Candidate and report resubmission returns the exact
+original receipt; conflicting bytes or metadata return a conflict.
+Completed reports require an accepted candidate. A terminal report fences
+new artifacts while allowing identical receipt retries.
+
+New model-key minting is unavailable without an explicitly injected
+provider; existing successful grants can be read without that provider.
+Tests inject a fake; no direct provider key or legacy secret is substituted. Redemption is reserved durably before provider I/O and is
+never replayed after a lost outcome. A successful grant is cached encrypted
+with AES-GCM under a context-separated key derived from the server's
+signing secret. Its authenticated data is the exact lane identity. Duplicate
+and reconnect requests return that same unexpired grant, including after
+server restart; expired or unauthenticatable cache entries fail closed.
+Cancellation is rechecked before storing and delivering the grant. No raw
+gateway key is stored in run evidence. Actual gateway minting belongs to
+the model-gateway task. The old `/lane` surfaces remain separate.

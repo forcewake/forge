@@ -58,8 +58,7 @@ class Settings(BaseSettings):
     # approve a plan via `@forge /go <run-id>`. Empty — nobody may approve.
     FORGE_APPROVERS: str = ""
 
-    # Bot-only credentials: a human approver's identity would let forge's
-    # own /go instructions return as authorized self-approval webhooks.
+    # Dedicated bot credentials prevent its own /go comments self-approving.
     FORGE_BOT_TOKEN: SecretStr | None = None
 
     # M1 run loop: MR target branch and max seconds a run may wait for CI
@@ -181,6 +180,7 @@ class Settings(BaseSettings):
     FORGE_LANE_SESSION_TTL_SECONDS: int = 300
     FORGE_LANE_OIDC_CLOCK_SKEW_SECONDS: int = 30
     FORGE_LANE_OIDC_JWKS_CACHE_SECONDS: int = 300
+    FORGE_LANE_BLOB_DIR: str = "data/lane-v1/blobs"
 
     # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label
     # name matches (case-insensitive) starts the same run command as
