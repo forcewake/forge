@@ -260,6 +260,8 @@ jobs:
           # beside a set ref or dev flag refuses.
           FORGE_LANE_WHEEL: ${{ vars.FORGE_LANE_WHEEL }}
           FORGE_LANE_WHEEL_SHA256: ${{ vars.FORGE_LANE_WHEEL_SHA256 }}
+          FORGE_LANE_REQUIREMENTS: ${{ vars.FORGE_LANE_REQUIREMENTS }}
+          FORGE_LANE_REQUIREMENTS_SHA256: ${{ vars.FORGE_LANE_REQUIREMENTS_SHA256 }}
           # NEXT-17: the expected sha256 of the codegraph MCP lock the
           # install step materializes (empty = the lock is generated but
           # not yet pinned; npm ci still enforces the lock's own per-tarball
@@ -429,6 +431,15 @@ jobs:
               # and let pip resolve forge's runtime dependencies normally: the
               # CODE is the verified bytes, and --no-deps would strand the
               # lane without its imports.
+              if [ -n "${FORGE_LANE_REQUIREMENTS:-}" ]; then
+                [[ "${FORGE_LANE_REQUIREMENTS_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+                curl --fail --location --proto '=https' --tlsv1.2 "$FORGE_LANE_REQUIREMENTS" -o /tmp/forge-lane-requirements.txt || exit 1
+                echo "$FORGE_LANE_REQUIREMENTS_SHA256  /tmp/forge-lane-requirements.txt" | sha256sum --check --status || exit 1
+                pip install --require-hashes -r /tmp/forge-lane-requirements.txt || exit 1
+              elif [ -n "${FORGE_LANE_REQUIREMENTS_SHA256:-}" ]; then
+                echo "FORGE_BOOTSTRAP_FAILED: requirements hash requires its URL"
+                exit 1
+              fi
               pip install "$WHEEL_FILE" || {
                 echo "failed" > .forge/bootstrap
                 echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
@@ -440,6 +451,9 @@ jobs:
               WHEEL_VERSION="$(printf '%s' "$(basename "$WHEEL_FILE")" | sed -n 's/^forge-\([0-9][^-]*\)-.*/\1/p')"
               printf '{"pin":"wheel","route":"%s","expected_sha256":"%s","actual_sha256":"%s","qualified":true,"version":"%s"}\n' \
                 "$FORGE_INSTALL_MODE" "$FORGE_WHEEL_SHA" "$ACTUAL_SHA" "$WHEEL_VERSION" > .forge/lane_install.json
+              if [ -n "${FORGE_LANE_REQUIREMENTS_SHA256:-}" ]; then
+                python -c 'import json,sys; p=".forge/lane_install.json"; d=json.load(open(p)); d["requirements_sha256"]=sys.argv[1]; open(p,"w").write(json.dumps(d))' "$FORGE_LANE_REQUIREMENTS_SHA256"
+              fi
               FORGE_LANE_EXPECTED_VERSION="$WHEEL_VERSION"
               ;;
             explicit-tag|default-tag)
@@ -675,6 +689,7 @@ jobs:
           # two contract files are ever staged here; nothing else can ride
           # along, so include-hidden-files stays unnecessary.
           rm -rf forge-output && mkdir -p forge-output
+          cp .forge/lane_install.json forge-output/lane_install.json
           # A Git failure here FAILS the step — the old failure-swallowing
           # suffix (a failed diff silently becoming an empty "successful"
           # candidate) is gone; a zero-change candidate stays a valid

@@ -278,30 +278,33 @@ class TestRouteResolutionIsExplicitAndConflictRejecting:
 
 
 class TestReleaseWorkflowBuildsTheLaneWheelSet:
-    """The authoritative lane distribution is published and recorded."""
+    """The same distributions pass RC tests and final promotion."""
 
     def test_the_workflow_builds_sdist_and_wheel_with_recorded_digests(self):
-        text = RELEASE_WORKFLOW.read_text()
-        assert "uv build --sdist --wheel --out-dir dist" in text
-        assert "wheel_sha256" in text
-        assert "sdist_sha256" in text
+        workflow = RELEASE_WORKFLOW.read_text()
+        assert workflow.count("uv build --all --sdist --wheel --out-dir dist") == 1
+        assert "Containerfile.release" in workflow
+        from tools.release.artifacts import prepare
+
+        assert callable(prepare)
 
     def test_the_gate_records_the_lane_artifact_identity(self):
-        text = RELEASE_WORKFLOW.read_text()
-        assert "--wheel-sha256" in text
-        assert "--wheel-url" in text
-        assert "--sdist-sha256" in text
-        assert "--sdist-url" in text
-        # The recorded URL is the release-asset download location.
-        assert "releases/download/${{ github.ref_name }}" in text
+        import yaml
+
+        jobs = yaml.safe_load(RELEASE_WORKFLOW.read_text())["jobs"]
+        assert jobs["live-smoke"]["needs"] == "candidate"
+        assert jobs["live-smoke"]["strategy"]["matrix"]["provider"] == ["github", "gitlab"]
+        assert jobs["promote"]["needs"] == ["candidate", "live-smoke"]
+        assert "tools/release/artifacts.py report" in RELEASE_WORKFLOW.read_text()
 
     def test_the_wheel_set_is_published_as_release_assets_after_qualification(self):
-        text = RELEASE_WORKFLOW.read_text()
-        assert "lane-dist-v${{ github.ref_name }}" in text
-        assert "gh release upload" in text
-        # The attach job verifies the published bytes against the digests
-        # the promotion record carries — no unverified asset ships.
-        assert "Verify the wheel set against the recorded digests" in text
+        workflow = RELEASE_WORKFLOW.read_text()
+        assert 'gh release download "$RC"' in workflow
+        assert "tools/release/artifacts.py verify" in workflow
+        assert workflow.index("cosign sign --yes") < workflow.index(
+            'gh release create "$GITHUB_REF_NAME"'
+        )
+        assert "--clobber" not in workflow
 
 
 # ---------------------------------------------------------------------------

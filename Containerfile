@@ -12,9 +12,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
 RUN mkdir -p /app/data /app/.cache/uv
 
-# Dependencies first: this layer only invalidates when the lockfile changes.
+# Workspace packages must be present when the frozen lockfile is resolved.
 # The postgres extra ships asyncpg — the production database profile (F25).
 COPY pyproject.toml uv.lock README.md ./
+COPY packages /app/packages
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --extra postgres
 
 # Application source + runtime assets (agent definitions, flows, migrations)

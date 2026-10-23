@@ -151,9 +151,26 @@ forge-agent-claude-sdk:
     - python3 -m pip install --quiet --no-input --break-system-packages uv
     - uv python install 3.13
     - uv venv /tmp/forge-lane-venv --python 3.13
-    - >
-      uv pip install --quiet --python /tmp/forge-lane-venv/bin/python
-      "forge[interactive] @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF}"
+    - |
+      mkdir -p .forge
+      if [ -n "${FORGE_LANE_WHEEL:-}" ]; then
+        printf '%s' "${FORGE_LANE_WHEEL_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$' || exit 1
+        test -n "${FORGE_LANE_REQUIREMENTS:-}" || exit 1
+        printf '%s' "${FORGE_LANE_REQUIREMENTS_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$' || exit 1
+        curl --fail --location --proto '=https' --tlsv1.2 "$FORGE_LANE_REQUIREMENTS" -o /tmp/forge-lane-requirements.txt || exit 1
+        echo "$FORGE_LANE_REQUIREMENTS_SHA256  /tmp/forge-lane-requirements.txt" | sha256sum --check --status || exit 1
+        wheel_file="/tmp/$(basename "$FORGE_LANE_WHEEL")"
+        curl --fail --location --proto '=https' --tlsv1.2 "$FORGE_LANE_WHEEL" -o "$wheel_file" || exit 1
+        echo "$FORGE_LANE_WHEEL_SHA256  $wheel_file" | sha256sum --check --status || exit 1
+        uv pip install --quiet --python /tmp/forge-lane-venv/bin/python --require-hashes -r /tmp/forge-lane-requirements.txt || exit 1
+        wheel_version="$(basename "$wheel_file" | sed -n 's/^forge-\([0-9][^-]*\)-.*/\1/p')"
+        installed_version="$(/tmp/forge-lane-venv/bin/python -c 'import forge; print(forge.__version__)')"
+        test "$installed_version" = "$wheel_version" || exit 1
+        printf '{"pin":"wheel","route":"explicit-wheel","expected_sha256":"%s","actual_sha256":"%s","qualified":true,"version":"%s","requirements_sha256":"%s"}\n' "$FORGE_LANE_WHEEL_SHA256" "$FORGE_LANE_WHEEL_SHA256" "$wheel_version" "$FORGE_LANE_REQUIREMENTS_SHA256" > .forge/lane_install.json
+      else
+        test -z "${FORGE_LANE_WHEEL_SHA256:-}${FORGE_LANE_REQUIREMENTS:-}${FORGE_LANE_REQUIREMENTS_SHA256:-}" || exit 1
+        uv pip install --quiet --python /tmp/forge-lane-venv/bin/python "forge[interactive] @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF}"
+      fi
     - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
     - git config user.name "forge"
     - git config user.email "forge@users.noreply.gitlab.com"
@@ -338,5 +355,6 @@ forge-agent-claude-sdk:
     paths:
       - .forge/candidate.diff
       - .forge/candidate.meta.json
+      - .forge/lane_install.json
     when: always
     expire_in: 1 week

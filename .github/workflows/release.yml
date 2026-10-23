@@ -1,350 +1,251 @@
 name: release
 
-# Publishes the release image to GHCR on a version tag. R30: the release
-# ARTIFACT is the smoke target — build once, push BY DIGEST, canary that
-# digest against a disposable Postgres (fresh-DB recipe + previous-release
-# schema upgrade with seeded real-shaped data, real alembic chain, NO
-# source mount). R32-19 adds the PROMOTION GATE between the canary and any
-# mutable tag: the digest only earns its tags when the qualification
-# profile (explicit required CI checks on the tagged sha) AND the canary
-# evidence qualify — a failed required check blocks promotion even when
-# the canary passed. The digest — not `latest` — is what this workflow
-# publishes for deployers to pin.
-#
-# Publishes only when FORGE_RELEASE_TOKEN (a PAT with write:packages) is
-# present as a repo/org secret; otherwise the job fails with the setup
-# instruction (the tag itself is the release; GHCR follows when the secret
-# lands).
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*", "!v*-rc.*"]
+
+# Releases share the dedicated smoke runner and its public ingress.
+concurrency:
+  group: forge-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  publish-ghcr:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
+  candidate:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
-      id-token: write # cosign keyless signing (Fulcio OIDC)
-      attestations: write # actions/attest-build-provenance
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U forge" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+      GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+      GH_REPO: ${{ github.repository }}
     outputs:
+      image: ${{ steps.identity.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
-      canary: ${{ steps.canary_results.outputs.json }}
-      sdist: ${{ steps.dist.outputs.sdist }}
-      sdist_sha256: ${{ steps.dist.outputs.sdist_sha256 }}
-      wheel: ${{ steps.dist.outputs.wheel }}
-      wheel_sha256: ${{ steps.dist.outputs.wheel_sha256 }}
+      rc: ${{ steps.identity.outputs.rc }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Guard — FORGE_RELEASE_TOKEN must exist (PAT with write:packages)
-        env:
-          TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Validate the version before building
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::FORGE_RELEASE_TOKEN is not set. Create a PAT with write:packages, add it as the FORGE_RELEASE_TOKEN secret, then re-tag (or re-run this workflow)."
-            exit 1
-          fi
-
-      # The canary asserts /health reports the tag's version; /health serves
-      # forge.__version__ from src/forge/__init__.py. Fail the release here,
-      # before any build, when the tag and the code disagree.
-      - name: Guard — tag must match forge.__version__
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          uv run --no-project --python 3.13 python - <<'PY'
+          import os, pathlib, re, tomllib
+          tag = os.environ['GITHUB_REF_NAME']
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', tag), 'a stable version tag is required'
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          assert tag == 'v' + version
+          assert f'__version__ = "{version}"' in pathlib.Path('src/forge/__init__.py').read_text()
+          PY
+      - name: Build the complete distribution once
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          CODE="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/forge/__init__.py)"
-          if [ "$TAG" != "$CODE" ]; then
-            echo "::error::tag v$TAG != src/forge/__init__.py __version__ '$CODE'. Bump __version__ to the tag (pyproject version too), then re-tag."
-            exit 1
-          fi
-
-      # Q35-08: the AUTHORITATIVE lane distribution is the published locked
-      # wheel set. The sdist+wheel are built from the SAME tagged tree as
-      # the image, sha256-recorded here, carried into the promotion record
-      # (additive wheel/sdist identity fields), and attached to the release
-      # below — so a cold copy of the shipped lane template installs the
-      # promoted bytes (hash-verified), never a stale git-ref fallback.
-      # Until this landed the pipeline was image-only; those archived
-      # records keep parsing with the wheel fields honestly absent.
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Build the lane wheel set (sdist + wheel, digest-recorded)
-        id: dist
+          uv build --all --sdist --wheel --out-dir dist
+          uv export --frozen --all-packages --no-dev --extra postgres --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/runtime-requirements.txt
+          uv export --frozen --all-packages --no-dev --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/lane-dependencies.txt
+          uv export --frozen --all-packages --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file "$RUNNER_TEMP/test-requirements.txt"
+      - name: Test installed wheels in a fresh environment
         run: |
-          uv build --sdist --wheel --out-dir dist
-          SDIST="$(ls dist/*.tar.gz)"
-          WHEEL="$(ls dist/*.whl)"
-          SDIST_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SDIST")"
-          WHEEL_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WHEEL")"
-          {
-            echo "sdist=$(basename "$SDIST")"
-            echo "sdist_sha256=$SDIST_SHA"
-            echo "wheel=$(basename "$WHEEL")"
-            echo "wheel_sha256=$WHEEL_SHA"
-          } >> "$GITHUB_OUTPUT"
-          echo "lane wheel  : $(basename "$WHEEL") sha256:$WHEEL_SHA"
-          echo "lane sdist  : $(basename "$SDIST") sha256:$SDIST_SHA"
-
-      - name: Keep the lane wheel set as a workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lane-dist-v${{ github.ref_name }}
-          path: dist
-          if-no-files-found: error
-
-      # R42-04 (#377) — the BUILD-ONCE guard (AC-8): the wheel this release
-      # just built must BE the wheel a strict qualification record bound for
-      # this version (digest equality). A rebuild whose bytes drifted — or a
-      # version nobody qualified — FAILS HERE: the promotion below never
-      # runs, and the release stays blocked until a qualification record
-      # binds the new bytes (re-qualified). The v0.41.0 gap (promoted wheel
-      # != the live trace's wheel) is exactly what this step makes
-      # impossible to repeat silently.
-      - name: Exact-composition gate (build once — promote THOSE bytes)
-        run: >-
-          python3 scripts/generate_template_pins.py --exact-composition
-          --expect-version "${GITHUB_REF_NAME#v}"
-          --expect-wheel-sha256 "${{ steps.dist.outputs.wheel_sha256 }}"
-
-      - name: Log in to GHCR
-        run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      # Build once, push by digest. No mutable tag exists yet: nothing can
-      # pull :vX or :latest until the canary below has passed on THIS digest.
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push by digest
+          set -euo pipefail
+          uv venv "$RUNNER_TEMP/release-venv" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/release-venv/bin/python" --require-hashes -r "$RUNNER_TEMP/test-requirements.txt"
+          uv pip install --python "$RUNNER_TEMP/release-venv/bin/python" --no-deps dist/*.whl
+          "$RUNNER_TEMP/release-venv/bin/python" -I -c 'import forge; assert "site-packages" in forge.__file__, forge.__file__'
+          "$RUNNER_TEMP/release-venv/bin/python" -m pytest -q -m "not slow" --junitxml=default.xml
+          "$RUNNER_TEMP/release-venv/bin/python" -m pytest -q $("$RUNNER_TEMP/release-venv/bin/python" tests/invariants/registry.py) --junitxml=invariants.xml
+          "$RUNNER_TEMP/release-venv/bin/python" scripts/assert_no_skips.py invariants.xml
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate the package registry
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build the image from the tested wheels once
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile
+          file: Containerfile.release
           push: true
           outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true
-
-      - name: Export the digest-pinned ref
-        run: echo "IMAGE=ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_ENV"
-
-      # scripts/canary_smoke.py pulls the digest back from GHCR (proving the
-      # registry round-trip) and asserts, with NO source mount:
-      #   fresh:   python -m forge.migrate on a fresh Postgres (the real
-      #            alembic chain — never create_all, R22) → the R22 boot gate
-      #            passes at head (DB revision == script head) → the image CMD
-      #            serves /health ok with the tag's version, DB/Redis/LiteLLM
-      #            all ok → /mcp answers 401 unauthenticated (fail closed) →
-      #            forge doctor passes database/redis/litellm (GitLab checks
-      #            are out of scope: no GitLab fixture in CI).
-      #   migrate: the previous release's image migrates a second fresh DB,
-      #            this image must REFUSE to boot on that stale schema (R22
-      #            gate), then upgrade prev→head and pass the gate.
-      #   seed:    --seed-real-data seeds the previous-schema DB with
-      #            real-shaped rows (run + frozen spec + bounded steps +
-      #            control command + publication intent); the upgrade must
-      #            preserve them — row counts + sha256 fingerprints per
-      #            table, not just the schema version (R32-19).
-      # External LLM keys are unavailable in CI: LiteLLM REACHABILITY (the
-      # boundary) is satisfied by a stub served by the image itself; no model
-      # call is made. --results-json writes the capability-tagged stage
-      # outcomes the promotion gate below consumes as evidence.
-      - name: Canary the digest (fresh DB + previous-release schema + seeded data)
+      - name: Bind all artifact identities
+        id: identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          python3 scripts/canary_smoke.py "$IMAGE" \
-            --expected-version "${GITHUB_REF_NAME#v}" \
-            --previous-image "ghcr.io/${{ github.repository }}:latest" \
-            --stages fresh,migrate \
-            --seed-real-data \
-            --results-json canary-results.json
-        # `latest` still points at the PREVIOUS release here — the tags are
-        # attached below, only after canary AND the promotion gate pass. On
-        # the first release (or a re-run where the chains do not differ) the
-        # stage skips or waives the refusal assertion on its own.
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}@$DIGEST"
+          rc="${GITHUB_REF_NAME}-rc.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          python3 tools/release/artifacts.py prepare --repo "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME" --rc "$rc" --commit "$GITHUB_SHA" --image "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+      - name: Boot the exact registry image and upgrade seeded previous-release data
+        env:
+          IMAGE: ${{ steps.identity.outputs.image }}
+        run: >-
+          python3 scripts/canary_smoke.py "$IMAGE" --runtime docker
+          --expected-version "${GITHUB_REF_NAME#v}"
+          --previous-image "ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          --stages fresh,migrate --seed-real-data --results-json canary-results.json
+      - name: Stage immutable RC assets
+        env:
+          RC: ${{ steps.identity.outputs.rc }}
+        run: |
+          gh release create "$RC" --target "$GITHUB_SHA" --prerelease --title "forge ${GITHUB_REF_NAME#v} candidate" --notes "Unpromoted candidate. No final image tag has moved."
+          gh release upload "$RC" dist/*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-candidate
+          path: |
+            dist
+            default.xml
+            invariants.xml
+            canary-results.json
+          if-no-files-found: error
 
-      - name: Export the canary results
-        id: canary_results
-        run: echo "json=$(tr -d '\n' < canary-results.json)" >> "$GITHUB_OUTPUT"
-
-  # R32-19 promotion gate: mutable tags move ONLY from qualified profile
-  # evidence. The gate is a QUERY over evidence collected earlier — the CI
-  # check-runs for the tagged sha and the canary results from the job above
-  # — it never re-runs a suite. Required checks are explicit,
-  # provenance-bound names (see forge.release_promotion.REQUIRED_CHECKS):
-  # a FAILED check blocks promotion even when the canary passed; a check
-  # with no recorded result (never run, cancelled, still pending) blocks
-  # fail-closed; a failed-then-passed retry is a conditional pass that
-  # stays on record, never silently green. The promotion record it emits is
-  # the artifact committed under docs/releases/evidence/v<version>/.
-  promotion-gate:
-    needs: publish-ghcr
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: read
+  live-smoke:
+    needs: candidate
+    # Provisioned sandbox runner: Docker, real provider/LLM credentials and a
+    # public HTTPS endpoint forwarded to this runner's port 8420. Never lab DBs.
+    runs-on: [self-hosted, linux, x64, forge-release-sandbox]
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        provider: [github, gitlab]
+    env:
+      IMAGE: ${{ needs.candidate.outputs.image }}
+      PROVIDER: ${{ matrix.provider }}
+      SMOKE_ENV: ${{ secrets.FORGE_RELEASE_SMOKE_ENV }}
+      ACTOR_TOKEN: ${{ matrix.provider == 'github' && secrets.FORGE_RELEASE_GITHUB_ACTOR_TOKEN || secrets.FORGE_RELEASE_GITLAB_ACTOR_TOKEN }}
+      REGISTRY_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+      TARGET: ${{ matrix.provider == 'github' && vars.FORGE_RELEASE_GITHUB_SANDBOX || vars.FORGE_RELEASE_GITLAB_SANDBOX }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Evaluate the promotion from recorded evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANARY_RESULTS: ${{ needs.publish-ghcr.outputs.canary }}
-        run: |
-          printf '%s' "$CANARY_RESULTS" > canary-results.json
-          uv run python -m forge.release_promotion gate \
-            --version "${GITHUB_REF_NAME#v}" \
-            --image-ref "ghcr.io/${{ github.repository }}" \
-            --digest "${{ needs.publish-ghcr.outputs.digest }}" \
-            --ci-run-id "${{ github.run_id }}" \
-            --head-sha "${{ github.sha }}" \
-            --checks-from-github "${{ github.repository }}@${{ github.sha }}" \
-            --canary-json canary-results.json \
-            --sdist "${{ needs.publish-ghcr.outputs.sdist }}" \
-            --sdist-sha256 "${{ needs.publish-ghcr.outputs.sdist_sha256 }}" \
-            --sdist-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.sdist }}" \
-            --wheel "${{ needs.publish-ghcr.outputs.wheel }}" \
-            --wheel-sha256 "${{ needs.publish-ghcr.outputs.wheel_sha256 }}" \
-            --wheel-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.wheel }}" \
-            --out promotion.json \
-            --archive
-
-      # R36-22: the committed profile-qualification records are part of this
-      # gate's contract. This step only READS the committed store (never
-      # re-runs anything): a record whose required evidence is marked skipped
-      # or failed refuses that profile's promotion EVEN WITH core CI green.
-      # Only each profile's LATEST record is judged; fixing a refusal means
-      # landing a NEW record — the store is append-only history.
-      - name: Profile-qualification records gate (R36-22)
-        run: uv run python -m forge.profile_qualification gate --root .
-
-      - name: Keep the promotion record
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: promotion-record-v${{ github.ref_name }}
-          path: promotion.json
-
-      - name: Publish the promotion decision
+          name: release-candidate
+      - name: Boot an isolated app, worker, database and queue from the RC digest
+        run: |
+          set -euo pipefail
+          test -n "$SMOKE_ENV" && test -n "$ACTOR_TOKEN" && test -n "$TARGET"
+          umask 077
+          export DOCKER_CONFIG="$RUNNER_TEMP/release-docker-$PROVIDER"
+          mkdir -p "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python3 - <<'PYCONFIG'
+          import json, os, pathlib
+          config = json.loads(os.environ['SMOKE_ENV'])
+          config['FORGE_RELEASE_SMOKE_ACTOR_TOKEN'] = os.environ['ACTOR_TOKEN']
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'forge-release.json').write_text(json.dumps(config))
+          PYCONFIG
+          scope="forge-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PROVIDER}"
+          echo "SCOPE=$scope" >> "$GITHUB_ENV"
+          docker network create "$scope"
+          docker run -d --name "$scope-pg" --network "$scope" --network-alias postgres -e POSTGRES_USER=forge -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=forge postgres:17-alpine
+          docker run -d --name "$scope-redis" --network "$scope" --network-alias redis redis:7-alpine
+          for i in $(seq 1 60); do docker exec "$scope-pg" pg_isready -U forge && break; sleep 1; done
+          for role in migrate app worker; do
+            python3 tools/release/containers.py "$IMAGE" "$scope" "$RUNNER_TEMP/forge-release.json" "$role"
+          done
+          for i in $(seq 1 60); do curl --fail --silent http://127.0.0.1:8420/health >/dev/null && break; sleep 2; done
+          curl --fail --silent http://127.0.0.1:8420/health >/dev/null
+      - name: Drive the actual issue to a verified Draft on this provider
+        run: |
+          set -euo pipefail
+          docker cp tools/release/live_smoke.py "$SCOPE-app:/tmp/release-smoke.py"
+          docker cp dist/release-manifest.json "$SCOPE-app:/tmp/release-manifest.json"
+          docker exec -e FORGE_RELEASE_SANDBOX=1 -e FORGE_RELEASE_SMOKE_TARGET="$TARGET" "$SCOPE-app" python /tmp/release-smoke.py "$PROVIDER" --manifest /tmp/release-manifest.json --out /tmp/provider-smoke.json
+          docker cp "$SCOPE-app:/tmp/provider-smoke.json" "$PROVIDER-smoke.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-${{ matrix.provider }}
+          path: ${{ matrix.provider }}-smoke.json
+          if-no-files-found: error
+      - name: Remove only this job's disposable services and credential file
         if: always()
         run: |
-          {
-            echo "## Promotion gate — v${GITHUB_REF_NAME#v}"
-            echo ""
-            echo '```json'
-            cat promotion.json
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${SCOPE:-}" ]; then
+            docker rm -f "$SCOPE-worker" "$SCOPE-app" "$SCOPE-redis" "$SCOPE-pg" || true
+            docker network rm "$SCOPE" || true
+          fi
+          rm -f "$RUNNER_TEMP/forge-release.json"
+          rm -rf "$RUNNER_TEMP/release-docker-$PROVIDER"
 
-  # Only now do the mutable tags move — onto the validated, gate-qualified
-  # digest — and the lane wheel set is published as release assets. Rollout
-  # discipline (Q35-08): the supported lane artifact is published BEFORE any
-  # target template defaults to it; the wheel set built above is immutable
-  # once attached (the same bytes the promotion record hashed).
-  attach-tags:
-    needs: [publish-ghcr, promotion-gate]
+  promote:
+    needs: [candidate, live-smoke]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # publish the lane wheel set as release assets
+      contents: write
       packages: write
-      id-token: write # cosign keyless signing (Fulcio OIDC)
-      attestations: write # actions/attest-build-provenance
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      IMAGE: ${{ needs.candidate.outputs.image }}
+      RC: ${{ needs.candidate.outputs.rc }}
     steps:
-      - name: Log in to GHCR
-        run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Attach tags to the validated digest
-        run: |
-          IMAGE_NAME=ghcr.io/${{ github.repository }}
-          docker buildx imagetools create \
-            -t "$IMAGE_NAME:${GITHUB_REF_NAME#v}" \
-            -t "$IMAGE_NAME:latest" \
-            "$IMAGE_NAME@${{ needs.publish-ghcr.outputs.digest }}"
-
-      # Q35-08: publish the authoritative lane wheel set. The URLs recorded
-      # in the promotion record point here — a cold target template pins
-      # wheel_url + wheel_sha256 from the archived record and refuses any
-      # bytes that do not reproduce the hash.
-      - name: Fetch the lane wheel set
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: lane-dist-v${{ github.ref_name }}
-          path: dist
-
-      - name: Verify the wheel set against the recorded digests
+          name: release-candidate
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: live-*
+          merge-multiple: true
+      - name: Verify staged RC bytes and bind the report
         run: |
-          verify() {
-            file="$1"; expected="$2"
-            actual="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "dist/$file")"
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::lane artifact $file hashes to sha256:$actual, the promotion record says sha256:$expected — refusing to publish."
-              exit 1
-            fi
-          }
-          verify "${{ needs.publish-ghcr.outputs.wheel }}" "${{ needs.publish-ghcr.outputs.wheel_sha256 }}"
-          verify "${{ needs.publish-ghcr.outputs.sdist }}" "${{ needs.publish-ghcr.outputs.sdist_sha256 }}"
-
-      # Keyless Sigstore signing FIRST — the digest is the thing signed, never a
-      # tag. Requires a public repo (public-good Sigstore). If forge goes
-      # private, or Rekor transparency is unacceptable, drop the two steps
-      # below and keep digest pinning + the provenance attestation
-      # (docs/research/2026-09-17-schema-upgrade-gates.md, open question 6).
-      # Signing precedes asset publishing so a gh/GitHub hiccup can never
-      # ship an unsigned digest (the v0.35.0 first-attempt bite: the wheel
-      # step failed on a git-less job and these went skipped).
+          set -euo pipefail
+          gh release download "$RC" --dir "$RUNNER_TEMP/rc"
+          python3 tools/release/artifacts.py verify --dist "$RUNNER_TEMP/rc"
+          cmp dist/release-manifest.json "$RUNNER_TEMP/rc/release-manifest.json"
+      - name: Authenticate the registry for SBOM generation
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-release-assets: false
+      - name: Bind the signed report to the SBOM and all prior proofs
+        run: python3 tools/release/artifacts.py report
       - uses: sigstore/cosign-installer@v4.1.2
-      - name: Sign the digest (keyless)
-        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }}"
-
-      - name: Attest build provenance for the digest
-        uses: actions/attest-build-provenance@v4.2.2
+      - name: Sign the tested image and release report before promotion
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          cosign sign --yes "$IMAGE"
+          cosign sign-blob --yes --bundle release-report.sigstore.json release-report.json
+      - uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ needs.publish-ghcr.outputs.digest }}
-
-      - name: Publish the lane wheel set as release assets
-        env:
-          GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
-          # gh resolves the repository from git remotes by default; this job
-          # runs where the checkout is not a git workspace — name the repo.
-          GH_REPO: ${{ github.repository }}
+          subject-digest: ${{ needs.candidate.outputs.digest }}
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: dist/*.whl
+      - uses: docker/setup-buildx-action@v3
+      - name: Publish the same distributions and attach tags to the tested digest
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "forge ${GITHUB_REF_NAME#v}" --notes "Release ${GITHUB_REF_NAME}. Pin the image by digest; the lane wheel set below is the authoritative lane distribution (sha256 recorded in docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json)."
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-
-      - name: Publish the pinning digest
-        if: always() && needs.publish-ghcr.outputs.digest != ''
-        run: |
-          {
-            echo "## Release image — pin the digest, not the tag"
-            echo ""
-            echo '```'
-            echo "docker pull ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }}"
-            echo '```'
-            echo ""
-            echo "Verify the signature:"
-            echo ""
-            echo '```'
-            echo "cosign verify ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }} \\"
-            echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \\"
-            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
-            echo '```'
-            echo ""
-            echo "## Lane wheel set — the authoritative lane distribution (Q35-08)"
-            echo ""
-            echo '```'
-            echo "wheel  : https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.wheel }}"
-            echo "sha256 : ${{ needs.publish-ghcr.outputs.wheel_sha256 }}"
-            echo '```'
-            echo ""
-            echo "Both identities are recorded in \`docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json\` — target templates pin their lane install defaults from that record."
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "forge ${GITHUB_REF_NAME#v}" --notes "Built once; installed-wheel tests, zero-skip invariants, image boot and both live provider smokes passed. See the signed release report."
+          gh release upload "$GITHUB_REF_NAME" dist/* release-report.json release-report.sigstore.json sbom.spdx.json
+          docker buildx imagetools create -t "ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}" -t "ghcr.io/${GITHUB_REPOSITORY,,}:latest" "$IMAGE"
+          gh release edit "$GITHUB_REF_NAME" --draft=false

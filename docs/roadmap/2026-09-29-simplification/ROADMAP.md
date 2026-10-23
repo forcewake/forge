@@ -425,6 +425,10 @@ run last so that they do not churn code about to be deleted.
 - **Size:** L (mostly deletions)
 
 ### P1-08 Simplify the release and CI workflows
+- **Status:** release-flow source implemented locally on 2026-10-23:
+  build once, wheel installation, exact image boot, mandatory native
+  provider smokes, signatures/attestations and digest-preserving promotion.
+  Hosted release execution remains unperformed and is not authorized.
 - **Goal:** tested bytes are shipped bytes by construction.
 - **Work:**
   - Rewrite `release.yml` per DESIGN §9:

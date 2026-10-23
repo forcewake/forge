@@ -11,6 +11,7 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+  workflow_call:
 
 # Pushes to the same branch cancel superseding runs.
 concurrency:
@@ -47,9 +48,10 @@ jobs:
         run: uv run python scripts/ratchet.py
 
       - name: Prose lint (added lines)
-        run: >-
-          uv run python scripts/prose_lint.py
-          --base "${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}"
+        run: |
+          base="${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'origin/main' }}"
+          git cat-file -e "$base^{commit}" 2>/dev/null || base=origin/main
+          uv run python scripts/prose_lint.py --base "$base"
 
       # R38-03 (#304): refuse database-archive artifacts (PGDMP magic, pg_dump
       # extensions, archives containing dump members) in the tracked tree
@@ -58,50 +60,6 @@ jobs:
       - name: Public-artifact gate (no database archives in tracked files)
         run: uv run python scripts/gate_public_artifacts.py
 
-      # R42-04 (#377) — the BUILD-ONCE guard (AC-8), tree-side: in the
-      # pre-release window the pending version must have a strict
-      # qualification record binding its candidate wheel, and every
-      # artifact naming it (the committed wheel receipt when CI has no
-      # dist/, the frozen supported-profile manifest) must bind the SAME
-      # digest; post-release, every strict record for the promoted version
-      # must pin exactly the promoted wheel. A changed candidate FAILS
-      # this check until re-qualified — a version bump without its
-      # qualification record cannot ride CI green.
-      - name: Exact-composition gate (build once — promote THOSE bytes)
-        run: uv run python scripts/generate_template_pins.py --exact-composition
-
-      # R38-16 (#317) + #323 (Q39-04) + #327 (Q39-08): the native template,
-      # secret-consumer and consumer-contract conformance gate, on EVERY
-      # push (the PG profiles stay on the integration job). Five checks,
-      # executed for real: (1) every shipped SDK-lane recipe YAML-parsed
-      # and its finalization shell executed VERBATIM under real bash
-      # (success/failure/no-op/restored-generation) with the #302
-      # unconditional-exit mutation replayed as a caught self-test; (2) the
-      # templates' declared dispatch surfaces validated against the CAPTURED
-      # production dispatch payloads (scripts/conformance_dispatch_captures.json
-      # — recorded through the production-entry fakes, drift-pinned by
-      # tests/test_gate_conformance.py); (3) the #303 credential-consumption
-      # blocks executed with delivered-vs-ambient sentinels (a dropped
-      # consumer mapping fails despite a correct-looking receipt; a
-      # comment-only marker spoof is refused); (4) the #323 collision-safe
-      # locator dimension with the installed-template digest inventory; (5)
-      # the #327 consumer contracts — the #320 grant through the REAL ASGI
-      # redemption endpoint (the sibling route refuses with zero broker
-      # calls; a DTO-preserving disconnect authorizes nothing), the
-      # runner-side typed verification as real lane subprocesses against a
-      # canned endpoint, and the #321 rebind digest through a real
-      # RunService dispatch. Exit codes: 2 prerequisite · 3 recipe · 4
-      # schema · 5 sentinel · 6 the gate proved itself insensitive
-      # (mutation escape) · 7 locator · 8 consumer contract.
-      - name: Native template & secret-consumer conformance
-        run: uv run python scripts/gate_conformance.py --report conformance-gate.json
-
-      - name: Upload the conformance report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: conformance-gate-report
-          path: conformance-gate.json
 
   workspace-build:
     runs-on: ubuntu-latest
@@ -133,7 +91,7 @@ jobs:
         run: >-
           uv run mypy src/forge/durable src/forge/runs src/forge/repository
           src/forge/factory src/forge/execution src/forge/integrations
-          packages/forge-protocol/src packages/forge-lane/src
+          packages/forge-protocol/src/forge_protocol packages/forge-lane/src/forge_lane
 
       # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
       # gateway, agents, flows, stores, utils, harness_entry, main,
@@ -421,5 +379,6 @@ jobs:
         run: |
           python3 scripts/canary_smoke.py forge:canary \
             --allow-unpinned \
+            --runtime docker \
             --previous-image ghcr.io/forcewake/forge:latest \
             --stages fresh,migrate
