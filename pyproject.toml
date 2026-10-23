@@ -159,7 +159,7 @@ id = "authority-verification_applicability"
 name = "verification_applicability: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
-allowed_importers = ["forge.adaptive.reference.system_twin", "forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
+allowed_importers = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -216,21 +216,6 @@ name = "usecases have no direct provider or gateway imports"
 type = "forbidden"
 source_modules = ["forge.runs.usecases"]
 forbidden_modules = ["forge.integrations", "forge.gateway"]
-allow_indirect_imports = true
-
-[[tool.importlinter.contracts]]
-id = "reference-importers"
-name = "reference package has only registered compatibility importers"
-type = "protected"
-protected_modules = ["forge.adaptive.reference"]
-allowed_importers = []
-
-[[tool.importlinter.contracts]]
-id = "reference-direction"
-name = "reference package does not import production entry points"
-type = "forbidden"
-source_modules = ["forge.adaptive.reference"]
-forbidden_modules = ["forge.main", "forge.lane_driver", "forge.adaptive.wiring", "forge.runs.service", "forge.runs.github_service"]
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]

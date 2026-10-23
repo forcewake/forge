@@ -33,7 +33,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-01 shared project config | Implemented; 6 red relocation tests before the move, 145 focused passes, 9,575 default passes, 807 invariant passes with no skips; all local guards green |
 | P1-02 saga removal | Implemented; obsolete coordinator removed, retained tests ported, actual socket-loss recovery fixed; 289 focused passes and six live-credential skips |
 | P1-03 test-only modules | All five clusters implemented; 18 named modules removed; retained contracts use current product seams |
-| P1-04 reference twins | Waits for P1-03 and P1-07 under the adopted plan |
+| P1-04 reference twins | Implemented; all reference-only source removed and architecture checks reject reintroduction; real publisher and recovery contracts remain |
 | P1-05 boundary registry | Implemented; 901 source lines removed, 15 contracts added, 48 architecture checks retained; 186 focused passes |
 | P1-06 closure matrix | Implemented; grading module, generated publication and approved drop suite removed |
 | P1-07 qualification retirement | Implemented; grading modules and obsolete scripts removed, six dev tools moved out of the wheel; native release, credential, migration and dispatch contracts retained |

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import importlib.util
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -65,25 +66,9 @@ _MODE_CONSTANTS = frozenset(
     }
 )
 
-# ---------------------------------------------------------------------------
-# R37-19 (#300) — the contracts-vs-reference separation constants. The
-# labelled evaluation package ``forge.adaptive.reference`` holds the
-# deterministic scenario builders and provider-shaped reference remotes;
-# the runtime composition must reach them only through the registered
-# compat homes (the modules the scenarios were extracted from).
-# ---------------------------------------------------------------------------
-
-#: The runtime entry points — the modules a customer's request enters
-#: forge through. NONE of them may import the reference package: an
-#: evaluation scenario beside a runtime contract must never become a
-#: deployed guarantee by import.
-REFERENCE_ENTRY_POINTS: tuple[str, ...] = tuple(
-    boundary_policy.IMPORT_CONTRACTS["reference-direction"]["forbidden_modules"]
-)
-REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
-    boundary_policy.IMPORT_CONTRACTS["reference-importers"]["allowed_importers"]
-)
-REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(REFERENCE_ENTRY_POINTS)
+# The evaluation namespace is retired. Test-owned source checks reject its
+# reintroduction and its imports; no compatibility importer is authorized.
+REFERENCE_NAMESPACE = "forge.adaptive.reference"
 FIXTURE_MODULES: tuple[str, ...] = tuple(
     boundary_policy.IMPORT_CONTRACTS["fixture-isolation"]["forbidden_modules"]
 )
@@ -100,8 +85,9 @@ class _NodeContext:
 class _ModuleIndex:
     """One parsed production module with node → context indexing."""
 
-    def __init__(self, module: str, tree: ast.Module) -> None:
+    def __init__(self, module: str, tree: ast.Module, *, is_package: bool = False) -> None:
         self.module = module
+        self.is_package = is_package
         self.tree = tree
         self._context: dict[int, _NodeContext] = {}
         self._walk(tree, (), ())
@@ -174,7 +160,7 @@ def _src_modules() -> dict[str, _ModuleIndex]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError as exc:  # pragma: no cover — a broken module is a finding
             raise AssertionError(f"{path} does not parse: {exc}") from exc
-        modules[module] = _ModuleIndex(module, tree)
+        modules[module] = _ModuleIndex(module, tree, is_package=path.name == "__init__.py")
     assert modules, f"no source modules found under {SRC_FORGE} — broken test?"
     return modules
 
@@ -762,78 +748,71 @@ def _check_native_locator_allocation(modules: dict[str, _ModuleIndex]) -> list[s
 
 
 def _reference_hits(index: _ModuleIndex) -> set[str]:
-    """The reference-package imports of *index* (module-level AND lazy)."""
+    """Static, relative and literal dynamic imports of the retired namespace."""
+    names = set(index.imported_modules())
+    loaders = {"__import__", "importlib.import_module"}
+    package = index.module if index.is_package else index.module.rpartition(".")[0]
+    for node in ast.walk(index.tree):
+        if isinstance(node, ast.Import):
+            loaders.update(
+                f"{a.asname}.import_module"
+                for a in node.names
+                if a.name == "importlib" and a.asname
+            )
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib" and node.level == 0:
+                loaders.update(a.asname or a.name for a in node.names if a.name == "import_module")
+            if node.level:
+                try:
+                    base = importlib.util.resolve_name(
+                        "." * node.level + (node.module or ""), package
+                    )
+                except ImportError:
+                    continue
+                names.add(base)
+                names.update(f"{base}.{a.name}" for a in node.names)
+    for node, callee in index.calls():
+        if callee not in loaders or not node.args:
+            continue
+        argument = node.args[0]
+        if not isinstance(argument, ast.Constant) or not isinstance(argument.value, str):
+            continue
+        name = argument.value
+        if name.startswith("."):
+            if len(node.args) < 2 or not isinstance(node.args[1], ast.Constant):
+                continue
+            target_package = node.args[1].value
+            if not isinstance(target_package, str):
+                continue
+            try:
+                name = importlib.util.resolve_name(name, target_package)
+            except ImportError:
+                continue
+        names.add(name)
     return {
-        name for name in index.imported_modules() if name.startswith("forge.adaptive.reference")
+        name
+        for name in names
+        if name == REFERENCE_NAMESPACE or name.startswith(REFERENCE_NAMESPACE + ".")
     }
 
 
 def _check_reference_separation(modules: dict[str, _ModuleIndex]) -> list[str]:
-    """`architecture.owner_violations` (the reference axis): the runtime
-    composition must not reach the labelled evaluation package except
-    through the registered compat homes.
-
-    - a RUNTIME ENTRY POINT importing the reference package is the
-      review's defect class outright (a scenario's assumptions becoming
-      a deployed guarantee by import);
-    - any OTHER non-reference module importing it must be a registered
-      compat home (the extraction's compatibility surface, pinned by
-      ``tests/test_reference_separation.py``);
-    - a registered compat home importing NOTHING from the package is a
-      drained surface — remove the registration with the re-export.
-    """
-    violations: list[str] = []
-    for index in modules.values():
-        if index.module.startswith("forge.adaptive.reference"):
-            continue  # the package's own imports are the purity rule below
-        hits = _reference_hits(index)
-        if not hits:
-            continue
-        if index.module in REFERENCE_ENTRY_POINTS:
-            violations.append(
-                f"{index.module} imports the reference package ({sorted(hits)}) — "
-                "a runtime entry point never pulls an evaluation scenario in; "
-                "compose the runtime contract the scenario fakes instead"
-            )
-        elif index.module not in REFERENCE_COMPAT_HOMES:
-            violations.append(
-                f"{index.module} imports the reference package ({sorted(hits)}) — "
-                "only the registered compat homes may; route the decision "
-                "through the runtime contract, or register the extraction "
-                "home in REFERENCE_COMPAT_HOMES with a reviewed reason"
-            )
-    for home in sorted(REFERENCE_COMPAT_HOMES):
-        index = modules.get(home)
-        if index is None:
-            violations.append(
-                f"the registered reference compat home {home} does not exist "
-                "under src/forge — a stale registration; remove it"
-            )
-        elif not _reference_hits(index):
-            violations.append(
-                f"{home} is registered as a reference compat home but imports "
-                "nothing from the package — the compatibility surface has "
-                "drained; remove the registration and the re-export together"
-            )
-    return violations
+    """Every production module refuses the retired evaluation dependency."""
+    return [
+        f"{index.module} imports retired reference package {sorted(hits)} — "
+        "use a test-owned fake around the actual product seam"
+        for index in modules.values()
+        if (hits := _reference_hits(index))
+    ]
 
 
-def _check_reference_purity(modules: dict[str, _ModuleIndex]) -> list[str]:
-    """The reference package composes runtime CONTRACTS only: it never
-    imports a provider service, the wiring, ``main`` or the lane entry,
-    and adds no orchestration of its own."""
-    violations: list[str] = []
-    for index in modules.values():
-        if not index.module.startswith("forge.adaptive.reference"):
-            continue
-        hits = index.imported_modules() & REFERENCE_FORBIDDEN_IMPORTS
-        if hits:
-            violations.append(
-                f"{index.module} imports {sorted(hits)} — the reference "
-                "package composes runtime contracts only; it must not reach "
-                "a provider service, the wiring, main or the lane entry"
-            )
-    return violations
+def _check_reference_absence(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """Reintroducing a module under the retired namespace also fails."""
+    return [
+        f"retired reference package was reintroduced: {name}"
+        for name in modules
+        if name == REFERENCE_NAMESPACE or name.startswith(REFERENCE_NAMESPACE + ".")
+    ]
 
 
 def _check_fixture_isolation(modules: dict[str, _ModuleIndex]) -> list[str]:
@@ -1414,7 +1393,7 @@ ALL_CHECKS = (
     ("continuation mode selection", _check_continuation_mode_selection),
     ("boundary registration", _check_boundary_registration),
     ("reference separation", _check_reference_separation),
-    ("reference purity", _check_reference_purity),
+    ("reference absence", _check_reference_absence),
     ("fixture isolation", _check_fixture_isolation),
     ("budget amendment applicants", _check_budget_amendment_applicants),
     ("redemption grant authority", _check_redemption_grant_authority),
@@ -1604,7 +1583,7 @@ class TestIntentionalViolationTraps:
         )
         violations = _check_reference_separation(modules)
         assert any(
-            "runtime entry point" in text and "reference package" in text for text in violations
+            "retired reference package" in text and "runs.service" in text for text in violations
         )
 
     def test_an_unregistered_module_importing_the_reference_package_is_caught(self) -> None:
@@ -1617,11 +1596,10 @@ class TestIntentionalViolationTraps:
             "    return default_twin_scenario()\n",
         )
         violations = _check_reference_separation(modules)
-        assert any("compat home" in text and "new_leg" in text for text in violations)
+        assert any("retired reference package" in text and "new_leg" in text for text in violations)
 
     def test_a_lazy_compat_import_is_still_an_import(self) -> None:
-        """The confinement counts FUNCTION-LEVEL imports too — the lazy
-        re-export pattern must stay registered, not hide."""
+        """A lazy import cannot hide a retired reference dependency."""
         modules = _synthetic(
             "forge.gateway.hidden_leg",
             "def build():\n"
@@ -1632,28 +1610,38 @@ class TestIntentionalViolationTraps:
         violations = _check_reference_separation(modules)
         assert any("hidden_leg" in text for text in violations)
 
-    def test_a_drained_compat_home_registration_is_caught(self, monkeypatch) -> None:
-        # A deliberately stale registration is fixture input to the real checker.
-        monkeypatch.setattr(
-            sys.modules[__name__],
-            "REFERENCE_COMPAT_HOMES",
-            frozenset({"forge.compat.retired_home"}),
-        )
-        modules = _synthetic("forge.compat.retired_home", "X = 1\n")
-        violations = _check_reference_separation(modules)
-        assert any("drained" in text or "does not exist" in text for text in violations)
+    def test_a_reintroduced_reference_package_is_caught(self) -> None:
+        modules = _synthetic("forge.adaptive.reference.new_scenario", "VALUE = 1\n")
+        violations = _check_reference_absence(modules)
+        assert any("reintroduced" in text and "new_scenario" in text for text in violations)
 
-    def test_a_reference_module_importing_the_wiring_is_caught(self) -> None:
-        modules = _synthetic(
-            "forge.adaptive.reference.new_scenario",
-            "from forge.adaptive.wiring import compose_runtime\n"
-            "\n"
-            "\n"
-            "def build():\n"
-            "    return compose_runtime()\n",
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "import importlib; importlib.import_module('forge.adaptive.reference.system_twin')",
+            "import importlib as loader; loader.import_module('forge.adaptive.reference')",
+            "from importlib import import_module as load; load('forge.adaptive.reference')",
+            "__import__('forge.adaptive.reference.reactive_vendor')",
+            "import importlib; importlib.import_module('.reference', 'forge.adaptive')",
+            "from .reference import system_twin",
+            "from . import reference",
+        ],
+    )
+    def test_a_literal_or_relative_reference_import_is_caught(self, statement) -> None:
+        modules = _synthetic("forge.adaptive.new_leg", statement)
+        violations = _check_reference_separation(modules)
+        assert any("retired reference package" in text for text in violations)
+
+    def test_a_package_relative_reference_import_is_caught(self) -> None:
+        index = _ModuleIndex(
+            "forge.adaptive", ast.parse("from . import reference"), is_package=True
         )
-        violations = _check_reference_purity(modules)
-        assert any("composes runtime contracts only" in text for text in violations)
+        assert _check_reference_separation({index.module: index})
+
+    def test_a_different_namespace_is_not_a_reference_dependency(self) -> None:
+        modules = _synthetic("forge.adaptive.new_leg", "from forge.adaptive import reference_tools")
+        assert _check_reference_separation(modules) == []
+        assert _check_reference_absence(modules) == []
 
     def test_a_production_module_importing_a_qualification_fixture_is_caught(self) -> None:
         """R40-17 (#353): the fixture axis trap — a module-level OR lazy
@@ -2226,6 +2214,9 @@ class TestSyntheticFixtureIsolation:
             "import forge.main\n"
             "import forge.adaptive.wiring\n"
             "import forge.worker.queue\n"
+            "import forge.repository.writer\n"
+            "import forge.runs.publisher\n"
+            "import forge.integrations.github_flow\n"
             "banned = ('tests.fixtures', 'forge.adaptive.reference')\n"
             "leaked = sorted(\n"
             "    m for m in sys.modules if m.startswith(banned)\n"
@@ -2237,6 +2228,10 @@ class TestSyntheticFixtureIsolation:
         )
         leaked = result.stdout.strip().removeprefix("LEAKED=")
         return set(filter(None, leaked.split(",")))
+
+    def test_retired_reference_namespace_is_absent_from_source_and_imports(self) -> None:
+        assert not (SRC_FORGE / "adaptive" / "reference").exists()
+        assert importlib.util.find_spec(REFERENCE_NAMESPACE) is None
 
     def test_default_production_startup_loads_no_fixture_or_reference_module(self) -> None:
         leaked = self._startup_probe()
