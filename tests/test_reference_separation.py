@@ -62,7 +62,6 @@ RUNTIME_ENTRY_MODULES: tuple[str, ...] = (
     "forge.adaptive.wiring",
     "forge.runs.service",
     "forge.runs.github_service",
-    "forge.runs.azure_service",
 )
 
 #: The ONLY non-reference modules that may import ``forge.adaptive.

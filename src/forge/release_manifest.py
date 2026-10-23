@@ -803,13 +803,8 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="C03",
         capability="harness-selection",
         level="contract_tested",
-        evidence=("tests/test_harness_selection.py"),
-    ),
-    FindingClosure(
-        finding="C04",
-        capability="runs/verification-contract",
-        level="contract_tested",
-        evidence=(),
+        evidence=("tests/test_harness_selection.py",),
+        note="Declared driver credential recipes only; the retired provider transport is excluded.",
     ),
     FindingClosure(
         finding="C05",
@@ -866,7 +861,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="B01",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_github_runs.py"),
+        evidence=("tests/test_github_runs.py",),
     ),
     FindingClosure(
         finding="B02",
@@ -879,18 +874,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="publication-intents",
         level="contract_tested",
         evidence=("tests/test_runs_service.py", "tests/test_failure_injection.py"),
-    ),
-    FindingClosure(
-        finding="B04",
-        capability="runs/spec-freeze",
-        level="contract_tested",
-        evidence=("tests/test_harness_entry.py"),
-    ),
-    FindingClosure(
-        finding="B05",
-        capability="runs/spec-freeze",
-        level="contract_tested",
-        evidence=(),
     ),
     FindingClosure(
         finding="B06",
@@ -938,7 +921,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="B13",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_github_harness.py"),
+        evidence=("tests/test_github_harness.py", "tests/test_github_runs.py"),
     ),
     FindingClosure(
         finding="B14",
@@ -963,7 +946,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="R02",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_runs_verification.py"),
+        evidence=("tests/test_runs_verification.py",),
     ),
     FindingClosure(
         finding="R03",

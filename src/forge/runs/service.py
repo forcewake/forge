@@ -908,7 +908,7 @@ async def execute_run_command(
     if metadata.get("command") == "security_triage":
         from forge.findings.triage import execute_security_command
 
-        if metadata.get("provider") in ("github"):
+        if metadata.get("provider") in ("github",):
             await execute_security_command(settings, forge_config, session_factory, metadata)
             return
         async with GitLabClient(
@@ -8851,7 +8851,7 @@ class RunService:
             )
             return
 
-        if getattr(run, "provider", "gitlab") in ("github") or (
+        if getattr(run, "provider", "gitlab") in ("github",) or (
             '"provider": "github"' in (handle or "")
         ):
             return

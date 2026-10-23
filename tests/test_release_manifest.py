@@ -69,8 +69,6 @@ FINDING_MARKERS: dict[str, str] = {
     "B01": "verification_epoch",
     "B02": "old_rerun_success_never_masks",
     "B03": "MRReservation",
-    "B04": "TestRenderBriefAzureEnforcedB04",
-    "B05": "trigger: none",
     "B06": "waived_conclusions",
     "B07": "missing MANDATORY GATE",
     "B08": "never_touches_another_repository",
@@ -83,8 +81,7 @@ FINDING_MARKERS: dict[str, str] = {
     "B15": "test_provider_services_never_reimplement_recovery_scans",
     "C01": "ambiguous_check_identity",
     "C02": "one_set_of_numbers",
-    "C03": "TestCredentialContractC03",
-    "C04": "never_touches_another_repository",
+    "C03": "test_the_sdk_lane_shares_the_claude_code_credential_recipe",
     "C05": "BackendStartSpec",
     "C06": "StrictManifestC06",
     "C07": "effective_output_rate",
@@ -136,7 +133,6 @@ EXPLICIT_NOT_RUN: frozenset[str] = frozenset(
         "release-canary/target-harness-upload",
         "release-canary/previous-release-upgrade",
         "real-provider-e2e/gitlab",
-        "real-provider-e2e/azure",
     }
 )
 
@@ -322,7 +318,7 @@ def test_every_claimed_finding_has_grep_verifiable_evidence() -> None:
 def test_a02_closure_is_proven_against_the_src_builders() -> None:
     # A16 acceptance: you cannot claim the executable spec on an adapter that
     # still freezes schema v2. Both builders must freeze the v3 constant.
-    for builder in ("src/forge/runs/github_service.py", "src/forge/runs/azure_service.py"):
+    for builder in ("src/forge/runs/github_service.py", "src/forge/runs/service.py"):
         assert "EXECUTABLE_SPEC_SCHEMA_VERSION" in _read(builder), (
             f"{builder} no longer freezes the executable spec — the A02 closure is stale"
         )
