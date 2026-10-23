@@ -4,9 +4,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .blob import BlobContent
+
 
 class Operation(StrEnum):
-    """File action supported by the GitLab Commits API."""
+    """An atomic repository file action."""
 
     CREATE = "create"
     UPDATE = "update"
@@ -15,13 +17,11 @@ class Operation(StrEnum):
 
 @dataclass(frozen=True)
 class Change:
-    """One file action. For ``create`` ``content`` is the full file text; for
-    ``update`` it is the materialized replacement (base with ``old_text``
-    swapped for ``new_text``); ``delete`` carries no content."""
+    """Full immutable text or exact blob bytes; a delete carries no content."""
 
     path: str
     operation: Operation
-    content: str | None = None
+    content: str | BlobContent | None = None
 
 
 @dataclass(frozen=True, init=False)

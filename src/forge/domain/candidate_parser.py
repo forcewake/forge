@@ -5,7 +5,17 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from .candidate import CandidateBundle, ChangeEntry, CreateFile, DeleteFile, UnifiedPatch
+from .candidate import (
+    CandidateBundle,
+    ChangeEntry,
+    CreateFile,
+    DeleteFile,
+    UnifiedPatch,
+    BinaryPatch,
+    ModeChange,
+)
+from .git_binary import parse_binary_blocks
+from .git_paths import decode_path, header_path
 from .candidate_usage import HarnessUsage
 from .patch import (
     CandidateError,
@@ -25,7 +35,7 @@ _FULL_OID_LENGTHS = (40, 64)
 _NO_NEWLINE_PREFIX = "\\ "
 
 
-_INDEX_LINE_RE = re.compile(r"^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: \d+)?$")
+_INDEX_LINE_RE = re.compile(r"^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: (\d+))?$")
 
 
 def parse_unified_diff(
@@ -42,6 +52,12 @@ def parse_unified_diff(
         driver_exit=driver_exit,
         entries=entries,
         usage=usage,
+    )
+
+
+def parse_diff_bytes(diff: bytes, attempt_base_oid: str) -> CandidateBundle:
+    return CandidateBundle(
+        attempt_base_oid, "completed", _DiffParser(diff.decode("latin1"), wire_bytes=True).parse()
     )
 
 
@@ -63,13 +79,16 @@ class _FileParse:
         self.is_binary: bool = False
         self.is_rename: bool = False
         self.is_mode_change: bool = False
+        self.old_mode: str = ""
+        self.binary_lines: list[str] = []
         self.old_oid: str = ""
         self.new_oid: str = ""
         self.hunks: list[DiffHunk] = []
 
 
 class _DiffParser:
-    def __init__(self, diff_text: str) -> None:
+    def __init__(self, diff_text: str, *, wire_bytes: bool = False) -> None:
+        self.wire_bytes = wire_bytes
         # Split on "\n" ONLY; a trailing newline must not produce a phantom empty context
         # line at EOF. CR stays content (CRLF diffs), and U+2028/\\x85 inside a line never
         # splits it.
@@ -158,27 +177,26 @@ class _DiffParser:
         flush_file()
         return tuple(entries)
 
-    @staticmethod
-    def _path_from_git_header(line: str) -> str:
-        # "diff --git a/<p> b/<p>" — best-effort b-side; the +++/--- headers refine it when
-        # present.
-        _, _, rest = line.partition("diff --git ")
-        parts = rest.split(" b/")
-        if len(parts) > 1:
-            return parts[-1].strip()
-        return rest.strip()
+    def _path_from_git_header(self, line: str) -> str:
+        return header_path(line, wire_bytes=self.wire_bytes)
 
-    @staticmethod
-    def _file_metadata(file: _FileParse, line: str) -> None:
+    def _file_metadata(self, file: _FileParse, line: str) -> None:
+        if file.is_binary:
+            file.binary_lines.append(line)
+            return
         if line.startswith("new file mode "):
             file.is_create = True
             file.mode = line.rsplit(" ", 1)[-1].strip() or file.mode
         elif line.startswith("deleted file mode "):
             file.is_delete = True
+            file.mode = line.rsplit(" ", 1)[-1]
         elif line.startswith(("old mode ", "new mode ")):
-            # A pure mode flip has no content delta and the write path has no mode action —
-            # rejected, never silently dropped.
+            # A pure mode change later requires the authoritative old mode and bytes.
             file.is_mode_change = True
+            if line.startswith("old mode "):
+                file.old_mode = line.rsplit(" ", 1)[-1]
+            else:
+                file.mode = line.rsplit(" ", 1)[-1]
         elif line.startswith(("rename ", "copy ")):
             file.is_rename = True
         elif line.startswith("GIT binary patch"):
@@ -190,10 +208,12 @@ class _DiffParser:
             if match is not None:
                 file.old_oid = _full_oid(match.group(1))
                 file.new_oid = _full_oid(match.group(2))
+                if match.group(3) and not file.is_mode_change:
+                    file.mode = match.group(3)
         elif line.startswith("--- "):
-            file.old_path = _strip_diff_prefix(line[4:].strip())
+            file.old_path = decode_path(line[4:].removesuffix("\r"), wire_bytes=self.wire_bytes)
         elif line.startswith("+++ "):
-            file.new_path = _strip_diff_prefix(line[4:].strip())
+            file.new_path = decode_path(line[4:].removesuffix("\r"), wire_bytes=self.wire_bytes)
         # "similarity ", "dissimilarity ", anything unknown: ignore.
 
     def _entry(self, file: _FileParse) -> ChangeEntry:
@@ -206,9 +226,22 @@ class _DiffParser:
             raise CandidateError("malformed_diff", "file header without a usable path")
 
         if file.is_binary:
-            raise CandidateError(
-                "binary_not_supported",
-                f"{path}: binary deltas are not supported in candidate bundles",
+            if file.is_rename:
+                raise CandidateError(
+                    "rename_not_supported", "binary rename requires explicit file actions"
+                )
+            forward, _ = parse_binary_blocks(tuple(file.binary_lines))
+            if file.is_delete:
+                return DeleteFile(
+                    path=path, mode=file.mode, base_blob_digest=_blob_claim(file.old_oid)
+                )
+            return BinaryPatch(
+                path,
+                forward,
+                "create" if file.is_create else "modify",
+                file.mode,
+                _blob_claim(file.old_oid),
+                _blob_claim(file.new_oid),
             )
         if file.is_rename:
             # TODO(v0.4): represent renames as delete+create pairs.
@@ -229,10 +262,7 @@ class _DiffParser:
         if file.is_delete:
             return DeleteFile(path=path, mode=file.mode, base_blob_digest=_blob_claim(file.old_oid))
         if file.is_mode_change and not file.hunks:
-            raise CandidateError(
-                "mode_change_not_supported",
-                f"{path}: mode-only changes are not supported in candidate bundles",
-            )
+            return ModeChange(path, file.old_mode, file.mode)
         if not file.hunks:
             raise CandidateError(
                 "ambiguous_representation",
@@ -252,11 +282,3 @@ def _full_oid(hex_oid: str) -> str:
     if len(hex_oid) in _FULL_OID_LENGTHS and set(hex_oid) != {"0"}:
         return hex_oid
     return ""
-
-
-def _strip_diff_prefix(path: str) -> str:
-    if path == "/dev/null":
-        return "/dev/null"
-    if path.startswith(("a/", "b/")):
-        return path[2:]
-    return path

@@ -158,12 +158,17 @@ class FakeWrites(FakeState):
                     return Unknown(evidence="fake:delete_missing_file")
                 del files[entry.path]
             else:
-                if entry.new_content is None or entry.mode not in ("100644", "100755"):
+                if entry.content_bytes is None or entry.mode not in ("100644", "100755", "120000"):
                     return Unknown(evidence="fake:unsupported_publication")
                 if (entry.operation == "create") == (entry.path in files):
                     return Unknown(evidence="fake:file_existence_conflict")
                 files[entry.path] = Blob(
-                    entry.new_content.encode(), "100755" if entry.mode == "100755" else "100644"
+                    entry.content_bytes,
+                    "100755"
+                    if entry.mode == "100755"
+                    else "120000"
+                    if entry.mode == "120000"
+                    else "100644",
                 )
         commit = commit_value(files, actual, candidate.changeset.commit_message + "\n" + marker)
         native.commits[commit.sha] = commit

@@ -105,8 +105,8 @@ def _forge_materialize(patch: bytes, base: bytes | None, path: str) -> bytes:
     bundle = parse_unified_diff(patch.decode("utf-8"), ATTEMPT_BASE)
     contents = {} if base is None else {path: base.decode("utf-8")}
     (completed,) = bundle.materialize(contents)
-    assert completed.new_content is not None
-    return completed.new_content.encode("utf-8")
+    assert completed.content_bytes is not None
+    return completed.content_bytes
 
 
 def _forge_reason(patch: bytes, base: bytes | None, path: str) -> str:
@@ -277,29 +277,33 @@ class TestGitOracleRejections:
         assert b"Binary files" in patch  # placeholder — git cannot apply it
         _git(git_repo, "checkout", "--", "blob.bin")
         assert _git_apply(git_repo, patch, check=False).returncode != 0
-        assert _forge_reason(patch, b"\x00\x01binary-ish\n", "blob.bin") == ("binary_not_supported")
+        assert _forge_reason(patch, b"\x00\x01binary-ish\n", "blob.bin") == ("corrupt_binary_patch")
 
-    def test_git_binary_patch_is_a_documented_divergence(self, git_repo):
+    def test_git_binary_patch_matches_native_post_image(self, git_repo):
         _commit_base(git_repo, "blob.bin", b"\x00\x01binary-ish\n")
         (git_repo / "blob.bin").write_bytes(b"\x00\x02other bytes\n")
         patch = _git(git_repo, "diff", "--binary", "--full-index", "--", "blob.bin").stdout
         assert b"GIT binary patch" in patch
         _git(git_repo, "checkout", "--", "blob.bin")
         assert _git_apply(git_repo, patch, check=False).returncode == 0  # git accepts
-        assert _forge_reason(patch, b"\x00\x01binary-ish\n", "blob.bin") == ("binary_not_supported")
+        assert (
+            _forge_materialize(patch, b"\x00\x01binary-ish\n", "blob.bin")
+            == b"\x00\x02other bytes\n"
+        )
 
-    def test_mode_only_change_is_a_documented_divergence(self, git_repo):
-        # R09: a pure mode flip is REJECTED, never silently dropped. git
-        # applies it — that is the declared v0.3 policy divergence (G7).
+    def test_mode_only_change_requires_and_preserves_authoritative_mode(self, git_repo):
+        # A mode-only change cannot infer its base mode or silently discard the flip.
         _commit_base(git_repo, "run.sh", b"#!/bin/sh\necho hi\n")
         (git_repo / "run.sh").chmod(0o755)
         patch = _git(git_repo, "diff", "--full-index", "--", "run.sh").stdout
         assert b"old mode 100644" in patch and b"new mode 100755" in patch
         (git_repo / "run.sh").chmod(0o644)
         assert _git_apply(git_repo, patch, check=False).returncode == 0  # git accepts
-        assert _forge_reason(patch, b"#!/bin/sh\necho hi\n", "run.sh") == (
-            "mode_change_not_supported"
-        )
+        assert _forge_reason(patch, b"#!/bin/sh\necho hi\n", "run.sh") == "stale_base"
+        bundle = parse_unified_diff(patch.decode(), ATTEMPT_BASE)
+        (completed,) = bundle.materialize({"run.sh": b"#!/bin/sh\necho hi\n"}, {"run.sh": "100644"})
+        assert completed.mode == "100755"
+        assert completed.content_bytes == b"#!/bin/sh\necho hi\n"
 
     def test_rename_is_a_documented_divergence(self, git_repo):
         _commit_base(git_repo, "old.txt", b"content\n")

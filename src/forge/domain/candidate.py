@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+import posixpath
 from typing import Any, Literal
 
+from .blob import BlobContent
+from .git_binary import BinaryBlock
 from .candidate_usage import HarnessUsage
 from .change_types import Change, ChangeSet, Operation
 from .patch import (
@@ -18,7 +21,7 @@ from .patch import (
     _verify_result_digest,
     apply_unified_hunks,
 )
-from .paths import PathPolicy, normalize_repo_path, validate_changeset
+from .paths import PathPolicy, normalize_repo_path, private_repo_path, validate_changeset
 
 
 CandidateOperation = Literal["create", "delete", "modify"]
@@ -134,7 +137,64 @@ class UnifiedPatch:
         return None
 
 
-ChangeEntry = CreateFile | DeleteFile | FullReplacement | UnifiedPatch
+@dataclass(frozen=True)
+class BinaryPatch:
+    path: str
+    forward: BinaryBlock
+    operation: CandidateOperation
+    mode: str = "100644"
+    base_blob_digest: str = ""
+    intended_digest: str = ""
+
+    def __post_init__(self) -> None:
+        _validated_digest(self.base_blob_digest)
+        _validated_digest(self.intended_digest)
+        if self.operation not in ("create", "modify") or not self.intended_digest:
+            raise CandidateError("corrupt_binary_patch", "binary post-image requires a full digest")
+        if self.operation == "modify" and not self.base_blob_digest:
+            raise CandidateError("stale_base", "binary update requires a full base digest")
+
+
+@dataclass(frozen=True)
+class BlobReplacement:
+    path: str
+    new_blob: BlobContent
+    operation: CandidateOperation
+    mode: str = "100644"
+    base_blob_digest: str = ""
+    intended_digest: str = ""
+
+    def __post_init__(self) -> None:
+        _validated_digest(self.base_blob_digest)
+        _validated_digest(self.intended_digest)
+        if self.operation not in ("create", "modify") or not self.intended_digest:
+            raise CandidateError("ambiguous_representation", "blob post-image requires its digest")
+
+
+@dataclass(frozen=True)
+class ModeChange:
+    path: str
+    old_mode: str
+    mode: str
+
+    def __post_init__(self) -> None:
+        if self.old_mode == self.mode:
+            raise CandidateError("empty_candidate", "mode-only entry does not change a mode")
+
+    @property
+    def operation(self) -> CandidateOperation:
+        return "modify"
+
+
+ChangeEntry = (
+    CreateFile
+    | DeleteFile
+    | FullReplacement
+    | UnifiedPatch
+    | BinaryPatch
+    | BlobReplacement
+    | ModeChange
+)
 
 
 @dataclass(frozen=True)
@@ -146,9 +206,22 @@ class ChangeManifestEntry:
     new_content: str | None = None
     mode: str = "100644"
     hunks: tuple[DiffHunk, ...] = ()
+    new_blob: BlobContent | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "hunks", tuple(self.hunks))
+        if self.mode not in ("100644", "100755", "120000"):
+            raise CandidateError(
+                "unsupported_mode", "manifest mode is not a supported Git blob mode"
+            )
+        if self.new_blob is not None and self.new_content is not None:
+            raise CandidateError("ambiguous_representation", "manifest has two post-images")
+
+    @property
+    def content_bytes(self) -> bytes | None:
+        if self.new_blob is not None:
+            return self.new_blob.raw
+        return self.new_content.encode("utf-8") if self.new_content is not None else None
 
 
 @dataclass(frozen=True)
@@ -171,17 +244,23 @@ class CandidateBundle:
     def paths(self) -> list[str]:
         return [entry.path for entry in self.entries]
 
-    def materialize(self, base_contents: dict[str, str]) -> list[ChangeManifestEntry]:
+    def materialize(
+        self, base_contents: Mapping[str, str | bytes], base_modes: Mapping[str, str] | None = None
+    ) -> list[ChangeManifestEntry]:
         """Complete every entry against the authoritative base texts."""
         completed: list[ChangeManifestEntry] = []
         for entry in self.entries:
-            completed.append(self._materialize_entry(entry, base_contents))
+            completed.append(self._materialize_entry(entry, base_contents, base_modes))
         return completed
 
     @staticmethod
     def _materialize_entry(
-        entry: ChangeEntry, base_contents: dict[str, str]
+        entry: ChangeEntry,
+        base_contents: Mapping[str, str | bytes],
+        base_modes: Mapping[str, str] | None = None,
     ) -> ChangeManifestEntry:
+        if isinstance(entry, (BinaryPatch, BlobReplacement, ModeChange)):
+            return _materialize_binary(entry, base_contents, base_modes)
         if isinstance(entry, DeleteFile):
             base = base_contents.get(entry.path)
             if base is not None and entry.base_blob_digest:
@@ -211,6 +290,13 @@ class CandidateBundle:
             content = entry.new_content
             hunks: tuple[DiffHunk, ...] = ()
         else:
+            if isinstance(base, bytes):
+                try:
+                    base = base.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise CandidateError(
+                        "binary_requires_binary_patch", "text patch targets a non-UTF-8 blob"
+                    ) from None
             content = apply_unified_hunks(base, entry.hunks, path=entry.path)
             hunks = entry.hunks
         _verify_result_digest(entry.path, content, entry.intended_digest)
@@ -237,7 +323,12 @@ def bundle_from_changeset(cs: ChangeSet, *, attempt_base_oid: str) -> CandidateB
     for change in cs.changes:
         path: str = change.path
         operation = operation_map[change.operation.value]
-        content: str | None = change.content
+        content = change.content
+        if isinstance(content, BlobContent):
+            raise CandidateError(
+                "binary_requires_native_manifest",
+                "binary changes require exact-base native manifest validation",
+            )
         if operation == "delete":
             entries.append(DeleteFile(path=path))
         elif content is None:
@@ -310,7 +401,7 @@ def manifest_to_changeset(
             Change(
                 path=entry.path,
                 operation=_OPERATION_MAP[entry.operation],
-                content=entry.new_content,
+                content=entry.new_blob if entry.new_blob is not None else entry.new_content,
             )
             for entry in entries
         ],
@@ -321,17 +412,21 @@ def manifest_to_changeset(
 def validate_candidate_bundle(
     bundle: CandidateBundle,
     *,
-    base_contents: dict[str, str],
+    base_contents: Mapping[str, str | bytes],
     branch: str,
     commit_message: str,
     allowed_paths: Sequence[str] = (),
     policy: PathPolicy | None = None,
+    base_modes: Mapping[str, str] | None = None,
 ) -> ValidatedCandidate:
     """The pure publication-boundary check, shared by EVERY backend (ADR-0026)."""
     if bundle.is_empty:
         raise CandidateError("empty_candidate", "candidate contains no changes")
     _reject_duplicate_paths(bundle)
-    entries = tuple(bundle.materialize(base_contents))
+    entries = tuple(bundle.materialize(base_contents, base_modes))
+    for entry in entries:
+        if entry.mode == "120000" and entry.operation != "delete":
+            _validate_link_target(entry)
     changeset = manifest_to_changeset(
         entries,
         branch=branch,
@@ -370,3 +465,58 @@ def _reject_duplicate_paths(bundle: CandidateBundle) -> None:
                 f"{path}: duplicate path ({canonical!r}) — one entry per path per candidate",
             )
         seen.add(canonical)
+
+
+def _materialize_binary(
+    entry: BinaryPatch | BlobReplacement | ModeChange,
+    base_contents: Mapping[str, str | bytes],
+    base_modes: Mapping[str, str] | None,
+) -> ChangeManifestEntry:
+    if entry.mode not in ("100644", "100755", "120000"):
+        raise CandidateError("unsupported_mode", "candidate mode is not a supported Git blob mode")
+    base = base_contents.get(entry.path)
+    if isinstance(base, str):
+        base = base.encode("utf-8")
+    if isinstance(entry, ModeChange):
+        if base is None or base_modes is None or base_modes.get(entry.path) != entry.old_mode:
+            raise CandidateError(
+                "stale_base", "mode change requires the exact authoritative base mode"
+            )
+        if entry.old_mode not in ("100644", "100755", "120000"):
+            raise CandidateError(
+                "unsupported_mode", "candidate old mode is not a supported blob mode"
+            )
+        content = base
+    else:
+        if entry.operation == "modify" and base is None:
+            raise CandidateError("stale_base", "binary update lacks an authoritative base")
+        if entry.base_blob_digest:
+            _verify_base_digest(entry.path, base or b"", entry.base_blob_digest)
+        content = (
+            entry.new_blob.raw
+            if isinstance(entry, BlobReplacement)
+            else entry.forward.apply(base or b"")
+        )
+        _verify_result_digest(entry.path, content, entry.intended_digest)
+    return ChangeManifestEntry(
+        entry.path, entry.operation, mode=entry.mode, new_blob=BlobContent(raw=content)
+    )
+
+
+def _validate_link_target(entry: ChangeManifestEntry) -> None:
+    try:
+        target = (entry.content_bytes or b"").decode("utf-8")
+    except UnicodeDecodeError:
+        raise CandidateError("unsafe_symlink", "symlink target must be UTF-8") from None
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), target))
+    if (
+        not target
+        or target.startswith(("/", "\\"))
+        or "\\" in target
+        or ":" in target
+        or any(ord(char) < 32 or ord(char) == 127 for char in target)
+        or resolved in (".", "..")
+        or resolved.startswith("../")
+        or private_repo_path(resolved)
+    ):
+        raise CandidateError("unsafe_symlink", "symlink target escapes repository authority")

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
+from .blob import BlobContent
 from .change_types import Change, ChangeSet, Operation
 
 DENIED_PATHS: frozenset[str] = frozenset({".gitlab-ci.yml", ".forge.yml"})
@@ -257,7 +258,7 @@ def private_repo_path(path: str) -> bool:
 
 def validate_changeset(
     cs: ChangeSet,
-    git_base: dict[str, str] | None = None,
+    git_base: Mapping[str, str | bytes] | None = None,
     allowed_paths: list[str] | None = None,
     policy: PathPolicy | None = None,
 ) -> list[str]:
@@ -288,7 +289,7 @@ WritePolicy = PathPolicy
 def _validate_change(
     change: Change,
     effective: PathPolicy,
-    git_base: dict[str, str] | None,
+    git_base: Mapping[str, str | bytes] | None,
     allowed_paths: list[str] | None,
     seen_paths: set[str],
 ) -> list[str]:
@@ -352,13 +353,29 @@ def _validate_change(
             f"(allowed_paths: {', '.join(allowed_paths)})"
         )
 
+    violations.extend(_validate_action(change, git_base, where))
+    return violations
+
+
+def _validate_action(
+    change: Change, git_base: Mapping[str, str | bytes] | None, where: str
+) -> list[str]:
+    violations: list[str] = []
     if change.operation is Operation.CREATE and change.content is None:
         violations.append(f"{where}: create requires content")
 
     if change.operation is Operation.DELETE and change.content is not None:
         violations.append(f"{where}: delete must not carry content")
 
-    if change.content is not None and len(change.content.encode("utf-8")) > MAX_CHANGE_BYTES:
+    content = change.content
+    size = (
+        content.size
+        if isinstance(content, BlobContent)
+        else len(content.encode("utf-8"))
+        if content is not None
+        else 0
+    )
+    if size > MAX_CHANGE_BYTES:
         violations.append(f"{where}: content exceeds {MAX_CHANGE_BYTES} bytes")
 
     if git_base is not None and change.operation in (Operation.UPDATE, Operation.DELETE):

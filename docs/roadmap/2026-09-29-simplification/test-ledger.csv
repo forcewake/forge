@@ -88,7 +88,7 @@ tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
 tests/test_budget_engine.py,22,637,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
-tests/test_candidate.py,49,675,true,false,,edge-case pin,,candidate,keep,-,
+tests/test_candidate.py,49,678,true,false,,edge-case pin,,candidate,keep,-,
 tests/test_candidate_collector.py,35,871,true,false,,,,candidate,keep,-,
 tests/test_capability_manifest.py,4,53,true,false,,edge-case pin,,capability,keep,-,
 tests/test_changeset_materialize.py,22,294,true,false,,,,changeset,keep,-,
@@ -130,6 +130,7 @@ tests/test_docs_links.py,4,131,false,false,,edge-case pin,,docs,keep,-,
 tests/test_doctor.py,24,597,true,false,,,,doctor,keep,-,
 tests/test_doctor_settings.py,4,48,true,false,,,,doctor,keep,-,
 tests/test_domain_approved_input.py,7,285,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
+tests/test_domain_binary_candidate.py,5,246,true,true,,edge-case pin,,domain,keep,P3-09,"Native Git binary, mode and symlink validation with durable byte-exact recovery"
 tests/test_domain_boundary.py,2,84,false,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_candidate.py,10,282,true,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_core.py,12,226,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
@@ -217,7 +218,7 @@ tests/test_operator_snapshot.py,36,1145,true,false,,,,operator,keep,-,
 tests/test_ops_drills.py,2,58,true,false,,edge-case pin,,ops,keep,-,
 tests/test_ops_limits.py,7,496,true,false,,,,ops,keep,-,
 tests/test_orphan_guard.py,1,61,false,false,,,,orphan,keep,-,
-tests/test_patch_differential.py,19,353,true,false,,invariant evidence; edge-case pin,,patch,keep,-,
+tests/test_patch_differential.py,19,357,true,false,,invariant evidence; edge-case pin,,patch,keep,-,
 tests/test_pg_gate.py,42,992,false,false,,,,pg,keep,-,
 tests/test_planning_ports.py,9,439,true,true,,edge-case pin,,planning,keep,P3-11,Frozen repository research and resolved citations
 tests/test_ports.py,3,195,true,true,,edge-case pin,,ports,keep,P3-02,Engine port scope and recovery contracts

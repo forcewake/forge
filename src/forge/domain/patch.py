@@ -61,14 +61,17 @@ def _validated_digest(digest: str) -> str:
     raise ValueError(f"malformed digest claim: {digest!r}")
 
 
-def _sha256_digest(text: str) -> str:
+def _sha256_digest(text: str | bytes) -> str:
     """The tagged sha256 digest of *text*'s utf-8 bytes."""
-    return _SHA256_PREFIX + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return (
+        _SHA256_PREFIX
+        + hashlib.sha256(text.encode("utf-8") if isinstance(text, str) else text).hexdigest()
+    )
 
 
-def _blob_digests(text: str) -> tuple[str, ...]:
+def _blob_digests(text: str | bytes) -> tuple[str, ...]:
     """The tagged git blob OIDs *text* would hash to (sha1 and sha256 repos)."""
-    data = text.encode("utf-8")
+    data = text.encode("utf-8") if isinstance(text, str) else text
     header = b"blob %d\x00" % len(data)
     return (
         _BLOB_PREFIX + hashlib.sha1(header + data).hexdigest(),
@@ -76,7 +79,7 @@ def _blob_digests(text: str) -> tuple[str, ...]:
     )
 
 
-def _digest_matches(content: str, claim: str) -> bool:
+def _digest_matches(content: str | bytes, claim: str) -> bool:
     """Whether *content*'s digest equals the tagged *claim*."""
     if claim.startswith(_SHA256_PREFIX):
         return claim == _sha256_digest(content)
@@ -159,7 +162,7 @@ def _join_lines(lines: list[str], ends_with_newline: bool) -> str:
     return "\n".join(lines) + ("\n" if ends_with_newline else "")
 
 
-def _verify_base_digest(path: str, base: str, claim: str) -> None:
+def _verify_base_digest(path: str, base: str | bytes, claim: str) -> None:
     """Reject a stale base BEFORE anything is applied (ADR-0016 honesty)."""
     if not _digest_matches(base, claim):
         raise CandidateError(
@@ -169,7 +172,7 @@ def _verify_base_digest(path: str, base: str, claim: str) -> None:
         )
 
 
-def _verify_result_digest(path: str, content: str, claim: str) -> None:
+def _verify_result_digest(path: str, content: str | bytes, claim: str) -> None:
     """The applied result must equal the entry's claim — never publish otherwise."""
     if claim and not _digest_matches(content, claim):
         raise CandidateError(

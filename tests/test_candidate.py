@@ -174,13 +174,13 @@ class TestParseRejections:
         )
         with pytest.raises(CandidateError) as excinfo:
             parse_unified_diff(diff, BASE, "completed")
-        assert excinfo.value.reason == "binary_not_supported"
+        assert excinfo.value.reason == "corrupt_binary_patch"
 
     def test_binary_placeholder_rejected(self):
         diff = "diff --git a/blob.bin b/blob.bin\nindex 111..222 100644\nBinary files a/blob.bin and b/blob.bin differ\n"
         with pytest.raises(CandidateError) as excinfo:
             parse_unified_diff(diff, BASE, "completed")
-        assert excinfo.value.reason == "binary_not_supported"
+        assert excinfo.value.reason == "corrupt_binary_patch"
 
     def test_rename_rejected(self):
         diff = (
@@ -195,13 +195,16 @@ class TestParseRejections:
 
     def test_mode_only_change_is_rejected_not_dropped(self):
         diff = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n"
+        bundle = parse_unified_diff(diff, BASE, "completed")
         with pytest.raises(CandidateError) as excinfo:
-            parse_unified_diff(diff, BASE, "completed")
-        assert excinfo.value.reason == "mode_change_not_supported"
+            bundle.materialize({"script.sh": b"original\n"})
+        assert excinfo.value.reason == "stale_base"
+        completed = bundle.materialize({"script.sh": b"original\n"}, {"script.sh": "100644"})
+        assert completed[0].content_bytes == b"original\n"
+        assert completed[0].mode == "100755"
 
     def test_mode_change_with_content_change_still_applies_the_content(self):
-        # A mode flip riding along a content delta is applied for its bytes;
-        # only the PURE mode-only change is unsupported.
+        # A mode flip riding along a content delta preserves both bytes and mode.
         diff = (
             "diff --git a/script.sh b/script.sh\n"
             "old mode 100644\n"
