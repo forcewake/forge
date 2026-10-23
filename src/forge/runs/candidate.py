@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
+from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 
 #: The manifest operations (``update`` in ChangeSet terms is ``modify``).
 CandidateOperation = Literal["create", "delete", "modify"]
@@ -533,9 +533,9 @@ class CandidateBundle:
 
 
 def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBundle:
-    """Wrap an already-materialized ChangeSet (builtin path) as a bundle.
+    """Wrap an already-materialized ChangeSet as a candidate bundle.
 
-    The builtin backend produces ChangeSets with FULL contents — every update
+    A ChangeSet carries FULL contents — every update
     becomes a :class:`FullReplacement` (R08: never "modify with content and
     empty hunks"); routing it through the same publisher boundary (ADR-0016
     §2) gives every backend identical validation. ``cs`` is typed loosely to
@@ -619,7 +619,7 @@ def attempt_base_for(run: object) -> str:
     """The frozen attempt base for *run* (ADR-0016 §4): cycle 1 → approved
     source base; repair → the last verified candidate OID. The
     :class:`AttemptContext` shared by the harness lane (``FORGE_ATTEMPT_BASE``,
-    checked against every candidate artifact) and the builtin proposal path.
+    checked against every candidate artifact) and validated adapter inputs.
     """
     return AttemptContext.of(run).attempt_base
 

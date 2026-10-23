@@ -13,7 +13,7 @@ import hashlib
 
 import pytest
 
-from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
+from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.repository import Change, ChangeSet, Operation
 from forge.runs.candidate import (
     AttemptContext,

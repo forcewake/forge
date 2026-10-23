@@ -117,7 +117,7 @@ src/forge/
   harnesses/   lane scripts, prompts and MCP config rendered for the target's CI
   harness_entry.py, lane_driver.py
                the lane side: CLI and SDK drivers inside the target's CI
-  factory/     LLM planner / implementer / reviewer (LiteLLM HTTP)
+  factory/     LLM planner / reviewer (LiteLLM HTTP)
   context/     context assembly, diff and log parsing, redaction
   reactive/    durable review and CI-debug bots on the step lane
   findings/    security findings and /security triage

@@ -933,7 +933,7 @@ _FACTORY_BRANCH_DERIVATIONS = frozenset({"factory_branch", "github_factory_branc
 #: - the target contract (``forge.durable.collaboration`` — the ONE live
 #:   admission site and the ONE legacy adapter),
 #: - the provider lanes' own twins and the transport/proposer FALLBACK
-#:   defaults (``stubs`` / ``factory.implementer`` suggest a branch the
+#:   defaults (``stubs`` suggest a branch the
 #:   service REBINDS to the target before any effect; ``backends`` /
 #:   ``publisher`` fall back only when no branch was passed).
 #: The publication authority for the GitLab lane — ``forge.runs.service``
@@ -946,7 +946,6 @@ _FACTORY_BRANCH_DERIVATION_HOMES = frozenset(
         "forge.durable.identity",
         "forge.durable.collaboration",
         "forge.runs.stubs",
-        "forge.factory.implementer",
         "forge.runs.backends",
         "forge.runs.publisher",
         "forge.integrations.github_flow",

@@ -1,6 +1,6 @@
 """Trusted publisher (ADR-0016 §2, ADR-0026): THE write boundary for candidates.
 
-Every candidate — builtin ChangeSets and harness artifacts alike, on every
+Every candidate — validated adapter inputs and CI artifacts, on every
 provider — crosses this boundary before anything reaches a commit API. The
 application-service entry :func:`publish_validated_candidate` owns the
 sequence (validate → fence → native adapter); the pure policy half is
@@ -82,7 +82,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.durable import FlowRun, FlowStatus, RunSpec, StepRun, factory_branch, short_run_id
 from forge.durable.claims import ExecutionClaim, current_claim
 from forge.durable.controller import as_aware_utc
-from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
+from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.gitlab.blob_reads import AUTHORITATIVE_READ_FAILED, BlobReadResult
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.repository import (
@@ -194,7 +194,7 @@ def validate_candidate_bundle(
     1. strict materialization of *bundle* against *base_contents* (the
        authoritative full texts at the attempt base): ``base_blob_digest``
        verified BEFORE anything is applied, ``intended_digest`` AFTER — the
-       R08/R09 guarantees run on every path, builtin included;
+       R08/R09 guarantees run on every publication path;
     2. :func:`validate_changeset` — denied paths/prefixes/lockfiles, change
        count and size caps, existence rules, and the *allowed_paths* globs,
        under the write profile *policy* (R18; ``None`` = the default

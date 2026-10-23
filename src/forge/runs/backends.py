@@ -1,12 +1,8 @@
 """Pluggable implementer backends (ADR-0015/0016).
 
 The implementer step of a run is pluggable; the controller owns the lifecycle
-unchanged (ADR-0004). Two backends:
+unchanged (ADR-0004). Implementation runs in project CI:
 
-- ``BuiltinBackend`` — today's LLM → ChangeSet → Commits API path (ADR-0001).
-  The produced ChangeSet is wrapped as a :class:`CandidateBundle` and routed
-  through the trusted publisher (ADR-0016 §2) so every backend crosses the
-  same validation → publication boundary.
 - ``CITharnessBackend`` — delegates implementation to a coding harness
   executing as a job in the *target project's* CI (never on forge
   infrastructure, ADR-0002/0015). The job runs proposal-only (ADR-0016): it
@@ -24,7 +20,6 @@ publisher. Harness-level failures (auth, quota, runner, timeout) classify as
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from dataclasses import dataclass
@@ -36,17 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.durable import FlowRun, as_aware_utc
 from forge.durable.identity import factory_branch
 from forge.gitlab.client import GitLabAPIError, GitLabClient
-from forge.repository.writer import ChangesetWriter
 from forge.runs.candidate import (
     CandidateBundle,
     CandidateError,
     HarnessUsage,
     attempt_base_for,
-    bundle_from_changeset,
     parse_unified_diff,
 )
 from forge.runs.ci_contract import classify_failure
-from forge.runs.publisher import publish_candidate
+from forge.runs.lane import LaneRequiredError
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +113,6 @@ class HarnessOutcome:
     - :meth:`change_candidate` — the backend downloaded a well-formed
       candidate bundle; the trusted publisher decides whether it becomes a
       commit (ADR-0016).
-    - :meth:`change_ready` — legacy shape (a verified commit sha, builtin
-      path).
     - :meth:`running` — keep waiting (durable deadline decides the rest).
     - :meth:`failed` — terminal for the harness leg; *failure_kind* says
       whether the code or the environment failed. A failed attempt that
@@ -130,8 +121,7 @@ class HarnessOutcome:
       and the control plane ingests the partial receipt exactly once.
     """
 
-    status: Literal["change_ready", "change_candidate", "running", "failed"]
-    commit_sha: str | None = None
+    status: Literal["change_candidate", "running", "failed"]
     bundle: CandidateBundle | None = None
     summary: str = ""
     failure_kind: HarnessFailureKind | None = None
@@ -140,10 +130,6 @@ class HarnessOutcome:
     #: readable and passed validation — ``None`` when nothing trustworthy
     #: was published (spend stays unknown, never invented).
     usage: HarnessUsage | None = None
-
-    @classmethod
-    def change_ready(cls, commit_sha: str, summary: str = "") -> HarnessOutcome:
-        return cls(status="change_ready", commit_sha=commit_sha, summary=summary)
 
     @classmethod
     def change_candidate(cls, bundle: CandidateBundle, summary: str = "") -> HarnessOutcome:
@@ -165,7 +151,7 @@ class HarnessOutcome:
 
     @property
     def ok(self) -> bool:
-        return self.status in ("change_ready", "change_candidate")
+        return self.status == "change_candidate"
 
 
 class ImplementerBackend(Protocol):
@@ -186,102 +172,8 @@ class ImplementerBackend(Protocol):
 # ----------------------------------------------------------------------
 
 
-async def fetch_git_base(
-    gitlab: GitLabClient,
-    project_id: int,
-    paths: list[str],
-    base_sha: str | None,
-) -> dict[str, str]:
-    """Fetch base content for *paths* at the pinned base snapshot (ADR-0001/0006).
-
-    Trusted layer's own read: validation is checked against the pinned
-    snapshot, not against the proposer's claim. Missing files are absent
-    from the result.
-    """
-    ref = base_sha or "HEAD"
-    git_base: dict[str, str] = {}
-    for path in dict.fromkeys(paths):
-        try:
-            repo_file = await gitlab.get_file(project_id, path, ref=ref)
-        except GitLabAPIError:
-            continue  # not in the snapshot — validate_changeset reports it
-        content = repo_file.content
-        if (repo_file.encoding or "") == "base64":
-            content = base64.b64decode(content).decode("utf-8", errors="replace")
-        git_base[path] = content
-    return git_base
-
-
 class _ArtifactMissing(Exception):
     """The candidate artifacts are absent/unreadable (404 or malformed)."""
-
-
-def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
-    """Read plan summary + files_hint out of the run's evidence blob."""
-    plan = (run.evidence or {}).get("plan") or {}
-    summary = str(plan.get("summary") or "")
-    hints = [str(hint) for hint in (plan.get("files_hint") or [])]
-    return summary, hints
-
-
-# ----------------------------------------------------------------------
-# Builtin backend (ADR-0001 path behind the protocol)
-# ----------------------------------------------------------------------
-
-
-class BuiltinBackend:
-    """The ``builtin`` backend: LLM → ChangeSet → publisher (ADR-0001/0016).
-
-    Wraps the propose path ``RunService`` drives synchronously for builtin
-    runs. Since ADR-0016 the produced ChangeSet is wrapped as a
-    :class:`CandidateBundle` and published through the SAME trusted boundary
-    as harness candidates (grant, spec digest, policy validation, journaled
-    write pinned to the attempt base).
-    """
-
-    def __init__(
-        self,
-        *,
-        implementer: Any,
-        gitlab: GitLabClient,
-        session_factory: async_sessionmaker[AsyncSession],
-        settings: Any,
-        writer_class: type[ChangesetWriter] = ChangesetWriter,
-    ) -> None:
-        self._implementer = implementer
-        self._gitlab = gitlab
-        self._session_factory = session_factory
-        self._settings = settings
-        self._writer_class = writer_class
-
-    async def start(self, run: FlowRun, issue_title: str, issue_description: str, plan: str) -> str:
-        plan_summary, files_hint = _plan_evidence(run)
-        changeset = await self._implementer.propose(
-            run,
-            issue_title,
-            plan_summary=plan_summary,
-            files_hint=files_hint,
-        )
-        attempt_base = attempt_base_for(run)
-        bundle = bundle_from_changeset(changeset, attempt_base_oid=attempt_base)
-        writer = self._writer_class(self._gitlab, self._session_factory, run.project_id)
-        result = await publish_candidate(
-            gitlab=self._gitlab,
-            session_factory=self._session_factory,
-            writer=writer,
-            run=run,
-            bundle=bundle,
-            commit_message=changeset.commit_message,
-        )
-        if not result.ok:
-            return json.dumps({"error": result.reason})
-        return json.dumps({"commit_sha": result.commit_sha, "branch": changeset.branch})
-
-    async def poll(self, run: FlowRun, handle: str) -> HarnessOutcome:
-        data = json.loads(handle)
-        if "error" in data:
-            return HarnessOutcome.failed("code", str(data["error"]))
-        return HarnessOutcome.change_ready(str(data["commit_sha"]), "builtin changeset committed")
 
 
 # ----------------------------------------------------------------------
@@ -634,18 +526,17 @@ def build_backend(
     gitlab: GitLabClient,
     session_factory: async_sessionmaker[AsyncSession],
     writer: Any | None = None,
-    implementer: Any | None = None,
     driver: str | None = None,
 ) -> ImplementerBackend:
     """Construct the configured implementer backend (``FORGE_IMPLEMENTER_BACKEND``).
 
-    Values: ``builtin`` (default) or ``ci_harness[:<harness>]`` — the harness
+    Values: ``ci_harness[:<harness>]`` — the harness
     name defaults to ``claude-code``. *driver* (ADR-0023) overrides the
     suffix-parsed harness: the dispatch leg runs the driver frozen in the
     RunSpec, not whatever the setting says post-gate. Unknown values raise
     ``ValueError`` (a configuration error, not a runtime condition).
     """
-    raw = str(getattr(settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin").strip()
+    raw = str(getattr(settings, "FORGE_IMPLEMENTER_BACKEND", "ci_harness") or "").strip()
     kind, _, suffix = raw.partition(":")
     harness = suffix.strip() if suffix.strip() else HARNESS_NAME
     # ADR-0023: an explicit driver (the RunSpec's frozen selection) wins —
@@ -653,15 +544,6 @@ def build_backend(
     if driver and driver.strip():
         harness = driver.strip()
 
-    if kind == "builtin":
-        if implementer is None:
-            raise ValueError("builtin backend requires an implementer agent")
-        return BuiltinBackend(
-            implementer=implementer,
-            gitlab=gitlab,
-            session_factory=session_factory,
-            settings=settings,
-        )
     if kind == "ci_harness":
         if writer is None:
             raise ValueError("ci_harness backend requires a ChangesetWriter")
@@ -671,4 +553,4 @@ def build_backend(
             settings=settings,
             harness=harness,
         )
-    raise ValueError(f"unknown FORGE_IMPLEMENTER_BACKEND {kind!r} (expected builtin | ci_harness)")
+    raise LaneRequiredError(f"unsupported FORGE_IMPLEMENTER_BACKEND {kind!r}")

@@ -28,7 +28,7 @@ GitHub-specific deviations, all deliberate:
   reconciler (``evaluate_waiting_harness``) polls the Actions run, adopts
   the candidate artifact through the SAME trusted publisher (branch CAS
   commit + Draft PR) and walks on to ``waiting_ci`` → review →
-  ``ready_for_human``. Empty/unset → builtin in-worker execution as before.
+  ``ready_for_human``. Empty/unset refuses admission before planning.
   Actions checks on the head are the verification surface.
 - **Expired or drifted decisions block** the run with a friendly comment
   (``decision_expired`` / ``decision_drift``) instead of silently ignoring
@@ -53,7 +53,6 @@ import os
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Final
 from uuid import uuid4
 
@@ -115,7 +114,7 @@ from forge.execution.github_actions import (
     ActionsHandle,
     GitHubActionsExecutor,
 )
-from forge.factory.implementer import IMPLEMENTER_TIER
+from forge.runs.lane import CODE_MODEL_TIER, LaneRefusal, github_lane_refusal
 from forge.factory.llm import LLMError, LLMResponseError
 
 # Q35-02: the continuation decision model (pure over an evidence snapshot);
@@ -211,14 +210,11 @@ from forge.repository import (
     Change,
     ChangeSet,
     Operation,
-    changeset_from_document,
-    changeset_to_document,
     validate_changeset,
 )
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
-from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
 from forge.runs.composition import CompositionBoundaryError
 from forge.runs.consistency import (
     assert_ready_invariants,
@@ -401,13 +397,9 @@ def _claim_generation() -> int | None:
 #: the re-dispatch; the scanner just stops polling the provider hot.
 _INTENT_PROBE_BACKOFF_SECONDS = 60
 
-#: R07: post-gate states a crashed worker leaves a run in. A re-delivered or
-#: re-claimed ``/go`` command re-drives the publish leg (the recovery
-#: driver) instead of ignoring the duplicate: ``_advance_publish`` probes the
-#: durable publication intent first (R11), so the re-drive adopts a landed
-#: commit, resolves a moved ref, or re-dispatches with the SAME operation key
-#: — and its propose checkpoint (``_propose_for_publish``) means the
-#: re-dispatch never calls the model a second time.
+#: Post-gate states left by a crashed worker. A repeated approval command
+#: re-enters the approved CI dispatch or refuses a retired execution shape;
+#: native intent recovery owns any already-started effect.
 _RESUMABLE_PUBLISH_STATUSES = frozenset(
     {"proposing", "validating", "committing", "ensuring_draft_mr"}
 )
@@ -659,26 +651,24 @@ class GitHubRunService:
         recovery pass; ends at ``waiting_approval`` (or parks the run
         ``blocked(config_…)`` BEFORE any paid call).
         """
-        # R28-15: freeze the source set FIRST. The target branch NAME is
-        # movable; the SHA is not. One resolved base SHA now binds every
-        # read of the planning leg — the authority config below, the
-        # discovery snapshot and the attempt base frozen into the spec —
-        # so a plan, its config and its evidence cannot come from two
-        # snapshots of a branch that moved mid-planning. An unreadable
-        # head keeps the legacy honesty: ``_read_base_sha`` logs and
-        # returns "" (the run freezes no base), and the reads fall back
-        # to the movable name — no worse than before, never fatal.
+        if not self._harness_workflow():
+            refusal = LaneRefusal("project has no configured GitHub Actions workflow")
+            await self._refuse_lane(run_id, refusal)
+            await self._post_journaled_note(
+                project_id, issue_number, refusal.reason, run_id, "lane_not_onboarded"
+            )
+            return
         base_sha = await self._read_base_sha()
         frozen_ref = base_sha or self._target_branch()
-        # v0.7 monorepo path scoping, A13: the repo's `.forge.yml`
-        # ``implement.paths`` globs shape the plan prompt and are frozen into
-        # the RunSpec the candidate validation enforces. The repository
-        # reader duck-types the typed config reader's surface (its
-        # ``project_id`` argument is accepted and ignored). The read is
-        # TYPED (R14 pattern): only a provider-confirmed absence earns the
-        # documented default profile; an unreadable or invalid config parks
-        # the run blocked(config_…) — a read failure must never WIDEN the
-        # run's scope, and nothing was paid or committed while it waits.
+        refusal = await github_lane_refusal(
+            self._stack.reader, project_id, frozen_ref, self._harness_workflow()
+        )
+        if refusal is not None:
+            await self._refuse_lane(run_id, refusal)
+            await self._post_journaled_note(
+                project_id, issue_number, refusal.reason, run_id, "lane_not_onboarded"
+            )
+            return
         config_read = await read_project_config(self._stack.reader, project_id, ref=frozen_ref)
         if config_read.needs_block:
             await self._park_config_blocked(
@@ -692,12 +682,6 @@ class GitHubRunService:
             )
             return
         path_scope = list(config_read.config.implement_paths) if config_read.config else []
-        # R32-10: resolve the SYSTEM CONTEXT — the read-many/write-one
-        # authorization the project's ``neighbors:`` section declares —
-        # BEFORE the planning try, so a malformed authorization parks the
-        # run blocked(config_invalid: …) with zero paid calls (the same
-        # A13 doctrine the config read itself applies: an authorization
-        # field that cannot be parsed honestly is never silently
         # narrowed to "no neighbors").
         try:
             system_profile = self._system_context_profile(
@@ -883,7 +867,7 @@ class GitHubRunService:
             run.evidence = _merge_evidence(
                 run.evidence,
                 {
-                    "backend": "builtin",
+                    "backend": "ci_harness",
                     "harness_selection": harness_selection.as_document(),
                     "plan": {
                         "digest": digest,
@@ -898,9 +882,7 @@ class GitHubRunService:
                         {
                             "budget": {
                                 "budget_class": harness_selection.budget_class,
-                                "enforcement": budget_enforcement_for_backend(
-                                    "ci_harness" if self._harness_workflow() else "builtin"
-                                ),
+                                "enforcement": budget_enforcement_for_backend("ci_harness"),
                                 "max_calls": budget_limits.max_calls,
                                 "max_tokens": budget_limits.max_tokens,
                                 "wallclock_s": budget_limits.wallclock_s,
@@ -3451,332 +3433,20 @@ class GitHubRunService:
             )
 
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
-        """One gate-approved publish cycle, ending at ``ready_for_human``.
-
-        Harness lane (ADR-0020): the FROZEN backend is ``ci_harness`` (the
-        repo was onboarded for Actions at plan acceptance) — the leg
-        dispatches the harness and parks in ``waiting_harness`` — the
-        reconciler drives the rest. Builtin (default): propose + publish
-        synchronously as before.
-
-        R04/A02: the frozen executable spec is THE approved input — the
-        task text, the plan artifact and the model route come from it, never
-        from live settings or a live issue re-read. A missing, tampered or
-        legacy (v2) spec parks the run (``spec_invalid`` / ``spec_legacy``),
-        never a silent fallback."""
-        if not await self._reserve_execution_capacity(
-            run_id, project_id=project_id, issue_number=issue_number
-        ):
-            return
+        """Dispatch only the approved CI lane; refuse retired execution shapes."""
         spec = await self._spec_or_block(run_id)
         if spec is None:
             return
-        if spec.backend == "ci_harness":
-            await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
-            return
-
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            base_sha = run.base_sha or ""
-            plan_digest = run.plan_digest or ""
-
-        # F13: a cancel that landed while this leg was starting revokes the
-        # grant — stand down instead of racing the cancel.
-        if await self._publication_revoked(run_id):
-            logger.info(
-                "GitHub run %s cancelled before publication — dropping in-flight leg",
-                run_id[:8],
+        if spec.backend != "ci_harness" or not spec.harness_workflow:
+            await self._refuse_lane(
+                run_id, LaneRefusal("approved execution backend has no CI lane")
             )
             return
+        await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
 
-        # R11: resolve the publication intent BEFORE any commit-API call.
-        # A previous attempt's open intent is probed by identity (marker +
-        # expected parent): its landed commit is adopted, never duplicated;
-        # only a proven-nothing-landed probe falls through to a dispatch —
-        # with the SAME stable operation key.
-        branch = github_factory_branch(issue_number, run_id)
-        expected_head = base_sha or None
-        run_row = await self._load_run(run_id)
-        intent = await self._publication_intent(run_row, branch=branch, expected_head=expected_head)
-        if intent is None:
-            intent = await self._record_publication_intent(
-                run_row, branch=branch, expected_head=expected_head
-            )
-        else:
-            verdict, hits = await self._probe_intent(intent)
-            if verdict is ProbeVerdict.ADOPT:
-                # The live R11 case: a previous attempt LANDED (its response
-                # was lost / the process stalled) — adopt it and finish the
-                # leg on the found commit. Zero new commit-API calls.
-                await self._complete_intent(
-                    intent.id,
-                    "adopted",
-                    provider_object_id=hits[0],
-                    remote_result={"sha": hits[0], "reconciled": True},
-                )
-                pr = await self._stack.flow.ensure_draft_pr(
-                    self._owner,
-                    self._repo,
-                    branch,
-                    self._target_branch(),
-                    issue_number,
-                    run_id,
-                )
-                outcome = GitHubPublishOutcome(
-                    ok=True,
-                    commit_oid=hits[0],
-                    expected_head_oid=expected_head,
-                    branch=branch,
-                    pr_number=int(pr["number"]) if pr else None,
-                    pr_url=pr.get("html_url") if pr else None,
-                    pr_draft=bool(pr.get("draft")) if pr else None,
-                    adopted=True,
-                )
-                await self._finish_publish_leg(
-                    run_id, project_id, issue_number, outcome, plan_digest
-                )
-                return
-            if verdict is ProbeVerdict.DUPLICATED:
-                # Someone else owns the ref now — the drift contract applies:
-                # the intent resolves duplicated and the run stops here, the
-                # same outcome a CAS refusal would produce (minus the POST).
-                await self._complete_intent(
-                    intent.id, "duplicated", remote_result={"branch": branch}
-                )
-                await self._to_terminal(
-                    run_id,
-                    FlowStatus.BLOCKED,
-                    f"branch_drift: {branch} moved away from the publication intent",
-                )
-                return
-            elif verdict is ProbeVerdict.UNKNOWN:
-                await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
-                await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
-                await self._post_journaled_note(
-                    project_id,
-                    issue_number,
-                    f"Run `{run_id[:8]}` publication outcome is **unresolved**: the remote "
-                    "probe found ambiguous evidence for this attempt. An operator must "
-                    f"inspect branch `{branch}` and reconcile manually — forge will not "
-                    "re-publish over an unknown outcome.\n\n*This is an automated message.*",
-                    run_id,
-                    "publish_unknown_outcome",
-                )
-                return
-            # REDISPATCH (nothing landed, head intact) falls through to the
-            # dispatch below, reusing the intent's stable operation key. A12:
-            # no certainty-window wait is required on this leg — the write
-            # below is a branch-wide CAS (``expectedHeadOid``), so a redispatch
-            # carrying the unchanged head is INHERENTLY duplicate-safe (a slow
-            # first write would move the head and the CAS would refuse the
-            # duplicate). The CAS, not a read, is the exactly-once guard here.
-
-        await self._mark_intent_dispatched(intent)
-        # R04: no live issue re-read — the implementer executes the FROZEN
-        # task text the approver saw, whatever the issue shows now.
-        issue_title = spec.task_title
-        # R07 bounded step ``propose``: the publish leg proposes through the
-        # checkpoint store — a REDISPATCH re-drive (a crashed attempt whose
-        # intent probe proved nothing landed) replays the persisted manifest
-        # with the SAME operation key instead of calling the model again.
-        expected_head = base_sha or await self._stack.client.get_branch_head(
-            self._owner, self._repo, self._target_branch()
-        )
-        changeset = await self._propose_for_publish(
-            run_id,
-            issue_number=issue_number,
-            issue_title=issue_title,
-            plan_summary=spec.plan_summary,
-            task_text=spec.task_text,
-            model_route=spec.model_route,
-            expected_head=expected_head,
-        )
-
-        # D04: the propose above is a LONG paid operation — a cancel that
-        # landed during it revokes the grant, and the branch CAS checks the
-        # EXPECTED HEAD, not this run's right to write. Re-check the grant
-        # immediately before the native dispatch: cancel-before-dispatch
-        # forbids the write; a cancel AFTER dispatch stays the honest
-        # unknown/superseded path.
-        if await self._publication_revoked(run_id):
-            logger.warning(
-                "GitHub run %s cancelled DURING propose — publication refused (zero native writes)",
-                run_id[:8],
-            )
-            return
-
-        outcome = await self._publish_candidate_run_aware(
-            run_id,
-            issue_number=issue_number,
-            changeset=changeset,
-            expected_head=expected_head or None,
-            operation_key=intent.operation_key,
-        )
-        await self._complete_intent_from_outcome(intent.id, outcome)
-
-        if not outcome.ok:
-            reason = outcome.reason or "publish_failed"
-            await self._to_terminal(
-                run_id, FlowStatus.BLOCKED if outcome.drift else FlowStatus.FAILED, reason
-            )
-            await self._post_journaled_note(
-                project_id,
-                issue_number,
-                f"Run `{run_id[:8]}` could not publish: {reason}\n\n"
-                "*This is an automated message.*",
-                run_id,
-                "publish_failed",
-            )
-            return
-        if getattr(outcome, "superseded", False):
-            # The commit DID land, but a cancel won the publication race —
-            # the publisher stamped superseded evidence on the run. Walking
-            # toward ensuring_draft_mr/READY would resurrect a cancelled
-            # run (R10).
-            return
-        await self._finish_publish_leg(run_id, project_id, issue_number, outcome, plan_digest)
-
-    async def _propose_for_publish(
-        self,
-        run_id: str,
-        *,
-        issue_number: int,
-        issue_title: str,
-        plan_summary: str,
-        expected_head: str | None,
-        task_text: str = "",
-        model_route: str = "",
-    ) -> ChangeSet:
-        """The builtin lane's ``propose`` step, checkpointed (R07).
-
-        The proposal manifest is persisted under
-        ``(run_id, cycle=1, step="propose", input_digest)`` the moment the
-        proposer returns — before the publish mutation is scheduled — so a
-        re-driven leg replays the manifest instead of re-calling the model.
-        A moved base (or edited plan summary) changes the digest and
-        legitimately re-proposes. R04/A02: *task_text* and *model_route*
-        come from the frozen executable spec (the service passes them); the
-        model sees exactly the approved input, never a live issue read.
-        """
-        digest = step_input_digest(
-            {"base": expected_head or "", "issue": issue_number, "plan_summary": plan_summary}
-        )
-        recorded = await load_step_output(
-            self._session_factory, run_id=run_id, step="propose", input_digest=digest
-        )
-        if recorded is not None:
-            changeset = changeset_from_document(recorded.get("manifest"))
-            if changeset is not None:
-                logger.info(
-                    "GitHub run %s replays its persisted proposal (%d changes) — no second "
-                    "model call",
-                    run_id[:8],
-                    len(changeset.changes),
-                )
-                return changeset
-        # The implementer only reads id/issue_iid/base_sha off the run (the
-        # same minimal stub ``GitHubPublishFlow.publish_proposal`` passed).
-        run_stub: Any = SimpleNamespace(
-            id=run_id, issue_iid=issue_number, project_id=0, base_sha=expected_head or ""
-        )
-        changeset = await self._stack.implementer.propose(
-            run_stub,
-            issue_title,
-            plan_summary=plan_summary,
-            attempt_base=expected_head,
-            task_text=task_text or None,
-            model_route=model_route or None,
-        )
-        # CHECKPOINT FIRST: the paid proposal becomes durable before the
-        # publish mutation (and its intent machinery) is scheduled.
-        await record_step_output(
-            self._session_factory,
-            run_id=run_id,
-            step="propose",
-            input_digest=digest,
-            output={"manifest": changeset_to_document(changeset)},
-        )
-        return changeset
-
-    async def _finish_publish_leg(
-        self,
-        run_id: str,
-        project_id: int,
-        issue_number: int,
-        outcome: GitHubPublishOutcome,
-        plan_digest: str,
-    ) -> None:
-        """The shared publish-leg tail: candidate evidence → Draft PR → waiting_ci.
-
-        Runs identically for a fresh commit and an ADOPTED previous attempt's
-        commit (R11) — the run advances to ``waiting_ci`` on the found sha.
-        """
-        commit_oid = outcome.commit_oid or ""
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            # Walk the intermediate states the publish leg covered in one
-            # synchronous pass: propose (done pre-call) → validate → commit
-            # → ensure Draft PR. Each journals its outbox row atomically.
-            await controller.transition(
-                run_id,
-                FlowStatus.VALIDATING,
-                reason=f"CAS commit pinned to {(outcome.expected_head_oid or '')[:8]}",
-            )
-            await controller.transition(
-                run_id, FlowStatus.COMMITTING, reason=f"candidate {commit_oid[:8]}"
-            )
-            await controller.transition(
-                run_id, FlowStatus.ENSURING_DRAFT_MR, reason=f"Draft PR #{outcome.pr_number}"
-            )
-            run = await self._get_run(session, run_id)
-            run.mr_iid = outcome.pr_number
-            run.candidate_shas = list(run.candidate_shas or []) + [commit_oid]
-            run.evidence = _merge_evidence(
-                run.evidence,
-                {
-                    "published_candidate": {
-                        "sha": commit_oid,
-                        "base": outcome.expected_head_oid,
-                        "branch": outcome.branch,
-                        "pr_number": outcome.pr_number,
-                        "pr_url": outcome.pr_url,
-                    }
-                },
-            )
-            await session.commit()
-
-        # The builtin lane never parks in waiting_harness — publishing the
-        # Draft PR is this run claiming the issue, so the janitor runs here.
-        await self.close_superseded_draft_prs(
-            project_id=project_id, issue_number=issue_number, successor_run_id=run_id
-        )
-
-        # The evidence comment lands as the run walks to waiting_ci; the
-        # verification surface is the head's Actions checks (E3b wires the
-        # executor — nothing is enforced yet).
-        await self._post_journaled_note(
-            project_id,
-            issue_number,
-            self._candidate_comment(outcome, plan_digest),
-            run_id,
-            "post_evidence_note",
-        )
-
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(
-                run_id,
-                FlowStatus.WAITING_CI,
-                reason=f"Draft PR #{outcome.pr_number} for {commit_oid[:8]}",
-            )
-            await session.commit()
-        # R02: STOP at waiting_ci. PR checks are an independent verification
-        # gate — the GitHub harness reconciler polls this run and only a
-        # verified (or honestly unverified) run continues to review.
-
-    # ------------------------------------------------------------------
-    # Harness leg (E3b, ADR-0020): dispatch → waiting_harness → reconcile
-    # ------------------------------------------------------------------
+    async def _refuse_lane(self, run_id: str, refusal: LaneRefusal) -> None:
+        await self._merge_run_evidence(run_id, {"admission": refusal.as_document()})
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, refusal.reason)
 
     async def _advance_harness(
         self,
@@ -3859,6 +3529,11 @@ class GitHubRunService:
         if spec is None:
             return
         workflow = spec.harness_workflow
+        if spec.backend != "ci_harness":
+            await self._refuse_lane(
+                run_id, LaneRefusal("approved execution backend is no longer supported")
+            )
+            return
         if not workflow:
             # The frozen backend says ci_harness but the document names no
             # workflow — a corrupt dispatch contract, never a live-settings
@@ -4563,7 +4238,7 @@ class GitHubRunService:
             await self._to_terminal(
                 run_id,
                 FlowStatus.BLOCKED,
-                f"quality_contract: {failure_reason} — the frozen builtin lane "
+                f"quality_contract: {failure_reason} — the retired execution shape "
                 "has no repair dispatch",
             )
             return False
@@ -5031,7 +4706,7 @@ class GitHubRunService:
     ) -> None:
         """Well-formed candidate → trusted publisher → Draft PR → waiting_ci.
 
-        The bundle crosses the SAME trusted boundary as the builtin path
+        The bundle crosses the trusted publication boundary
         (ADR-0016 §2): publication grant, spec digest, strict
         materialization against the authoritative attempt-base contents
         (via the repository reader), policy validation, then ONE branch-CAS
@@ -6755,11 +6430,11 @@ class GitHubRunService:
         return str(getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
 
     def _harness_workflow(self) -> str:
-        """The target repo's harness workflow filename, or "" for builtin.
+        """The target repository workflow filename, or empty when not onboarded.
 
         ``FORGE_GITHUB_HARNESS_WORKFLOW`` (ADR-0020): set at onboarding to
         the human-applied ``ci/templates/forge-harness.github.yml`` filename;
-        empty (default) keeps the builtin in-worker lane.
+        empty configuration refuses admission before paid planning.
         """
         return str(getattr(self._settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or "").strip()
 
@@ -6807,7 +6482,7 @@ class GitHubRunService:
         available = _resolved if _resolved is not None else set(SHIPPED_DRIVERS)
         selection = compile_harness_selection(
             preference,
-            f"ci_harness:{self._harness_driver()}" if workflow else "builtin",
+            f"ci_harness:{self._harness_driver()}",
             available,
             self._planner_harness_proposal(),
         )
@@ -6899,7 +6574,7 @@ class GitHubRunService:
         ``LLMClient`` (stubs) are skipped.
         """
         guard = await load_budget_guard(self._session_factory, run_id)
-        for agent in (self._stack.planner, self._stack.implementer, self._stack.reviewer):
+        for agent in (self._stack.planner, self._stack.reviewer):
             client = getattr(agent, "_llm", None)
             if client is not None and hasattr(client, "set_budget"):
                 client.set_budget(guard)
@@ -7121,7 +6796,7 @@ class GitHubRunService:
             "approvers": self._approvers(),
             "target_branch": self._target_branch(),
             "required_jobs": self._required_jobs(),
-            "implementer_backend": "ci_harness" if self._harness_workflow() else "builtin",
+            "implementer_backend": "ci_harness",
             "harness_model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
             "harness_preference": resolve_preference(self._config, self._settings),
             "harness_fallback": bool(getattr(self._settings, "FORGE_HARNESS_FALLBACK", False)),
@@ -7172,7 +6847,7 @@ class GitHubRunService:
         """
         selection = harness_selection or self._compile_harness_selection()
         workflow = self._harness_workflow()
-        backend = "ci_harness" if workflow else "builtin"
+        backend = "ci_harness"
         # R13/A02/C02: the budget's numeric profile is resolved AT FREEZE
         # TIME and stored IN the spec — the gate approves exactly these
         # ceilings and the honest enforcement level of this lane. ``None``
@@ -7192,7 +6867,7 @@ class GitHubRunService:
             plan_summary=plan_summary,
             plan_files_hint=plan_files_hint,
             plan_digest=plan_digest,
-            model_route=IMPLEMENTER_TIER,
+            model_route=CODE_MODEL_TIER,
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
             waived_conclusions=sorted(waived_conclusions_from_settings(self._settings)),

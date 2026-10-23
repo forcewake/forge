@@ -32,7 +32,6 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import FlowRun, FlowStatus, LLMCall, RunBudget, load_budget_guard
-from forge.factory.implementer import LLMImplementer
 from forge.factory.llm import LLMError
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import LLMReviewer
@@ -77,7 +76,7 @@ def make_settings(**overrides) -> Settings:
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_HARNESS_TIMEOUT_SECONDS=1800,  # hermetic: dev .env sets 5400
-        FORGE_IMPLEMENTER_BACKEND="builtin",  # pinned: the dev .env sets ci_harness
+        FORGE_IMPLEMENTER_BACKEND="ci_harness",  # pinned: the dev .env sets ci_harness
     )
     values.update(overrides)
     return Settings(**values)
@@ -172,6 +171,7 @@ def fake_gitlab() -> FakeGitLab:
     fake = FakeGitLab()
     fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
     fake.seed_commit("main", "base-sha-1", "initial")
+    fake.ci_configuration = {"valid": True, "jobs": [{"name": "forge-agent"}]}
     return fake
 
 
@@ -220,7 +220,6 @@ def real_agent_service(db, fake_gitlab, llm, settings) -> RunService:
         gitlab=fake_gitlab,
         settings=settings,
         planner=LLMPlanner(llm, settings=settings),
-        implementer=LLMImplementer(llm, gitlab=fake_gitlab, settings=settings),
         reviewer=LLMReviewer(llm, gitlab=fake_gitlab, settings=settings),
     )
 
@@ -269,7 +268,7 @@ class TestProfileFreezeChain:
             "max_calls": 40,
             "max_tokens": 500000,
             "wallclock_s": 3600,
-            "enforcement": "full",
+            "enforcement": "partial",
         }
         # Provenance: the pre-plan row was backfilled with the spec digest.
         run = await get_run(db, run_id)
@@ -278,7 +277,7 @@ class TestProfileFreezeChain:
         # The honest enforcement record rides the run evidence.
         assert run.evidence["budget"] == {
             "budget_class": "standard",
-            "enforcement": "full",
+            "enforcement": "partial",
             "max_calls": 40,
             "max_tokens": 500000,
             "wallclock_s": 3600,
@@ -318,30 +317,34 @@ class TestProfileFreezeChain:
         assert unbudgeted is None
         assert "budget" not in (await get_run(db, run_id)).evidence
 
-    async def test_post_gate_legs_reserve_against_the_frozen_budget(self, db, fake_gitlab):
-        """/go advances on a FRESH service instance (the worker builds one
-        per command) — the propose + review legs must still reserve, and the
-        budget shows their actuals."""
+    async def test_lane_dispatch_keeps_planner_spend_and_makes_no_local_implementation_call(
+        self,
+        db,
+        fake_gitlab,
+    ):
         settings = make_settings(FORGE_BUDGET_PROFILES=PROFILE_JSON)
-        llm = BudgetAwareFakeLLM(session_factory=db, script=["{}", CREATE_DRAFT, REVIEW_OK_JSON])
+        llm = BudgetAwareFakeLLM(session_factory=db, script=["{}"])
         service = real_agent_service(db, fake_gitlab, llm, settings)
         run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
-
         await service.handle_command_note(
-            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+            PROJECT_ID,
+            f"@forge /go {run_id}",
+            "alice",
+            ISSUE_IID,
+            author_user_id=11,
         )
-
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.WAITING_CI.value
-        assert llm.dispatches == 2  # planner + implementer; review awaits CI
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        assert len(fake_gitlab.pipelines) == 1
+        assert llm.dispatches == 1  # planner only; the CI job owns implementation
         budget = await get_budget(db, run_id)
-        assert budget.consumed_calls == 2
-        assert budget.consumed_tokens == 30  # 15 per scripted call
+        assert budget.consumed_calls == 1
+        assert budget.consumed_tokens == 15
         assert budget.reserved_calls == 0
         assert budget.status == "open"
 
 
-class TestBuiltinExhaustion:
+class TestLaneBudgetExhaustion:
     async def test_exhausted_budget_stops_all_dispatches_and_blocks_budget_exhausted(
         self, db, fake_gitlab
     ):

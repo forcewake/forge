@@ -7,7 +7,7 @@ Public surface:
 - :func:`forge.runs.reconciler.run_reconciler` — the poll-based CI/harness
   reconciler.
 - :mod:`forge.runs.backends` — the ADR-0015 pluggable implementer backends
-  (``builtin`` and ``ci_harness``).
+  (``ci_harness``).
 - :mod:`forge.runs.candidate` — the ADR-0016 CandidateBundle and the trusted
   ``git diff`` artifact parser.
 - :mod:`forge.runs.publisher` — the ADR-0016 trusted publisher: the single
@@ -28,7 +28,6 @@ Public surface:
 from forge.runs.admission import AdmissionDecision, approvers_for, check_admission
 from forge.runs.backends import (
     CITharnessBackend,
-    BuiltinBackend,
     HarnessOutcome,
     ImplementerBackend,
     build_backend,
@@ -71,7 +70,6 @@ from forge.runs.verification import evaluate as evaluate_verification
 
 __all__ = [
     "AdmissionDecision",
-    "BuiltinBackend",
     "CITharnessBackend",
     "CandidateBundle",
     "CandidateError",

@@ -540,17 +540,10 @@ class GitLabClient:
         commit_message: str,
         start_branch: str | None = None,
     ) -> dict[str, Any]:
-        """Create a commit via the Commits API.
+        """Create a commit without retrying an uncertain write.
 
-        ``POST /projects/:id/repository/commits`` with ``branch``,
-        ``commit_message``, ``actions`` (``{action, file_path, content}``) and
-        optional ``start_branch``.
-
-        This call is **never auto-retried** (non-idempotent): a lost response
-        must not duplicate a commit. On ``httpx.TimeoutException`` raises
-        :class:`CommitOutcomeUnknown` — the caller must reconcile (match the
-        branch commits by the unique operation marker and expected parent)
-        before any retry (ADR-0005).
+        A timeout raises ``CommitOutcomeUnknown``. Reconcile the operation
+        marker and expected parent before deciding whether anything landed.
         """
         payload: dict[str, Any] = {
             "branch": branch,
@@ -593,6 +586,14 @@ class GitLabClient:
             }
             for c in raw
         ]
+
+    async def lint_ci_configuration(self, project_id: int, ref: str) -> dict[str, Any]:
+        """Read the project's compiled CI configuration without creating a pipeline."""
+        response = await self._get(
+            f"/projects/{project_id}/ci/lint",
+            params={"content_ref": ref, "include_jobs": "true", "dry_run": "false"},
+        )
+        return response.json()
 
     async def create_pipeline(
         self,

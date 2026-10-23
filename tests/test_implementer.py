@@ -1,258 +1,105 @@
-"""LLMImplementer authoritative-evidence policy (R14) + prompt budgets (R32).
+"""Retained authority-read lessons at the lane candidate publication boundary."""
 
-The authoritative base contents behind materialization are typed reads
-(:meth:`RepositoryReader.read_blob`): ONLY a provider-confirmed ``not_found``
-may treat a path as absent. A 403, a timeout or an undecodable payload must
-BLOCK the proposal with ``authoritative_read_failed`` evidence — never flip
-an update into a create. Evidence reads (tree, prompt files) stay lenient:
-incomplete evidence degrades the prompt, never the existence facts.
-
-R32: within the prompt, the repair diagnosis and the output contract are
-mandatory sections assembled before the file evidence — heavy evidence can
-truncate itself, never the instructions (deep coverage in
-``tests/test_prompt_budgets.py``).
-"""
-
-import json
-
-import httpx
 import pytest
 
-from forge.durable import FlowRun
-from forge.factory.implementer import AuthoritativeReadError, LLMImplementer
 from forge.gitlab.blob_reads import BlobReadResult
 from forge.gitlab.client import GitLabAPIError
-from forge.repository.changeset import MaterializationError
+from forge.repository import Change, ChangeSet, Operation
+from forge.runs.candidate import CandidateError, bundle_from_changeset
+from forge.runs.publisher import _fetch_base_contents, validate_candidate_bundle
 from tests.fixtures.fake_gitlab import FakeGitLab
-from tests.fixtures.fake_llm import FakeLLM
 
 PROJECT_ID = 42
-ISSUE_IID = 7
-ISSUE_TITLE = "Tweak the widget"
-BASE_SHA = "base-sha-1"
+BASE_SHA = "b" * 40
 
 
-def make_run(**overrides) -> FlowRun:
-    values = dict(id="runabc123", project_id=PROJECT_ID, issue_iid=ISSUE_IID, base_sha=BASE_SHA)
-    values.update(overrides)
-    return FlowRun(**values)
+@pytest.mark.parametrize("status", [401, 403, 500, 503])
+async def test_failed_authoritative_read_never_means_absence(status):
+    remote = FakeGitLab()
+
+    async def refused(*args, **kwargs):
+        raise GitLabAPIError(status, "cannot read pinned base")
+
+    remote.get_file = refused
+    with pytest.raises(CandidateError) as raised:
+        await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["src/app.py"])
+    assert raised.value.reason == "authoritative_read_failed"
+    assert remote.calls_of("create_commit") == []
 
 
-def update_draft(path: str, old_text: str, new_text: str) -> str:
-    return json.dumps(
-        {
-            "branch": "model/chose/this",
-            "commit_message": "model's own message",
-            "changes": [
-                {"path": path, "operation": "update", "old_text": old_text, "new_text": new_text}
+async def test_invalid_utf8_base_refuses_instead_of_replacement_decoding():
+    remote = FakeGitLab()
+    remote.seed_bytes_file("assets/binary", b"\xff\xfe\x00")
+    with pytest.raises(CandidateError, match="incomplete") as raised:
+        await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["assets/binary"])
+    assert raised.value.reason == "authoritative_read_failed"
+
+
+async def test_complete_pinned_blob_keeps_the_tail_and_deduplicates_reads():
+    remote = FakeGitLab()
+    content = "first\n" + "tail\n" * 3000
+    remote.seed_file("src/app.py", content)
+    actual = await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["src/app.py"] * 2)
+    assert actual == {"src/app.py": content}
+    assert remote.calls_of("get_file") == [("get_file", (PROJECT_ID, "src/app.py", BASE_SHA))]
+
+
+async def test_authoritative_size_cap_refuses_without_truncating(monkeypatch):
+    from forge.runs import publisher
+
+    monkeypatch.setattr(publisher, "FORGE_MATERIALIZE_MAX_FILE_CHARS", 8)
+    remote = FakeGitLab()
+    remote.seed_file("src/app.py", "123456789")
+    with pytest.raises(CandidateError) as raised:
+        await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["src/app.py"])
+    assert raised.value.reason == "file_too_large"
+
+
+async def test_confirmed_absence_permits_create_at_the_publisher():
+    remote = FakeGitLab()
+    base = await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["forge-demo/new.md"])
+    bundle = bundle_from_changeset(
+        ChangeSet(
+            "untrusted/model-branch",
+            "model message",
+            [
+                Change("forge-demo/new.md", Operation.CREATE, "new\n"),
             ],
-        }
+        ),
+        attempt_base_oid=BASE_SHA,
     )
-
-
-def create_draft(path: str, content: str = "# new\n") -> str:
-    return json.dumps(
-        {
-            "branch": "model/chose/this",
-            "commit_message": "model's own message",
-            "changes": [{"path": path, "operation": "create", "content": content}],
-        }
+    validated = validate_candidate_bundle(
+        bundle,
+        base_contents=base,
+        branch="factory/trusted",
+        commit_message="trusted message",
     )
+    assert validated.changeset.branch == "factory/trusted"
+    assert validated.changeset.commit_message == "trusted message"
+    assert validated.changeset.changes[0].content == "new\n"
 
 
-class _ForbiddenReader(FakeGitLab):
-    """A repo where EVERY authenticated read answers 403 (token scoped out)."""
+async def test_create_over_an_existing_file_is_refused():
+    remote = FakeGitLab()
+    remote.seed_file("src/app.py", "keep\n")
+    base = await _fetch_base_contents(remote, PROJECT_ID, BASE_SHA, ["src/app.py"])
+    bundle = bundle_from_changeset(
+        ChangeSet("factory/trusted", "message", [Change("src/app.py", Operation.CREATE, "new\n")]),
+        attempt_base_oid=BASE_SHA,
+    )
+    from forge.runs.publisher import PolicyViolation
 
-    async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD"):
-        raise GitLabAPIError(403, "authentication/authorization failed")
-
-    async def get_tree(self, project_id: int, path: str = "", ref: str = "HEAD", recursive=False):
-        raise GitLabAPIError(403, "authentication/authorization failed")
-
-
-class _TimeoutReader(FakeGitLab):
-    """A repo where blob reads time out while the file EXISTS."""
-
-    async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD"):
-        raise httpx.ConnectTimeout("timed out")
-
-
-@pytest.fixture()
-def fake_gitlab() -> FakeGitLab:
-    fake = FakeGitLab()
-    fake.seed_commit("main", BASE_SHA, "initial")
-    return fake
-
-
-@pytest.fixture()
-def implementer_factory():
-    def build(reader, script: list[str]) -> tuple[FakeLLM, LLMImplementer]:
-        llm = FakeLLM(script=script)
-        return llm, LLMImplementer(llm, gitlab=reader)
-
-    return build
-
-
-class TestForbiddenNeverProvesAbsence:
-    """The R14 headline: a 403 on an EXISTING file must not flip UPDATE→CREATE."""
-
-    async def test_403_on_existing_file_raises_instead_of_creating(self, implementer_factory):
-        repo = _ForbiddenReader()
-        repo.seed_commit("main", BASE_SHA, "initial")
-        repo.seed_file("src/app.py", "x = 1\n")
-        llm, implementer = implementer_factory(
-            repo, [update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+    with pytest.raises(PolicyViolation, match="already exists"):
+        validate_candidate_bundle(
+            bundle, base_contents=base, branch="factory/trusted", commit_message="trusted"
         )
 
-        with pytest.raises(AuthoritativeReadError) as exc:
-            await implementer.propose(make_run(), ISSUE_TITLE)
 
-        # Blocked with the R14 marker — not silently reclassified as absence.
-        assert "authoritative_read_failed" in str(exc.value)
-        assert "forbidden" in str(exc.value)
-        assert "src/app.py" in str(exc.value)
-        # The model was asked exactly once; no proposal survived the failure.
-        assert len(llm.calls_for("implementer")) == 1
-
-    async def test_timeout_on_existing_file_raises_instead_of_creating(self, implementer_factory):
-        repo = _TimeoutReader()
-        repo.seed_commit("main", BASE_SHA, "initial")
-        repo.seed_file("src/app.py", "x = 1\n")
-        _, implementer = implementer_factory(
-            repo, [update_draft("src/app.py", "x = 1\n", "x = 42\n")]
-        )
-
-        with pytest.raises(AuthoritativeReadError) as exc:
-            await implementer.propose(make_run(), ISSUE_TITLE)
-
-        assert "authoritative_read_failed" in str(exc.value)
-        assert "unavailable" in str(exc.value)
-
-    async def test_create_over_existing_is_rejected_when_the_file_is_readable(
-        self, fake_gitlab, implementer_factory
+def test_only_provider_confirmed_absence_is_absence():
+    assert BlobReadResult.not_found("404").confirmed_absent
+    for result in (
+        BlobReadResult.forbidden("403"),
+        BlobReadResult.unavailable("timeout"),
+        BlobReadResult.incomplete("bad bytes"),
     ):
-        # The other half of the flip: a model proposing CREATE for a file the
-        # authoritative read CAN see is rejected — create-over-existing is
-        # impossible in either direction.
-        fake_gitlab.seed_file("src/app.py", "x = 1\n")
-        llm, implementer = implementer_factory(fake_gitlab, [create_draft("src/app.py")])
-
-        with pytest.raises(MaterializationError, match="create but file already exists"):
-            await implementer.propose(make_run(), ISSUE_TITLE)
-        assert len(llm.calls_for("implementer")) == 1
-
-
-class TestStrictDecodeAtAuthority:
-    async def test_invalid_utf8_base_is_explicitly_rejected(self, fake_gitlab, implementer_factory):
-        fake_gitlab.seed_bytes_file("assets/logo.bin", b"\xff\xfe\x00\x80 binary")
-        _, implementer = implementer_factory(
-            fake_gitlab, [update_draft("assets/logo.bin", "x", "y")]
-        )
-
-        with pytest.raises(AuthoritativeReadError) as exc:
-            await implementer.propose(make_run(), ISSUE_TITLE)
-
-        assert "incomplete" in str(exc.value)
-        assert "not valid UTF-8" in str(exc.value)
-
-
-class TestConfirmedAbsence:
-    async def test_not_found_lets_a_create_materialize(self, fake_gitlab, implementer_factory):
-        llm, implementer = implementer_factory(fake_gitlab, [create_draft("forge-demo/x.md")])
-
-        cs = await implementer.propose(make_run(), ISSUE_TITLE)
-
-        assert cs.changes[0].operation.value == "create"
-        assert cs.changes[0].content == "# new\n"
-        # The absence was provider-confirmed (a 404 at the pinned base), not
-        # synthesized from a failure.
-        assert ("get_file", (PROJECT_ID, "forge-demo/x.md", BASE_SHA)) in fake_gitlab.calls_of(
-            "get_file"
-        )
-        assert len(llm.calls_for("implementer")) == 1
-
-    async def test_not_found_reports_missing_for_an_update(self, fake_gitlab, implementer_factory):
-        # Absence is honest in the other direction too: an update against a
-        # confirmed-missing file fails materialization — not a create flip,
-        # not a read failure.
-        _, implementer = implementer_factory(fake_gitlab, [update_draft("gone.py", "x", "y")])
-
-        with pytest.raises(MaterializationError, match="not in base snapshot"):
-            await implementer.propose(make_run(), ISSUE_TITLE)
-
-    async def test_confirmed_absence_is_not_a_failure_marker(self):
-        assert BlobReadResult.not_found("404").confirmed_absent
-        assert not BlobReadResult.forbidden("403").confirmed_absent
-
-
-class TestEvidenceStaysLenient:
-    async def test_incomplete_tree_listing_is_incomplete_evidence_not_a_create_flip(
-        self, fake_gitlab, implementer_factory
-    ):
-        # The tree read fails (incomplete LISTING evidence) but the file
-        # exists: the authoritative read still proves existence, so the
-        # update materializes against the FULL content — never flipped.
-        async def dead_tree(project_id, path="", ref="HEAD", recursive=False):
-            raise GitLabAPIError(500, "tree listing exploded")
-
-        fake_gitlab.get_tree = dead_tree  # type: ignore[method-assign]
-        tail = "".join(f"line {i:04d}\n" for i in range(50))
-        fake_gitlab.seed_file("src/app.py", "x = 1\n" + tail)
-        _, implementer = implementer_factory(
-            fake_gitlab, [update_draft("src/app.py", "x = 1\n", "x = 42\n")]
-        )
-
-        cs = await implementer.propose(make_run(), ISSUE_TITLE)
-
-        assert cs.changes[0].content == "x = 42\n" + tail
-
-    async def test_evidence_read_failure_does_not_block_when_model_uses_no_files(
-        self, fake_gitlab, implementer_factory
-    ):
-        # A lenient evidence read failure (the hinted file 403s) only
-        # shrinks the prompt; existence facts still come from the strict
-        # reads (the created path is provider-confirmed absent).
-        async def partial_read(project_id, file_path, ref="HEAD"):
-            if file_path == "docs/hint.md":
-                raise GitLabAPIError(403, "denied")
-            raise GitLabAPIError(404, f"file {file_path} not found")
-
-        fake_gitlab.get_file = partial_read  # type: ignore[method-assign]
-        fake_gitlab.seed_file("docs/hint.md", "hint text\n")
-        _, implementer = implementer_factory(fake_gitlab, [create_draft("forge-demo/x.md")])
-
-        cs = await implementer.propose(make_run(), ISSUE_TITLE, files_hint=["docs/hint.md"])
-
-        assert cs.changes[0].path == "forge-demo/x.md"
-
-
-class TestAuthoritativeReadErrorType:
-    def test_is_a_materialization_error_so_existing_blocks_apply(self):
-        from forge.repository.changeset import MaterializationError as ME
-
-        err = AuthoritativeReadError("src/app.py at base1234 read forbidden: 403")
-        assert isinstance(err, ME)
-        assert err.detail == "src/app.py at base1234 read forbidden: 403"
-        assert str(err).startswith("authoritative_read_failed:")
-
-
-class TestPromptSectionOrder:
-    """R32: repair diagnosis + output contract precede the file evidence."""
-
-    async def test_contract_and_repair_precede_evidence_without_overflow(
-        self, fake_gitlab, implementer_factory
-    ):
-        fake_gitlab.seed_file("src/app.py", "x = 1\n")
-        llm, implementer = implementer_factory(fake_gitlab, [create_draft("forge-demo/x.md")])
-
-        await implementer.propose(
-            make_run(), ISSUE_TITLE, files_hint=["src/app.py"], repair_context="CI failed: boom"
-        )
-
-        user = llm.calls_for("implementer")[0]["user"]
-        assert user.index("Use branch: ") < user.index("A previous attempt")
-        assert user.index("A previous attempt") < user.index("Current file contents:")
-        # Small inputs: the repair text is intact and no budget report runs.
-        assert "CI failed: boom" in user
-        assert "Evidence budget report" not in user
-        assert "Current file contents:\n--- FILE: src/app.py ---\nx = 1\n" in user
+        assert not result.confirmed_absent

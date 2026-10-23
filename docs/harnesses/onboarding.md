@@ -108,10 +108,12 @@ FORGE_HARNESS_TIMEOUT_SECONDS=1800
 FORGE_HARNESS_MODEL=glm-5.3-flash[1m]  # passed through as FORGE_HARNESS_MODEL
 ```
 
-Backend selection is tighten-only (ADR-0011): once a project runs with a
-harness backend, switching back to `builtin` is a deliberate operational
-decision, because repair loops and budgets behave differently (builtin runs
-repair with bounded LLM cycles; harness runs block instead).
+The CI lane is required. GitLab admission reads the project's compiled CI
+configuration at the source ref and requires the selected lane job. GitHub
+admission verifies the configured workflow in the repository and requires
+its `workflow_dispatch` entry. Missing or unreadable lane configuration
+blocks the run with `lane_not_onboarded` before paid planning. A run frozen
+with an older execution backend must be approved again for the lane.
 
 ### Harness preference (ADR-0023)
 
@@ -263,7 +265,7 @@ One-time, human-applied:
 Forge-side configuration:
 
 ```bash
-FORGE_GITHUB_HARNESS_WORKFLOW=forge-harness.github.yml  # empty = builtin in-worker
+FORGE_GITHUB_HARNESS_WORKFLOW=forge-harness.github.yml  # required; empty refuses admission
 FORGE_HARNESS_MODEL=glm-5.3-flash[1m]
 FORGE_HARNESS_TIMEOUT_SECONDS=1800
 ```

@@ -35,6 +35,7 @@ class FakeGitLab:
         self.notes: list[dict] = []  # issue notes
         self.mr_notes: list[dict] = []  # merge-request notes
         self.issues: dict[int, dict] = {}
+        self.ci_configuration = {"valid": True, "jobs": []}
         self.files: dict[str, str] = {}  # path -> text content (all refs)
         self.mr_updates: list[dict] = []  # journal of update_merge_request calls
         self.calls: list[tuple[str, tuple]] = []
@@ -151,6 +152,10 @@ class FakeGitLab:
         )
 
     # -- repository files / tree ---------------------------------------------
+
+    async def lint_ci_configuration(self, project_id: int, ref: str) -> dict:
+        self.calls.append(("lint_ci_configuration", (project_id, ref)))
+        return self.ci_configuration
 
     def seed_file(self, path: str, content: str) -> None:
         """Seed a file in the (ref-independent) repository snapshot."""

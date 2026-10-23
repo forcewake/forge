@@ -1216,7 +1216,7 @@ class GitHubRepositoryReader:
 
     Bound to one repository; duck-types the GitLabClient read surface the
     builtin implementer uses (``get_file`` / ``get_tree`` / ``get_issue``),
-    so :class:`~forge.factory.implementer.LLMImplementer` runs against GitHub
+    so the factory planner/reviewer runs against GitHub
     unchanged. AuthoritativeReader semantics (ADR-0016 §2, ADR-0019 §1):
 
     - full blobs, no truncation: a contents-API response without inline

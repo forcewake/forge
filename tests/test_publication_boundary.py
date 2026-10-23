@@ -186,34 +186,25 @@ def fake_github() -> FakeGitHub:
     return github
 
 
-class FixedProposer:
-    """A proposer that always returns the given changeset."""
-
-    def __init__(self, changeset: ChangeSet) -> None:
-        self.changeset = changeset
-
-    async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
-        return self.changeset
-
-
 async def publish_via_github(fake: FakeGitHub, changeset: ChangeSet, scope):
-    """The builtin bridge entry (the R01 path): propose → boundary → write."""
-    flow = GitHubPublishFlow(
-        fake, proposer=FixedProposer(changeset), base_branch="main", reader=fake
-    )
-    return await flow.publish_proposal(
-        owner="acme",
-        repo="acme-widget",
+    """The lane-candidate entry validates bytes before any native write."""
+    flow = GitHubPublishFlow(fake, base_branch="main")
+    return await flow.publish_candidate(
+        "acme",
+        "acme-widget",
         issue_number=42,
         run_id=RUN_ID,
-        issue_title="Add password reset",
+        bundle=bundle_from_changeset(changeset, attempt_base_oid=GH_BASE_HEAD),
+        commit_message=changeset.commit_message,
+        base_branch="main",
+        expected_head=GH_BASE_HEAD,
         allowed_paths=list(scope) if scope else None,
     )
 
 
 async def publish_via_github_transport(fake: FakeGitHub, changeset: ChangeSet, scope):
     """The transport entry, invoked DIRECTLY with an unvalidated changeset."""
-    flow = GitHubPublishFlow(fake, proposer=FixedProposer(changeset), base_branch="main")
+    flow = GitHubPublishFlow(fake, base_branch="main")
     return await flow.publish_changeset(
         "acme",
         "acme-widget",
@@ -255,7 +246,7 @@ async def publish_via_gitlab(db, fake: FakeGitLab, changeset: ChangeSet, scope) 
 
 class TestZeroWritesOnRejection:
     @pytest.mark.parametrize("name,make_cs,fragment,scope", SCENARIOS)
-    async def test_github_builtin_bridge_refuses_and_never_mutates(
+    async def test_github_lane_candidate_refuses_and_never_mutates(
         self, fake_github, name, make_cs, fragment, scope
     ):
         outcome = await publish_via_github(fake_github, make_cs(), scope)

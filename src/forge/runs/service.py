@@ -7,18 +7,10 @@ gate and advances ``proposing → validating → committing → ensuring_draft_m
 waiting_ci``. The :mod:`forge.runs.reconciler` then drives ``waiting_ci → … →
 ready_for_human`` by polling pipelines.
 
-Since M2-1 the planner/implementer/reviewer behind these steps are real LLM
-agents (ADR-0014), constructor-injected with the LLM-driven defaults; tests
-inject stubs/fakes. Since M2-2 the implementer step itself is pluggable
-(ADR-0015): the ``builtin`` backend keeps the synchronous propose→validate→
-commit path, while ``ci_harness`` delegates implementation to a coding
-harness running as a job in the target project's CI — the run parks durably
-in ``waiting_harness`` and the reconciler polls it, adopting the result only
-after verifying the real branch head SHA. CI verdicts go through the
-ADR-0008 quality contract with failure classification: only *code* failures
-trigger the bounded repair loop (``evaluating_ci → proposing → … →
-waiting_ci``, at most ``FORGE_MAX_COMMIT_CYCLES - 1`` repairs) — and never
-on harness runs, which make no forge-side LLM calls after the gate.
+The server plans and reviews through read-only agents. Implementation runs
+only in target-project CI, parks durably in ``waiting_harness``, and returns
+candidate bytes to the trusted publisher. Admission verifies the project
+lane before planning. Stored execution shapes without a lane are refused.
 Infrastructure, config and unknown-evidence failures block the run instead
 of burning model calls. Every model call lands in the ``llm_calls`` ledger
 (ADR-0013) and the run accumulates evidence (plan, review, pipeline) in
@@ -203,7 +195,7 @@ from forge.durable.budgets import (
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition, StaleClaimError
 from forge.durable.claims import current_claim
-from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
+from forge.runs.lane import CODE_MODEL_TIER, LaneRefusal, gitlab_lane_admission
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
@@ -215,19 +207,12 @@ from forge.project_config import ConfigReadResult, read_project_config
 from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
     ChangesetWriter,
-    MaterializationError,
-    WriteOutcome,
-    changeset_from_document,
-    changeset_to_document,
-    validate_changeset,
 )
-from forge.repository.writer import BranchDriftError
 from forge.runs.admission import check_admission
 from forge.runs.backends import (
     BackendStartSpec,
     HarnessOutcome,
     build_backend,
-    fetch_git_base,
     is_harness_backend,
 )
 from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
@@ -238,7 +223,6 @@ from forge.runs.consistency import (
     ready_reason,
     verified_verdict,
 )
-from forge.runs.candidate import AttemptContext
 from forge.runs.ci_contract import classify_failure
 from forge.runs.execution_profile import derive_from_reader
 from forge.runs.harness_selection import (
@@ -863,18 +847,8 @@ REPAIR_MAX_FAILED_JOBS = 3
 
 
 def budget_enforcement_for_backend(backend: str) -> str:
-    """The honest enforcement level of a lane for its frozen budget (R13 §4).
-
-    ``full`` — every model dispatch of the lane is intercepted before the
-    provider is contacted (the builtin lane: each call reserves through the
-    :class:`~forge.durable.budgets.BudgetGuard`, so calls, tokens AND the
-    wall clock are enforced). ``partial`` — CLI harness lanes: forge makes no
-    per-call interception (the model calls happen inside the CI job), so only
-    the wall clock and the episode count are enforced at dispatch/poll time;
-    call/token ceilings are reconciled after the fact from the artifact's
-    usage receipt and are never claimed as enforced.
-    """
-    return "partial" if is_harness_backend(backend) else "full"
+    """CI jobs enforce episode/time caps; model usage is reconciled separately."""
+    return "partial"
 
 
 def forge_token(settings: Settings) -> str:
@@ -894,7 +868,7 @@ def build_default_agents(
     gitlab: GitLabClient,
     session_factory: async_sessionmaker[AsyncSession],
     budget: "BudgetGuard | None" = None,
-) -> tuple[LLMPlanner, LLMImplementer, LLMReviewer]:
+) -> tuple[LLMPlanner, LLMReviewer]:
     """Construct the real LLM-driven factory agents over one shared client.
 
     When a run budget is supplied, every model call through the shared
@@ -903,7 +877,6 @@ def build_default_agents(
     llm = LLMClient(settings=settings, session_factory=session_factory, budget=budget)
     return (
         LLMPlanner(llm, settings=settings),
-        LLMImplementer(llm, gitlab=gitlab, settings=settings),
         LLMReviewer(llm, gitlab=gitlab, settings=settings),
     )
 
@@ -1041,15 +1014,13 @@ class RunService:
         self._credential_broker = (
             credential_broker if credential_broker is not None else EnvBroker()
         )
-        if planner is None or implementer is None or reviewer is None:
-            default_planner, default_implementer, default_reviewer = build_default_agents(
+        if planner is None or reviewer is None:
+            default_planner, default_reviewer = build_default_agents(
                 settings, gitlab, session_factory
             )
             planner = planner if planner is not None else default_planner
-            implementer = implementer if implementer is not None else default_implementer
             reviewer = reviewer if reviewer is not None else default_reviewer
         self._planner = planner
-        self._implementer = implementer
         self._reviewer = reviewer
         # Q39-13 (#332): once the MR discussions surface answers 404
         # (an older CE instance, a scoped token), the auxiliary
@@ -1271,12 +1242,22 @@ class RunService:
         resume in :meth:`start_run`; every stage it ends with is idempotent
         (see :meth:`_finish_plan_publication`).
         """
-        # F22/R13: the run's numeric budget is resolved and opened BEFORE the
-        # first paid call (idempotent per run — a resumed leg finds the
-        # frozen row). The budget class comes from the harness decision
-        # (compiled at plan time, ADR-0023 §2), and the class names a numeric
-        # profile resolved AT FREEZE TIME; nothing configured → no ceilings.
-        harness_selection = self._compile_harness_selection()
+        ref = await self._read_base_sha(project_id) or self._target_branch()
+        refusal, project_lanes = await gitlab_lane_admission(
+            self._gitlab, project_id, ref, self._backend_name()
+        )
+        declared = resolve_available_drivers(self._config, self._settings)
+        if declared is not None:
+            project_lanes &= declared
+            if not project_lanes:
+                refusal = LaneRefusal("the driver inventory excludes every project CI lane")
+        if refusal is not None:
+            await self._refuse_lane(run_id, refusal)
+            await self._post_journaled_note(
+                project_id, issue_iid, refusal.reason, run_id, "lane_not_onboarded"
+            )
+            return
+        harness_selection = self._compile_harness_selection(project_lanes)
         budget_limits = self._budget_limits_for_class(harness_selection.budget_class)
         if budget_limits is not None:
             async with self._session_factory() as session:
@@ -1289,15 +1270,6 @@ class RunService:
                 )
                 await session.commit()
         await self._apply_run_budget(run_id)
-        # v0.7 monorepo path scoping, A13: the project's `.forge.yml`
-        # ``implement.paths`` globs are resolved BEFORE the plan — they shape
-        # the plan prompt and are frozen into the RunSpec (with the config
-        # read's provenance) that the publisher and the builtin validation
-        # enforce. The read is TYPED (R14 pattern): only a provider-confirmed
-        # absence earns the documented default profile; an unreadable or
-        # invalid config parks the run blocked(config_…) — a read failure
-        # must never WIDEN the run's scope, and nothing was paid or
-        # committed while it waits (the reconciler retries the read).
         config_read = await read_project_config(self._gitlab, project_id, ref=self._target_branch())
         if config_read.needs_block:
             await self._park_config_blocked(
@@ -1344,9 +1316,6 @@ class RunService:
                     path_scope=path_scope or None,
                 )
             except (LLMError, LLMResponseError) as exc:
-                # R13: a budget refusal never contacts the provider and never
-                # unblocks by retrying the same run — classify it visibly as
-                # blocked(budget_exhausted), not a planning failure.
                 if str(exc) == BUDGET_EXHAUSTED:
                     await self._to_terminal(
                         run_id,
@@ -1356,14 +1325,7 @@ class RunService:
                 else:
                     await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
                 raise
-            # B11: recompile the selection against the CURRENT plan (the
-            # planner's ``last_plan`` is THIS plan) — a reused planner can
-            # never leak a previous run's plan into this decision.
-            harness_selection = self._compile_harness_selection()
-            # R42-16 (#379's named pin): the pre-plan budget row above froze
-            # its limits at open time (idempotent by run — an assessment is
-            # a REQUEST, never a grant). A proposal-driven class change must
-            # not freeze a spec whose ceilings the opened row cannot
+            harness_selection = self._compile_harness_selection(project_lanes)
             # enforce: the selection keeps the planner's class, its
             # ENFORCEABLE ceilings stay the opened ones, and the pin is
             # loud — the GitHub leg's B11 block is the precedent, so the
@@ -1660,7 +1622,6 @@ class RunService:
         )
         for agent, agent_guard in (
             (self._planner, guard),
-            (self._implementer, guard),
             (self._reviewer, closing_guard),
         ):
             client = getattr(agent, "_llm", None)
@@ -5500,359 +5461,16 @@ class RunService:
         self,
         project_id: int,
         run_id: str,
-        *,
-        repair_context: str = "",
-        repair_reason: str | None = None,
-        context_title: str | None = None,
+        **kwargs: Any,
     ) -> None:
-        """Run one propose → validate → commit → MR cycle (initial or repair).
-
-        The caller has already moved the run to ``proposing`` (post-gate or
-        repair re-entry) and bumped ``commit_cycle`` for repairs. A crash
-        resume may enter mid-leg instead (the run already sat in
-        ``validating``/``committing``/``ensuring_draft_mr``): stages already
-        left behind are not re-entered — the walk continues from where the
-        durable state says it is (ADR-0017 §3). ``context_title`` (R40-02)
-        relabels the appended context block for callers whose context is a
-        reviewer's correction rather than a failed-CI repair.
-        """
-        if not await self._reserve_execution_capacity(project_id, run_id):
-            return
-        # F22/R13: (re)bind this run's budget guard before any paid call —
-        # the guard lives per run in the database, and the service instance
-        # handling this leg may be fresh (the worker builds one per command),
-        # so the start_run binding cannot be relied on here.
-        await self._apply_run_budget(run_id)
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            # F02/R06: ONE context owns this attempt's bases — the implementer
-            # reads and materializes at ``attempt_base``, update/delete
-            # existence is validated against the SAME snapshot, and the writer
-            # pins the branch to it. Repairs build on the last VERIFIED
-            # candidate, not the original approved base — otherwise cycle 2
-            # cannot see cycle 1's files and its update would roll work back.
-            # The ``source_base`` stays frozen for the final cumulative
-            # review/acceptance only; it never decides repair existence.
-            attempt = AttemptContext.of(run)
-            entry_status = run.status
-            recorded_attempt = (run.evidence or {}).get("attempt")
-
-        # R04 (ADR-0018 §1): the executable spec is THE approved input — the
-        # frozen task text, plan artifact, model route and path policy come
-        # from it, never from live Settings or a live issue re-read. A
-        # missing or tampered spec blocks the run (never a silent fallback).
-        try:
-            spec = await self._load_executable_spec(run_id)
-        except SpecInvalid as exc:
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
-            return
-        plan_summary, files_hint = spec.plan_summary, list(spec.plan_files_hint)
-        await self._record_spec_drift(project_id, run_id, spec)
-        # R41-04 (#359): the publication ref is the run's COLLABORATION
-        # target source branch — resolved BEFORE the proposal so the
-        # proposer's id-derived default is rebound (a modern round's
-        # independent child id would otherwise fork a NEW branch and
-        # MR). An unresolved target parks the run typed before any paid
-        # call.
-        source_branch = await self._collaboration_branch_or_block(run_id)
-        if source_branch is None:
-            return
-        mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
-        # ADR-0017 §3 (R06): mid-leg, the persisted record — not a fresh
-        # re-derivation — says what this attempt actually started from.
-        # Durable state may have drifted under a crashed attempt
-        # (``candidate_shas``, ``commit_cycle``); re-deriving would aim the
-        # remaining legs at a snapshot the proposal never read and re-propose
-        # (a second paid call) changes that are already materialized. A
-        # same-cycle record is never stale, so its base wins.
-        if (
-            mid_leg
-            and isinstance(recorded_attempt, dict)
-            and recorded_attempt.get("cycle") == attempt.cycle
-            and isinstance(recorded_attempt.get("attempt_base"), str)
-            and recorded_attempt.get("attempt_base")
-        ):
-            previous = recorded_attempt.get("previous_candidate")
-            attempt = AttemptContext(
-                cycle=attempt.cycle,
-                attempt_base=str(recorded_attempt["attempt_base"]),
-                source_base=attempt.source_base,
-                previous_candidate=previous if isinstance(previous, str) else None,
-            )
-
-        # ADR-0017 §3 (R06): a walk that re-enters its own attempt adopts the
-        # manifest it already materialized for THIS cycle at THIS base — same
-        # changes, no second paid proposal. Anything else (first proposal, a
-        # new repair cycle, a stale or absent record) proposes at the attempt
-        # base as before.
-        # R04: no live issue re-read — the implementer executes the FROZEN
-        # task text the approver saw, whatever the issue shows now (drift is
-        # recorded as ``spec_drift`` evidence above, never re-read into work).
-        changeset = (
-            changeset_from_document(recorded_attempt.get("manifest"))
-            if isinstance(recorded_attempt, dict)
-            and recorded_attempt.get("cycle") == attempt.cycle
-            and recorded_attempt.get("attempt_base") == attempt.attempt_base
-            else None
+        """Refuse a stored execution shape that predates the CI-only lane."""
+        await self._refuse_lane(
+            run_id, LaneRefusal("approved execution backend is no longer supported")
         )
-        if changeset is not None:
-            logger.info(
-                "Run %s cycle %d resumes on its recorded manifest (%d changes)",
-                run_id[:8],
-                attempt.cycle,
-                len(changeset.changes),
-            )
-            # R41-04 (#359): a resumed manifest rebinds to the target
-            # branch too (a no-op for manifests recorded after #359; a
-            # legacy manifest's id-derived default corrects here, before
-            # any effect leg consumes it).
-            changeset = replace(changeset, branch=source_branch)
-        else:
-            try:
-                changeset = await self._implementer.propose(
-                    run,
-                    spec.task_title,
-                    plan_summary=plan_summary,
-                    files_hint=files_hint,
-                    repair_context=repair_context,
-                    attempt_base=attempt.attempt_base,
-                    task_text=spec.task_text,
-                    model_route=spec.model_route,
-                )
-            except MaterializationError as exc:
-                # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
-                # a blocked run, not a guess.
-                await self._to_terminal(
-                    run_id, FlowStatus.BLOCKED, f"changeset_invalid: materialization: {exc}"
-                )
-                return
-            except (LLMError, LLMResponseError) as exc:
-                # R13: a budget refusal means the provider was never
-                # contacted and no in-run retry can succeed — classify it
-                # blocked(budget_exhausted), not a proposal failure.
-                if str(exc) == BUDGET_EXHAUSTED:
-                    await self._to_terminal(
-                        run_id,
-                        FlowStatus.BLOCKED,
-                        f"{BUDGET_EXHAUSTED}: proposer refused — run budget cannot grant a call",
-                    )
-                else:
-                    await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
-                return
-            # R41-04 (#359): rebind the proposer's branch suggestion to
-            # the run's collaboration source branch BEFORE the manifest
-            # persists — the recorded manifest carries the target ref,
-            # and every downstream leg (writer, MR, intents) consumes
-            # the one contract.
-            changeset = replace(changeset, branch=source_branch)
-            # R06: persist the attempt (number, manifest, previous candidate)
-            # the moment it materializes — the durable record a resumed walk
-            # continues from.
-            await self._merge_run_evidence(
-                run_id,
-                {
-                    "attempt": {
-                        **attempt.document(),
-                        "manifest": changeset_to_document(changeset),
-                    }
-                },
-            )
 
-        if not mid_leg:
-            await self._transition(run_id, FlowStatus.VALIDATING)
-
-        # validating: trusted ADR-0001 validation; violations block the run.
-        # The run's frozen RunSpec ``allowed_paths`` scope (v0.7 monorepo
-        # scoping) is enforced here too — the builtin path is the second of
-        # the two write boundaries (the trusted publisher is the other).
-        # R04: the scope comes from the digest-verified spec, not a raw read.
-        allowed_paths = list(spec.allowed_paths)
-        # R06: existence is checked at the ATTEMPT base — the snapshot the
-        # proposal was materialized against. The frozen source base would
-        # report a cycle-1 created file as missing and block a legitimate
-        # cycle-2 update of it.
-        git_base = await self._fetch_git_base(
-            project_id,
-            [change.path for change in changeset.changes],
-            attempt.attempt_base,
-        )
-        violations = validate_changeset(changeset, git_base, allowed_paths=allowed_paths)
-        if violations:
-            await self._to_terminal(
-                run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
-            )
-            return
-
-        # A resumed ``validating`` entry still owes the graph the committing
-        # move — validating -> ensuring_draft_mr is not a legal edge (ADR-0004).
-        if not mid_leg or entry_status == FlowStatus.VALIDATING.value:
-            await self._transition(run_id, FlowStatus.COMMITTING)
-
-        # committing: journaled, reconcilable write (ADR-0005). The factory
-        # branch is cut from the FROZEN attempt base (review F03) — never
-        # from the live target branch — and the expected head is checked
-        # before the commit (BranchDriftError on drift).
-        writer = self._writer_class(
-            self._gitlab,
-            self._session_factory,
-            project_id,
-            settle_seconds=self._publish_settle_seconds(),
-        )
-        # F13 (ADR-0018 §4): re-read the publication grant right before
-        # applying — a cancel that landed while this proposal was in flight
-        # revokes it, so this leg stands down instead of racing the cancel.
-        if await self._publication_revoked(run_id):
-            logger.info(
-                "Run %s cancelled before publication — dropping in-flight proposal",
-                run_id[:8],
-            )
-            return
-        # ADR-0017 §3: look for the already-existing effect before creating a
-        # new one — a crashed attempt may have landed the commit after the
-        # journal recorded it but before the run state caught up.
-        commit_sha = await self._committed_candidate(run_id, project_id, changeset.branch)
-        if commit_sha is not None:
-            logger.info(
-                "Run %s adopting committed candidate %s — no second commit",
-                run_id[:8],
-                commit_sha[:8],
-            )
-        else:
-            try:
-                result = await writer.apply(
-                    run_id,
-                    changeset,
-                    start_ref=attempt.attempt_base,
-                    expected_head=attempt.attempt_base,
-                    # R11 intent identity: the writer journals the durable
-                    # publication intent (stable operation key + expected
-                    # parent) BEFORE the HTTP effect; an open intent from a
-                    # crashed attempt is probed-and-adopted, never
-                    # duplicated and never misread as branch drift.
-                    provider="gitlab",
-                    repo=str(project_id),
-                    commit_cycle=attempt.cycle,
-                )
-            except GitLabAPIError as exc:
-                await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
-                return
-            except BranchDriftError as exc:
-                # A human push on the factory branch is never force-fixed
-                # (review F03): the guarded apply refused, so the run stops
-                # here with the reason — the same contract as the harness
-                # publisher and the GitHub lanes, and the branch keeps
-                # the human's commit.
-                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"branch_drift: {exc}")
-                return
-            if result.outcome is WriteOutcome.SETTLING:
-                # A12: the recovery probe was negative — the intent parked in
-                # the effect-certainty window. NOT a terminal outcome: the
-                # run stays in ``committing`` so the window-end re-probe
-                # (evaluate_publication_intents) can adopt a late-landing
-                # commit or resolve the honest unknown. The step's lease
-                # expiry re-drives the leg, which adopts via the journal.
-                logger.info(
-                    "Run %s publication negative-probed — settling in the A12 "
-                    "certainty window (no re-dispatch)",
-                    run_id[:8],
-                )
-                return
-            if result.outcome is WriteOutcome.UNKNOWN:
-                # Unknown outcome: block the run, never blind-retry (ADR-0005).
-                await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
-                return
-            commit_sha = result.commit_sha
-            if commit_sha is None:
-                # A known (committed) outcome always carries the sha — treat a
-                # missing one as unknown rather than crash downstream.
-                await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
-                return
-
-        if entry_status != FlowStatus.ENSURING_DRAFT_MR.value:
-            try:
-                await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
-            except (InvalidTransition, StaleClaimError):
-                # A concurrent recovery may already have walked the run
-                # past this stage (its own MR ensured) — the reads below
-                # see the row as it is and adopt instead of fighting.
-                async with self._session_factory() as probe:
-                    current = await self._get_run(probe, run_id)
-                if current is None or current.status not in (
-                    FlowStatus.ENSURING_DRAFT_MR.value,
-                    FlowStatus.WAITING_CI.value,
-                ):
-                    raise
-                logger.info(
-                    "Run %s already past ensuring_draft_mr (now %s) — continuing the leg",
-                    run_id[:8],
-                    current.status,
-                )
-
-        # ensuring_draft_mr: Draft MR before CI (ADR-0007). On a repair the MR
-        # already exists — update it instead of creating a second one.
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            mr_iid = run.mr_iid
-            cycle = run.commit_cycle or 1
-        if mr_iid is None:
-            # ADR-0017 §3: a crashed attempt may have created the Draft MR
-            # already (its intent/outcome is journaled) — adopt it, never
-            # create a second MR for the run.
-            mr_iid = await self._journaled_draft_mr(run_id, project_id, changeset.branch)
-        try:
-            if mr_iid is not None:
-                await self._update_draft_mr(
-                    project_id,
-                    run_id,
-                    mr_iid,
-                    changeset.branch,
-                    commit_sha,
-                    cycle,
-                    repair_reason=repair_reason,
-                )
-            else:
-                mr_iid = await self._create_draft_mr(
-                    project_id, run_id, changeset.branch, commit_sha
-                )
-        except GitLabAPIError as exc:
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"mr_failed: {exc}")
-            return
-        except httpx.HTTPError:
-            # Lost MR response that survived retries — unknown, stop the run.
-            await self._to_terminal(run_id, FlowStatus.FAILED, "mr_unknown_outcome")
-            return
-
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            try:
-                await controller.transition(
-                    run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {commit_sha[:8]}"
-                )
-            except (InvalidTransition, StaleClaimError):
-                # A concurrent recovery (the publication-intent scanner
-                # finishing an adopted commit's walk) already landed the
-                # run in waiting_ci with its MR — this leg's remaining
-                # writes are all recorded on the row; stand down instead
-                # of fighting a walk that already finished.
-                run = await self._get_run(session, run_id)
-                if run is None or run.status != FlowStatus.WAITING_CI.value:
-                    raise
-                logger.info(
-                    "Run %s already walked to waiting_ci by a concurrent recovery — "
-                    "standing down (mr=%s)",
-                    run_id[:8],
-                    run.mr_iid,
-                )
-                await session.rollback()
-                return
-            run = await self._get_run(session, run_id)
-            run.mr_iid = mr_iid
-            run.candidate_shas = list(run.candidate_shas or []) + [commit_sha]
-            await session.commit()
-
-        logger.info(
-            "Run %s committed %s (cycle %d) — waiting for CI", run_id[:8], commit_sha[:8], cycle
-        )
+    async def _refuse_lane(self, run_id: str, refusal: LaneRefusal) -> None:
+        await self._merge_run_evidence(run_id, {"admission": refusal.as_document()})
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, refusal.reason)
 
     async def _advance_harness(
         self,
@@ -5946,6 +5564,11 @@ class RunService:
             spec = await self._load_executable_spec(run_id)
         except SpecInvalid as exc:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
+            return
+        if not is_harness_backend(spec.backend):
+            await self._refuse_lane(
+                run_id, LaneRefusal("approved execution backend is no longer supported")
+            )
             return
         await self._record_spec_drift(project_id, run_id, spec)
 
@@ -6558,7 +6181,7 @@ class RunService:
 
     def _backend_name(self) -> str:
         """The configured implementer backend (ADR-0015), frozen per run."""
-        raw = getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin"
+        raw = getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "ci_harness") or ""
         return str(raw).strip()
 
     async def _budget_episode_block(
@@ -7080,46 +6703,6 @@ class RunService:
             reservation.mr_iid = int(mr["iid"])
             await session.commit()
             return int(mr["iid"])
-
-    async def _committed_candidate(self, run_id: str, project_id: int, branch: str) -> str | None:
-        """The candidate a crashed attempt already committed on *branch* (ADR-0017 §3).
-
-        The journaled ``commit`` action is the durable record of the write: a
-        succeeded row carries the sha even when the process died before the
-        run state caught up. The sha is adopted only when it is NOT yet
-        accounted for in ``candidate_shas`` (otherwise this is a repair cycle,
-        which must write a NEW candidate) and is still the live branch head
-        (otherwise the branch drifted and the guarded apply must decide).
-        """
-        async with self._session_factory() as session:
-            row = (
-                (
-                    await session.execute(
-                        select(ActionLog)
-                        .where(
-                            ActionLog.flow_run_id == run_id,
-                            ActionLog.action_kind == "commit",
-                            ActionLog.correlation_id == branch,
-                            ActionLog.status == "succeeded",
-                        )
-                        .order_by(ActionLog.id.desc())
-                        .limit(1)
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            sha = str(((row.remote_result or {}).get("sha") if row is not None else "") or "")
-            if not sha:
-                return None
-            run = await self._get_run(session, run_id)
-            if run is not None and sha in list(run.candidate_shas or []):
-                return None  # repair cycle — this commit is accounted for
-        try:
-            head = await self._gitlab.get_branch_head(project_id, branch)
-        except GitLabAPIError:
-            return None  # cannot verify — let the drift-guarded apply decide
-        return sha if head == sha else None
 
     async def _journaled_draft_mr(self, run_id: str, project_id: int, branch: str) -> int | None:
         """The Draft MR a crashed attempt already created, if it still exists (ADR-0017 §3)."""
@@ -9635,7 +9218,7 @@ class RunService:
                     run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {sha[:8]}"
                 )
             except (InvalidTransition, StaleClaimError):
-                # The builtin leg's comment applies verbatim: a concurrent
+                # The publication rule applies here: a concurrent
                 # recovery may have finished this walk already.
                 run = await self._get_run(session, run_id)
                 if run is None or run.status != FlowStatus.WAITING_CI.value:
@@ -9920,7 +9503,7 @@ class RunService:
             )
             await session.commit()
 
-    def _compile_harness_selection(self) -> HarnessSelection:
+    def _compile_harness_selection(self, project_lanes: set[str] | None = None) -> HarnessSelection:
         """ADR-0023 §2: preference ∩ lanes → the frozen harness decision.
 
         The configured backend driver is always part of the list (tighten-
@@ -9952,6 +9535,8 @@ class RunService:
         # disjoint configured driver below).
         _resolved = resolve_available_drivers(self._config, self._settings)
         available = _resolved if _resolved is not None else set(SHIPPED_DRIVERS)
+        if project_lanes is not None:
+            available &= project_lanes
         selection = compile_harness_selection(
             preference,
             backend,
@@ -10072,7 +9657,7 @@ class RunService:
             plan_summary=plan_summary,
             plan_files_hint=plan_files_hint,
             plan_digest=plan_digest,
-            model_route=IMPLEMENTER_TIER,
+            model_route=CODE_MODEL_TIER,
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
             waived_conclusions=sorted(waived_conclusions_from_settings(self._settings)),
@@ -10380,18 +9965,17 @@ class RunService:
             run = await self._get_run(session, run_id)
             return run.issue_iid
 
-    async def _fetch_git_base(
-        self,
-        project_id: int,
-        paths: list[str],
-        base_sha: str | None,
-    ) -> dict[str, str]:
-        """Fetch base content for the update/delete paths at the base snapshot.
+    async def _read_base_sha(self, project_id: int) -> str:
+        """Record the pinned base (head of the target branch) at planning time.
 
-        Delegates to :func:`forge.runs.backends.fetch_git_base` — the trusted
-        layer's own read (ADR-0001/0006), shared with the builtin backend.
+        F28: reads the branch object (single GET) — head checks must not
+        paginate the commit history.
         """
-        return await fetch_git_base(self._gitlab, project_id, paths, base_sha)
+        try:
+            return await self._gitlab.get_branch_head(project_id, self._target_branch())
+        except GitLabAPIError:
+            logger.warning("Could not read base head for project %d", project_id, exc_info=True)
+            return ""
 
     def _plan_comment(
         self, run_id: str, plan: str, digest: str, harness_selection: HarnessSelection
@@ -10456,18 +10040,6 @@ class RunService:
             f"{closing}\n\n"
             "*This is an automated message.*"
         )
-
-    async def _read_base_sha(self, project_id: int) -> str:
-        """Record the pinned base (head of the target branch) at planning time.
-
-        F28: reads the branch object (single GET) — head checks must not
-        paginate the commit history.
-        """
-        try:
-            return await self._gitlab.get_branch_head(project_id, self._target_branch())
-        except GitLabAPIError:
-            logger.warning("Could not read base head for project %d", project_id, exc_info=True)
-            return ""
 
     async def _read_issue_title(self, project_id: int, run_or_iid) -> str:
         """Fetch the issue title; fall back to a neutral label on read failure."""

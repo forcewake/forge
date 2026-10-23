@@ -21,7 +21,7 @@ GitLab's ``last_commit_id`` file-level CAS becomes a branch-wide CAS here),
 and the Draft PR is created with ``draft: true``. The branch CAS turns a
 would-be duplicate commit into ``STALE_DATA`` — surfaced as a drift outcome,
 never a silent retry (research §3.4). Since ADR-0026 the SAME trusted
-boundary guards every provider×backend: ``publish_proposal`` wraps the
+boundary guards every provider×backend: ``publish_changeset`` wraps the
 proposal with :func:`bundle_from_changeset` and materializes it against
 authoritative base contents (R08/R09 digest verification), and
 :func:`validate_changeset` policy + ``allowed_paths`` run before the first
@@ -36,7 +36,6 @@ from collections.abc import Awaitable, Callable
 
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -46,10 +45,7 @@ from forge.adaptive.pause_fence import PauseFenceDecision
 from forge.config import Settings
 from forge.durable import short_run_id
 from forge.durable.intents import commit_matches, message_with_marker
-from forge.factory.implementer import (
-    FORGE_MATERIALIZE_MAX_FILE_CHARS,
-    LLMImplementer,
-)
+from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.factory.llm import LLMClient
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import (
@@ -159,71 +155,8 @@ class GitHubPublishFlow:
         reader: BaseContentReader | None = None,
     ) -> None:
         self._client = client
-        self._proposer = proposer
         self._base_branch = base_branch
         self._reader = reader
-
-    async def publish_proposal(
-        self,
-        *,
-        owner: str,
-        repo: str,
-        issue_number: int,
-        run_id: str,
-        issue_title: str,
-        plan_summary: str = "",
-        base_branch: str | None = None,
-        expected_head: str | None = None,
-        allowed_paths: list[str] | None = None,
-        operation_key: str | None = None,
-        publication_fence: PublicationFence | None = None,
-    ) -> GitHubPublishOutcome:
-        """Builtin-implementer leg: propose against the frozen base, publish.
-
-        The proposer reads repository evidence through a
-        :class:`GitHubRepositoryReader` (injected at construction), so the
-        builtin implementer runs against GitHub unchanged. ``run`` is a
-        minimal stub — the implementer only uses id/issue_iid/base_sha of it.
-
-        ``expected_head`` is the FROZEN base the plan was approved against —
-        pinned by the gate at plan time. When omitted the base head is read
-        live (the caller owns that decision). ``allowed_paths`` is the
-        RunSpec's frozen scope; the proposal crosses the SAME ADR-0026
-        publication boundary as every other backend — policy validation
-        (``validate_changeset`` / denied paths / size caps / the scope) and
-        R08/R09 digest verification run BEFORE any commit-API call, and a
-        violation is a blocked outcome with zero mutations (review R01).
-        ``operation_key`` is the durable publication intent's stable key
-        (R11) — stamped into the commit headline for identity probes.
-        """
-        if self._proposer is None:
-            raise ValueError("publish_proposal requires a proposer")
-        base = base_branch or self._base_branch
-        if expected_head is None:
-            expected_head = await self._client.get_branch_head(owner, repo, base)
-        run_stub = SimpleNamespace(
-            id=run_id, issue_iid=issue_number, project_id=0, base_sha=expected_head
-        )
-        changeset = await self._proposer.propose(
-            run_stub,
-            issue_title,
-            plan_summary=plan_summary,
-            attempt_base=expected_head,
-        )
-        bundle = bundle_from_changeset(changeset, attempt_base_oid=expected_head)
-        return await self._publish_bundle(
-            owner,
-            repo,
-            issue_number=issue_number,
-            run_id=run_id,
-            bundle=bundle,
-            commit_message=changeset.commit_message,
-            base_branch=base,
-            expected_head=expected_head,
-            allowed_paths=allowed_paths,
-            operation_key=operation_key,
-            publication_fence=publication_fence,
-        )
 
     async def publish_changeset(
         self,
@@ -264,7 +197,7 @@ class GitHubPublishFlow:
         if expected_head is None:
             expected_head = await self._client.get_branch_head(owner, repo, base)
         bundle = bundle_from_changeset(changeset, attempt_base_oid=expected_head)
-        return await self._publish_bundle(
+        return await self.publish_candidate(
             owner,
             repo,
             issue_number=issue_number,
@@ -332,7 +265,7 @@ class GitHubPublishFlow:
             raise TypeError(
                 "publish_validated requires a ValidatedCandidate issued by the "
                 "publication boundary (ADR-0026); route raw ChangeSets through "
-                "publish_changeset / publish_proposal"
+                "publish_changeset / publish_candidate"
             )
         base = base_branch or self._base_branch
         branch = github_factory_branch(issue_number, run_id)
@@ -497,7 +430,7 @@ class GitHubPublishFlow:
         )
         return hits[0] if len(hits) == 1 else None
 
-    async def _publish_bundle(
+    async def publish_candidate(
         self,
         owner: str,
         repo: str,
@@ -800,7 +733,7 @@ class GitHubAgents:
     client: GitHubClient
     reader: GitHubRepositoryReader
     planner: LLMPlanner
-    implementer: LLMImplementer
+    implementer: Any
     reviewer: GitHubPRReviewer
     flow: GitHubPublishFlow
 
@@ -829,11 +762,9 @@ def build_github_agents(
     reader = GitHubRepositoryReader(client, owner, repo)
     llm = LLMClient(settings=settings, session_factory=session_factory)
     planner = LLMPlanner(llm, settings=settings)
-    implementer = LLMImplementer(llm, gitlab=reader, settings=settings)
     reviewer = GitHubPRReviewer(llm, client, settings=settings)
     flow = GitHubPublishFlow(
         client,
-        proposer=implementer,
         base_branch=str(getattr(settings, "FORGE_TARGET_BRANCH", "main") or "main"),
         reader=reader,
     )
@@ -841,7 +772,7 @@ def build_github_agents(
         client=client,
         reader=reader,
         planner=planner,
-        implementer=implementer,
+        implementer=None,
         reviewer=reviewer,
         flow=flow,
     )

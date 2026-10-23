@@ -52,8 +52,8 @@ def changeset(branch: str | None = None) -> ChangeSet:
     )
 
 
-def make_flow(fake: FakeGitHub, proposer=None) -> GitHubPublishFlow:
-    return GitHubPublishFlow(fake, proposer=proposer, base_branch="main")
+def make_flow(fake: FakeGitHub) -> GitHubPublishFlow:
+    return GitHubPublishFlow(fake, base_branch="main")
 
 
 class TestFactoryBranch:
@@ -235,84 +235,28 @@ class TestDraftPrDedup:
         assert len(fake.calls_of("create_draft_pr")) == 1
 
 
-class TestProposalLeg:
-    async def test_publish_proposal_uses_proposer_against_reader(self, fake: FakeGitHub):
-        """The builtin implementer (reader-bound) proposes; the flow publishes."""
-        proposals = []
+class TestLaneCandidateEntry:
+    async def test_candidate_publishes_against_its_frozen_base(self, fake):
+        from forge.runs.candidate import bundle_from_changeset
 
-        class StubProposer:
-            async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
-                proposals.append(
-                    {
-                        "issue_title": issue_title,
-                        "plan_summary": plan_summary,
-                        "attempt_base": attempt_base,
-                        "run_id": run.id,
-                    }
-                )
-                return changeset()
-
-        flow = make_flow(fake, proposer=StubProposer())
-        outcome = await flow.publish_proposal(
-            owner="acme",
-            repo="acme-widget",
+        fake.heads[REPO]["main"] = "9" * 40
+        cs = changeset()
+        result = await make_flow(fake).publish_candidate(
+            "acme",
+            "acme-widget",
             issue_number=42,
             run_id=RUN_ID,
-            issue_title="Add password reset",
-            plan_summary="1. add reset endpoint",
-        )
-
-        assert outcome.ok is True
-        (proposal,) = proposals
-        assert proposal["issue_title"] == "Add password reset"
-        assert proposal["attempt_base"] == BASE_HEAD  # frozen base fed to proposer
-        assert proposal["run_id"] == RUN_ID
-        assert outcome.pr_number is not None
-
-    async def test_publish_proposal_pins_the_frozen_expected_head(self, fake: FakeGitHub):
-        """The gate-approved base is the CAS pin — not the live branch head.
-
-        main may have moved between plan time and /go; the publish leg must
-        still cut the factory branch from the snapshot the plan was made
-        against.
-        """
-        fake.heads[REPO]["main"] = "9" * 40  # main moved after the plan
-        moved_head = await fake.get_branch_head("acme", "acme-widget", "main")
-        assert moved_head == "9" * 40
-
-        class StubProposer:
-            async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
-                assert attempt_base == BASE_HEAD  # proposes against the frozen base
-                return changeset()
-
-        flow = make_flow(fake, proposer=StubProposer())
-        outcome = await flow.publish_proposal(
-            owner="acme",
-            repo="acme-widget",
-            issue_number=42,
-            run_id=RUN_ID,
-            issue_title="Add password reset",
+            bundle=bundle_from_changeset(cs, attempt_base_oid=BASE_HEAD),
+            commit_message=cs.commit_message,
+            base_branch="main",
             expected_head=BASE_HEAD,
         )
+        assert result.ok and result.expected_head_oid == BASE_HEAD
+        assert fake.heads[REPO][result.branch] == result.commit_oid
+        assert fake.files[REPO]["src/app.py"] == "print('hello')\n"
 
-        assert outcome.ok is True
-        assert outcome.expected_head_oid == BASE_HEAD
-        assert (
-            fake.heads[REPO]["forge/42/abcd1234"].endswith(outcome.commit_oid or "")
-            or fake.heads[REPO]["forge/42/abcd1234"] == outcome.commit_oid
-        )
-
-
-class StubProposer:
-    """Returns one fixed changeset, recording what it was asked."""
-
-    def __init__(self, changeset: ChangeSet):
-        self.changeset = changeset
-        self.calls: list[dict] = []
-
-    async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
-        self.calls.append({"issue_title": issue_title, "attempt_base": attempt_base})
-        return self.changeset
+    def test_no_model_proposal_entry_exists(self, fake):
+        assert not hasattr(make_flow(fake), "publish_proposal")
 
 
 class TestPublicationBoundary:
@@ -339,10 +283,10 @@ class TestPublicationBoundary:
             commit_message="rogue",
             changes=[Change(path=".gitlab-ci.yml", operation=Operation.CREATE, content="x")],
         )
-        flow = make_flow(fake, proposer=StubProposer(rogue))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=rogue
         )
 
         await self._assert_refused(fake, outcome, "changeset_invalid")
@@ -356,10 +300,10 @@ class TestPublicationBoundary:
                 Change(path=".github/workflows/pwn.yml", operation=Operation.CREATE, content="x")
             ],
         )
-        flow = make_flow(fake, proposer=StubProposer(rogue))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=rogue
         )
 
         await self._assert_refused(fake, outcome, "denylisted prefix")
@@ -370,15 +314,15 @@ class TestPublicationBoundary:
             commit_message="scoped run",
             changes=[Change(path="web/x.ts", operation=Operation.CREATE, content="hi\n")],
         )
-        flow = make_flow(fake, proposer=StubProposer(proposal))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
+        outcome = await flow.publish_changeset(
             owner="acme",
             repo="acme-widget",
             issue_number=42,
             run_id=RUN_ID,
-            issue_title="t",
             allowed_paths=["services/**"],
+            changeset=proposal,
         )
 
         await self._assert_refused(fake, outcome, "outside the allowed scope")
@@ -392,10 +336,10 @@ class TestPublicationBoundary:
                 for i in range(21)
             ],
         )
-        flow = make_flow(fake, proposer=StubProposer(flood))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=flood
         )
 
         await self._assert_refused(fake, outcome, "max 20")
@@ -408,10 +352,10 @@ class TestPublicationBoundary:
                 Change(path="big.txt", operation=Operation.CREATE, content="x" * (256 * 1024 + 1))
             ],
         )
-        flow = make_flow(fake, proposer=StubProposer(big))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=big
         )
 
         await self._assert_refused(fake, outcome, "bytes")
@@ -425,10 +369,10 @@ class TestPublicationBoundary:
             commit_message="fantasy",
             changes=[Change(path="src/ghost.py", operation=Operation.UPDATE, content="x")],
         )
-        flow = make_flow(fake, proposer=StubProposer(fantasy))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=fantasy
         )
 
         await self._assert_refused(fake, outcome, "candidate_invalid")
@@ -464,10 +408,10 @@ class TestPublicationBoundary:
             assert fake.calls_of(mutation) == []
 
     async def test_valid_proposal_publishes_exactly_the_manifest(self, fake: FakeGitHub):
-        flow = make_flow(fake, proposer=StubProposer(changeset()))
+        flow = make_flow(fake)
 
-        outcome = await flow.publish_proposal(
-            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        outcome = await flow.publish_changeset(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, changeset=changeset()
         )
 
         assert outcome.ok is True

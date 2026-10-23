@@ -19,14 +19,14 @@ from forge.config import Settings
 from forge.durable import FlowRun
 from forge.durable.identity import factory_branch
 from forge.models.base import Base
-from forge.repository import ChangesetWriter, Change, ChangeSet, Operation
+from forge.repository import ChangesetWriter
 from forge.runs.backends import (
     CITharnessBackend,
-    BuiltinBackend,
     build_backend,
     is_harness_backend,
 )
-from forge.runs.stubs import StubImplementer
+from forge.runs.publisher import publish_candidate
+from forge.runs.lane import LaneRequiredError
 from tests.fixtures.candidate import create_diff, seed_candidate
 from tests.fixtures.fake_gitlab import FakeGitLab
 
@@ -415,58 +415,40 @@ class TestPoll:
         assert outcome.status == "running"
 
 
-class TestBuiltinBackend:
-    async def _persisted_run(self, db, run: FlowRun) -> FlowRun:
+class TestLaneCandidatePublication:
+    @pytest.mark.parametrize(
+        "path,accepted", [("forge-demo/x.md", True), (".gitlab-ci.yml", False)]
+    )
+    async def test_only_the_publisher_commits_validated_lane_bytes(
+        self, fake_gitlab, db, path, accepted
+    ):
+        run = make_run()
         async with db() as session:
             session.add(run)
             await session.commit()
-        return run
-
-    async def test_start_commits_and_poll_reports_change_ready(self, fake_gitlab, db):
-        backend = BuiltinBackend(
-            implementer=StubImplementer(),
+        backend = make_backend(fake_gitlab, db)
+        handle, _, branch = await started(fake_gitlab, backend, run=run)
+        seed_job(fake_gitlab, json.loads(handle)["pipeline_id"], status="success")
+        seed_candidate(
+            fake_gitlab, 555, attempt_base=BASE_SHA, diff=create_diff(path, "candidate\n")
+        )
+        outcome = await backend.poll(run, handle)
+        assert outcome.status == "change_candidate"
+        assert fake_gitlab.calls_of("create_commit") == []
+        result = await publish_candidate(
             gitlab=fake_gitlab,
             session_factory=db,
-            settings=make_settings(),
+            writer=ChangesetWriter(fake_gitlab, db, PROJECT_ID),
+            run=run,
+            bundle=outcome.bundle,
         )
-        run = await self._persisted_run(db, make_run())
-        handle = await backend.start(run, "Add a widget", "", "")
-
-        data = json.loads(handle)
-        assert data["commit_sha"]
-        assert data["branch"] == factory_branch(ISSUE_IID, run.id)
-        # The commit really landed on the run's branch.
-        assert fake_gitlab.branches[data["branch"]][0]["sha"] == data["commit_sha"]
-
-        outcome = await backend.poll(run, handle)
-        assert outcome.ok
-        assert outcome.commit_sha == data["commit_sha"]
-
-    async def test_changeset_violations_become_failed_outcome(self, fake_gitlab, db):
-        class DeniedImplementer:
-            async def propose(self, run, issue_title, **kwargs):
-                return ChangeSet(
-                    branch=factory_branch(ISSUE_IID, run.id),
-                    commit_message="nope",
-                    changes=[
-                        Change(path=".gitlab-ci.yml", operation=Operation.CREATE, content="x")
-                    ],
-                )
-
-        backend = BuiltinBackend(
-            implementer=DeniedImplementer(),
-            gitlab=fake_gitlab,
-            session_factory=db,
-            settings=make_settings(),
-        )
-        run = await self._persisted_run(db, make_run())
-        handle = await backend.start(run, "Add a widget", "", "")
-
-        outcome = await backend.poll(run, handle)
-        assert outcome.status == "failed"
-        assert outcome.failure_kind == "code"
-        assert "changeset_invalid" in outcome.reason
-        assert fake_gitlab.calls_of("create_commit") == []  # never dispatched
+        assert result.ok is accepted
+        if accepted:
+            assert fake_gitlab.branches[branch][0]["sha"] == result.commit_sha
+            assert len(fake_gitlab.calls_of("create_commit")) == 1
+        else:
+            assert "denylisted" in result.reason
+            assert fake_gitlab.calls_of("create_commit") == []
 
 
 class TestBuildBackend:
@@ -479,22 +461,17 @@ class TestBuildBackend:
         )
         assert isinstance(backend, CITharnessBackend)
 
-    def test_builtin_without_implementer_is_a_config_error(self, fake_gitlab, db):
-        with pytest.raises(ValueError, match="implementer"):
+    @pytest.mark.parametrize("backend", ["builtin", "", "unknown"])
+    def test_removed_or_unknown_backend_has_typed_onboarding_refusal(
+        self, fake_gitlab, db, backend
+    ):
+        with pytest.raises(LaneRequiredError, match="lane_not_onboarded") as raised:
             build_backend(
-                make_settings(FORGE_IMPLEMENTER_BACKEND="builtin"),
+                make_settings(FORGE_IMPLEMENTER_BACKEND=backend),
                 gitlab=fake_gitlab,
                 session_factory=db,
             )
-
-    def test_builtin_with_implementer_builds_builtin_backend(self, fake_gitlab, db):
-        backend = build_backend(
-            make_settings(FORGE_IMPLEMENTER_BACKEND="builtin"),
-            gitlab=fake_gitlab,
-            session_factory=db,
-            implementer=StubImplementer(),
-        )
-        assert isinstance(backend, BuiltinBackend)
+        assert "docs/harnesses/onboarding.md" in str(raised.value)
 
     def test_unknown_backend_value_rejected(self, fake_gitlab, db):
         with pytest.raises(ValueError, match="FORGE_IMPLEMENTER_BACKEND"):

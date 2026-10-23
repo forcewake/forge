@@ -38,7 +38,7 @@ from forge.durable import (
     StepRun,
     as_aware_utc,
 )
-from forge.factory.implementer import IMPLEMENTER_TIER
+from forge.runs.lane import CODE_MODEL_TIER as IMPLEMENTER_TIER
 from forge.factory.llm import LLMError
 from forge.factory.reviewer import ReviewVerdict
 from forge.harness_entry import PlanBindingError, fetch_issue_context

@@ -31,7 +31,7 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings
 from forge.durable import Controller, FlowRun, FlowStatus, GateApproval, RunSpec
-from forge.factory.implementer import IMPLEMENTER_TIER
+from forge.runs.lane import CODE_MODEL_TIER as IMPLEMENTER_TIER
 from forge.models.base import Base
 from forge.runs import RunService
 from forge.runs.service import task_digest_of

@@ -480,6 +480,11 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-10 Remove the builtin implementer
+- **Status:** source implemented locally on 2026-10-23. The builtin
+  implementer, backend and proposal publication routes are removed.
+  Admission checks the project's real CI configuration before paid work.
+  Retained lifecycle suites await the shared engine-port integration;
+  no complete assembled-version pass is claimed yet.
 - **Goal:** one implementer backend, the lane.
 - **Work:**
   - Delete `factory/implementer.py` and the builtin path in

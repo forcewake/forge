@@ -111,10 +111,9 @@ class Settings(BaseSettings):
     # inherently duplicate-safe.
     FORGE_PUBLISH_SETTLE_SECONDS: int = 30
 
-    # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
-    # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
-    # a coding harness executing as a job in the target project's CI.
-    FORGE_IMPLEMENTER_BACKEND: str = "builtin"
+    # Implementation runs in target-project CI. The optional suffix selects
+    # the driver; projects without an onboarded lane refuse before planning.
+    FORGE_IMPLEMENTER_BACKEND: str = "ci_harness"
 
     # ADR-0015 harness budgets: run-level wall-clock timeout for a harness
     # job (enforced durably by the controller; GitLab's own maximum_timeout
@@ -216,12 +215,8 @@ class Settings(BaseSettings):
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None
 
-    # Stage E3b (ADR-0020): the harness workflow filename human-applied to
-    # the TARGET repo (e.g. "forge-harness.github.yml"). Empty (default) →
-    # builtin in-worker execution as before. When set, an approved /go
-    # dispatches the Actions harness instead of running the builtin
-    # proposer; the candidate returns as an Actions artifact for the same
-    # trusted publisher.
+    # The workflow installed in this target repository. Admission verifies
+    # it exists before any planner call; empty configuration refuses the run.
     FORGE_GITHUB_HARNESS_WORKFLOW: str = ""
 
     # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label

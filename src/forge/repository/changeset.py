@@ -19,6 +19,8 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any
 
+FORGE_MATERIALIZE_MAX_FILE_CHARS = 400_000
+
 
 class Operation(StrEnum):
     """File action supported by the GitLab Commits API in M1."""

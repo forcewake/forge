@@ -35,8 +35,8 @@ from dataclasses import dataclass
 EXECUTABLE_SPEC_SCHEMA_VERSION = 3
 
 #: Honest budget enforcement levels (R13 §4), frozen with the ceilings:
-#: ``full`` — every model dispatch of the lane is intercepted (the builtin
-#: lane reserves before each provider call); ``partial`` — CLI harness lanes:
+#: ``full`` remains readable for historical execution documents;
+#: ``partial`` describes current CI lanes:
 #: only the wall clock and the episode count are enforced forge-side, the
 #: harness's own model calls are never intercepted, so call/token ceilings
 #: are reconciled after the fact and never claimed as enforced.

@@ -37,7 +37,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-05 boundary registry | Implemented; 901 source lines removed, 15 contracts added, 48 architecture checks retained; 186 focused passes |
 | P1-06 closure matrix | Waits for completed P1-03 |
 | P1-08 release and CI flow | Build-once artifact verification and workflow rewrite in an isolated worker branch |
-| P1-10 lane-only implementation | Removing the builtin backend and adding admission refusal before paid work |
+| P1-10 lane-only implementation | Source implemented; builtin execution removed and actual project CI checked before paid work; remaining lifecycle-test ports join engine integration |
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
 | P2-02 wire protocol | Implemented; immutable v1 bodies, bound approval/candidate/checkpoint identities, canonical serialization and exported schemas |

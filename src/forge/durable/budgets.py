@@ -1437,7 +1437,7 @@ async def ingest_usage_receipt(
     from forge.runs.candidate import usage_receipt_id
 
     # The deferred import keeps forge.durable → forge.runs.candidate out of
-    # module level: runs.candidate → factory.implementer → factory.llm →
+    # module level: runs.candidate → factory.llm →
     # forge.durable.budgets would close a cycle at import time.
     attempt = str(getattr(usage, "attempt_id", "") or attempt_id or "")[:100]
     receipt_id = str(getattr(usage, "receipt_id", "") or "") or usage_receipt_id(
