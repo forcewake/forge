@@ -505,7 +505,7 @@ async def _default_triage_runner(
 
 
 def _project_config_stub() -> Any:
-    from forge.orchestrator.project_config import ProjectConfig
+    from forge.project_config import ProjectConfig
 
     return ProjectConfig()
 

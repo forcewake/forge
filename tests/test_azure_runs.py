@@ -44,7 +44,7 @@ from forge.integrations.azure import (
     PipelineRun,
 )
 from forge.models.base import Base
-from forge.orchestrator.project_config import clear_cache
+from forge.project_config import clear_cache
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.azure_service import (
     AzureAgents,

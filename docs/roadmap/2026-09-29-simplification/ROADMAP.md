@@ -44,7 +44,7 @@ The step-by-step implementation plan is [PLAN-phase-0.md](PLAN-phase-0.md).
 
 **Status:** code complete on 2026-10-11, measured at `69d9ac7` (see
 [metrics.md](metrics.md)). Open exit criteria, for the owner: push
-`release/0.42.x`, tag `pre-simplification`, review `test-ledger.csv`, and
+`release/0.42.x`, tag `pre-simplification`, and
 make the new CI jobs required once they have run green on a pull request,
 which also proves the default suite hermetic on Linux. The default tier
 takes 543 s against the 480 s target; see the plan's
@@ -252,6 +252,10 @@ takes 543 s against the 480 s target; see the plan's
 - **Size:** M
 
 ### P0-13 Test disposition ledger
+- **Status:** owner review completed on 2026-10-23. The owner confirmed
+  all 129 `drop-*` or nonempty-`review` rows reviewed, with existing
+  dispositions unchanged. All 303 rows retain their curated values.
+  Ledger SHA-256: `8d10d4d6a4eeeb4a0fb2aed012dbc0c3afe374479eceacbb88c4a50717abdbda`.
 - **Goal:** every test file has a fate before code is deleted.
 - **Work:**
   - `scripts/build_test_ledger.py` generates `test-ledger.csv` with columns
@@ -297,6 +301,10 @@ Order: P1-01 first, then the deletion clusters. The prose and docs diets
 run last so that they do not churn code about to be deleted.
 
 ### P1-01 Extract project config from `orchestrator/`
+- **Status:** implemented locally on 2026-10-23 under the owner's local
+  implementation override. All importers use `forge.project_config`;
+  9,575 default tests and 807 registered invariant tests pass, with zero
+  invariant skips. Hosted acceptance remains separate.
 - **Goal:** unblock the legacy deletion.
 - **Work:** move `orchestrator/project_config.py` (`ProjectConfig`,
   `ConfigReadResult`, `read_project_config`) to `forge/project_config.py`.

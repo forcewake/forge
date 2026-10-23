@@ -118,7 +118,7 @@ async def _default_debug_runner(
         failed_jobs=failed_jobs,
         job_logs=job_logs,
     )
-    from forge.orchestrator.project_config import ProjectConfig
+    from forge.project_config import ProjectConfig
 
     agent = PipelineDebuggerAgent(
         definition=definition,

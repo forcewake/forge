@@ -3,7 +3,7 @@
 The project config (``.forge.yml``) is the authority a run's path scope
 comes from. These tests pin the A13 contract end to end:
 
-- the typed read (:class:`~forge.orchestrator.project_config.ConfigReadResult`)
+- the typed read (:class:`~forge.project_config.ConfigReadResult`)
   distinguishes ``confirmed_absent`` / ``valid`` / ``unreadable`` / ``invalid``
   (the R14 BlobReadResult pattern, reused over HTTP);
 - only a provider-confirmed absence earns the documented default profile;
@@ -31,7 +31,7 @@ from forge.durable import FlowRun, FlowStatus, Outbox, RunSpec
 from forge.durable.controller import Controller, InvalidTransition
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
-from forge.orchestrator.project_config import (
+from forge.project_config import (
     CONFIG_FILE,
     ConfigReadResult,
     ProjectConfig,

@@ -27,7 +27,7 @@ from forge.gitlab.events import (
     JobEvent,
 )
 from forge.llm.provider import get_model
-from forge.orchestrator.project_config import load_project_config
+from forge.project_config import load_project_config
 from forge.worker.tasks import create_flow_step_task
 
 if TYPE_CHECKING:

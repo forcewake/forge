@@ -326,7 +326,7 @@ class TestDiscoveryConnection:
         """R32-10: the production planning path holds a typed
         ``ProjectConfig`` (the run start's ``.forge.yml`` read), not a
         server ``ForgeConfig`` — the neighbor section parses from it."""
-        from forge.orchestrator.project_config import _parse_project_config
+        from forge.project_config import _parse_project_config
 
         config = _parse_project_config(
             "forge:\n  neighbors:\n    - provider: github\n      repository_id: acme/partner\n"

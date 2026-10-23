@@ -211,7 +211,7 @@ from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.gitlab.schemas import Pipeline
 from forge.gateway.feedback import max_review_rounds
 from forge.harnesses.brief_envelope import build_brief_envelope
-from forge.orchestrator.project_config import ConfigReadResult, read_project_config
+from forge.project_config import ConfigReadResult, read_project_config
 from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
     ChangesetWriter,

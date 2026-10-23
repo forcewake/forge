@@ -1,7 +1,7 @@
 import base64
 import pytest
 
-from forge.orchestrator.project_config import (
+from forge.project_config import (
     ProjectConfig,
     clear_cache,
     load_project_config,

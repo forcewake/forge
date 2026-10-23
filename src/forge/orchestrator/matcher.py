@@ -16,7 +16,7 @@ from forge.gitlab.events import (
 if TYPE_CHECKING:
     from forge.agents.registry import AgentRegistry
     from forge.config import ForgeConfig
-    from forge.orchestrator.project_config import ProjectConfig
+    from forge.project_config import ProjectConfig
 
 logger = logging.getLogger(__name__)
 

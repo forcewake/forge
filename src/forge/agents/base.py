@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from forge.agents.registry import AgentDefinition
     from forge.context.engine import AgentContext
     from forge.gitlab.client import GitLabClient
-    from forge.orchestrator.project_config import ProjectConfig
+    from forge.project_config import ProjectConfig
 
 logger = logging.getLogger(__name__)
 

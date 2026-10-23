@@ -206,7 +206,7 @@ from forge.integrations.github_flow import (
     build_github_agents,
     github_factory_branch,
 )
-from forge.orchestrator.project_config import ConfigReadResult, read_project_config
+from forge.project_config import ConfigReadResult, read_project_config
 from forge.repository import (
     Change,
     ChangeSet,

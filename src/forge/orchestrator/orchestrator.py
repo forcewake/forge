@@ -23,7 +23,7 @@ from forge.llm.provider import get_model
 from forge.models.agent_run import AgentRun
 from forge.models.review_state import ReviewState
 from forge.orchestrator.matcher import match_agents
-from forge.orchestrator.project_config import load_project_config
+from forge.project_config import load_project_config
 from forge.stores.conversation import ConversationStore
 
 if TYPE_CHECKING:

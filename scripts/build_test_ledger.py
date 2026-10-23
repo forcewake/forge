@@ -75,7 +75,7 @@ SHARED = (
     "forge.gitlab.schemas",
     "forge.gitlab.events",
     "forge.utils",
-    "forge.orchestrator.project_config",
+    "forge.project_config",
 )
 # Moved by P1-01 rather than deleted with its package.
 MOVED = ("forge.orchestrator.project_config",)

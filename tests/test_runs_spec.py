@@ -55,7 +55,7 @@ ISSUE_DESC = "Widgets make the app better."
 def _clear_project_config_cache():
     """The project-config cache is process-global (5-min TTL) — never leak
     a seeded `.forge.yml` scope between tests."""
-    from forge.orchestrator.project_config import clear_cache
+    from forge.project_config import clear_cache
 
     clear_cache()
     yield

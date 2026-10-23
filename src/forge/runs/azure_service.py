@@ -140,7 +140,7 @@ from forge.integrations.azure import (
     FileChange,
     PipelineRun,
 )
-from forge.orchestrator.project_config import ConfigReadResult, read_project_config
+from forge.project_config import ConfigReadResult, read_project_config
 from forge.repository import Change, ChangeSet, Operation
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import QUEUED_STATUSES

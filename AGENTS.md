@@ -122,8 +122,8 @@ src/forge/
   reactive/    durable review and CI-debug bots on the step lane
   findings/    security findings and /security triage
   mcp_server/  forge's MCP server (token-scoped tools)
-  orchestrator/project_config.py
-               the project's .forge.yml reader, used by every RunService (P1-01 moves it)
+  project_config.py
+               the project's .forge.yml reader, shared by every RunService
   orchestrator/, flows/, agents/, mcp_client/, stores/
                legacy GitLab reactive bot: review, pipeline debug, chat; agents/ also
                holds the LLM agents that reactive/ CI debug and findings/ triage use
@@ -217,6 +217,15 @@ new one.
 - Full run triage recipe: [.claude/skills/forge-debug-run/SKILL.md](.claude/skills/forge-debug-run/SKILL.md).
 
 ## Where work stands
+
+The owner authorized local implementation toward 1.0.0 on 2026-10-23,
+explicitly allowing work before the GitHub prerequisites are satisfied.
+Do not block local implementation on publication, required hosted checks,
+the maintenance branch or the recovery tag. Local verification, invariant
+evidence, edge-case pins and the reviewed ledger remain binding. Internal
+task dependencies still apply. This authorization does not request remote
+pushes, merges, tags or settings changes. Current implementation progress:
+[IMPLEMENTATION-1.0.md](docs/roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md).
 
 The shipped factory and its history live in the [CHANGELOG](CHANGELOG.md)
 and [docs/README.md](docs/README.md). The current work is the simplification

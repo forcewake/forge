@@ -561,7 +561,7 @@ async def check_review_feedback_scope(gitlab: GitLabClient, project_id: int) -> 
         validate_review_feedback_feature,
     )
     from forge.gateway.feedback import review_feedback_commands_enabled
-    from forge.orchestrator.project_config import read_project_config
+    from forge.project_config import read_project_config
 
     enabled = review_feedback_commands_enabled()
     paths: list[str] | None = None

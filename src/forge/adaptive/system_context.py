@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from forge.adaptive.discovery_stage import DiscoveryRunContext
     from forge.adaptive.research_planner import ResearchHarness
     from forge.config import ForgeConfig
-    from forge.orchestrator.project_config import ProjectConfig
+    from forge.project_config import ProjectConfig
 
 __all__ = [
     "NEIGHBOR_PROVIDER_VALUES",
@@ -323,7 +323,7 @@ def from_project_config(
     *config* is the PROJECT configuration — either the server-side
     :class:`~forge.config.ForgeConfig` view of a ``forge.yml`` (its
     ``get("neighbors")``) or the typed
-    :class:`~forge.orchestrator.project_config.ProjectConfig` the run
+    :class:`~forge.project_config.ProjectConfig` the run
     start paths read from the repo's ``.forge.yml`` (its ``neighbors``
     field, carried raw for exactly this parse).
     """

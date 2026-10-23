@@ -875,7 +875,7 @@ class TestFormatTriageComment:
         from forge.context.engine import AgentContext
         from forge.context.security_report import SecurityFinding as ReportFinding
         from forge.context.security_report import SecurityReport
-        from forge.orchestrator.project_config import ProjectConfig
+        from forge.project_config import ProjectConfig
 
         registry = AgentRegistry("agents")
         registry.load()

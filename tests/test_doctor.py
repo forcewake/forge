@@ -294,7 +294,7 @@ def _delivery_env(monkeypatch, *, mode="gitlab-protected-variable", **extra):
 
 async def _project_results(monkeypatch, tmp_path, client):
     monkeypatch.setattr(doctor, "GitLabClient", lambda **kwargs: client)
-    from forge.orchestrator.project_config import clear_cache
+    from forge.project_config import clear_cache
 
     clear_cache()
     return await doctor.check_project(_delivery_settings(), PROJECT_ID)

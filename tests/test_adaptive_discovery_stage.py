@@ -110,7 +110,7 @@ from forge.durable import FlowRun, Outbox
 from forge.factory.planner import PLANNER_MAX_INPUT_CHARS
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
-from forge.orchestrator.project_config import clear_cache
+from forge.project_config import clear_cache
 from forge.runs.github_service import GitHubRunService
 from forge.runs.stubs import StubImplementer, StubReviewer
 from tests.fixtures.fake_github import FakeGitHub

@@ -62,7 +62,7 @@ from forge.durable.models import ActionLog, FlowRun, PublicationIntent, RunBudge
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-light
     from forge.adaptive.checkpoint_repository import CheckpointLookupOutcome
     from forge.config import Settings
-    from forge.orchestrator.project_config import ConfigReadResult
+    from forge.project_config import ConfigReadResult
 
 logger = logging.getLogger(__name__)
 
@@ -971,7 +971,7 @@ async def evaluate_config_blocks(
     For every blocked run of *provider* whose reason is a config gate:
 
     - the read is retried through *reread* (a typed
-      :class:`~forge.orchestrator.project_config.ConfigReadResult`) — a
+      :class:`~forge.project_config.ConfigReadResult`) — a
       still-failing read leaves the run parked (the retry is free);
     - a recovered read (``valid`` or provider-confirmed absence) walks the
       run back to ``preflight`` through the journaled plan-restart edge

@@ -12,7 +12,7 @@ from forge.gitlab.events import (
     PipelineObjectAttributes,
 )
 from forge.orchestrator.matcher import match_agents
-from forge.orchestrator.project_config import ProjectConfig
+from forge.project_config import ProjectConfig
 
 
 def _make_registry_stub(agents: list[AgentDefinition]):

@@ -51,7 +51,7 @@ from forge.integrations.github_flow import (
 )
 from forge.models.base import Base
 from forge.adaptive.discovery_stage import DiscoveryRunContext
-from forge.orchestrator.project_config import (
+from forge.project_config import (
     ConfigReadResult,
     clear_cache,
     read_project_config,
