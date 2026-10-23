@@ -14,9 +14,9 @@ restarts, nothing is silently reused, and every refusal is typed with
 zero emitted values.
 
 Live-qualified on the current pairing by
-[qualification/records/redemption-2026-09-27.json](../../qualification/records/redemption-2026-09-27.json)
+[qualification/records/redemption-2026-09-27.json](../archive.md) (archived original: `qualification/records/redemption-2026-09-27.json`)
 (evidence:
-[docs/evaluation/2026-09-27-redemption-pairing/](../evaluation/2026-09-27-redemption-pairing/));
+[docs/evaluation/2026-09-27-redemption-pairing/](../archive.md) (archived original: `docs/evaluation/2026-09-27-redemption-pairing`));
 the typed-refusal matrix is additionally covered offline by
 `tests/test_operation_grant.py`, `test_credential_consumption.py`,
 `test_credential_broker.py` and `test_credential_audit.py`.

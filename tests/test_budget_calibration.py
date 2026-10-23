@@ -58,7 +58,7 @@ ISSUE_TITLE = "Add a widget"
 ISSUE_DESC = "Widgets make the app better."
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT = REPO_ROOT / "evaluation" / "economics" / "budget-calibration-v1.json"
+ARTIFACT = REPO_ROOT / "tests" / "fixtures" / "budget-calibration-v1.json"
 
 #: The recorded live-lab profile (the receipted 200k→600k amendment's
 #: result) and the runbook default — both from the calibration report.

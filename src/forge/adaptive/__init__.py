@@ -19,7 +19,7 @@ describes — the SEPARATION the review centers on:
 
 Every schema validates its ``schema`` discriminator, digests are hex
 sha256-shaped, and the shipped examples under
-``docs/roadmap/2026-09-21-adaptive/contracts/`` parse against these
+``tests/fixtures/adaptive_contracts/`` parse against these
 models (the review package's own contract proposals, now executable).
 """
 

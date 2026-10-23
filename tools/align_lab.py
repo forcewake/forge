@@ -102,9 +102,7 @@ REQUIRED_CAPS: tuple[str, ...] = ("FORGE_BUDGET_PROFILES", "FORGE_LANE_BUDGET_SE
 #: Env names podman injects per-container — never passed explicitly.
 _RUNTIME_ENV = frozenset({"HOSTNAME"})
 
-DEFAULT_RECEIPTS = (
-    REPO_ROOT / "docs" / "evaluation" / "2026-09-24-live-single-writer" / "alignment-receipts.json"
-)
+DEFAULT_RECEIPTS = REPO_ROOT / ".forge" / "verification" / "alignment-receipts.json"
 
 #: R38-03 (#304): operational backups go to MAINTAINER-PRIVATE storage.
 PRIVATE_BACKUP_ENV = "FORGE_PRIVATE_BACKUP_DIR"

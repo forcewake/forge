@@ -1,56 +1,25 @@
-"""R38-03 (#304) — the public-artifact confidentiality gate.
-
-``scripts/gate_public_artifacts.py`` refuses tracked database archives
-(PostgreSQL custom-format magic, pg_dump extensions, archives CONTAINING
-dump members) outside the reviewed synthetic-fixture allowlist, and
-validates the sanitized backup receipts (digest + verdict + reference per
-artifact). ``tools/align_lab.py`` must default its backup destination to
-private storage and refuse an in-repo destination. Everything here runs
-against synthetic bytes and a throwaway git repo — no real dump is ever
-created or committed.
-"""
+"""Public dump denial and private lab backup destinations remain enforced."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from tools.align_lab import AlignmentError, build_plan, private_backup_base, resolve_backup_dir
 from scripts.gate_public_artifacts import (
     ALLOWLIST_STAMP,
-    VERDICTS,
+    DEFAULT_ALLOWLIST,
     load_allowlist,
     main,
     scan,
     scan_paths,
-    validate_backup_receipts,
 )
 from tests.test_align_lab import FakeLabRunner  # the podman boundary stub
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-#: A minimal VALID receipt — mutated by the negative tests.
-RECEIPT = {
-    "filename": "pre-r3708-alignment-20260924T114520Z.dump",
-    "created_utc": "2026-09-24T11:45:20Z",
-    "size_bytes": 204769,
-    "sha256": "b384e96a5b1d7e925ea83740dc1527e23fc95090e51085199871d3662230b0eb",
-    "format": "postgresql-custom-dump (PGDMP magic, v1.16)",
-    "schema_version": "alembic-026",
-    "restore_test": "ok",
-    "classification": "sensitive_content",
-    "classification_basis": "credential scan negative; internal operational text present",
-    "private_reference": "forge-private-2026-09-24-01",
-    "alignment_receipt": "r3708-0c76a2e9ab46",
-}
-
-
-def receipts_document(entries: list[dict[str, Any]]) -> str:
-    return "# receipts\n\n```json\n" + json.dumps(entries, indent=2) + "\n```\n"
 
 
 def write_fixture(root: Path, relative: str, payload: bytes) -> Path:
@@ -159,73 +128,16 @@ def test_allowlist_refuses_without_entry_or_with_stale_digest(tmp_path: Path) ->
 
 
 def test_committed_allowlist_is_wellformed_and_empty() -> None:
-    document = load_allowlist(REPO_ROOT / "qualification" / "fixtures-allowlist.json")
+    assert DEFAULT_ALLOWLIST == REPO_ROOT / "scripts" / "public-artifact-fixtures.json"
+    assert DEFAULT_ALLOWLIST.is_file()
+    document = load_allowlist(DEFAULT_ALLOWLIST)
     assert document["stamp"] == ALLOWLIST_STAMP
     assert document["entries"] == []  # nothing admitted by default
 
 
 # ---------------------------------------------------------------------------
-# the receipts document schema
+# historical receipt grading retired; tracked archive denial remains
 # ---------------------------------------------------------------------------
-
-
-def test_validator_accepts_a_complete_receipt() -> None:
-    receipts, problems = validate_backup_receipts(receipts_document([RECEIPT]))
-    assert problems == []
-    assert receipts == [RECEIPT]
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        # missing digest
-        {"sha256": ""},
-        # digest not 64-hex
-        {"sha256": "not-hex"},
-        # verdict outside the closed set ("safe" is not a verdict)
-        {"classification": "safe"},
-        # missing private reference
-        {"private_reference": ""},
-        # missing filename entirely
-        {"filename": None},
-        # nonsensical size
-        {"size_bytes": 0},
-    ],
-)
-def test_validator_refuses_incomplete_receipts(mutation: dict[str, Any]) -> None:
-    entry = {**RECEIPT, **mutation}
-    _, problems = validate_backup_receipts(receipts_document([entry]))
-    assert problems, f"expected a problem for {mutation}"
-
-
-def test_validator_refuses_missing_block_and_non_list() -> None:
-    assert validate_backup_receipts("# no block here")[1] != []
-    assert validate_backup_receipts('```json\n{"not": "a list"}\n```')[1] != []
-
-
-def test_committed_receipts_readme_passes_validation() -> None:
-    text = (
-        REPO_ROOT
-        / "docs"
-        / "evaluation"
-        / "2026-09-24-live-single-writer"
-        / "backups"
-        / "README.md"
-    ).read_text(encoding="utf-8")
-    receipts, problems = validate_backup_receipts(text)
-    assert problems == []
-    assert len(receipts) == 6  # one per removed dump
-    assert {r["classification"] for r in receipts} <= VERDICTS
-
-
-def test_receipt_referencing_a_tracked_backup_is_a_violation(tmp_path: Path) -> None:
-    write_fixture(tmp_path, RECEIPT["filename"], b"PGDMP back again")
-    violations = scan_paths(
-        [RECEIPT["filename"]],
-        tmp_path,
-        receipts_text=receipts_document([RECEIPT]),
-    )
-    assert any("STILL TRACKED" in v for v in violations)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +162,7 @@ def test_scan_over_a_real_git_checkout(tmp_path: Path) -> None:
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "evidence"], cwd=root, check=True)
 
-    violations = scan(root, allowlist_path=allowlist, receipts_path=root / "no-receipts.md")
+    violations = scan(root, allowlist_path=allowlist)
     assert len(violations) == 1
     assert "docs/evidence/pre-align.dump" in violations[0]
 
@@ -262,7 +174,7 @@ def test_scan_over_a_real_git_checkout(tmp_path: Path) -> None:
         root,
         [{"path": "docs/evidence/pre-align.dump", "sha256": digest, "reason": "synthetic"}],
     )
-    assert scan(root, allowlist_path=reviewed, receipts_path=root / "no-receipts.md") == []
+    assert scan(root, allowlist_path=reviewed) == []
 
 
 def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -271,12 +183,12 @@ def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     allowlist = allowlist_with(root, [])
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "clean"], cwd=root, check=True)
-    assert main(["--root", str(root), "--allowlist", str(allowlist), "--receipts", "0"]) == 0
+    assert main(["--root", str(root), "--allowlist", str(allowlist)]) == 0
 
     write_fixture(root, "lab.dump", b"PGDMP")
     subprocess.run(["git", "add", "lab.dump"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "oops"], cwd=root, check=True)
-    code = main(["--root", str(root), "--allowlist", str(allowlist), "--receipts", "0"])
+    code = main(["--root", str(root), "--allowlist", str(allowlist)])
     assert code == 1
     assert "lab.dump" in capsys.readouterr().out
 

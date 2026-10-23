@@ -9,13 +9,13 @@ acceptance decisions that produced them. Module:
 `scripts/build_accepted_task_ledger.py` (the accepted-task ledger,
 Q39-11, and the review-loop lineage fold, R41-13). The executed report
 over the lab pilot's real recorded ledgers is committed at
-[`evaluation/economics/lab-economics-v1.json`](../evaluation/economics/lab-economics-v1.json);
+[`evaluation/economics/lab-economics-v1.json`](../archive.md) (archived original: `docs/evaluation/economics/lab-economics-v1.json`);
 the accepted-task ledger over the useful-WIP resume trace plus the #310
 SDK receipts is committed at
-[`evaluation/economics/accepted-task-ledger-v1.json`](../evaluation/economics/accepted-task-ledger-v1.json);
+[`evaluation/economics/accepted-task-ledger-v1.json`](../archive.md) (archived original: `docs/evaluation/economics/accepted-task-ledger-v1.json`);
 the lineage-folded v2 ledger over the #364 review-and-correction
 capture is committed at
-[`evaluation/economics/accepted-task-ledger-v2.json`](../evaluation/economics/accepted-task-ledger-v2.json)
+[`evaluation/economics/accepted-task-ledger-v2.json`](../archive.md) (archived original: `docs/evaluation/economics/accepted-task-ledger-v2.json`)
 (the v1 artifact is never overwritten).
 
 ## The join chain

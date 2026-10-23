@@ -5,7 +5,7 @@ economics report without hiding failed work or calling unknown usage
 zero. Module: `forge.adaptive.delivery_measurement`; tests:
 `tests/test_delivery_measurement.py`. A committed example ledger
 (authored fixture data, labeled as such) lives in
-[`docs/evaluation/2026-09-23-delivery-measurement/`](../evaluation/2026-09-23-delivery-measurement/README.md).
+[`docs/evaluation/2026-09-23-delivery-measurement/`](../archive.md) (archived original: `docs/evaluation/2026-09-23-delivery-measurement/README.md`).
 
 ## The join chain
 

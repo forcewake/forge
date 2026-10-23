@@ -21,7 +21,7 @@ active plan, pending questions and command offsets; native session files
 are optional acceleration data" (architecture plan §8, EXE-03) — and P2's
 gate demands "a paused job resumed on another runner." Today forge has
 live proof of turn/steering/interrupt per driver
-([2026-09-21 driver smokes](../evaluation/2026-09-21-drivers/README.md))
+([2026-09-21 driver smokes](../archive.md) (archived original: `docs/evaluation/2026-09-21-drivers/README.md`))
 but **no live cross-runner resume and no codified recipe for carrying
 vendor session state inside a portable checkpoint**. [observed from repo;
 inference for the gap]

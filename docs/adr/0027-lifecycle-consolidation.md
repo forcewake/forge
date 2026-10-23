@@ -7,7 +7,7 @@ Status: accepted (incremental) (2026-09-17)
 Context: review finding R27 — the GitLab, GitHub and Azure DevOps lanes
 must differ by adapter *configuration*, not by three hand-maintained
 lifecycle engines (the same finding class as
-[review plan §1](../reviews/2026-09-13-v0.1.0/plan.md) and F31: extract
+[review plan §1](../archive.md) (archived original: `docs/reviews/2026-09-13-v0.1.0/plan.md`) and F31: extract
 core contracts and independent adapters **without a big-bang rewrite**).
 The review is explicit about the failure mode: every provider service
 re-implements the same lifecycle invariants by hand, and each copy drifts

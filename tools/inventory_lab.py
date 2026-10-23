@@ -747,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=None,
-        help="output path (default: qualification/inventory-<date>.json)",
+        help="output path (default: .forge/verification/inventory-<date>.json)",
     )
     parser.add_argument("--root", type=Path, default=REPO_ROOT, help="the repository root")
     parser.add_argument(
@@ -769,7 +769,10 @@ def main(argv: list[str] | None = None) -> int:
 
     stages = list(STAGES) if args.stage == "all" else [args.stage.strip()]
     out = args.out or (
-        args.root / "qualification" / f"inventory-{datetime.now(timezone.utc):%Y-%m-%d}.json"
+        args.root
+        / ".forge"
+        / "verification"
+        / f"inventory-{datetime.now(timezone.utc):%Y-%m-%d}.json"
     )
     probe = LabProbe(app_health_url=args.app_health_url)
     try:

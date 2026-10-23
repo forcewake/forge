@@ -14,7 +14,7 @@ into an active agent turn (claude-agent-sdk, codex `turn/steer` with
 `expectedTurnId`, opencode prompt injection), and `/answer` resolves waiting
 questions mid-run ([adaptive
 runbook](../operations/adaptive-runbook.md) §3, [driver
-evaluation](../evaluation/2026-09-21-drivers/README.md)). That creates a
+evaluation](../archive.md) (archived original: `docs/evaluation/2026-09-21-drivers/README.md`)). That creates a
 two-sided injection surface the classic /implement flow only half had:
 
 1. **Untrusted content reaching the agent mid-run** — issue text (the task

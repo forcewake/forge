@@ -13,7 +13,7 @@ as the only output, and usage receipts where the vendor provides them
 > start, mid-turn guidance, interrupt, drain — for the adaptive
 > execution lane; they are live-verified separately
 > ([adaptive-runbook.md](../operations/adaptive-runbook.md),
-> [driver evidence](../evaluation/2026-09-21-drivers/README.md)). The
+> [driver evidence](../archive.md) (archived original: `docs/evaluation/2026-09-21-drivers/README.md`)). The
 > harness docs here do not apply to them.
 
 | Driver | Doc | One-liner |

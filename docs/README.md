@@ -60,7 +60,7 @@ is wired on this repo, and the ground rules.
 | [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md), [patch application vs git apply](research/patch-application.md), [remote effect reconciliation](research/remote-effect-reconciliation.md), [Actions artifacts & usage receipts](research/actions-artifacts-usage.md), [schema upgrade gates](research/schema-upgrade-gates.md) |
 | [Specs](specs/) | stage briefs and contracts the milestones were built from |
 | [Security](security/threat-model.md) | the threat model |
-| [Reviews](reviews/) | external review passes and their dispositions |
+| [Reviews](archive.md) (archived original: `docs/reviews`) | external review passes and their dispositions |
 | [FAQ](reference/faq.md) | short answers, all providers |
 | [Onboarding prompt](reference/onboarding-prompt.md) | copy-paste bootstrap for coding agents working ON forge |
 

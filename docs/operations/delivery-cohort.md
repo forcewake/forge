@@ -11,7 +11,7 @@ economics computed **per accepted unit**.
 
 This is an evaluation harness (spec + runner + aggregation), not a live
 benchmark result: the cohort is the *proposed* measurement instrument. It
-lives in [`evaluation/cohort/`](../../evaluation/cohort/), never imports the
+lives in [`evaluation/cohort/`](../archive.md) (archived original: `evaluation/cohort`), never imports the
 `forge` package, and talks to a running forge instance exactly the way an
 operator does — an issue, `/implement`, `/go`, `/status`, `/cancel`,
 `/retry` — over the GitHub `gh` CLI.

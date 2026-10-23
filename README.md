@@ -191,7 +191,7 @@ Delivery semantics, with the evidence level honestly stated per cell:
 | Operator `/retry` + auto-revive | live | live |
 | Exact-WIP cross-runner resume | live (three file shapes) | contract-tested |
 
-Historical GitLab CE qualification records remain under [`qualification/records/`](qualification/records/). Current release verification requires independent native GitHub and GitLab smokes; local source changes alone do not establish a live result.
+Historical GitLab CE qualification records are preserved in the [local archive](docs/archive.md) (original: `qualification/records/`). Current release verification requires independent native GitHub and GitLab smokes; local source changes alone do not establish a live result.
 
 ### Drivers
 

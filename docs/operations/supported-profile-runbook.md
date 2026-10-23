@@ -250,9 +250,9 @@ The manifest's `exclusions` list is normative; in short:
 ## 8a. The runner-redemption credential route (R40-07 / #343)
 
 The profile's second delivery mode is **live-qualified**: the
-[redemption-2026-09-26 record](../../qualification/records/redemption-2026-09-26.json)
+[redemption-2026-09-26 record](../archive.md) (archived original: `qualification/records/redemption-2026-09-26.json`)
 and its evidence bundle
-([docs/evaluation/2026-09-26-redemption-qualification/](../../docs/evaluation/2026-09-26-redemption-qualification/))
+([docs/evaluation/2026-09-26-redemption-qualification/](../archive.md) (archived original: `docs/evaluation/2026-09-26-redemption-qualification`))
 prove the full chain on the real lab: native dispatch → minted operation
 grant (never seeded) → lane bootstrap redemption → the model consumer
 presenting the BROKER-selected credential.
@@ -320,7 +320,7 @@ uv run python scripts/align_lab.py --apply \
   AND the lane package of the SAME composition (the working-tree build +
   its own pinned wheel, sha256-verified inside the lane job) — the
   2026-09-27 trace
-  ([records/redemption-2026-09-27.json](../../qualification/records/redemption-2026-09-27.json))
+  ([records/redemption-2026-09-27.json](../archive.md) (archived original: `qualification/records/redemption-2026-09-27.json`))
   re-proved the sentinel identity, the rotation/expiry/retirement arms
   and the runner-side response fence on that pair. The rotation
   procedure itself (rotate → typed refusals under the old revision →

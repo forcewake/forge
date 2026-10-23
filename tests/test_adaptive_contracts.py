@@ -1,6 +1,6 @@
 """The adaptive contracts parse the review package's own examples.
 
-The examples under docs/roadmap/2026-09-21-adaptive/contracts/ ARE the
+The preserved examples under tests/fixtures/adaptive_contracts/ ARE the
 executable specification — the review proposed them; these tests prove
 the implementation accepts them verbatim and rejects the corruption
 classes each schema guards.
@@ -25,13 +25,7 @@ from forge.adaptive import (
 )
 from forge.adaptive.models import UNRESOLVED_IMAGE_DIGEST
 
-CONTRACTS = (
-    Path(__file__).resolve().parent.parent
-    / "docs"
-    / "roadmap"
-    / "2026-09-21-adaptive"
-    / "contracts"
-)
+CONTRACTS = Path(__file__).resolve().parent / "fixtures" / "adaptive_contracts"
 
 
 def _load(name: str) -> dict:
