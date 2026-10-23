@@ -75,7 +75,12 @@ class RepoPort(Protocol):
         self, repo: RepoRef, branch: str, base: Sha
     ) -> ProbeResult[BranchOutcome]: ...
     async def probe_commit(
-        self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha
+        self,
+        repo: RepoRef,
+        branch: str,
+        marker: str,
+        expected_parent: Sha,
+        candidate: ValidatedCandidate,
     ) -> ProbeResult[CommitOutcome]: ...
 
 

@@ -122,7 +122,9 @@ async def test_commit_is_atomic_cas_and_probe_recovers_complete_result(case: Pro
     assert await case.repositories.read_blob(case.repo, outcome.sha, "keep.bin") == b"\x00\xff"
     tree = await case.repositories.read_tree(case.repo, outcome.sha)
     assert next(entry for entry in tree.entries if entry.path == "tool.sh").mode == "100755"
-    probe = await case.repositories.probe_commit(case.repo, BRANCH, "commit-marker", case.base)
+    probe = await case.repositories.probe_commit(
+        case.repo, BRANCH, "commit-marker", case.base, candidate(case.base)
+    )
     assert isinstance(probe, Found) and probe.value == outcome
     duplicate = await case.writes.commit(
         case.repo, candidate(case.base), case.base, "commit-marker"
@@ -241,7 +243,7 @@ async def test_faults_never_turn_uncertainty_into_absence(case: ProviderCase, me
         "set_label": lambda: case.subjects.probe_label(case.subject, "lost", True),
         "ensure_branch": lambda: case.repositories.probe_branch(case.repo, "forge/lost", case.base),
         "commit": lambda: case.repositories.probe_commit(
-            case.repo, BRANCH, "lost-marker", case.base
+            case.repo, BRANCH, "lost-marker", case.base, candidate(case.base)
         ),
         "ensure_draft": lambda: case.reviews.probe_draft(case.repo, BRANCH),
         "post_review": lambda: case.reviews.probe_review(review, "lost-marker"),
@@ -315,7 +317,9 @@ async def test_native_state_survives_lost_recovery_cache_and_http_failure(
     result = await case.writes.commit(case.repo, candidate(case.base), case.base, "actual-marker")
     assert isinstance(result, Committed)
     case.fake.records.clear()
-    recovered = await case.repositories.probe_commit(case.repo, BRANCH, "actual-marker", case.base)
+    recovered = await case.repositories.probe_commit(
+        case.repo, BRANCH, "actual-marker", case.base, candidate(case.base)
+    )
     assert (
         isinstance(recovered, Found)
         and isinstance(recovered.value, Committed)
@@ -354,7 +358,9 @@ async def test_injected_conflict_preserves_competing_head(case: ProviderCase) ->
         == b"original\r\n"
     )
     assert await case.repositories.read_blob(case.repo, result.actual_head, "tool.sh") is None
-    probe = await case.repositories.probe_commit(case.repo, BRANCH, "never-applied", case.base)
+    probe = await case.repositories.probe_commit(
+        case.repo, BRANCH, "never-applied", case.base, candidate(case.base)
+    )
     assert isinstance(probe, Found) and isinstance(probe.value, Conflict)
     assert probe.value.actual_head == result.actual_head
     assert await case.repositories.find_commit_by_marker(case.repo, BRANCH, "never-applied") is None

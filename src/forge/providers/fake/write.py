@@ -217,7 +217,7 @@ class FakeWrites(FakeState):
             return Refused(reason="stale_candidate", evidence="fake:review_head_mismatch")
         if fault.http_5xx:
             return Unknown(evidence="fake:http_503")
-        ref = CommentRef(subject=review, native_id=self.next_id())
+        ref = CommentRef(subject=review, native_id=self.next_id(), kind="review")
         self.comments[f"{ref_key(review)}:{ref.native_id}"] = NativeComment(ref, body.body, marker)
         note = FeedbackNote(
             ref=ref,
@@ -241,7 +241,11 @@ class FakeWrites(FakeState):
             return Refused(reason="missing_note", evidence="fake:missing_note")
         if fault.http_5xx:
             return Unknown(evidence="fake:http_503")
-        ref = CommentRef(subject=note.ref.subject, native_id=self.next_id())
+        ref = CommentRef(
+            subject=note.ref.subject,
+            native_id=self.next_id(),
+            kind="review_comment" if note.ref.kind == "review_comment" else "issue_comment",
+        )
         self.comments[f"{ref_key(ref.subject)}:{ref.native_id}"] = NativeComment(
             ref, body, marker, reply_to=note.ref.native_id
         )

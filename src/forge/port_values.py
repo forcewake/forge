@@ -41,6 +41,7 @@ class ReviewRef(Value):
 
 
 class CommentRef(Value):
+    kind: Literal["issue_comment", "review_comment", "review"] = "issue_comment"
     subject: SubjectRef | ReviewRef
     native_id: ShortText
 
@@ -162,6 +163,7 @@ class CheckResult(Value):
     observed_at: AwareDatetime
     evidence: Evidence
     workflow_path: RepoPath | None = None
+    failure_kind: Literal["code", "infrastructure", "configuration", "unknown"] = "unknown"
 
 
 class ReviewBody(Value):

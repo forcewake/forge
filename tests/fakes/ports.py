@@ -104,11 +104,16 @@ class ScriptedPorts:
         return cast(ProbeResult[BranchOutcome], self.take("probe_branch", repo, branch, base))
 
     async def probe_commit(
-        self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha
+        self,
+        repo: RepoRef,
+        branch: str,
+        marker: str,
+        expected_parent: Sha,
+        candidate: ValidatedCandidate,
     ) -> ProbeResult[CommitOutcome]:
         return cast(
             ProbeResult[CommitOutcome],
-            self.take("probe_commit", repo, branch, marker, expected_parent),
+            self.take("probe_commit", repo, branch, marker, expected_parent, candidate),
         )
 
     async def find_draft(self, repo: RepoRef, head_branch: str) -> ReviewRef | None:

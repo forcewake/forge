@@ -10,12 +10,16 @@ from urllib.parse import quote
 
 from pydantic import TypeAdapter, ValidationError
 
+from forge.domain.candidate import ValidatedCandidate
 from forge.domain.plan import RepoPath
+from forge.domain.publication import matches_manifest
 from forge.domain.verdicts import CommitOutcome, Committed, Conflict, Sha
 from forge.port_values import (
     Applied,
     BranchOutcome,
     BranchRef,
+    CommentRef,
+    ReviewRef,
     Found,
     Inconclusive,
     ProbeResult,
@@ -307,7 +311,12 @@ class GitHubRepo:
             return Inconclusive(reason="branch read unavailable", evidence=error.evidence)
 
     async def probe_commit(
-        self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha
+        self,
+        repo: RepoRef,
+        branch: str,
+        marker: str,
+        expected_parent: Sha,
+        candidate: ValidatedCandidate,
     ) -> ProbeResult[CommitOutcome]:
         try:
             head, matches = await self._marker(repo, branch, marker)
@@ -318,11 +327,51 @@ class GitHubRepo:
             row = matches[0]
             parents = list_doc(row.get("parents"))
             proof = evidence("probe_commit", commit=object_sha(row.get("sha")))
-            result: CommitOutcome = (
-                Committed(sha=object_sha(row.get("sha")), evidence=proof)
-                if len(parents) == 1 and object_doc(parents[0]).get("sha") == expected_parent
-                else Conflict(actual_head=head, evidence=proof)
-            )
+            if len(parents) != 1 or object_doc(parents[0]).get("sha") != expected_parent:
+                return Found[CommitOutcome](
+                    value=Conflict(actual_head=head, evidence=proof), evidence=proof
+                )
+            before = await self.read_tree(repo, expected_parent)
+            after = await self.read_tree(repo, object_sha(row.get("sha")))
+            if (
+                candidate.bundle.attempt_base_oid != expected_parent
+                or candidate.changeset.branch != branch
+                or not matches_manifest(
+                    candidate,
+                    {e.path: (e.mode, e.sha) for e in before.entries if e.kind != "tree"},
+                    {e.path: (e.mode, e.sha) for e in after.entries if e.kind != "tree"},
+                )
+            ):
+                return Inconclusive(reason="commit manifest mismatch", evidence=proof)
+            result: CommitOutcome = Committed(sha=object_sha(row.get("sha")), evidence=proof)
             return Found[CommitOutcome](value=result, evidence=proof)
         except ReadUnavailable as error:
             return Inconclusive(reason="commit read unavailable", evidence=error.evidence)
+
+
+def comment_resource(comment: CommentRef) -> str:
+    ident = comment.native_id
+    if not ident.isascii() or not ident.isdecimal() or int(ident) <= 0 or str(int(ident)) != ident:
+        raise malformed("invalid_comment_native_id")
+    if comment.kind == "issue_comment":
+        return "issues/comments/" + ident
+    if not isinstance(comment.subject, ReviewRef):
+        raise malformed("review_comment_requires_review_target")
+    if comment.kind == "review_comment":
+        return "pulls/comments/" + ident
+    return f"pulls/{comment.subject.number}/reviews/{ident}"
+
+
+def comment_bound(comment: CommentRef, row: dict[str, object]) -> bool:
+    from urllib.parse import urlsplit
+
+    if native_id(row.get("id")) != comment.native_id:
+        return False
+    if comment.kind == "review":
+        return isinstance(comment.subject, ReviewRef)
+    field, segment = (
+        ("issue_url", "issues")
+        if comment.kind == "issue_comment"
+        else ("pull_request_url", "pulls")
+    )
+    return urlsplit(text(row.get(field))).path.endswith(f"/{segment}/{comment.subject.number}")

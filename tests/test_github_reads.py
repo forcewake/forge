@@ -11,6 +11,7 @@ import httpx
 import pytest
 from forge_protocol import digest
 
+from forge.domain.candidate import CandidateBundle, CreateFile, validate_candidate_bundle
 from forge.domain.plan import RepositoryIdentity
 from forge.port_values import (
     Actor,
@@ -281,22 +282,55 @@ async def test_commit_probe_is_parent_bound_and_duplicate_or_missing_markers_are
     provider,
 ):
     repo, _, _, wire = provider
-    result = await repo.probe_commit(REPO, "main", MARKER, PARENT)
+    candidate = validate_candidate_bundle(
+        CandidateBundle(
+            attempt_base_oid=PARENT,
+            driver_exit="completed",
+            entries=(CreateFile("src/file.txt", BODY.decode()),),
+        ),
+        base_contents={},
+        branch="main",
+        commit_message="Implementation",
+    )
+    after = wire.routes["git/trees/" + TREE]["tree"]
+    old_tree = "e" * 40
+    wire.routes["git/commits/" + PARENT] = {"sha": PARENT, "tree": {"sha": old_tree}}
+    wire.routes["git/trees/" + old_tree] = {
+        "sha": old_tree,
+        "truncated": False,
+        "tree": [entry for entry in after if entry["path"] != "src/file.txt"],
+    }
+    result = await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate)
     assert (
         isinstance(result, Found)
         and result.value.kind == "committed"
         and result.value.sha == COMMIT
     )
-    conflict = await repo.probe_commit(REPO, "main", MARKER, "0" * 40)
+    original = next(entry for entry in after if entry["path"] == "src/file.txt")
+    original["mode"] = "100755"
+    assert isinstance(
+        await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate), Inconclusive
+    )
+    original["mode"] = "100644"
+    after.append({"path": "unapproved", "type": "blob", "mode": "100644", "sha": BLOB})
+    assert isinstance(
+        await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate), Inconclusive
+    )
+    after.pop()
+    conflict = await repo.probe_commit(REPO, "main", MARKER, "0" * 40, candidate)
     assert isinstance(conflict, Found) and conflict.value.kind == "conflict"
     wire.routes["commits"].append(
         {"sha": "f" * 40, "parents": [{"sha": PARENT}], "commit": {"message": MARKER}}
     )
-    assert isinstance(await repo.probe_commit(REPO, "main", MARKER, PARENT), Inconclusive)
+    assert isinstance(
+        await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate), Inconclusive
+    )
     with pytest.raises(ReadUnavailable):
         await repo.find_commit_by_marker(REPO, "main", MARKER)
     wire.routes["commits"] = [{"sha": COMMIT, "parents": [], "commit": {"message": "no marker"}}]
-    assert isinstance(await repo.probe_commit(REPO, "main", MARKER, PARENT), Inconclusive)
+    assert isinstance(
+        await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate), Inconclusive
+    )
     assert all(
         request.url.params["sha"] == COMMIT
         for request in wire.calls

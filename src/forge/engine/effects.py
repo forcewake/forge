@@ -223,7 +223,11 @@ class Effects:
         if kind == EffectKind.COMMIT:
             assert repo is not None
             return await self.repo.probe_commit(
-                repo, data["branch"], data["marker"], data["expected_head"]
+                repo,
+                data["branch"],
+                data["marker"],
+                data["expected_head"],
+                TypeAdapter(ValidatedCandidate).validate_json(_encoded(data["candidate"])),
             )
         if kind == EffectKind.ENSURE_BRANCH:
             assert repo is not None

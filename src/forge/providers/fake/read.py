@@ -2,6 +2,8 @@
 
 from forge_protocol import digest
 
+from forge.domain.candidate import ValidatedCandidate
+from forge.domain.publication import matches_manifest
 from forge.domain.verdicts import CommitOutcome, Committed, Conflict, Sha
 from forge.port_values import (
     Applied,
@@ -205,7 +207,12 @@ class FakeReads(FakeState):
         return result
 
     async def probe_commit(
-        self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha
+        self,
+        repo: RepoRef,
+        branch: str,
+        marker: str,
+        expected_parent: Sha,
+        candidate: ValidatedCandidate,
     ) -> ProbeResult[CommitOutcome]:
         native = self.repo(repo)
         result: ProbeResult[CommitOutcome] = self.probe(
@@ -216,6 +223,17 @@ class FakeReads(FakeState):
             marker,
             expected_parent,
         )
+        if (
+            candidate.bundle.attempt_base_oid != expected_parent
+            or candidate.changeset.branch != branch
+        ):
+            return Inconclusive(reason="candidate context mismatch", evidence="fake:manifest")
+        if isinstance(result, Found) and isinstance(result.value, Committed):
+            return (
+                result
+                if self._commit_matches(repo, result.value.sha, candidate)
+                else Inconclusive(reason="commit manifest mismatch", evidence="fake:manifest")
+            )
         if result.kind != "definitely_absent":
             return result
         head = native.branches.get(branch)
@@ -223,6 +241,8 @@ class FakeReads(FakeState):
         while cursor is not None:
             commit = native.commits[cursor]
             if commit.parent == expected_parent and commit.message.endswith("\n" + marker):
+                if not self._commit_matches(repo, commit.sha, candidate):
+                    return Inconclusive(reason="commit manifest mismatch", evidence="fake:manifest")
                 return Found[CommitOutcome](
                     value=Committed(sha=commit.sha, evidence="fake:marker_found"),
                     evidence="fake:native_commit",
@@ -234,6 +254,21 @@ class FakeReads(FakeState):
                 evidence="fake:native_head",
             )
         return result
+
+    def _commit_matches(self, repo: RepoRef, sha: Sha, candidate: ValidatedCandidate) -> bool:
+        native = self.repo(repo)
+        commit = native.commits.get(sha)
+        parent = native.commits.get(candidate.bundle.attempt_base_oid)
+        return bool(
+            commit is not None
+            and parent is not None
+            and commit.parent == parent.sha
+            and matches_manifest(
+                candidate,
+                {path: (blob.mode, blob.sha) for path, blob in parent.files},
+                {path: (blob.mode, blob.sha) for path, blob in commit.files},
+            )
+        )
 
     async def find_draft(self, repo: RepoRef, head_branch: str) -> ReviewRef | None:
         result = await self.probe_draft(repo, head_branch)
