@@ -355,6 +355,8 @@ When a pin breaks:
 
 | EC-713 | Ambient Decimal precision rounds budget arithmetic or changes which provider costs validate | Validate exact NUMERIC(38,18) values without context-dependent normalization; add/subtract in an isolated exact context and reject overflow | `src/forge/domain/budget.py` | `tests/test_domain_core.py::test_money_arithmetic_is_exact_under_hostile_decimal_context`, `tests/test_domain_core.py::test_money_format_refuses_overflow_without_rounding`, `tests/test_domain_core.py::test_small_provider_costs_and_large_caps_settle_without_loss` |
 
+| EC-714 | A forged candidate bypasses the lane file policy with a permissive write profile | Refuse private Git/runtime/authentication paths and control characters at the server publication boundary, before any provider write | `src/forge/domain/paths.py` | `tests/test_domain_candidate.py::test_publication_rejects_metadata_controls_and_credentials_under_permissive_policy` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

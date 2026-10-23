@@ -230,6 +230,31 @@ def in_path_scope(path: str, allowed_paths: list[str]) -> bool:
     return any(fnmatchcase(path, glob) for glob in allowed_paths if glob)
 
 
+def _private_path(path: str) -> bool:
+    parts = tuple(part.casefold() for part in path.split("/"))
+    directories = {".git", ".forge", ".claude", ".copilot", ".ssh", ".aws", ".kube"}
+    names = {
+        ".forge.yml",
+        ".mcp.json",
+        ".gitconfig",
+        ".gitmodules",
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "id_rsa",
+        "id_ed25519",
+    }
+    return any(
+        part in directories
+        or part in names
+        or part.startswith(".env")
+        or part.endswith((".pem", ".key"))
+        for part in parts
+    )
+
+
 def validate_changeset(
     cs: ChangeSet,
     git_base: dict[str, str] | None = None,
@@ -275,6 +300,10 @@ def _validate_change(
         return violations
 
     canonical = normalize_repo_path(change.path)
+    if any(ord(char) < 32 or ord(char) == 127 for char in change.path):
+        violations.append(f"{where}: control characters are not allowed")
+    if _private_path(canonical):
+        violations.append(f"{where}: private metadata or credential path")
     if canonical == ".forge" or canonical.startswith(".forge/"):
         violations.append(f"{where}: reserved forge runtime namespace")
 

@@ -241,3 +241,42 @@ def test_usage_raw_json_cannot_drift_after_receipt_construction():
     zero = HarnessUsage.from_meta({"input_tokens": 0, "completeness": "exact", "unknown": "keep"})
     assert zero.completeness == "unknown" and zero.total_known_tokens is None
     assert zero.raw_document()["unknown"] == "keep"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/config",
+        "nested/.GiT/hooks/pre-commit",
+        "nested/.forge/session.json",
+        "safe\x00.py",
+        "safe\nname.py",
+        ".ssh/id_rsa",
+        "service/.env.production",
+        "nested/.git-credentials",
+        "credentials",
+        "secrets/private.key",
+    ],
+)
+def test_publication_rejects_metadata_controls_and_credentials_under_permissive_policy(path):
+    from forge.domain.candidate import CreateFile, PolicyViolation
+
+    policy = PathPolicy(
+        name="approved",
+        denied_paths=frozenset(),
+        denied_prefixes=(),
+        permitted_globs=("*",),
+        deny_lockfiles=False,
+    )
+    bundle = CandidateBundle(
+        attempt_base_oid="a" * 40, driver_exit="completed", entries=(CreateFile(path, "forged"),)
+    )
+    with pytest.raises(PolicyViolation):
+        validate_candidate_bundle(
+            bundle,
+            base_contents={},
+            branch="factory/1",
+            commit_message="m",
+            allowed_paths=("*",),
+            policy=policy,
+        )
