@@ -116,3 +116,12 @@ class EffectRecord:
     head_branch: str | None
     dispatched_at: datetime | None
     dispatch_deadline_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RestartLane:
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.reason or len(self.reason) > 300:
+            raise ValueError("lane revival requires a bounded reason")

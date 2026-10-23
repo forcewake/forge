@@ -11,6 +11,10 @@ class LaneAuthError(ValueError):
     """An authentication request was refused without exposing its credentials."""
 
 
+class LaneAuthPending(LaneAuthError):
+    """A current durable dispatch is awaiting its native provider job binding."""
+
+
 def identity_of(value: RunIdentity) -> RunIdentity:
     return RunIdentity(
         forge_run_id=value.forge_run_id, attempt=value.attempt, generation=value.generation

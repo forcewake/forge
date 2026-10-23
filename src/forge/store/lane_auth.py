@@ -7,18 +7,19 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from forge_protocol import Brief, LaneDispatch, RunIdentity
+from forge_protocol import Brief, LaneDispatch, RunIdentity, digest
 from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.api.lane_auth_values import LaneAuthError, PendingDispatch, identity_of
+from forge.api.lane_auth_values import LaneAuthError, LaneAuthPending, PendingDispatch, identity_of
 from forge.domain.approved_input import ApprovedInput
 from forge.domain.run_spec import RunSpec2
 from forge.domain.states import TERMINAL, State
 from forge.store.inbox import ingest_event, mark_processed
 from forge.store.inbox_models import EventInbox
 from forge.store.models_lane import EngineLaneSession
+from forge.store.models_execution import EngineEffect
 from forge.store.models_runs import EngineApprovedInput, EngineRun, EngineRunSpec
 from forge.store.transactions import SessionFactory, canonical_json, stored_time, transaction
 
@@ -71,6 +72,40 @@ def current(
     return pending
 
 
+async def awaiting_job_binding(
+    session: AsyncSession, run: EngineRun | None, identity: RunIdentity
+) -> bool:
+    if (
+        run is None
+        or run.cancel_requested
+        or State(run.state) in TERMINAL
+        or (run.id, run.attempt, run.generation)
+        != (identity.forge_run_id, identity.attempt, identity.generation)
+    ):
+        return False
+    effect = await session.scalar(
+        select(EngineEffect).where(
+            EngineEffect.key == f"{run.id}:{run.attempt}:{run.generation}:lane:dispatch",
+            EngineEffect.run_id == run.id,
+            EngineEffect.kind == "dispatch_lane",
+            EngineEffect.state.in_(("requested", "dispatched", "unknown", "committed", "adopted")),
+        )
+    )
+    if effect is None:
+        return False
+    try:
+        raw = json.loads(effect.payload_json)
+        dispatch = LaneDispatch.model_validate_json(raw["dispatch_json"])
+        return (
+            digest(raw) == effect.payload_digest
+            and identity_of(dispatch) == identity
+            and dispatch.provider == run.provider
+            and len(dispatch.nonce or "") >= 32
+        )
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
 async def locked_current(
     session: AsyncSession, identity: RunIdentity
 ) -> tuple[EngineRun, EngineLaneSession, PendingDispatch]:
@@ -86,6 +121,8 @@ async def locked_current(
         )
         .with_for_update()
     )
+    if row is None and await awaiting_job_binding(session, run, identity):
+        raise LaneAuthPending("lane dispatch is awaiting its provider job binding")
     pending = current(run, row, identity)
     assert run is not None and row is not None
     return run, row, pending

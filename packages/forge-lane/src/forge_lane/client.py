@@ -1,5 +1,6 @@
 """One authenticated HTTP protocol; no provider or control-plane imports."""
 
+import asyncio
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, TypeVar
@@ -33,6 +34,10 @@ def same_identity(left: RunIdentity, right: RunIdentity) -> bool:
         right.attempt,
         right.generation,
     )
+
+
+class _SessionPending(LaneFailure):
+    pass
 
 
 class LaneClient:
@@ -74,6 +79,10 @@ class LaneClient:
                 )
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
+            if method == "POST" and path == "/session" and status == 503:
+                raise _SessionPending(
+                    ExitCode.TRANSPORT, "session_pending", "Lane dispatch binding is pending"
+                ) from None
             code = ExitCode.AUTHENTICATION if status in (401, 403) else ExitCode.TRANSPORT
             kind = "session_refused" if code == ExitCode.AUTHENTICATION else "server_refused"
             raise LaneFailure(
@@ -101,7 +110,22 @@ class LaneClient:
         request = SessionRequest(
             **self.identity, provider=self.dispatch.provider, oidc_token=oidc_token
         )
-        response = await self.request("POST", "/session", json=request.model_dump(mode="json"))
+        try:
+            async with asyncio.timeout(min(60, self.dispatch.timeout_seconds)):
+                while True:
+                    try:
+                        response = await self.request(
+                            "POST", "/session", json=request.model_dump(mode="json")
+                        )
+                        break
+                    except _SessionPending:
+                        await asyncio.sleep(1)
+        except TimeoutError:
+            raise LaneFailure(
+                ExitCode.TRANSPORT,
+                "session_startup_timeout",
+                "Lane provider binding did not become available before the startup deadline",
+            ) from None
         token = self.parse(SessionToken, response)
         if token.expires_at <= datetime.now(timezone.utc):
             raise LaneFailure(

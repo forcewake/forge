@@ -141,6 +141,7 @@ tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_approval.py,8,585,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
 tests/test_engine_lane.py,14,551,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
+tests/test_engine_lane_handlers.py,15,513,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_runner.py,17,426,false,true,,invariant evidence; edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
 tests/test_engine_store.py,14,430,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,

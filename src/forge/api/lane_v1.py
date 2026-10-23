@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.types import Message
 from forge_protocol import (
     Brief,
     CandidateBundle,
@@ -24,20 +26,20 @@ from forge_protocol import (
 )
 
 from forge.api.lane_auth import LaneAuthService
-from forge.api.lane_auth_values import LaneAuthError
+from forge.api.lane_auth_values import LaneAuthError, LaneAuthPending
 from forge.api.lane_v1_blobs import BlobError, BlobTooLarge, LaneBlobStore
 from forge.api.lane_v1_service import LaneV1Service, ModelKeyUnavailable
 from forge.api.lane_v1_values import LaneConflict, LaneNotFound
 
 
 class LaneRoute(APIRoute):
-    def get_route_handler(self):
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
 
-        async def guarded(request: Request):
+        async def guarded(request: Request) -> Response:
             receive, count = request.receive, 0
 
-            async def bounded_receive():
+            async def bounded_receive() -> Message:
                 nonlocal count
                 message = await receive()
                 count += len(message.get("body", b""))
@@ -60,6 +62,8 @@ class LaneRoute(APIRoute):
                         ]
                     },
                 )
+            except LaneAuthPending as exc:
+                raise HTTPException(503, str(exc), headers={"Retry-After": "1"}) from None
             except LaneAuthError as exc:
                 raise HTTPException(401, str(exc), headers={"WWW-Authenticate": "Bearer"}) from None
             except LaneNotFound as exc:
@@ -83,7 +87,7 @@ def service(request: Request) -> LaneV1Service:
         raise HTTPException(
             503, "lane v1 is unavailable: configure its signing key and HTTPS public URL"
         )
-    return value
+    return cast(LaneV1Service, value)
 
 
 Service = Annotated[LaneV1Service, Depends(service)]

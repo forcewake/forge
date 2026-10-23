@@ -9,6 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.states import TERMINAL, Handler, State, transition
+from forge.store.records import RestartLane
 from forge.store.approval import apply_approval_commit
 from forge.store.approval_values import ApprovalCommit, ConsumeGate, OpenGate
 from forge.store.models_execution import EngineStep
@@ -143,6 +144,32 @@ async def claim_one(
     return lease_record(row)
 
 
+def apply_lane_restart(
+    run: EngineRun,
+    lease: Lease,
+    restart: RestartLane | None,
+    successors: tuple[StepRequest, ...],
+    transition_to: State | None,
+    approval: ApprovalCommit | None,
+) -> None:
+    if restart is None:
+        return
+    if (
+        lease.handler != Handler.AWAIT_LANE
+        or run.state != State.RUNNING.value
+        or transition_to is not None
+        or approval is not None
+        or len(successors) != 1
+        or successors[0].handler != Handler.DISPATCH
+    ):
+        raise StoreConflict("lane revival requires one atomic dispatch successor")
+    run.attempt += 1
+    run.generation += 1
+    run.version += 1
+    run.failed_handler = None
+    run.reason = restart.reason
+
+
 class StepStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
@@ -227,6 +254,7 @@ class StepStore:
         reason: str | None = None,
         outcome: Literal["succeeded", "failed"] = "succeeded",
         approval: ApprovalCommit | None = None,
+        restart_lane: RestartLane | None = None,
     ) -> StepRecord:
         canonical_json(result_json)
         for request in successors:
@@ -270,6 +298,7 @@ class StepStore:
                     transition_to = State.BLOCKED if decision.block else None
                     reason = decision.reason if decision.block else None
                     outcome = "failed" if decision.block else "succeeded"
+            apply_lane_restart(run, lease, restart_lane, successors, transition_to, approval)
             for request in successors:
                 await enqueue_in(session, run, request)
             if transition_to is not None:

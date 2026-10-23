@@ -4,12 +4,14 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from datetime import timedelta
 import json
 import math
 from typing import Generic, Protocol, TypeVar
 
 from forge.domain.states import Handler, State
+from forge.store.records import RestartLane
 from forge.ports import Clock
 from forge.store.approval_values import ApprovalCommit
 from forge.store.records import Lease, StepRecord, StepRequest, StaleLease
@@ -70,9 +72,17 @@ class StepResult:
     park: Park | None = None
     next_state: State | None = None
     approval: ApprovalCommit | None = None
+    restart_lane: RestartLane | None = None
+    defer_until: datetime | None = None
 
     def __post_init__(self) -> None:
         canonical_json(self.result_json)
+        if self.defer_until is not None and (
+            self.successors or self.park or self.next_state or self.approval or self.restart_lane
+        ):
+            raise ValueError("a waiting step cannot complete or mutate lifecycle")
+        if self.restart_lane is not None and (self.park or self.next_state or self.approval):
+            raise ValueError("lane revival is a separate atomic completion")
         object.__setattr__(self, "successors", tuple(self.successors))
         if self.park is not None and (
             self.successors or self.next_state is not None or self.approval is not None
@@ -200,7 +210,18 @@ class StepRunner(Generic[E]):
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+        return await self._complete(holder, result)
+
+    async def _complete(self, holder: LeaseHolder, result: StepResult) -> str:
         try:
+            if result.defer_until is not None:
+                retried = await self.store.reschedule(
+                    holder.current,
+                    due_at=result.defer_until,
+                    reason="awaiting_observation",
+                    now=self.clock.now(),
+                )
+                return "rescheduled" if retried.state == "scheduled" else "parked"
             completed = await self.store.complete_and_enqueue(
                 holder.current,
                 result.result_json,
@@ -209,6 +230,7 @@ class StepRunner(Generic[E]):
                 transition_to=result.park.state if result.park else result.next_state,
                 reason=result.park.reason if result.park else None,
                 approval=result.approval,
+                restart_lane=result.restart_lane,
             )
             return "parked" if result.park or completed.state == "failed" else "completed"
         except StaleLease:
