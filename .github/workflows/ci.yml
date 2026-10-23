@@ -29,7 +29,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -100,6 +100,18 @@ jobs:
           name: conformance-gate-report
           path: conformance-gate.json
 
+  workspace-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build every distribution
+        run: uv build --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-distributions
+          path: dist/*
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
@@ -109,7 +121,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       # Blocking since F29: the core packages (durable state machine, runs
       # services, repository, factory agents, execution, integrations) must
@@ -118,6 +130,7 @@ jobs:
         run: >-
           uv run mypy src/forge/durable src/forge/runs src/forge/repository
           src/forge/factory src/forge/execution src/forge/integrations
+          packages/forge-protocol/src packages/forge-lane/src
 
       # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
       # gateway, agents, flows, stores, utils, harness_entry, main,
@@ -144,7 +157,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Run tests (default tier)
         run: uv run pytest -q -m "not slow" --durations=30
@@ -171,7 +184,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Run tests (slow tier)
         run: uv run pytest -q -m slow
@@ -203,7 +216,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies (with the postgres extra)
-        run: uv sync --extra postgres
+        run: uv sync --all-packages --extra postgres
 
       - name: Invariant Suite
         run: >-
@@ -226,10 +239,10 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Default tier with coverage
-        run: uv run pytest -q -m "not slow" --cov=forge --cov=scripts --cov-report=xml
+        run: uv run pytest -q -m "not slow" --cov=forge --cov=forge_protocol --cov=forge_lane --cov=scripts --cov-report=xml
 
       - name: Diff coverage (at least 85% of changed lines)
         run: >-
@@ -304,7 +317,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies (with the postgres extra)
-        run: uv sync --extra postgres
+        run: uv sync --all-packages --extra postgres
 
       - name: Failure-injection exit bar (real Postgres)
         run: uv run pytest tests/test_failure_injection.py -q
@@ -376,7 +389,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies (with the postgres extra)
-        run: uv sync --extra postgres
+        run: uv sync --all-packages --extra postgres
 
       - name: OS-process failure injection (SIGKILL drills on real workers)
         run: uv run pytest tests/test_failure_injection_os.py -q

@@ -640,6 +640,11 @@ run last so that they do not churn code about to be deleted.
 - The old lane still serves the old services.
 
 ### P2-01 Set up the uv workspace
+- **Status:** implemented locally on 2026-10-23. Three distributions
+  build with `uv build --all` and install into a fresh environment.
+  Import contracts enforce protocol independence and server/lane
+  separation. CI now builds all distributions and includes package
+  sources in type and coverage checks; hosted execution is unclaimed.
 - **Goal:** three distributions in one repository.
 - **Work:**
   - Create `packages/forge-protocol/` and `packages/forge-lane/`, each

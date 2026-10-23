@@ -39,6 +39,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-08 release and CI flow | Build-once artifact verification and workflow rewrite in an isolated worker branch |
 | P1-10 lane-only implementation | Removing the builtin backend and adding admission refusal before paid work |
 | P1-11 Azure removal | Removing Azure code and porting retained shared contracts; local `release/0.42.x` preserves `7ed64ba` |
+| P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
 
 The owner completed review of all 129 required ledger rows on 2026-10-23,
 keeping existing dispositions. The source ledger hash and confirmation

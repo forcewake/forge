@@ -2,6 +2,13 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
+[manifest]
+members = [
+    "forge",
+    "forge-lane",
+    "forge-protocol",
+]
+
 [[package]]
 name = "agno"
 version = "2.5.0"
@@ -743,6 +750,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
     { name = "fastapi" },
+    { name = "forge-protocol" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "mcp" },
@@ -774,6 +782,7 @@ postgres = [
 dev = [
     { name = "diff-cover" },
     { name = "fakeredis" },
+    { name = "forge-lane" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -794,6 +803,7 @@ requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'interactive'", specifier = ">=0.2.118" },
     { name = "cryptography", marker = "extra == 'github'", specifier = ">=42" },
     { name = "fastapi", specifier = "==0.135.2" },
+    { name = "forge-protocol", editable = "packages/forge-protocol" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "litellm", specifier = "<=1.82.0" },
     { name = "mcp", specifier = "==1.26.0" },
@@ -812,6 +822,7 @@ provides-extras = ["postgres", "mysql", "github", "interactive"]
 dev = [
     { name = "diff-cover", specifier = "==10.6.0" },
     { name = "fakeredis", specifier = ">=2.26" },
+    { name = "forge-lane", editable = "packages/forge-lane" },
     { name = "import-linter", specifier = "==2.15" },
     { name = "mypy", specifier = "==1.19.1" },
     { name = "pytest", specifier = "==9.0.2" },
@@ -821,6 +832,32 @@ dev = [
     { name = "ruff", specifier = "==0.15.7" },
     { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]
+
+[[package]]
+name = "forge-lane"
+version = "0.1.0"
+source = { editable = "packages/forge-lane" }
+dependencies = [
+    { name = "forge-protocol" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "forge-protocol", editable = "packages/forge-protocol" },
+    { name = "httpx", specifier = "==0.28.1" },
+]
+
+[[package]]
+name = "forge-protocol"
+version = "0.1.0"
+source = { editable = "packages/forge-protocol" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.13.5,<3" }]
 
 [[package]]
 name = "frozenlist"
