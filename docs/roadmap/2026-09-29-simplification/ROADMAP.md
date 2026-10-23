@@ -286,6 +286,12 @@ takes 543 s against the 480 s target; see the plan's
 
 ## Phase 1 — Subtract (weeks 2–3)
 
+**Status:** subtraction/source work through P1-17 is implemented locally on
+2026-10-23; the documentation patch preserves exact local archive snapshots.
+Phase 1 is not closed. Global prose share, direct-dependency and all-docs
+word targets remain open; assembled verification, hosted CI, release/tag
+publication, live dogfooding and pilot acceptance are not claimed.
+
 **Exit criteria:**
 
 - `src/forge` ≤ 110K lines.
@@ -622,6 +628,12 @@ run last so that they do not churn code about to be deleted.
 - **Size:** L (split into about 6 PRs)
 
 ### P1-17 Documentation diet
+- **Status:** implemented locally on 2026-10-23. Current guides and README
+  are concise, historical docs are recoverable from a verified local-only
+  snapshot, and local path/heading links are checked. The active-reader
+  count excludes only canonical execution records and the unchanged old
+  changelog; the unchanged all-docs metric remains above 60K, so this target
+  and Phase 1 exit remain open.
 - **Goal:** documentation a newcomer can read.
 - **Work:**
   - Rewrite `README.md` (≤ 2 pages: what forge is, the safety model, a

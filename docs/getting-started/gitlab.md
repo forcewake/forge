@@ -1,100 +1,60 @@
-# Project onboarding (runbook)
+# Connect a GitLab project
 
-Goal: connect a GitLab project to forge so runs can be dispatched, with the
-execution profile approved by a human **before** the first run
-([ADR-0002](../adr/0002-ci-execution-environment-explicit-execution-profiles.md)). Machine-checkable
-version: `python -m forge.doctor --project <id>` until it exits 0.
+Current provider services still use the existing GitLab CI lane. The new
+[lane v1](../harnesses/lane-v1.md) is a separately composed migration route.
+Use a disposable target for the first workflow and obtain the project
+owner's authority before changing tokens, hooks or CI.
 
-## 1. Approve the execution profile (human decision)
+## 1. Approve the execution profile
 
-Confirm before touching CI:
+Use an ephemeral unprivileged Docker executor, never a shell runner,
+Docker socket, production secrets or broad internal-network access.
+Permit only required GitLab, package-registry and model endpoints.
+Protect the target branch: humans may merge, the bot may neither merge nor
+push there. Forge writes only its reserved factory branch.
 
-- Ephemeral **docker executor** runner only (no shell runners).
-- No privileged mode, no Docker socket, no production secrets in the runner's
-  reach, no broad internal network access from job containers.
-- Outbound network needed: the GitLab origin, the package registry the
-  harness installs from, and the harness API endpoint.
+## 2. Configure identity and webhook
 
-## 2. Bot identity and permissions
+Keep the bot's project-scoped `FORGE_BOT_TOKEN` in the control plane only;
+configure the required GitLab API permissions and trusted `FORGE_APPROVERS`.
+An optional lane `FORGE_BOT_READ_TOKEN` is read-only. Never stage the bot's
+write token or forge's admin/database credentials in project CI.
 
-- Bot user (e.g. `forge`) with a project-scoped PAT — in forge's env only
-  (`FORGE_BOT_TOKEN`, `api` scope, 90-day expiry recommended — see
-  [token-rotation.md](../operations/token-rotation.md)). The harness lane never receives
-  it: optionally give the lane a READ-ONLY project PAT
-  (`FORGE_BOT_READ_TOKEN`, ADR-0016).
-- Target branch (`main`) protected: **Maintainers may merge; nobody pushes**.
-  The bot works exclusively on `factory/<issue-iid>/<run-id>` branches.
-- Bot is NOT given merge rights on the target branch — that is the enforced
-  no-merge guarantee, not a convention.
+Enable GitLab in forge, set its base URL and `GITLAB_WEBHOOK_SECRET`, and
+configure the project's webhook to the deployment's `/webhook` endpoint.
+Use HTTPS outside a deliberately isolated local environment. Enable Notes,
+Issues, Merge request, Pipeline and Job events as required by the ingress;
+[GitLab documents their event semantics](https://docs.gitlab.com/user/project/integrations/webhook_events/).
+LAN delivery also depends on the administrator's allowed-local-request
+policy. A webhook secret authenticates transport; it never grants actor
+approval authority.
 
-## 3. Webhook
+## 3. Install the matching lane
 
-Settings → Webhooks → `http://<forge-host>:8420/webhook`, secret = the
-`GITLAB_WEBHOOK_SECRET` value, events: **Notes, Merge request, Pipeline, Job**.
-If forge runs on a LAN address, the GitLab admin setting
-`allow_local_requests_from_web_hooks_and_services` must be enabled.
+Include or copy the reviewed [GitLab template](../../ci/templates/) for the
+selected driver. Pin a reviewed immutable published ref or exact template;
+a moving `main` include is not a reproducible deployment. The compiled
+configuration must contain the selected lane job. Normal pipelines must
+skip implementation when no forge dispatch identity is present.
 
-## 4. CI variables (Settings → CI/CD → Variables)
+Provision only that driver's masked model/subscription credential, optional
+read-only clone token, and explicitly configured MCP secrets. A protected
+variable invisible on factory refs fails preflight; do not work around it
+with an ambient duplicate. Use the [credential runbooks](../operations/credential-rotation.md).
+`FORGE_REQUIRED_JOBS` names actual independent jobs that must exist and
+succeed on the candidate SHA. A green pipeline without those jobs is not
+verification. Admission refuses missing CI before paid planning.
 
-| Variable | Notes |
-|----------|-------|
-| `FORGE_BOT_READ_TOKEN` | optional; masked; READ-ONLY PAT (repo read). Never put a write token in the lane (ADR-0016) — the trusted publisher is the only writer |
-| harness credential | `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`, or `ZAI_API_KEY`, or `FORGE_GROK_AUTH` — exactly the backend chosen below |
-| `FORGE_HARNESS_HTTPS_PROXY` | optional; only when the runner network throttles AI streams |
-| `FORGE_HARNESS_MCP` | optional; MCP servers for the lane (JSON, ADR-0022) — see [harness-onboarding §2b](../harnesses/onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022) for a copy-paste Context7 + Microsoft Learn example |
+## 4. Verify and operate
 
-Never store forge's own admin token in the project.
+Run `forge doctor --project <id>`. Then comment `/implement`, review the
+posted plan and approve `/go <run-id>`. The lane returns a candidate to the
+trusted publisher; independent CI and readonly review precede readiness.
+Inspect the exact Draft/head/check evidence and leave merging to a human.
+[Operator commands](../operations/operator-commands.md) cover cancellation,
+reconciliation, retries and GitLab review feedback.
 
-## 5. Harness template (human-applied include)
-
-One line in `.gitlab-ci.yml` on the default branch:
-
-```yaml
-include:
-  - remote: 'https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/grok.gitlab-ci.yml'
-```
-
-The harness job runs only when forge triggers a pipeline with `FORGE_RUN_ID`
-— normal pipelines skip it. Details and triage:
-[harness-onboarding.md](../harnesses/onboarding.md).
-
-### 5b. The dispatch envelope (pause/steer/resume, R37-07)
-
-Every harness dispatch triggers the pipeline with forge's envelope
-variables — the frozen brief (`FORGE_PLAN`, `FORGE_ATTEMPT_BASE`,
-`FORGE_HARNESS_MODEL`, `FORGE_HARNESS_DRIVER`) plus the lane-resume
-contract the persisted continuation decision selected:
-
-| Variable | Meaning |
-|----------|---------|
-| `FORGE_LANE_RESUME` / `FORGE_LANE_RESUME_MODE` | WIP continuity: `fresh` (nothing restores), `required` (the held checkpoint MUST restore before the turn — a failed restore halts the lane with zero model calls), `restart` (operator-discarded WIP) |
-| `FORGE_RESUME_CHECKPOINT` | the exact pinned checkpoint digest on a `required` resume (empty otherwise) |
-| `FORGE_ATTEMPT_GENERATION` / `FORGE_CONTINUATION_DECISION_ID` | the durable attempt identity and the decision this dispatch executes |
-| `FORGE_LANE_CONTROL_URL` / `FORGE_LANE_CONTROL_TOKEN` | the lane-control dial-out pair (the token is attempt-scoped and minted at dispatch; a retry's new attempt retires the old one) |
-
-No control-plane root secret and no publication token ever rides these
-variables. Exact resume requires an SDK lane template
-(`claude-sdk-lane.gitlab-ci.yml` and siblings — `python -m
-forge.lane_driver` performs the checkpoint restore); the batch templates
-(`claude-code.gitlab-ci.yml`, `grok.gitlab-ci.yml`, …) refuse a
-`required`-resume dispatch in the job rather than silently re-implement
-over discarded WIP. Steering is opt-in: set the project CI variable
-`FORGE_STEERING_ENABLED=1` (plus keep the control URL reachable from the
-runner) and the lane consumes operator commands through the same
-dispatched credentials.
-
-## 6. Required jobs (quality contract)
-
-`FORGE_REQUIRED_JOBS` (forge-side setting) lists job names that must be
-green for a run to reach review. Seed the repo with real tests the pipeline
-runs; a green icon without the required jobs is not done ([ADR-0008](../adr/0008-quality-contract-instead-of-pipeline-status.md)).
-
-## 7. Verify and go live
-
-```bash
-python -m forge.doctor --project <id>     # exit 0
-```
-
-Then the first live run: comment `/implement` on an issue, review the plan,
-reply `@forge /go <run-id>`. Watch the run reach `ready_for_human` with an
-evidence comment bound to the candidate SHA.
+Required resume needs an SDK lane and the exact verified checkpoint before
+any model turn; batch templates refuse it. Steering needs explicit control
+configuration and cannot widen approval. See [harness onboarding](../harnesses/onboarding.md)
+and [runtime recovery](../operations/adaptive-runbook.md).

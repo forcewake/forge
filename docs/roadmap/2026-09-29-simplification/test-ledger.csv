@@ -124,6 +124,7 @@ tests/test_delivery_economics.py,4,76,true,false,,edge-case pin,,delivery,keep,-
 tests/test_dependency_contract.py,3,37,false,false,,edge-case pin,,dependency,keep,-,
 tests/test_deployment_ops.py,3,34,true,false,,edge-case pin,,deployment,keep,-,
 tests/test_discovery_authority.py,3,55,true,false,,edge-case pin,,discovery,keep,-,
+tests/test_docs_links.py,4,131,false,false,,edge-case pin,,docs,keep,-,
 tests/test_doctor.py,24,597,true,false,,,,doctor,keep,-,
 tests/test_doctor_settings.py,4,48,true,false,,,,doctor,keep,-,
 tests/test_durable_controller.py,28,423,true,false,,,,durable,keep,-,

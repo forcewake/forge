@@ -1,95 +1,61 @@
-# Token and secret rotation (runbook)
+# Token and signing-key rotation
 
-Four secrets rotate on different clocks. None of them lives in forge's
-database, so rotation never touches run state.
+Credentials stay in the deployment's private secret store and selected CI
+secret carriers, never source, logs or public receipts. Record identities,
+revisions and expiry without values. The control-plane publisher credential
+never enters the coding lane.
 
-| Secret | Where it lives | Rotation |
-|--------|----------------|----------|
-| Bot PAT (`FORGE_BOT_TOKEN` in forge env; optional read-only `FORGE_BOT_READ_TOKEN` in project CI variables) | GitLab user `forge` → Access Tokens; forge env; (read-only variant) project CI variables | 90 days recommended (current lab token expires 2026-10-31) |
-| Webhook secret (`GITLAB_WEBHOOK_SECRET`) | GitLab project webhook + forge env | 180 days, or immediately on suspicion |
-| Model API key (`ZAI_API_KEY`/`ANTHROPIC_AUTH_TOKEN`) | Provider console; LiteLLM config; project CI variables | Provider-driven; immediately on leak |
-| Operator/admin token | Your secrets store; never in forge | Your policy |
+## Provider, webhook and model credentials
 
-## Bot PAT rotation (no lost runs)
+For a GitLab bot PAT or GitHub App key/token, keep the same scoped bot
+identity and permissions. Stage the replacement, update both consumers,
+verify doctor/provider access, then revoke the old credential. Existing
+runs remain durable, but a rejected native call can have an unknown effect:
+probe before retry. Never grant target-branch merge or bypass to repair auth.
 
-The token is read at call time from the environment — restart is the only
-propagation step:
+Rotate webhook secrets in forge and each provider hook as one coordinated
+change. A single-secret deployment has a delivery gap during mismatched
+values; inspect provider delivery failures/retries afterwards. Do not assume
+all missed events will be replayed. Ingress authentication never substitutes
+for actor approval checks.
 
-1. Create the new PAT for the bot user (same scopes, same user — run
-   identity and gate audit rows must stay stable).
-2. Update it in forge's env (`FORGE_BOT_TOKEN`); if the project uses the
-   optional read-only lane token, update `FORGE_BOT_READ_TOKEN` in the
-   project CI variables. The lane must never hold a write token (ADR-0016).
-3. Recreate `forge-app` and `forge-worker` (in-flight runs are durable:
-   `waiting_harness`/`waiting_ci` runs are resumed by the reconciler; runs
-   in worker-held states simply resume processing after restart).
-4. Revoke the old PAT only after `forge doctor` exits 0.
+Model credential rotation depends on its selected route. Already running
+jobs retain their staged environment. Revoking a value can fail the turn;
+that is not zero spend. Existing bound-lane grants retain their original
+revision/deadline and refuse after a conflicting rebind. Use
+[lane rotation](credential-rotation.md), [native locators](native-locators.md)
+and value-free [consumer receipts](credential-consumption.md).
 
-## Webhook secret
+## Existing lane-control and operator credentials
 
-1. Set the new value in forge's env, restart `forge-app`.
-2. Update the webhook secret in every onboarded project (old deliveries
-   between the two updates get 401 — GitLab retries them, forge accepts
-   once the new secret is live; ordering above avoids most retries).
-3. Never commit the secret; `data/captured/` payloads are not secret but
-   honor the [retention policy](audit-retention.md).
+`FORGE_LANE_CONTROL_SECRET` still signs the current legacy control/operator
+families while their callers migrate. Changing it invalidates existing
+tokens unless the particular route explicitly supports a documented overlap.
+Drain or cancel/re-dispatch affected work; do not claim overlap from a
+restart alone. Canonical operator scope must be reissued explicitly.
 
-## Model keys
+Legacy generation-less lane acceptance has a restart-stable bounded
+migration window: explicit `FORGE_LEGACY_CREDENTIAL_DEADLINE` (older alias
+honored), recorded `FORGE_LANE_LEGACY_TOKEN_START`, or a write-once persisted
+anchor under the checkpoint store. Missing/unpersistable or malformed
+state refuses legacy acceptance. Never delete or edit the anchor to reopen
+it. Drain grandfathered work through authorized re-dispatch; after expiry,
+restart cannot revive it. Generation-scoped tokens remain separately checked.
 
-Update LiteLLM's config/env and the project CI variables that the harness
-jobs read, then restart `forge-litellm`. In-flight harness jobs already
-running keep their env — a key revoked mid-run fails that job honestly
-(classified `harness_infrastructure` when auth patterns appear in the
-trace) and the run blocks or repairs per the standard rules.
+## New lane v1 server signing key
 
-## Legacy lane-token drain and rotation (Q35-06)
+`FORGE_SECRET_KEY` is a separate server-only secret of at least 32 bytes.
+It signs short lane sessions and derives a context-separated encryption key
+for cached attempt model grants. CI never receives it. There is no fallback
+to the legacy shared secret. Rotation invalidates old sessions and makes
+old cached grant ciphertext unavailable under the new key; it must not
+trigger a second mint for the same unknown/reserved attempt.
 
-The lane credential has two spellings: the standing
-**generation-scoped token** (`HMAC(secret, work_id:generation)`, minted
-by each dispatch for the run's current attempt) and the **legacy
-work-scoped token** (`HMAC(secret, work_id)`, no generation), kept
-working only inside a bounded migration window. That window no longer
-depends on process lifetimes — resolve it once, and every restart
-agrees:
+Plan a drain or cancellation plus newly authorized dispatch generations,
+coordinate app/worker key rollout, and retain the appropriate old key only
+in private recovery storage for backups that require it. Restore database
+and key identity together; never copy raw model keys into evidence to work
+around cache failure. OIDC issuer/workflow/ref bindings and durable nonce/JTI
+receipts remain required after key rotation.
 
-| Anchor | Configuration | Restart-stable? |
-|--------|---------------|-----------------|
-| Explicit deadline | `FORGE_LEGACY_CREDENTIAL_DEADLINE` (ISO date; the older `FORGE_LANE_LEGACY_TOKEN_DEADLINE` spelling is honored) | Yes — operator state |
-| Recorded start | `FORGE_LANE_LEGACY_TOKEN_START` + 30 days | Yes — operator state |
-| Persisted anchor file | written **once** on first resolution; default `lane-legacy-credential-anchor` under `FORGE_CHECKPOINT_STORE_DIR` (override with `FORGE_LEGACY_CREDENTIAL_ANCHOR_FILE`) | Yes — deployment state |
-| Nothing persistable | — | Legacy acceptance **refused** (fail-closed); generation tokens unaffected |
-
-Operator rules:
-
-1. **Set an explicit deadline on promotion.** A newly promoted profile
-   should record `FORGE_LEGACY_CREDENTIAL_DEADLINE` from day one; the
-   value is a fixed instant both processes started on either side of it
-   agree on. A date already in the past is valid (the window is closed);
-   a malformed, empty, or out-of-sanity-bounds value is refused —
-   `forge doctor` reports it as `credential.configuration_invalid` and
-   the APIs refuse legacy tokens with the same diagnostic rather than
-   silently opening a fresh window.
-2. **Do not delete or hand-edit the anchor file.** It is write-once
-   deployment state: once it exists, its instant is the migration start
-   forever. Corrupt or missing-and-unwritable state refuses legacy
-   tokens (fail-closed) — restore from backup, or pin the window with
-   an explicit deadline instead.
-3. **Drain before expiry.** `forge doctor`'s `credential.legacy_deadline`
-   check shows the anchor source, the deadline, days remaining, and the
-   count of grandfathered generation-less works still visible
-   (`cancellation_generation = 0`). Warn while that count is non-zero.
-   Drain means: let those attempts finish or retry them — the retry
-   dispatch mints a generation-scoped token; run history is never
-   rewritten.
-4. **Rotate `FORGE_LANE_CONTROL_SECRET` with an overlap.** Both token
-   spellings derive from the same secret, so a rotation pairs with the
-   migration window, not against it: deploy the new secret (restart),
-   then re-dispatch the live attempts so their lanes hold tokens under
-   the new secret, then revoke nothing further — old attempts die with
-   their tokens at the deadline. A secret rotated without re-dispatch
-   strands in-flight lanes exactly as any expiry would; the recovery is
-   the retry/re-dispatch path, never widening the window.
-5. **After the deadline, legacy stays dead.** A restart cannot revive a
-   legacy token: the deadline is derived from recorded state, not from
-   the new process's start. Generation-scoped tokens are unaffected by
-   the window in either direction.
+See [backup/restore](backup-restore.md) and [upgrade](upgrade.md).

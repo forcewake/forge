@@ -26,7 +26,7 @@ actually crossed it.
    :class:`PublishResult`. `publish_candidate` becomes its GitLab-native
    binding (base-content reads + `ChangesetWriter`); other backends migrate
    onto it incrementally without changing who may publish or what was
-   approved ([contracts-v0.2](../specs/contracts-v0.2.md) invariant).
+   approved ([contracts-v0.2](../archive.md) (archived original: `docs/specs/contracts-v0.2.md`) invariant).
 2. **The pure boundary check is shared**:
    :func:`forge.runs.publisher.validate_candidate_bundle`(bundle,
    base_contents, branch, commit_message, allowed_paths) is the one policy

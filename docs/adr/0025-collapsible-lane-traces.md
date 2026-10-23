@@ -7,7 +7,7 @@ Context: the lane job log is the human's window into what the coding agent
 is doing — and a raw NDJSON stream is unreadable (the first dogfood run
 flooded 3000+ lines of stream-json, hiding the one failed test among
 `thinking_tokens` telemetry spam). The research base is
-[research/harness-log-formats.md](../research/harness-log-formats.md)
+[research/harness-log-formats.md](../archive.md) (archived original: `docs/research/2026-09-16-harness-log-formats.md`)
 (event schemas for all four drivers, verified against official docs).
 
 ## Decision

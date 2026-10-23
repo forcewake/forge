@@ -1,58 +1,48 @@
-# Backup and restore (runbook)
+# Backup and restore
 
-forge's state of record lives in **Postgres** (runs, steps, gates, usage
-ledger, action journal, event inbox/outbox). Redis holds only transient
-queue/heartbeat/dedup state — it is **not** backed up. Captured webhook
-payloads (optional, `FORGE_CAPTURE_DIR`) are supplementary evidence.
+PostgreSQL holds durable runs, approvals, budgets, inbox/outbox, effect
+intent and lane session/replay state. Checkpoints and lane blobs have a
+separate content store. Back up their consistent set, deployment identity
+and private key/configuration references. Redis queue/heartbeat state is
+transient, not an authority backup.
 
-## Backup
+Use a consistent logical `pg_dump` (custom format) on the selected database,
+plus the matching checkpoint/blob tree and manifests. Coordinate a pause
+of writers when needed to bind both halves. Keep pre-upgrade and scheduled
+backups outside Git, encrypted and access-controlled. Capture files can
+contain issue/comment text; they follow [retention](audit-retention.md).
 
-```bash
-# consistent logical backup (run from any host that reaches Postgres)
-podman exec forge-postgres \
-  pg_dump -U forge -d forge -Fc -f /tmp/forge-$(date +%F).dump
-podman cp forge-postgres:/tmp/forge-$(date +%F).dump ./backups/
+Raw secrets belong in the private secret store. Encrypted cached model
+grants may be present in durable run evidence; recovery needs the matching
+server signing/encryption key. Preserve legacy credential anchors, registry
+revisions and locator maps with their deployment state. A database dump
+alone is not an exact-WIP or credential recovery proof.
 
-# captured webhook payloads (optional, plain files)
-tar czf ./backups/forge-captures-$(date +%F).tgz data/captured/
-```
+## Restore order
 
-Schedule: nightly `pg_dump` plus a pre-upgrade dump (see
-[upgrade.md](upgrade.md)). Keep dumps out of any Git repository — they
-contain issue titles, plan digests and model prompts.
+1. Stop app and worker writers and prevent dispatch. Record in-flight native
+   jobs; stopping forge does not stop remote jobs or undo landed effects.
+2. Restore into the explicitly selected clean database and restore matching
+   checkpoint/blob/configuration/key state. Never use a shared lab as a
+   disposable restore target.
+3. Verify the shipped migration head, durable authority rows, checkpoint
+   digests and their base/generation linkage before enabling any resume.
+   A missing or mismatched required half keeps dispatch closed.
+4. Clear only the deployment's selected transient queue database after
+   writers stop, without touching unrelated Redis tenants. Recreate app
+   and worker from one schema-compatible pinned composition.
+5. Run health/doctor and reconcile remote branch heads, Drafts, jobs and
+   persisted intent against the restored rows. Remote state may be newer
+   than the backup. Probe/adopt unknown effects; never replay blindly.
 
-## What is NOT in the backup and must not be
+Keep dispatch closed until consistency is demonstrated. A required
+checkpoint that cannot be restored means explicit retirement or a separately
+authorized restart, not silent WIP loss. Audit amendments, grants,
+redemptions, review-round targets and draining native occupancy are part of
+the consistency check, not optional report data. Do not force a guarded
+schema downgrade by deleting authorization rows.
 
-- Secrets: bot PAT, model API keys, webhook secret — those live in GitLab CI
-  variables and your secrets store, never in forge's database.
-- Git content: all code lives in the GitLab repositories; forge only
-  references SHAs.
-
-## Restore
-
-```bash
-# 1. Stop writers (app keeps serving read-only-ish; worker must not run)
-podman stop forge-worker forge-app
-
-# 2. Restore into a clean database
-podman exec forge-postgres psql -U forge -c "DROP DATABASE IF EXISTS forge;"
-podman exec forge-postgres psql -U forge -c "CREATE DATABASE forge;"
-podman cp ./backups/forge-YYYY-MM-DD.dump forge-postgres:/tmp/
-podman exec forge-postgres pg_restore -U forge -d forge --no-owner /tmp/forge-YYYY-MM-DD.dump
-
-# 3. Clear transient queue state (Redis was not restored)
-podman exec forge-redis redis-cli FLUSHDB
-
-# 4. Start and verify
-podman start forge-app forge-worker
-python -m forge.doctor
-```
-
-## After a restore: reconcile in-flight runs
-
-Runs that were mid-flight at backup time may point at pipelines/jobs that
-have since finished. The reconciler is designed for this: it re-reads the
-world (branch head, pipeline, job status) and applies the verdict on the
-next tick. Runs whose external state is gone (deleted branch/pipeline) end
-in `blocked` with a reason — that is the intended safe outcome, resolve them
-manually or `/cancel`.
+Rehearse on disposable infrastructure and retain the observed fingerprints
+and exact artifact identity. A successful database import proves neither
+provider recovery nor model execution. See [upgrade](upgrade.md),
+[token rotation](token-rotation.md) and [deployment boundaries](deployment-boundaries.md).

@@ -122,9 +122,7 @@ surface is wired end to end (R40-01 / #337) behind ONE capability flag:
 - **`FORGE_REVIEW_FEEDBACK_ENABLED`** (default **OFF**). With the flag off the
   GitLab ingress does not parse `/fix` or `/ask` at all — zero routing, the
   classic workflow byte for byte (the `FORGE_ADAPTIVE_COMMANDS_ENABLED`
-  pattern). GitHub never parses the verbs; the capability
-  manifest (`forge doctor --capabilities`, row `operator-commands/review-feedback`)
-  reports the surface as wired for the GitLab MR-note profile only.
+  pattern). GitHub never parses these feedback verbs on the current provider-service path.
 - **The ingress**: a token-authenticated GitLab MR note with `/fix …` or
   `/ask …` travels the SAME durable run-command path as every note command —
   inbox row + scheduled step committed in ONE transaction, the 202 answered
@@ -157,11 +155,11 @@ Full trace: `tests/production_entry/test_feedback_ingress.py`
 (ASGI ingress → durable inbox → restarted worker → installed reconciler).
 Design doc: `docs/evaluation/2026-09-25-review-feedback/README.md`.
 
-## Honest gaps
+## Migration status
 
-- GitHub's commit CAS check (`expectedHeadOid`) happens at publish time,
-  inside forge — platform-side enforcement is a known gap tracked in the
-  [guarantee matrix](../../README.md#guarantee-levels).
+Provider parity beyond this table belongs to the shared-engine migration.
+Check current behavior and exact-head verification; historical live traces
+never certify a newer composition.
 
 ## Configuration
 
@@ -169,6 +167,6 @@ The knobs behind this surface (defaults shown are the shipped defaults):
 `FORGE_APPROVERS` / `FORGE_GITHUB_APPROVERS`,
 `FORGE_TRIGGER_LABEL`, `FORGE_DECISION_TTL_SECONDS`,
 `FORGE_RUN_AUTO_REVIVE_LIMIT`, `FORGE_RUN_REVIVE_BACKOFF_SECONDS`,
-`FORGE_SECURITY_TRIAGERS`, `FORGE_SECURITY_AUTO_ACCEPT` — see
+see
 [`.env.example`](../../.env.example) (annotated) and
 `src/forge/config.py` (authoritative).

@@ -3,7 +3,7 @@
 > **Amended by [ADR-0035](0035-simplification-program.md)** (2026-09-29).
 
 Status: accepted (2026-09-15), grounded in
-[research/harness-selection.md](../research/harness-selection.md)
+[research/harness-selection.md](../archive.md) (archived original: `docs/research/2026-09-15-harness-selection.md`)
 Context: today the implementer harness is pinned per project
 (`FORGE_IMPLEMENTER_BACKEND=ci_harness[:driver]`, tighten-only per
 [ADR-0015](0015-pluggable-implementer-backends.md)). Four shipped drivers

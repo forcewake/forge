@@ -320,6 +320,10 @@ When a pin breaks:
 
 | EC-615 | Failed native verification evidence was lost when repair dispatched | Code repair retains the failed verdict, original tested SHA, subject and full native check identity before dispatch | `src/forge/runs/usecases.py` | `tests/test_usecases.py::TestObserveVerification::test_code_failure_repairs_with_the_failed_native_verdict` |
 
+| EC-630 | A shortened runbook loses its recovery source, or a local archive becomes a published-proof claim | Preserve original blobs in a verified local snapshot before deletion; keep immutable changelog bytes and disclose local-only recovery | `docs/archive.md`, `docs/archive/documentation-0.42.json` | `tests/test_docs_links.py::test_historical_changelog_keeps_exact_snapshot_bytes` |
+| EC-631 | A doc link resolves only in an old source tree or a removed heading | Check actual checkout paths and Markdown heading anchors, ignoring fenced examples rather than accepting dangling links | `tests/test_docs_links.py` | `tests/test_docs_links.py::test_active_markdown_links_resolve`, `tests/test_docs_links.py::test_link_checker_catches_missing_files_and_headings` |
+| EC-632 | A smaller reader count is mistaken for the all-docs exit metric | Exclude only canonical program records and the immutable changelog, include ADRs/register, and leave the all-docs counter unchanged | `docs/archive.md` | `tests/test_docs_links.py::test_documentation_budget_keeps_history_explicit` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

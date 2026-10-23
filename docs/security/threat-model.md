@@ -6,7 +6,7 @@ decisions mitigate which risks. It applies to any installation; per-project
 details (execution profiles, approver lists, path rules) are set during
 onboarding.
 
-forge is an agentic sidecar: it accepts commands from GitLab, produces code
+forge is an agentic sidecar: it accepts commands from GitHub or GitLab, produces code
 with an LLM, writes branches and Draft merge requests, and runs pipelines.
 It never merges and never holds merge authority
 ([ADR-0003](../adr/0003-no-merge-is-enforceable.md)).
@@ -33,7 +33,7 @@ It never merges and never holds merge authority
                        └──────────────────────────────────────────┘
 ```
 
-- **B1 — Webhook ingress.** Every event from GitLab is untrusted until its
+- **B1 — Webhook ingress.** Every provider event is untrusted until its
   secret is validated (timing-safe comparison), the project scope is
   resolved, and the actor is checked. Events are deduplicated and journaled;
   labels and comment text are input signals, never authorization.
@@ -75,7 +75,7 @@ These are not mitigated by forge and require environment-level controls:
   projects ([ADR-0002](../adr/0002-ci-execution-environment-explicit-execution-profiles.md)).
 - **A compromised control-plane host or Postgres.** forge's durable state is
   only as trustworthy as the host and database it runs on.
-- **A malicious GitLab administrator** or GitLab instance compromise.
+- **A malicious provider administrator** or GitLab instance compromise.
 - **Prompt injection that turns into harmful CI code** is narrowed by R1–R3
   but not eliminated: the model can still propose code that CI executes.
   Containment (profiles, no secrets in jobs) is the mitigation, not
@@ -88,3 +88,14 @@ These are not mitigated by forge and require environment-level controls:
 This model is revisited whenever a new ADR changes a trust boundary, a new
 input channel is added (e.g. MCP tool sources), or the execution profile
 model changes.
+
+## Lane migration
+
+The current provider services retain their existing lane credential routes
+until migration. New lane v1 separately binds CI OIDC to the trusted issuer,
+repository/workflow/ref and provider job, exact attempt and durable replay
+receipts. Its short bearer sessions and model-grant cache use a separate
+server-only signing secret. Neither OIDC nor a model credential grants
+publication authority. See [ADR-0035](../adr/0035-simplification-program.md)
+and the [architecture status](../overview.md); source availability alone
+does not establish live deployment acceptance.

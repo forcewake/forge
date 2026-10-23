@@ -10,7 +10,7 @@ Microsoft Learn) and other MCP tool surfaces, but today a lane has no way
 to receive MCP servers — and an uncontrolled way would be a prompt-injection
 hole (a repo-supplied `.mcp.json` is auto-loaded by several drivers even in
 untrusted `-p` runs, per the harness security research). Live verification
-on the lab ([research/mcp-lane-live-evidence.md](../research/mcp-lane-live-evidence.md)):
+on the lab ([research/mcp-lane-live-evidence.md](../archive.md) (archived original: `docs/research/2026-09-15-mcp-lane-live-evidence.md`)):
 claude-code and opencode both invoke Context7 and Microsoft Learn tools
 natively end-to-end (job 651: 4 `mcp__*` tool_use events, both servers
 `connected` at init; opencode job 655: native `<server>_<tool>` calls).

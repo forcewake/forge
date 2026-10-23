@@ -1,0 +1,970 @@
+{
+  "snapshot": "a80706e54674b5abb571f4b8481252a41273c0c7",
+  "local_ref": "archive/docs-0.42-20261023-a80706e",
+  "published": false,
+  "files": 160,
+  "bytes": 2575212,
+  "recovered_exactly": true,
+  "rows": [
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 129573,
+      "sha256": "573dbed55d358a53020382b1ff0b6f750e1a1824e1053c6d463bc8976176890b",
+      "git_blob": "de36bf8b59039f1e3472df04234a352b48338bb2"
+    },
+    {
+      "path": "README.md",
+      "bytes": 21016,
+      "sha256": "fe55cb8e57a604f7db81b288a03699e839b3d6cf5f868d8409ba4bfbf784caa4",
+      "git_blob": "fa7ef019ed22e687dd07194031a818a175f8773b"
+    },
+    {
+      "path": "docs/README.md",
+      "bytes": 6101,
+      "sha256": "0ef26f29c7557fb20a343241e20b98b92698ee0eb08cd35e7367de8dde6a40a8",
+      "git_blob": "d058b1adea1b84db0a607e37a329774e1cd58e22"
+    },
+    {
+      "path": "docs/adaptive/discovery-splice.md",
+      "bytes": 5589,
+      "sha256": "220beadebb795480b61ddd305bd6a25a69bd2cac4da64ea045d58ba30db7c3ed",
+      "git_blob": "db39413452385463fb96145a911034c48ddab08f"
+    },
+    {
+      "path": "docs/adr/0000-record-architecture-decisions.md",
+      "bytes": 3550,
+      "sha256": "8d11d609d796976d789034a6cd8eddd68e7dbe7759c30379ddaca57bd954fd2c",
+      "git_blob": "eb4f8f12d5b97eedc5c7956d8b97099368c8a255"
+    },
+    {
+      "path": "docs/adr/0001-commits-api-write-backend-changeset-contract.md",
+      "bytes": 3545,
+      "sha256": "a218fe34929705c262b64798421a7a2c78d8bd7763f586a63844bf7d1877d9fe",
+      "git_blob": "5ea96df309b6667175c0f0be5562331bb881005d"
+    },
+    {
+      "path": "docs/adr/0002-ci-execution-environment-explicit-execution-profiles.md",
+      "bytes": 2814,
+      "sha256": "ea01ea2d3ec46f92da96d4dccaae4ea54df3cbb36d5dad64f5b1d23774230700",
+      "git_blob": "f9b5415d81752f76d8c502e7e8c3068250088da2"
+    },
+    {
+      "path": "docs/adr/0003-no-merge-is-enforceable.md",
+      "bytes": 2250,
+      "sha256": "e367da5cfa13d3505268d471a58f68d69dc2d9d7a8e1ec0ce0f775033c5a1ffa",
+      "git_blob": "0542c421319cc621a03c0aabd4ad41d5521aad51"
+    },
+    {
+      "path": "docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md",
+      "bytes": 4976,
+      "sha256": "3d4bf12e7aa504c3fc803a7e3d8b9ba0b7121c8357b67852b56ebfe8f4651386",
+      "git_blob": "a05415068235ef8f458f334125278cdfc7685874"
+    },
+    {
+      "path": "docs/adr/0005-durable-execution-and-unknown-outcome.md",
+      "bytes": 2880,
+      "sha256": "d2eb90240628e78867c7e3e5f87c6e5d1ca1050dc4691cbbf8de68e8706a1508",
+      "git_blob": "9f390fdf1008fcdd15168dec5ffca2b9cddbd1b0"
+    },
+    {
+      "path": "docs/adr/0006-snapshot-isolation-and-race-protection.md",
+      "bytes": 3178,
+      "sha256": "107499a42ccf559f7cc9384b7d3e973879ed99914d1e0869e42e35525d0002a2",
+      "git_blob": "46ecd6438f2d56cb2fbca35ae5e6189c5a721dac"
+    },
+    {
+      "path": "docs/adr/0007-draft-mr-before-required-ci.md",
+      "bytes": 2750,
+      "sha256": "32bf3fa0e98e6a9318de100c1670cd7563b2c76e8bcec31eda0a2a4275147f1a",
+      "git_blob": "389d8d4353c8a11e13c73d82566da6705cfe5dbe"
+    },
+    {
+      "path": "docs/adr/0008-quality-contract-instead-of-pipeline-status.md",
+      "bytes": 2989,
+      "sha256": "8a4ef2c17ed02637a005d88279d9237fed849ad505f15d58b227f48ca5b414c9",
+      "git_blob": "29837146856a4a5ce9a9e61a8c290471a0fce0ad"
+    },
+    {
+      "path": "docs/adr/0009-human-gates-authorize-specific-decision.md",
+      "bytes": 2916,
+      "sha256": "e08f1abb7c52ebbf5e23abd60743ea478f495e78582d59bb15b23ac60d7709c5",
+      "git_blob": "49aa647542902e108210e0fa3258ab8af86588c4"
+    },
+    {
+      "path": "docs/adr/0010-ce-compatible-labels.md",
+      "bytes": 2400,
+      "sha256": "0e50a45f4929f8078a396eea3252851e9d617f741ac02f1719b6ffa3450aed53",
+      "git_blob": "c18768956db1e788cf7aaca2ef59ef02c0a3975e"
+    },
+    {
+      "path": "docs/adr/0011-config-never-delegates-security-downward.md",
+      "bytes": 3099,
+      "sha256": "8a48c1214ea7d22284b3e9bb65365e7e4da696521ff64fb1c32c843fbcb5dde4",
+      "git_blob": "49cfe56511afb50cf66cb4d83bb25e7cdb08e202"
+    },
+    {
+      "path": "docs/adr/0012-context-and-redaction-at-every-boundary.md",
+      "bytes": 3457,
+      "sha256": "51ec99f107c86f10022fe6f1d2d056e750e41cf00eeccf82af4c2a5adbaa3e64",
+      "git_blob": "544855d688a49f69e9ff9eb75982c55e4d92e641"
+    },
+    {
+      "path": "docs/adr/0013-budgets-and-usage-ledger-in-core.md",
+      "bytes": 3499,
+      "sha256": "783e00d07396e9d529f3615c2fc33592bbaf719e8bbd41a9d63f07b2fac0e8e2",
+      "git_blob": "0804c5dd8289c3f036522d08e146df7106364cec"
+    },
+    {
+      "path": "docs/adr/0014-llm-http-client-over-agno.md",
+      "bytes": 2732,
+      "sha256": "0575dc118831c9b87c21abbcc2457418171789f46f1115d8766f9a075e08d585",
+      "git_blob": "20626a2ffe88cc1b3dcf1585538054e4bbd490bd"
+    },
+    {
+      "path": "docs/adr/0015-pluggable-implementer-backends.md",
+      "bytes": 4908,
+      "sha256": "f9a9c2d4317d0e7e560cd6e526bd441816698f93d4725a54019d447a2f45e6bb",
+      "git_blob": "176c586cc84eb43d5a2a2d332c113ea1111cac25"
+    },
+    {
+      "path": "docs/adr/0016-candidate-bundle-trusted-publisher.md",
+      "bytes": 2667,
+      "sha256": "069d4e0b586dab821834cd5f50325366c666d5b67ae906f58bd3ec8a4378d159",
+      "git_blob": "e5563c5333115f223675245c9c8d8e1c6d519372"
+    },
+    {
+      "path": "docs/adr/0017-durable-step-runtime.md",
+      "bytes": 2496,
+      "sha256": "0748baae0ddabba6f4d1ce1ec0f176d05cf1dbc2c1cb191cc18e3fdb4d1979b6",
+      "git_blob": "3d97a7559645ab6790af364385a99064cfb4eb91"
+    },
+    {
+      "path": "docs/adr/0018-immutable-run-spec.md",
+      "bytes": 2236,
+      "sha256": "2a6231f7d6871f4fc57324aae652a7e2afcbee5e57de1a68a81dd1b0c96eeb09",
+      "git_blob": "28a0a2201d0ab96dbd6a52c6e2bf5587fff73b7c"
+    },
+    {
+      "path": "docs/adr/0019-source-execution-adapters.md",
+      "bytes": 3449,
+      "sha256": "0927efbb2c7dbf4d63537c8935d50a12ccc36df0e01e87ea6f2b9b46c15e9530",
+      "git_blob": "5b58d592d0a338561b9f948c803f39e18170199d"
+    },
+    {
+      "path": "docs/adr/0020-github-actions-executor.md",
+      "bytes": 3405,
+      "sha256": "fb05386c946a2595d1e3c86270c0862c061ac78acc7f71c2d29bd009c17729e9",
+      "git_blob": "93ca7a0dbd2a0339361d52b342df6e29783da805"
+    },
+    {
+      "path": "docs/adr/0021-roadmap-v0.6-v0.8.md",
+      "bytes": 3720,
+      "sha256": "b6d1dea6217438b49c9e1557e17e19199996a3a0f44c5fc9bdc3f77b53e35b64",
+      "git_blob": "e82326df9c986d6e2301b470a8846cef9a976c9e"
+    },
+    {
+      "path": "docs/adr/0022-harness-mcp-integration.md",
+      "bytes": 5230,
+      "sha256": "2c6e9bfa33e4039cf15c98dc3048702625adddc42aa8433ae2e891dadf000ab5",
+      "git_blob": "7863d0dff4a7108a48721ef94face8ac4513aa43"
+    },
+    {
+      "path": "docs/adr/0023-dynamic-harness-selection.md",
+      "bytes": 6337,
+      "sha256": "c58d6831b3e04ae8eda436fe02cb5fbc1eb6e2e2c9f44b2b747000e786413b4a",
+      "git_blob": "145b5fd55b36ab9a1b0ee5673bada5016ceb8e1a"
+    },
+    {
+      "path": "docs/adr/0024-azure-devops-adapter.md",
+      "bytes": 7236,
+      "sha256": "f4c98707c3a5e56b995db6bd4c8affecca356a7a01ca4538f4f69d84b272fa9e",
+      "git_blob": "be6ff64eec3f47ce8e063c6f45d0ee3cc77afd0a"
+    },
+    {
+      "path": "docs/adr/0025-collapsible-lane-traces.md",
+      "bytes": 3545,
+      "sha256": "7f4f0a10a80192d2f330234fc1ba2c4dc80d2fdad69f8ce646be86ad936d7b77",
+      "git_blob": "0fd8e692ab764d85783f474f34185282aaec8968"
+    },
+    {
+      "path": "docs/adr/0026-publication-boundary.md",
+      "bytes": 5315,
+      "sha256": "46a1b7208379f80105af93bb3afcec69941f780d9f02f9380defd6d176e8503d",
+      "git_blob": "00b60e5f7e4c20f94799cffc4ab59720edf5d5f1"
+    },
+    {
+      "path": "docs/adr/0027-lifecycle-consolidation.md",
+      "bytes": 8022,
+      "sha256": "16b45de85f4de3ff8bde8e33251ea94327a344cf1126c6dd5f2fcc44e8837abb",
+      "git_blob": "6321f0333fada6dee6e0b3db8e9aed3045491666"
+    },
+    {
+      "path": "docs/adr/0028-live-leg-check-invariants.md",
+      "bytes": 6103,
+      "sha256": "527726945466e6122c489092ea0df1f2eddfaf19be6be7ab8a3f51f51a8902bb",
+      "git_blob": "1bc3a25f753b8df2fdcbdc873026657d736ac9dd"
+    },
+    {
+      "path": "docs/adr/0029-composition-boundaries.md",
+      "bytes": 13925,
+      "sha256": "556a4e9b9612f445fd38a96848a8f7d6c48f404b66419af7a8dd952253a1d4e9",
+      "git_blob": "65930c9ed2bcb2682ee9de3880361f7803a6fed6"
+    },
+    {
+      "path": "docs/adr/0030-authority-boundary-ownership.md",
+      "bytes": 17579,
+      "sha256": "d8f1973c303eb8c3f22367bc0a912f497ffc134ff542bb3a4947a644b4b1f9ab",
+      "git_blob": "7461285dcd6c79ea4b9ff17ce8d76c5fdc99ad44"
+    },
+    {
+      "path": "docs/adr/0031-contracts-vs-reference-separation.md",
+      "bytes": 11501,
+      "sha256": "9262432a9e0b69e8f99d693c6bf18da9b5127f009dd07f140f98edfea8de7457",
+      "git_blob": "f0f80df4e01a1dbb9e28877169ce99ea1f1997c8"
+    },
+    {
+      "path": "docs/adr/0032-versioned-execution-spec.md",
+      "bytes": 9084,
+      "sha256": "e80ff74c11cfb5ee09c4508939741043ad1ca3253542b8fc502627b739306ffc",
+      "git_blob": "0c25cb32b11446966dfb5e7253d3eab00a483049"
+    },
+    {
+      "path": "docs/adr/0033-execution-ownership-consolidation.md",
+      "bytes": 10253,
+      "sha256": "d8d97aa0273ae5d8cff3df9f4a2dee05240c1c288a873164676a35f371c18ef3",
+      "git_blob": "9cebea92a718bad5dc31ed6ee84d25360c31b0ac"
+    },
+    {
+      "path": "docs/adr/0034-execution-ownership-map.md",
+      "bytes": 34586,
+      "sha256": "52879ce72d65970774e5ec64015ccac667b0d6da4f363706f44db2b1834e12d9",
+      "git_blob": "930bc535f0a153f0b41099d37cb81c8fc724b82f"
+    },
+    {
+      "path": "docs/adr/0035-simplification-program.md",
+      "bytes": 12156,
+      "sha256": "61f4c1ac2825b5d504c8fa6de3fc42599181a01679231508b85bd1e878cc1591",
+      "git_blob": "c766f4cd68e12f6f6f1abb238e4860508baf458b"
+    },
+    {
+      "path": "docs/archive.md",
+      "bytes": 2194,
+      "sha256": "97d2f80dd026a2d4ee926b1fc3ffdcda0fc9bcd68cdd3f02d316ee99c23a9751",
+      "git_blob": "9a62af139ff5ff4af112801c0ca4cf5eb36b89b0"
+    },
+    {
+      "path": "docs/epam/ai-assets-marketplace-submission.md",
+      "bytes": 10104,
+      "sha256": "a0bc4d19cd0e8a686ee1e882f893db62851ee41baa45e1650bfca9018c0ca83f",
+      "git_blob": "6f25b5f126d6e73a8070d6c8823fea7f874ba2d4"
+    },
+    {
+      "path": "docs/getting-started/github.md",
+      "bytes": 7877,
+      "sha256": "abf5f254ee98b0a14a05055dc89238d44fb1821f2bdf9f78372ee50038a3f0c5",
+      "git_blob": "91c29c683abc0bb73f1101bca851e8aeec8d22ad"
+    },
+    {
+      "path": "docs/getting-started/gitlab.md",
+      "bytes": 5178,
+      "sha256": "c07ea0d4fb2ab1ddccef256bf477cf38e6216d6b51d511e3690475884913ef5c",
+      "git_blob": "bed8cf383672b6384c46ba5d5356f307e4c38c16"
+    },
+    {
+      "path": "docs/harnesses/README.md",
+      "bytes": 5158,
+      "sha256": "8a5e6f1d04339c44504df81f47bcee99b3daa2925263ff1773bf4914fabfcc55",
+      "git_blob": "02c216c10a362dc6f361a9fb76607cd298597121"
+    },
+    {
+      "path": "docs/harnesses/claude-code.md",
+      "bytes": 3700,
+      "sha256": "10975a960fa36d9275e96c6d12c6a60d32994c6db1470ce0c5110ac32ad0808f",
+      "git_blob": "a58b1198fb63d404cb35a96a997b7f4b72705c0b"
+    },
+    {
+      "path": "docs/harnesses/copilot-cli.md",
+      "bytes": 3208,
+      "sha256": "672b1e2425371dbe9c55527736db4f37014a5b22da5d95333d986e8042b854ef",
+      "git_blob": "772f63ab2d07bb56cb32c90d94a0f7e089b154b6"
+    },
+    {
+      "path": "docs/harnesses/dotnet-lane.md",
+      "bytes": 7573,
+      "sha256": "299886f8971ff37c5f09e7370d6e6c5c927e4be6131a8db0be5bfdd9aead270f",
+      "git_blob": "dbb0de1f43d0d44240d8bd5475e4dd261990f99e"
+    },
+    {
+      "path": "docs/harnesses/grok-build.md",
+      "bytes": 3982,
+      "sha256": "a86c7b0318a4f18bbae63ecb65b7c635ce358fb3debcdc8ef17c107a3627e79a",
+      "git_blob": "8856012e8b3c061660fdee6f1c3df86df5520175"
+    },
+    {
+      "path": "docs/harnesses/lane-v1.md",
+      "bytes": 2229,
+      "sha256": "c36ab8e5d4241ba32bdd9c014bfe16f0c2825361c05ec54ad4dfa14c58648b6d",
+      "git_blob": "e1b1728bafe2b1e6b45150dcdb07c833e8a47a9c"
+    },
+    {
+      "path": "docs/harnesses/onboarding.md",
+      "bytes": 17062,
+      "sha256": "e38b75a61ec738ec875beb123c00b46dba975d516f71455c6b3f4ea658ac4490",
+      "git_blob": "7c97642302ecef0f4cc03db9ed65d84a20a8a05c"
+    },
+    {
+      "path": "docs/harnesses/opencode.md",
+      "bytes": 3218,
+      "sha256": "0399f67e4d634037d08df59986cdbc5fc887112a5f1963d1cf5c0538a5e5f3e4",
+      "git_blob": "95fbcc7ff9e09ad242062b72dbd598034c526ff7"
+    },
+    {
+      "path": "docs/onboarding/cold-install-runbook.md",
+      "bytes": 36682,
+      "sha256": "082688da744e51b02de9fd6f695eb63aa6dee9c7c4e8df53bb2ab9b066f4229e",
+      "git_blob": "d61b5bdd4d9b9c77cf7a09a42f96c8e823c47e56"
+    },
+    {
+      "path": "docs/operations/README.md",
+      "bytes": 5396,
+      "sha256": "38a1fff1c59a3e1f878ef5269b82108053c33f6546af82334aeff5f780222608",
+      "git_blob": "8ade0d29960c431ace8da8ec95f6c4aa33f49836"
+    },
+    {
+      "path": "docs/operations/adaptive-runbook.md",
+      "bytes": 19480,
+      "sha256": "5c6ee82471b74afb229ad78c15121c5b5f6c2ea37d967876a0c8fbfd433219f2",
+      "git_blob": "8f9f5f6b5478bed97346dd64788421286546813f"
+    },
+    {
+      "path": "docs/operations/audit-retention.md",
+      "bytes": 2191,
+      "sha256": "f07dfd82e59d4eec67a23c247d29ce22291137092d64b5577b14d5b8f15980f4",
+      "git_blob": "0bb9ba85b20ca73a592a8dc60415424445642cfc"
+    },
+    {
+      "path": "docs/operations/backup-restore.md",
+      "bytes": 2249,
+      "sha256": "e76bdf3d5f400bdfbcece892ab4b42469d0fd18be25622c2f35461e83b82491e",
+      "git_blob": "f08ded989d0dac454d727075e308cff3468f3604"
+    },
+    {
+      "path": "docs/operations/budget-calibration.md",
+      "bytes": 14801,
+      "sha256": "453164d6121d4a7f777831cff67136c4153d8f3bf25fa1470617c92e01ccee9d",
+      "git_blob": "fdcd341dad5aa0782e4c479573f9b3a98c808d32"
+    },
+    {
+      "path": "docs/operations/closing-budget.md",
+      "bytes": 10796,
+      "sha256": "052d0658e87776f76c1aa77127ff90b9f61a0e9a016acc54e286468a6eccddb5",
+      "git_blob": "2b93cd71ea3149c785d55cfcc2a6839a21c53592"
+    },
+    {
+      "path": "docs/operations/conformance-gate.md",
+      "bytes": 10258,
+      "sha256": "be738cffdef1bf8c46c710a6633db0a95bc60c768aeb149d87b768fcd5e7543f",
+      "git_blob": "d8aa3060d315fa4f6107ab308cc3ece169c6262b"
+    },
+    {
+      "path": "docs/operations/credential-consumption.md",
+      "bytes": 4727,
+      "sha256": "70aaee6443fbc1aebb7794f22c4d6627a2051ff43206dbdcf53d098c45018ed6",
+      "git_blob": "899164e0da6a4756120d5e3cbf7048b72cb15cb0"
+    },
+    {
+      "path": "docs/operations/credential-rotation.md",
+      "bytes": 8209,
+      "sha256": "3d317117a2633ae31cdbfa9e2c2788870579bccda7ba90bdc9c0183e25a0749a",
+      "git_blob": "9dde5faaa512a8f7d0f94c44c07617cdd286d691"
+    },
+    {
+      "path": "docs/operations/delivery-cohort.md",
+      "bytes": 11360,
+      "sha256": "c3dc603a5f6e57c980d4f5d24399b69807d6a5c15ccbf67e0160ccce4422f507",
+      "git_blob": "1e40f54ff391213038ac4296c309631f6404a878"
+    },
+    {
+      "path": "docs/operations/delivery-economics.md",
+      "bytes": 21329,
+      "sha256": "1d8275d4249ef22f4f19b98c4068f3ab5ac57d3ad538cc64bc61154a30491f5d",
+      "git_blob": "77b04e0968417b5ff8c6ae94589ab45d1d7f317d"
+    },
+    {
+      "path": "docs/operations/delivery-measurement.md",
+      "bytes": 3506,
+      "sha256": "8370a5a79b5a3ba78ed58fbaed63b9419de8936e60d1605605c12afda03c2e28",
+      "git_blob": "d208bfbad2749d6c4e0e03fd867a66438523ed90"
+    },
+    {
+      "path": "docs/operations/deployment-boundaries.md",
+      "bytes": 23864,
+      "sha256": "86de73c8c54e2dcb824a85a27d771bac7ef3d3de6343bcf33e9ab6d4ef9f5f26",
+      "git_blob": "104516ba02df19341105b72a49fe8ddd10476975"
+    },
+    {
+      "path": "docs/operations/discovery-scope.md",
+      "bytes": 4363,
+      "sha256": "c2e287ccdd82f40705115a44ce8a6eee4e9f1cca988dbdffd4c0f78b1ec8d85a",
+      "git_blob": "cdd5adbf55e9d96c7149c4a7b6b3b66534700ec8"
+    },
+    {
+      "path": "docs/operations/lab-alignment-runbook.md",
+      "bytes": 13278,
+      "sha256": "3fb46c6b358146d274f1a1be5c9fbad1b0b58dcf4702588a4cecd4dc91ea6998",
+      "git_blob": "5c55c0f96bc000225aed8995bfa9a0402e718df0"
+    },
+    {
+      "path": "docs/operations/lane-closure.md",
+      "bytes": 10723,
+      "sha256": "c961ee7b6f8da57106d0b3456f15e3343d759d771faca7ae5f6581a3c9aef7c5",
+      "git_blob": "874d12704b8ad8732fb11552aecf7474872b890a"
+    },
+    {
+      "path": "docs/operations/maintenance-0.42.md",
+      "bytes": 3733,
+      "sha256": "a28013fab6109e23c6236452b259aacd0834263cb9043b57be32b795e7ba63be",
+      "git_blob": "af41964495a58aae3cb982a798c4c2b10deb52c4"
+    },
+    {
+      "path": "docs/operations/native-locators.md",
+      "bytes": 8568,
+      "sha256": "291625edf36f2d345e5f3900078d95c470dcaabeb13b4fa857d5831a0bde3ec8",
+      "git_blob": "38a0b8bad712a261673b68f2ce683b8660106d2a"
+    },
+    {
+      "path": "docs/operations/operator-commands.md",
+      "bytes": 12367,
+      "sha256": "396644178c0036f97f0fb51a813cbb09d207651901589fc3cab30915d172927e",
+      "git_blob": "3dd67eff501740caffe22d89fe9e86c4476ab01c"
+    },
+    {
+      "path": "docs/operations/operator-view.md",
+      "bytes": 50063,
+      "sha256": "bbe43f83ab9767d244251114b1cff74844ef5895ce9f5a5d268bddccdcee0e9d",
+      "git_blob": "1341ff48db05181ba3659faa46c16459cf9172a8"
+    },
+    {
+      "path": "docs/operations/ops-drills.md",
+      "bytes": 8639,
+      "sha256": "6d5b35da32c9232ebd4f06c6f23a82d71a8c1c7944952fd1425bbd87cf78e9e7",
+      "git_blob": "3f0bc62c5271e15b04923154a3cd15cddfd50a17"
+    },
+    {
+      "path": "docs/operations/production-entry-mutation-gates.md",
+      "bytes": 22551,
+      "sha256": "36ce03d805f021b564326e51524150646f4ac9c52ef11c62da7008ca85dc6689",
+      "git_blob": "78600e03a112f18e406a6ee6d4247d498e72a557"
+    },
+    {
+      "path": "docs/operations/release.md",
+      "bytes": 4411,
+      "sha256": "7e2724d9d602d1ac8ecab961e6aedca7791758a3bfc9252a1e3e612a07debcb8",
+      "git_blob": "b4bc923877d9f5daafc7db5c0a5bdd2a20f52d2b"
+    },
+    {
+      "path": "docs/operations/review-rounds.md",
+      "bytes": 11245,
+      "sha256": "987c2dd390a250ec51e30596d1dc8bee369ba2326daf54cb3f0b11dcf9e33c08",
+      "git_blob": "80ac55aade69545441cd30f89d0f742201b32be6"
+    },
+    {
+      "path": "docs/operations/support-agreement.md",
+      "bytes": 15343,
+      "sha256": "c2eda0548d4d94106c0dcc0c46cfc5ff23a12a383c77a6fd3b32eaa6efdb1c21",
+      "git_blob": "0ab40bee1411c40f3f64beee900efed9fb0fdb8d"
+    },
+    {
+      "path": "docs/operations/supported-profile-runbook.md",
+      "bytes": 28781,
+      "sha256": "c70e4a90dd84937153035fa0a1ce5b2020dbd5943899c87ec6597328fde2b3f9",
+      "git_blob": "49d1d3c2ecd8f5d83ae6a8465250624045394729"
+    },
+    {
+      "path": "docs/operations/token-rotation.md",
+      "bytes": 5597,
+      "sha256": "657ee6c7c38dc056bd1f662d2afaba5dad864354a6da6a6a727bd519341a0cb4",
+      "git_blob": "81731c480728b050c774cee866e9dae274e0091e"
+    },
+    {
+      "path": "docs/operations/upgrade.md",
+      "bytes": 6271,
+      "sha256": "174f0c09b8ae952eeaa88e25e7762f542664b1ed3225fbd6f86675fcafa18a4e",
+      "git_blob": "3b194c6ad8f6372f0b2169d358f6c7f5c09443da"
+    },
+    {
+      "path": "docs/overview.md",
+      "bytes": 5276,
+      "sha256": "7533546f94ebbfab538aedc79941d4d10b04f96b0c4950fad9b8e97c0e79c2ab",
+      "git_blob": "21dce6481c7da7b8234fac76529c88f7362aac27"
+    },
+    {
+      "path": "docs/product/supported-contract.md",
+      "bytes": 11492,
+      "sha256": "9c86046030807fdcb8345d4c3b97bfde4c9d4ea6e9e3b6366ce189dde67eac52",
+      "git_blob": "227b031e2e153d5e83a8f3225ec4da79ed34c0e9"
+    },
+    {
+      "path": "docs/reference/dogfooding.md",
+      "bytes": 2782,
+      "sha256": "409f8594c882440928f2c95c9f1e46cb1bc3bc5c86c05c0bf3f137c11449b6fd",
+      "git_blob": "fa3c583c3929084ddaf89aef2523d0207d021e96"
+    },
+    {
+      "path": "docs/reference/edge-cases.md",
+      "bytes": 126063,
+      "sha256": "cee13957d0c826d54164f53f62c219350c384dd720cc4f88b0bc2b209fa099d2",
+      "git_blob": "bd0d99a2880d405f89d87f04ce781f5e189a40cf"
+    },
+    {
+      "path": "docs/reference/faq.md",
+      "bytes": 8356,
+      "sha256": "65a30d054714ec2b10824d1f6af3c430e8cc3c14c5fcf1631f333b33d6e4044f",
+      "git_blob": "b4b0b518d7b4ceddf1e0bfb2873ac89ef4823fe8"
+    },
+    {
+      "path": "docs/reference/onboarding-prompt.md",
+      "bytes": 1896,
+      "sha256": "b7dcdf260d2fca6d9418d6e13800fa15428a126aa1cf0c69cbffc8da310c2033",
+      "git_blob": "09d21fe20255310327ecb724410bd579dbce7d99"
+    },
+    {
+      "path": "docs/reference/testing.md",
+      "bytes": 2372,
+      "sha256": "c15ef46474856c3b0ee9d222f93bab27f16037e21404a2ca05871266728289ce",
+      "git_blob": "a70bfe2ea63d26b1c2fe4a4f66553a6a1ad63538"
+    },
+    {
+      "path": "docs/reference/verification-binding.md",
+      "bytes": 3936,
+      "sha256": "c36dfd13ed4a8d8ccc68e364899aa081066c8997a837b1da301c77c2e964005f",
+      "git_blob": "95b5e863f9e1d5bda76bbfea6c0169b47e6e9260"
+    },
+    {
+      "path": "docs/releases/README.md",
+      "bytes": 6793,
+      "sha256": "a50bc44271f645b42b9d84c08e5a9487540ec6b38be7bf54f8f940bde9cdc1d0",
+      "git_blob": "a74c92b3ed9b4d73d62c1d126f1786bc8500d5eb"
+    },
+    {
+      "path": "docs/releases/profile-records.md",
+      "bytes": 20771,
+      "sha256": "b26e1ffda27d4071b42e0e6ba8cdcadeab4c4131c7111c2291bdcfa82e5140ff",
+      "git_blob": "1873b4381ac3cf13c136675d8e1bfcdccbad1bf0"
+    },
+    {
+      "path": "docs/research/2026-09-13-durable-execution.md",
+      "bytes": 43170,
+      "sha256": "390da8ebe3ddf14cd37a01d5ee039a0193a6629c27bc0fd1b830b6374e915f09",
+      "git_blob": "d9a57cd3dc392b18684f1165747482beeac518cb"
+    },
+    {
+      "path": "docs/research/2026-09-13-github-api.md",
+      "bytes": 44485,
+      "sha256": "e59c1382a6182ccbbba060da368f6e423b6eca0f5b5d20a766491c9446400067",
+      "git_blob": "b472c909cc0821d6b391b10d39bb71d1e00f1d07"
+    },
+    {
+      "path": "docs/research/2026-09-13-harness-interfaces.md",
+      "bytes": 41414,
+      "sha256": "4e7188a03b0e70607b08e1e31857b31888cf733e0b42a103e078015050851022",
+      "git_blob": "521bf15d46942192cbad72d6dba98f5be3e6a391"
+    },
+    {
+      "path": "docs/research/2026-09-14-ci-security-surface.md",
+      "bytes": 30981,
+      "sha256": "b23212543fb87610f1e6c86e15727f44bc43ca279a262e8fa3f91d502e6938e2",
+      "git_blob": "4b37264064b01aeb249935bc16f207de4b33c703"
+    },
+    {
+      "path": "docs/research/2026-09-14-complex-projects.md",
+      "bytes": 49716,
+      "sha256": "0d55805140b550d410a4a4b73787719c2b0e49faddb974c488035f8a2563c107",
+      "git_blob": "58fd872f5d666d330dd020e146f4101b35806af2"
+    },
+    {
+      "path": "docs/research/2026-09-14-github-actions-executor.md",
+      "bytes": 4180,
+      "sha256": "8e7a8f4f2a82ada08b5768402689fc7eb6cffd2efc85818ae0dbbcc2f9873198",
+      "git_blob": "a1017d0dc94bafc4615e1dc9eb6820d0c092eaef"
+    },
+    {
+      "path": "docs/research/2026-09-14-github-reactive.md",
+      "bytes": 35608,
+      "sha256": "a2539e02993f7e0cc3a22ad39dddb902c87ec5b675be83b624db31716fc9f6e3",
+      "git_blob": "fa628034776395ba36c4a3d748e985cf487d7367"
+    },
+    {
+      "path": "docs/research/2026-09-14-mcp-surface.md",
+      "bytes": 39626,
+      "sha256": "aa3a0364ce1f542ea614bd2a05f93c27a6c54e5c190c625d276b18c5b40903ed",
+      "git_blob": "845ea33fcb4b4df414cd8ea6a9c427072d2fb4d8"
+    },
+    {
+      "path": "docs/research/2026-09-15-azure-devops.md",
+      "bytes": 84775,
+      "sha256": "cb86ec4e7b46df22545c8c287cc95c812b3a578ca4b64547f4947ef637ef836b",
+      "git_blob": "4b460d2702585addc4e2cc5834dfaaf64ed026bb"
+    },
+    {
+      "path": "docs/research/2026-09-15-harness-config-best-practices.md",
+      "bytes": 50574,
+      "sha256": "b3c099cc6ea489008459350f7c3c71e7c2575860e1c0f884ca982c6f98c9da8e",
+      "git_blob": "2546ca8714f8c9ab27fb371b1835fd55ecf33ddf"
+    },
+    {
+      "path": "docs/research/2026-09-15-harness-selection.md",
+      "bytes": 31205,
+      "sha256": "955cd6129697a7f0a19351bfa7b7245f976fc9b87fb4cf8a35285948fa23d54c",
+      "git_blob": "548e57d80c12acd22f96798ecfd1b4770f59849a"
+    },
+    {
+      "path": "docs/research/2026-09-15-mcp-lane-live-evidence.md",
+      "bytes": 9137,
+      "sha256": "5cc05cc0e58634bab25c42576efbe4059202cbf5699ac97484edffb71f16d0a5",
+      "git_blob": "68b5c485799a1c96d9b025425e77f4d9a5c5cec3"
+    },
+    {
+      "path": "docs/research/2026-09-16-harness-log-formats.md",
+      "bytes": 24732,
+      "sha256": "3505413613114b4c02ecdccea1731e26259aa679cedb0be41126dea60621079b",
+      "git_blob": "8f4628925b25e8a56f82b6dadff793f43baf24e6"
+    },
+    {
+      "path": "docs/research/2026-09-17-actions-artifacts-usage.md",
+      "bytes": 29223,
+      "sha256": "58acbabef9dc9c53a62a00f260ccf69c3d793f6adfc32b30ddfaf5e2eedb9a5a",
+      "git_blob": "d6448d29a0f6bbe1b04fced449c69788f5c446c6"
+    },
+    {
+      "path": "docs/research/2026-09-17-patch-application.md",
+      "bytes": 35852,
+      "sha256": "71fbb1ccd5265280bf2b3d76b4119e3106a38f9910b12990142ba461e1e8fbc5",
+      "git_blob": "2e763c9b35a2eb981c8c9bcb59fc772719b36eb7"
+    },
+    {
+      "path": "docs/research/2026-09-17-remote-effect-reconciliation.md",
+      "bytes": 33904,
+      "sha256": "bd97e08a3ec46fb031beaf8870c5698b493dc2d6ca6f06232175fca9d5ecda8c",
+      "git_blob": "6d46c02f10de239b748cae631bdab1abae56d476"
+    },
+    {
+      "path": "docs/research/2026-09-17-schema-upgrade-gates.md",
+      "bytes": 34185,
+      "sha256": "c5b5349bd07945dd610f8c90fb63c22dd4694605ffb0036e655bc522bcb1480b",
+      "git_blob": "80f1238745a0a2dedc22dc6560cae1cedce66f02"
+    },
+    {
+      "path": "docs/research/2026-09-21-claude-sdk-python.md",
+      "bytes": 41382,
+      "sha256": "507819bde12b7f00112a628cf0ccb6d2a086f752d534f20dc3c5b71bab8bda28",
+      "git_blob": "39ebfd9b827726f87b0101945eaadc50d0358155"
+    },
+    {
+      "path": "docs/research/2026-09-21-codex-app-server.md",
+      "bytes": 34623,
+      "sha256": "6899fd3705295662dd9b332b78499ec50ed3dbd411598bb12b0b2230bea45ac2",
+      "git_blob": "f3466a7d17b9c14aa16db504464be9caa92abf7d"
+    },
+    {
+      "path": "docs/research/2026-09-21-forge-harness-hacks.md",
+      "bytes": 33490,
+      "sha256": "8511ae2eaf2509e4915d1556f47e6f758ba854870e7e02f768ff25ef4c72ecfc",
+      "git_blob": "e64cc35d5ae6d2a9f5d8611bd7e1b369c40f1f23"
+    },
+    {
+      "path": "docs/research/2026-09-21-opencode-server.md",
+      "bytes": 29456,
+      "sha256": "6a67dcf7a193a655e798f4eb45ce3ac118590c02d099a76e4d87c548c8431ccc",
+      "git_blob": "1f66cf0651c89cd425684bba5bbf106daa69d6b1"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-agent-sandboxing.md",
+      "bytes": 12742,
+      "sha256": "d5db535ae6498be5d1882e8c912f8899ccd9e485b4aa84577384b76f14cec927",
+      "git_blob": "cf56419240fe36c98fe283df3800b680abd3a0cb"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-byok-multitenant.md",
+      "bytes": 10335,
+      "sha256": "86e7eb69269ac552199f9eec32bd39eccfa7e74021b6403dcabd6b81fe2b2a2b",
+      "git_blob": "a476afbeb68d64448c82257eed6f5953d86318f9"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-cost-accounting-budgets.md",
+      "bytes": 11215,
+      "sha256": "a5bf7814d5bf26d721c444c48492fb4e032ea9445fe918fa049bfe1385da88a3",
+      "git_blob": "e40f9e86f2c9a2df21411a19a2bd2026b93ee200"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-durable-agent-sessions.md",
+      "bytes": 12157,
+      "sha256": "219982cc39d153f9a3e77cd54e8e4118c9de366c70d82f863f00a5af65ea318c",
+      "git_blob": "30b7e05b73c374bbd56ad38b2f5cf45c65e90786"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-overview.md",
+      "bytes": 10820,
+      "sha256": "fc301d8d26e2006dc17f5f4a9ad70fae3aaf2cf01d4575e3b0307a52fb1f8312",
+      "git_blob": "39a6b5c5278e13a5f58166398d6259593d9a7edb"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-prompt-injection-steering.md",
+      "bytes": 11820,
+      "sha256": "4fbba20cf9c7c0512b199c9be57d65cab302eb4ea9608e844c4acaab0d5eb1f7",
+      "git_blob": "a83fe9fb1750d13f78eaa4e35f55e4b5ecdad718"
+    },
+    {
+      "path": "docs/research/2026-09-22-gap-runner-scheduling.md",
+      "bytes": 9898,
+      "sha256": "c2c0a88d401850d45abbe92d6017c0b1ba2c5a410053940d0ea2cbfd79a00d63",
+      "git_blob": "28ab92b58a976edbcd136c4be6034092b90f5aec"
+    },
+    {
+      "path": "docs/research/2026-09-22-script-rendering-architecture.md",
+      "bytes": 33489,
+      "sha256": "e96f3870ab565d490630320d22f418021c64a7cd28fab674655cc295cc351688",
+      "git_blob": "23e90b960cac8f4385cf3cb206c13b1a3c8ce99b"
+    },
+    {
+      "path": "docs/research/2026-09-23-copilot-sdk-lane.md",
+      "bytes": 33578,
+      "sha256": "f7c6fac7ee98573594cdead1d4ddfa3353178177bc0b95a2c12c7f5ca72773d1",
+      "git_blob": "2fd168b654c7f2f0ec3498883fb9b3188c017d4e"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/01-e2e-qualification-layers.md",
+      "bytes": 14045,
+      "sha256": "e5ea9f858fd552d54d21f45ed0943e47193345f4c03f2e787544d7cfa10917aa",
+      "git_blob": "9fc425171affbba815ff034410c419d60bcb5954"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/02-synthetic-test-environments.md",
+      "bytes": 12454,
+      "sha256": "92dcda6609ea58eae373f338204c2835b90b1a35cc08444cb1dab6e386e2c3ba",
+      "git_blob": "7ca4a1526e2050a1a6178528a31fe6513522b12d"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/03-evidence-based-capability-qualification.md",
+      "bytes": 12981,
+      "sha256": "670f070c2b0fc81f3c6fe83990c8822f541246a9188ef767d398dfd2ca6b9473",
+      "git_blob": "c7720f55419104fc9dbd7d2e457080e6a8e0c7ab"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/04-design-partner-pilot-methodology.md",
+      "bytes": 13606,
+      "sha256": "297c64f0ead6ec783bdb8f155c0b67370c5e2b74aa8a63a2f9659ba8b86615f2",
+      "git_blob": "127e3e9f3aac87ba4688a5b2f06ea725f1efd555"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/05-operator-console-patterns.md",
+      "bytes": 12722,
+      "sha256": "e5e3633ba42d2d75805f83a9d46f5070832798911cc36984bacb2abba400725f",
+      "git_blob": "a20cc95904d53fbe371effaec5735dfed9c0aaa0"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/06-two-writer-coordinated-changes.md",
+      "bytes": 11871,
+      "sha256": "149e1633e7b14755961b29d710cc9fb2b6d4eec290db52a42af16d2e6ecbafff",
+      "git_blob": "24652ef4c76783aa1abe5169634f69bd93f73ba2"
+    },
+    {
+      "path": "docs/research/2026-09-23-e2e-qualification/overview.md",
+      "bytes": 11487,
+      "sha256": "3f6e5b2a92a22a5bd046fcae88b0dd288188cf91af514e3ea54fbc8ee116af79",
+      "git_blob": "9689ef0636916b33a203648b93eb799625ccc1d7"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/01-github-actions-secret-delivery.md",
+      "bytes": 9110,
+      "sha256": "d1b2df7efb060f5af5c1fc0406669f77daacdd68bee694c744d77fc19bd63f3c",
+      "git_blob": "8ccb6a9a2a9a051299746778948268a61986091c"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/02-azure-pipelines-secret-delivery.md",
+      "bytes": 8718,
+      "sha256": "a01b37c5bd94686ab7e205a0cc70f77aca0e9067fc7d14ea84fda65a68db0971",
+      "git_blob": "4516361f111d27624722db2925aef39780144cee"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/03-gitlab-cicd-secret-delivery.md",
+      "bytes": 7236,
+      "sha256": "cd0d059a4e99bf4b57bba30969f8fcc29ec6bad068709a5de019b929c1ebe5f0",
+      "git_blob": "281c4fa41d036e86d97e5927c3ad6b20857578c7"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/04-runner-time-redemption.md",
+      "bytes": 11120,
+      "sha256": "f656d9aebb09326d567916c66de7effe7f30fb31dc1912e2cc293870774c45d0",
+      "git_blob": "83b56ab54efb592f9c82641874c55e5b0394137a"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/05-anthropic-credential-consumption.md",
+      "bytes": 6680,
+      "sha256": "25cb0caeb2dfbd73219e4e35cb9c68a8584913d30f1636b47ad65c6ee90a3a26",
+      "git_blob": "3bb2aa0f6bfffa830c9fbf8d8d29677e576323d0"
+    },
+    {
+      "path": "docs/research/2026-09-24-credential-delivery/overview.md",
+      "bytes": 11687,
+      "sha256": "f3ace1b7b9faab057df74bc71510f5f9bbb371b6458657b387eafbc4164c7ac9",
+      "git_blob": "e92b2f8467ebd0d29e2583a6cb855e7458648d19"
+    },
+    {
+      "path": "docs/research/2026-09-25-operation-scoped-credential-grants/01-operation-scoped-issuance.md",
+      "bytes": 16785,
+      "sha256": "e5ab6a2f47987dc1803772776d7bab91257b9eedb82e5d7dd3b3a69e6e44ee44",
+      "git_blob": "8832b78f7f163127a51beb861df9d018d57dd7a8"
+    },
+    {
+      "path": "docs/research/2026-09-25-operation-scoped-credential-grants/02-gitlab-ce-free-credential-reality.md",
+      "bytes": 9938,
+      "sha256": "4d708977c4b99d4dfd8cb4bda828fd7c9ccfa6cdd81c73fe1cb3e24cc37be922",
+      "git_blob": "a61201f5e0f19f6acd7bcd4183cf923cfea84b08"
+    },
+    {
+      "path": "docs/research/2026-09-25-operation-scoped-credential-grants/03-sender-constrained-credentials.md",
+      "bytes": 9722,
+      "sha256": "e36c3191bbfc19d9ce773c1a9eb15abfa4d66d82e64a0f2d708041cc1db5e0ea",
+      "git_blob": "84ca1cdc8f38014415e7e62e81e7046da645aecd"
+    },
+    {
+      "path": "docs/research/2026-09-25-operation-scoped-credential-grants/04-absolute-deadlines-vs-sliding-ttls.md",
+      "bytes": 10943,
+      "sha256": "4d9d597e71d6d4ce1ddfafae1d88fce2a0079fed2b0386fc92b55ee0accc1e7a",
+      "git_blob": "ceccec8f3d2f9a2cde8d74d3a513e18987e91e1f"
+    },
+    {
+      "path": "docs/research/2026-09-25-operation-scoped-credential-grants/overview.md",
+      "bytes": 11151,
+      "sha256": "e457b31615d4ab35f99caedd1ca0b1b844c296cb6fce156502a9e7904d1ac5bb",
+      "git_blob": "4f8b40bbc286fc8d68b64d02f79a68cc541d8d31"
+    },
+    {
+      "path": "docs/research/2026-09-26-durable-ingress-acknowledgement/webhook-durability-semantics.md",
+      "bytes": 3839,
+      "sha256": "a95173ce2782d5fed894685a7f658a23929a0d7576cd075ec0f471c38ffcd04f",
+      "git_blob": "45391740b620ba081014232ad765abc11696f124"
+    },
+    {
+      "path": "docs/research/2026-09-26-mr-feedback-ingress/gitlab-note-webhook-semantics.md",
+      "bytes": 4774,
+      "sha256": "b23314fdf08bd5513ae282b3e06de2f2032df514821efc55e3c3a5dca48f5356",
+      "git_blob": "a28d93a3605c8e2840698964831205023a803631"
+    },
+    {
+      "path": "docs/research/2026-09-27-gitlab-pipeline-sources/README.md",
+      "bytes": 1727,
+      "sha256": "f13e265ac180fbf1631d18b69a1cf3c06c41bc1971363becc1c0f2d91126bd79",
+      "git_blob": "c47633fef53c377bce60d37dd2766f7cac385cb2"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/DESIGN.md",
+      "bytes": 50247,
+      "sha256": "78d4a63f8a91b231fda4bfdf7c1ef293590b879741af49eebc7605a86a718bc2",
+      "git_blob": "0432aa8f38ee152b489cb2903076e407fc8dc1d1"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/HANDOFF.md",
+      "bytes": 25935,
+      "sha256": "416e5f33040bca15989d3eb7fc03dd199a125cce7d5b122f96940305cb701573",
+      "git_blob": "d6869e218df837ec58f4318d08a11faa7ec1f5b1"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md",
+      "bytes": 6194,
+      "sha256": "288c29a3d58664600e66d85cc6965bdb61a7254c1ba28a5fa8cc3a96de55e9cc",
+      "git_blob": "71b48ceccd88dc69c3abee7a642bf18f67142fd7"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/PLAN-phase-0.md",
+      "bytes": 194424,
+      "sha256": "239e262b9d30401f2f2eb4226024db5af361d4a408a6c0b2eb3724cf618aec2b",
+      "git_blob": "f3e6c05da525c950928a6e0ef371a11e7501f0dd"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/ROADMAP.md",
+      "bytes": 66575,
+      "sha256": "41e87efb9c71eb3240a36ad56d867d25f6bd80d8e2fa6151151b0c2838432fc6",
+      "git_blob": "9f1d04ae525b1c2151e56b6daa3df8731bad5526"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/metrics-history.json",
+      "bytes": 1236,
+      "sha256": "bd9332597af8fb55c700ee5ddc8d0ee76402263f6b142ca7b49d623d85ba84d1",
+      "git_blob": "583dff04a5c5fa4c4df80ba948a336026e018e81"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/metrics.md",
+      "bytes": 2420,
+      "sha256": "9472061550aa75e1a4935db79145ae857cf7fbedafbab4f6aac84e279f297323",
+      "git_blob": "a51a8724f951a2c7c2392a0c272314aba3602e09"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/ports-inventory.md",
+      "bytes": 8335,
+      "sha256": "54f457c15b5211ad423e3019eb718be2fc5dc0eb1cb45a963973566fb2ecb94d",
+      "git_blob": "9b32d9ec2a048f0cde0444cafc37797b5f0247a3"
+    },
+    {
+      "path": "docs/roadmap/2026-09-29-simplification/test-ledger.csv",
+      "bytes": 21395,
+      "sha256": "e9ddaf6db29fbf6a16d1ab80da8d9507fb35a02ceda58eabcda3d5912d7b0ba5",
+      "git_blob": "806aaaf5dd28fa0f9ffdefc2548f9cdf6c5aa204"
+    },
+    {
+      "path": "docs/security/threat-model.md",
+      "bytes": 7886,
+      "sha256": "9b1d93a0003acb137ac77f3cc72df819e8c685a702182b332d821e704f13e79f",
+      "git_blob": "dacebd2e4ba5c1eb9d89004b6a6518a7289fc031"
+    },
+    {
+      "path": "docs/specs/candidate-collection.md",
+      "bytes": 4758,
+      "sha256": "c845e64f134b5658ab19913292d9421b302e215ecef5c345f38dcaf83585575a",
+      "git_blob": "78e373d83f67cc5330c4a9e7f4cf4745b3d77e3f"
+    },
+    {
+      "path": "docs/specs/contracts-v0.2.md",
+      "bytes": 3096,
+      "sha256": "edac7bb0fc6959e5912494c8bec942c490dbff1bd2e613ee05ba2bd32da253d8",
+      "git_blob": "c41db32561439a24693c13fc19eadf70740f5897"
+    },
+    {
+      "path": "docs/specs/coverage-audit.md",
+      "bytes": 3384,
+      "sha256": "a3cd62228ca0af97b79a60384e5790c7c9f921ec75c01c94087b575312a3182a",
+      "git_blob": "67cd9374232f95bc73c2241261da582b79c204fe"
+    },
+    {
+      "path": "docs/specs/harness-selection-v0.9-brief.md",
+      "bytes": 6989,
+      "sha256": "2dbf0ac5f1f9ad0038083e35fee199a46e6a36d21acad0ce95963e0b4fd63b11",
+      "git_blob": "c470893d9c22e093b6575078e938dd86eaef3caa"
+    },
+    {
+      "path": "docs/specs/qualification-profile.md",
+      "bytes": 11859,
+      "sha256": "396d743c5a0cddead886985cc115e5160ebf15da101742d142fdae947e7ac056",
+      "git_blob": "36b3cb51d760abae5ad6f0f521eb885dcda078a4"
+    },
+    {
+      "path": "docs/specs/stage-b2-brief.md",
+      "bytes": 4996,
+      "sha256": "b344777f4ec39ff36dcd8e7104f02a8ec8e29669f06e9199faad76fc4dad61af",
+      "git_blob": "078ce2fdab5bd1ea6f8f0c36a02a163e27521ad0"
+    },
+    {
+      "path": "docs/specs/stage-d-brief.md",
+      "bytes": 5069,
+      "sha256": "c661267de382d3e042eaad1de0997ba9ccfbf957aec5ec20de9c9d0b1cda084a",
+      "git_blob": "d4bd1920b756c1a22261797697e282272d3e70f1"
+    },
+    {
+      "path": "docs/specs/stage-e3-brief.md",
+      "bytes": 4978,
+      "sha256": "bac33e19797871bbc475f2d62236d84674e8a88d9206c3d73a9b5b1552bd291d",
+      "git_blob": "2c2db2781a132db91ab25d9980c4e5bdbe4ad5f1"
+    }
+  ]
+}

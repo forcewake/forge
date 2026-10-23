@@ -1,91 +1,24 @@
-# forge documentation
+# Documentation
 
-**forge** is an agentic software factory for GitHub and GitLab CE: an authorized issue becomes a plan, a human gate, a coding agent in
-ephemeral CI, a trusted publisher, and a Draft MR/PR ready for human
-review. The bot never merges.
+Forge plans an issue, waits for approval, executes in the target's CI and
+publishes a verified candidate as a Draft. Merge stays with a human.
+The [main README](../README.md) states the current release status.
 
-Azure DevOps remains on the [0.42.x maintenance line](operations/maintenance-0.42.md).
+| Start or operate | Guide |
+| --- | --- |
+| Connect a repository | [GitHub](getting-started/github.md), [GitLab](getting-started/gitlab.md) |
+| Install from this source tree | [Installation](onboarding/cold-install-runbook.md) |
+| Configure the current CI lane | [Harness onboarding](harnesses/onboarding.md), [driver index](harnesses/README.md) |
+| Understand the new lane | [Lane v1](harnesses/lane-v1.md), [architecture](overview.md) |
+| Approve, cancel or diagnose work | [Commands](operations/operator-commands.md), [read-only operator API](operations/operator-view.md) |
+| Operate the deployment | [Operations](operations/README.md) |
+| Recover data or change versions | [Backup and restore](operations/backup-restore.md), [upgrade](operations/upgrade.md) |
+| Rotate credentials | [Tokens](operations/token-rotation.md), [current lane credentials](operations/credential-rotation.md) |
+| Assess risks and limitations | [Threat model](security/threat-model.md), [FAQ](reference/faq.md), [support boundary](operations/support-agreement.md) |
+| Develop safely | [Agent instructions](../AGENTS.md), [testing](reference/testing.md), [edge cases](reference/edge-cases.md) |
+| Read architectural decisions | [ADRs](adr/0000-record-architecture-decisions.md), [simplification design](roadmap/2026-09-29-simplification/DESIGN.md) |
+| Check implementation progress | [Implementation record](roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md), [roadmap](roadmap/2026-09-29-simplification/ROADMAP.md), [metrics](roadmap/2026-09-29-simplification/metrics.md) |
+| Recover historical material | [Archive guide](archive.md), [0.x changelog](archive/CHANGELOG-0.x.md) |
 
-Start at the [main README](../README.md); this index maps the docs tree.
-
-## Getting started
-
-| Guide | Covers |
-|---|---|
-| [GitLab CE project onboarding](getting-started/gitlab.md) | execution profile, bot identity, webhook, CI variables, harness include, `forge doctor` |
-| [GitHub setup](getting-started/github.md) | GitHub App registration, webhook, secrets, harness workflow, label trigger |
-
-## Harnesses (coding agents in your CI)
-
-| Doc | Covers |
-|---|---|
-| [Harness onboarding](harnesses/onboarding.md) | shared setup: includes, common variables, MCP servers, how a run flows, writing the task, triage |
-| [Multi-harness & auto-selection](harnesses/README.md) | the preference list, the compiler, the gate's Implementation block, fallback |
-| [Claude Code](harnesses/claude-code.md) | variables, flags, MCP dialect, receipts, gotchas |
-| [Grok Build](harnesses/grok-build.md) | subscription auth rotation, the npm hang fix, deny rules |
-| [opencode](harnesses/opencode.md) | injected permission map, model routing, MCP translation |
-| [GitHub Copilot CLI](harnesses/copilot-cli.md) | fine-grained PAT, scoped grants, deny-wins rules |
-
-## Operations
-
-| Doc | Covers |
-|---|---|
-| [Operations index](operations/README.md) | runbooks overview |
-| [Backup & restore](operations/backup-restore.md) | Postgres durability, restore drills |
-| [Upgrade](operations/upgrade.md) | migration ordering, rollback |
-| [Operator commands](operations/operator-commands.md) | `/implement` `/go` `/cancel` `/retry` `/status` `/why-blocked` `/reconcile` `/security` — effects, authorization, provider parity; the `forge` label, auto-revive, issue-edit replan |
-| [Token rotation](operations/token-rotation.md) | every credential forge and the lanes touch |
-| [Audit retention](operations/audit-retention.md) | evidence, action log, captures |
-
-## Dogfooding
-
-[forge is developed through forge](reference/dogfooding.md): the loop, what
-is wired on this repo, and the ground rules.
-
-## Roadmap
-
-| Doc | Covers |
-|---|---|
-| [Simplification program — design](roadmap/2026-09-29-simplification/DESIGN.md) | [ADR-0035](adr/0035-simplification-program.md): subtract → separate → unify → productize; target architecture, invariants I1–I8, scope for 1.0 |
-| [Simplification program — roadmap](roadmap/2026-09-29-simplification/ROADMAP.md) | phase-by-phase task breakdown with acceptance criteria |
-| [Simplification program — metrics](roadmap/2026-09-29-simplification/metrics.md) | measured baseline and per-phase targets |
-| [Phase 0 implementation plan](roadmap/2026-09-29-simplification/PLAN-phase-0.md) | 16 test-first tasks: guardrails, invariants, ratchet, metrics |
-| [Simplification program — handoff](roadmap/2026-09-29-simplification/HANDOFF.md) | where the program stands, what to do next, how to work, and a kickoff prompt for the next agent |
-
-## Reference
-
-| Tree | Covers |
-|---|---|
-| [ADR](adr/) | architecture decisions 0000–0035 (the "why") |
-| [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md), [patch application vs git apply](research/patch-application.md), [remote effect reconciliation](research/remote-effect-reconciliation.md), [Actions artifacts & usage receipts](research/actions-artifacts-usage.md), [schema upgrade gates](research/schema-upgrade-gates.md) |
-| [Specs](specs/) | stage briefs and contracts the milestones were built from |
-| [Security](security/threat-model.md) | the threat model |
-| [Reviews](archive.md) (archived original: `docs/reviews`) | external review passes and their dispositions |
-| [FAQ](reference/faq.md) | short answers, all providers |
-| [Onboarding prompt](reference/onboarding-prompt.md) | copy-paste bootstrap for coding agents working ON forge |
-
-## Design pillars (one line each, full story in the ADRs)
-
-- The bot never merges ([ADR-0003](adr/0003-no-merge-is-enforceable.md)).
-- The controller owns the lifecycle; implementers propose
-  ([ADR-0004](adr/0004-controller-owns-lifecycle-implementer-proposes.md)).
-- Durable execution with unknown-outcome reconciliation
-  ([ADR-0005](adr/0005-durable-execution-and-unknown-outcome.md),
-  [ADR-0017](adr/0017-durable-step-runtime.md)).
-- Quality contract instead of pipeline status
-  ([ADR-0008](adr/0008-quality-contract-instead-of-pipeline-status.md)).
-- Human gates authorize one specific decision
-  ([ADR-0009](adr/0009-human-gates-authorize-specific-decision.md)).
-- Proposal-only lanes + one trusted publisher
-  ([ADR-0016](adr/0016-candidate-bundle-trusted-publisher.md)).
-- Immutable RunSpec, admission before spend
-  ([ADR-0018](adr/0018-immutable-run-spec.md)).
-- Source/execution/harness/model-route adapters
-  ([ADR-0019](adr/0019-source-execution-adapters.md)).
-- MCP into lanes ([ADR-0022](adr/0022-harness-mcp-integration.md)) and
-  task-aware harness selection
-  ([ADR-0023](adr/0023-dynamic-harness-selection.md)).
-- One publication boundary for every provider × backend
-  ([ADR-0026](adr/0026-publication-boundary.md)).
-- One lifecycle owned by core, consolidated incrementally — no three
-  hand-maintained copies ([ADR-0027](adr/0027-lifecycle-consolidation.md)).
+The canonical simplification plans are execution records, not setup guides.
+Historical measurements do not certify the current checkout.
