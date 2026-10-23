@@ -25,7 +25,7 @@ Five checks, every push (the lint job — fast, no database, no provider):
    template and MUST be caught; an uncaught mutation refuses the gate
    itself (the gate proved itself insensitive).
 2. ``dispatch-schema`` — the shipped templates' DECLARED dispatch surface
-   (GitHub ``on.workflow_dispatch.inputs``, Azure ``parameters``, the
+   (GitHub ``on.workflow_dispatch.inputs`` and the
    GitLab recipes' consumed pipeline variables) validated against the
    CAPTURED production dispatch payload shapes
    (``scripts/conformance_dispatch_captures.json`` — fresh captures
@@ -124,7 +124,6 @@ CAPTURES_PATH = REPO_ROOT / "scripts" / "conformance_dispatch_captures.json"
 CAPTURES_SCHEMA = "forge.conformance-dispatch-captures/1"
 
 GITHUB_TEMPLATE = "forge-harness.github.yml"
-AZURE_TEMPLATE = "forge-lane.azure-pipelines.yml"
 
 #: The GitLab recipes that MUST carry a credential-consumption block today
 #: (the #303 anthropic-route lanes). Recipes discovered by scan beyond
@@ -150,14 +149,10 @@ PROBE_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TO
 
 #: Per-provider scrub guarantees: which strays each shipped recipe's
 #: block actually unsets. The gitlab lanes and the GitHub template scrub
-#: the whole anthropic family; the Azure block currently guarantees only
-#: CLAUDE_CODE_OAUTH_TOKEN (its ANTHROPIC_API_KEY posture is observed —
-#: the probe still records it — but is not a gate assertion on that
-#: sibling-owned surface).
+#: the whole anthropic family.
 SCRUB_GUARANTEE: dict[str, tuple[str, ...]] = {
     "gitlab-lane": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
     "github": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
-    "azure": ("CLAUDE_CODE_OAUTH_TOKEN",),
 }
 
 #: The dispatch key the credential ref rides under (the #303 spelling).
@@ -298,7 +293,6 @@ def _load_seams() -> dict[str, Any]:
         from tests.test_templates import HARNESS_TEMPLATES  # noqa: PLC0415
 
         from forge.adaptive.credential_broker import (  # noqa: PLC0415
-            DELIVERY_MODE_AZURE_GROUP,
             DELIVERY_MODE_GITHUB_NATIVE,
             DELIVERY_MODE_GITLAB_PROTECTED,
             CredentialDeliveryPlan,
@@ -337,7 +331,6 @@ def _load_seams() -> dict[str, Any]:
         "delivery_template_conformance": delivery_template_conformance,
         "gitlab_protected_mode": DELIVERY_MODE_GITLAB_PROTECTED,
         "github_native_mode": DELIVERY_MODE_GITHUB_NATIVE,
-        "azure_group_mode": DELIVERY_MODE_AZURE_GROUP,
     }
 
 
@@ -360,8 +353,7 @@ def _require_tools() -> None:
 _FORGE_VARIABLE_RE = re.compile(r"\bFORGE_[A-Z0-9_]+")
 
 #: The credential-consumption guard: the ``if`` line that opens the #303
-#: block in every shipped recipe (gitlab lanes, the GitHub driver step,
-#: the Azure driver step).
+#: block in every shipped recipe (GitLab lanes and the GitHub driver step).
 _CREDENTIAL_GUARD_RE = re.compile(
     r'^\s*if \[ -n "\$\{FORGE_CREDENTIAL_REF:-\}" \] && '
     r'\[ "\$\{FORGE_CREDENTIAL_REDEEM:-\}" != "1" \]; then'
@@ -400,14 +392,6 @@ def github_declared_inputs(doc: dict[str, Any]) -> set[str]:
     if not isinstance(inputs, dict) or not inputs:
         raise PrerequisiteError("the GitHub template declares no workflow_dispatch inputs")
     return set(inputs)
-
-
-def azure_declared_parameters(doc: dict[str, Any]) -> set[str]:
-    """The declared queue-time parameter names."""
-    parameters = doc.get("parameters")
-    if not isinstance(parameters, list) or not parameters:
-        raise PrerequisiteError("the Azure template declares no parameters")
-    return {str(entry["name"]) for entry in parameters}
 
 
 def referenced_forge_variables(text: str) -> set[str]:
@@ -546,12 +530,6 @@ CONDITIONAL_INPUTS: dict[str, dict[str, tuple[str, str]]] = {
             '"repair_context": repair_context',
         ),
     },
-    "azure": {
-        "repair_context": (
-            "src/forge/runs/azure_service.py",
-            '"repair_context": repair_context',
-        ),
-    },
 }
 
 
@@ -583,7 +561,7 @@ def declared_vs_captured(
     captured_shapes: dict[str, list[str]],
     annotations: dict[str, tuple[str, str]] | None = None,
 ) -> list[SchemaFinding]:
-    """The bidirectional GitHub/Azure conformance rule.
+    """The bidirectional GitHub conformance rule.
 
     - ``undeclared_sent``: a captured shape sends a key the shipped
       template does not declare — the real provider answers a dispatch-wide
@@ -1007,9 +985,7 @@ def run_sentinel_arm(
     (the value that must never reach the model process); the carrier env
     carries the DELIVERED sentinel exactly where the recipe's mapping
     puts it. The probe snapshots the credential slots the block leaves
-    behind. *parent_overrides* mutates the parent env (the Azure arm's
-    dropped-mapping mutation: an unmapped secret variable is ABSENT from
-    the step env, not ambient).
+    behind. *parent_overrides* supplies explicit parent environment overrides.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -1084,10 +1060,6 @@ def _carrier_env(provider: str, segment: str) -> dict[str, str]:
         return {f"FORGE_MODEL_{segment}": DELIVERED_SENTINEL}
     if provider == "github":
         return {"FORGE_MODEL_CREDENTIAL": DELIVERED_SENTINEL}
-    if provider == "azure":
-        # the template's own env mapping renders the variable-group secret
-        # into the step env (`ANTHROPIC_AUTH_TOKEN: $(LANE_ANTHROPIC_AUTH_TOKEN)`)
-        return {"ANTHROPIC_AUTH_TOKEN": DELIVERED_SENTINEL}
     raise PrerequisiteError(f"unknown credential provider {provider!r}")
 
 
@@ -1110,10 +1082,9 @@ def run_secret_consumers(seams: dict[str, Any]) -> dict[str, Any]:
     for name in seams["HARNESS_TEMPLATES"]:
         text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
         gitlab_recipes.append((name, "present" if credential_block(text) else "absent"))
-    # (ii) the GitHub + Azure templates (their blocks are required).
+    # (ii) the GitHub template (its block is required).
     native_specs: list[tuple[str, str]] = [
         (GITHUB_TEMPLATE, "github"),
-        (AZURE_TEMPLATE, "azure"),
     ]
 
     for name, presence in gitlab_recipes:
@@ -1262,29 +1233,19 @@ def _sentinel_recipe_arms(
     # correct-looking receipt is not evidence of consumption.
     #
     # Provider shape of the dropped mapping: the gitlab lanes and the
-    # GitHub template map inside the block (the ``export`` line); the
-    # Azure template's mapping is the DRIVER STEP'S env mapping
-    # (``ANTHROPIC_AUTH_TOKEN: $(LANE_ANTHROPIC_AUTH_TOKEN)``) — dropping
-    # it leaves the step env without the credential (an unmapped Azure
-    # SECRET variable is absent from the step env by design).
-    if provider == "azure":
+    # GitHub template map inside the block (the ``export`` line).
+    try:
+        mutated_block, dropped_lines = drop_consumer_mapping(block)
+        dropped_count = len(dropped_lines)
+    except PrerequisiteError:
+        # the SHIPPED block itself carries no consumer mapping — the
+        # defect this mutation replays is already the template's
+        # reality (the sentinel arm above has FAILED on it); the
+        # mutation arm records that state rather than crashing.
         mutated_block = block
-        mutated_carrier: dict[str, str] = {}
-        mutated_parents = {"ANTHROPIC_AUTH_TOKEN": ""}
-        dropped_count = 1
-    else:
-        try:
-            mutated_block, dropped_lines = drop_consumer_mapping(block)
-            dropped_count = len(dropped_lines)
-        except PrerequisiteError:
-            # the SHIPPED block itself carries no consumer mapping — the
-            # defect this mutation replays is already the template's
-            # reality (the sentinel arm above has FAILED on it); the
-            # mutation arm records that state rather than crashing.
-            mutated_block = block
-            dropped_count = 0
-        mutated_carrier = _carrier_env(provider, segment)
-        mutated_parents = None
+        dropped_count = 0
+    mutated_carrier = _carrier_env(provider, segment)
+    mutated_parents = None
     mutated_expectations, mutated_result = run_sentinel_arm(
         mutated_block,
         carrier_env=mutated_carrier,
@@ -1420,7 +1381,7 @@ def _locator_encoding_findings(encode: Any, refs: tuple[str, ...]) -> list[str]:
     """The pure encoding findings for one encoder over *refs*: a shared
     locator between two distinct refs, or a locator outside the provider
     charset intersection ``[A-Z0-9_]`` (GitHub secret names, GitLab
-    CI/CD variables, Azure variable-group names — a hyphen is refused by
+    CI/CD variables — a hyphen is refused by
     GitHub's secret API at provisioning)."""
     locators: dict[str, str] = {}
     findings: list[str] = []
@@ -1446,11 +1407,6 @@ def _locator_probe_plan(seams: dict[str, Any], profile: str = "gitlab") -> Any:
     plan = seams["delivery_plan_template"]
     if profile == "github":
         mode, transport_ref = seams["github_native_mode"], "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
-    elif profile == "azure":
-        mode, transport_ref = (
-            seams["azure_group_mode"],
-            "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN",
-        )
     else:
         mode, transport_ref = (
             seams["gitlab_protected_mode"],
@@ -1540,9 +1496,9 @@ def run_locator_conformance(seams: dict[str, Any]) -> dict[str, Any]:
                 "digest": digest_inventory[filename],
             }
         )
-    # the parameterized single templates (github/azure) must pass the
+    # the parameterized single templates (github) must pass the
     # same structural floor with a named driver.
-    for provider_template, profile in ((GITHUB_TEMPLATE, "github"), (AZURE_TEMPLATE, "azure")):
+    for provider_template, profile in ((GITHUB_TEMPLATE, "github"),):
         text = (TEMPLATES_DIR / provider_template).read_text(encoding="utf-8")
         try:
             seams["delivery_template_conformance"](
@@ -1621,7 +1577,7 @@ def run_locator_conformance(seams: dict[str, Any]) -> dict[str, Any]:
             "probe_refs": list(LOCATOR_PROBE_REFS),
             "locators": {ref: str(seams["native_locator"](ref)) for ref in LOCATOR_PROBE_REFS},
             "findings": encoding_findings,
-            "charset": "^[A-Z0-9_]+$ (the GitHub/GitLab/Azure carrier-name intersection)",
+            "charset": "^[A-Z0-9_]+$ (the GitHub/GitLab carrier-name intersection)",
         },
         "driver_templates": driver_report,
         "digest_inventory": digest_inventory,
@@ -2502,17 +2458,6 @@ def run_dispatch_schema(seams: dict[str, Any], captures: dict[str, Any]) -> dict
         "findings": [finding.__dict__ for finding in github_findings],
     }
 
-    azure_shapes = _shapes(providers, "azure")
-    declared = azure_declared_parameters(yaml_doc(TEMPLATES_DIR / AZURE_TEMPLATE))
-    azure_findings = declared_vs_captured(
-        "azure", declared, azure_shapes, CONDITIONAL_INPUTS.get("azure")
-    )
-    providers_report["azure"] = {
-        "declared": sorted(declared),
-        "captured_shapes": {shape: sorted(keys) for shape, keys in sorted(azure_shapes.items())},
-        "findings": [finding.__dict__ for finding in azure_findings],
-    }
-
     gitlab_shapes = _shapes(providers, "gitlab")
     consumed: set[str] = set()
     for name in seams["HARNESS_TEMPLATES"]:
@@ -2542,7 +2487,6 @@ def run_dispatch_schema(seams: dict[str, Any], captures: dict[str, Any]) -> dict
         "locator_dimension": {
             "credential_ref_key": {
                 "github": "credential_ref",
-                "azure": "credential_ref",
                 "gitlab": CREDENTIAL_REF_ENV,
             },
             "carrier_derivation": "runtime FORGE_MODEL_<ref> composition (spelling-agnostic)",
@@ -2608,7 +2552,6 @@ def build_report(
                     executed_ids.append(f"shipped-recipes/{template['template']}/{arm['arm']}")
     if schema:
         executed_ids.append("dispatch-schema/github")
-        executed_ids.append("dispatch-schema/azure")
         executed_ids.append("dispatch-schema/gitlab")
     if sentinels:
         for recipe in sentinels["recipes"]:

@@ -3,7 +3,7 @@
 Short answers with pointers. Setup guides:
 [GitLab project onboarding](../getting-started/gitlab.md) ·
 [GitHub setup](../getting-started/github.md) ·
-[Azure DevOps setup](../getting-started/azure-devops.md) · harness details:
+[Azure DevOps setup](../operations/maintenance-0.42.md) · harness details:
 [harness-onboarding](../harnesses/onboarding.md).
 
 ## Runs and lifecycle
@@ -38,7 +38,7 @@ The loop is fully contract-tested and live-verified against a real org
 (2026-09-20: real hosted-agent cycles, candidate → Draft PR → builds
 verification → failure classification → repair) — setup and the
 verification checklist:
-[azure-setup](../getting-started/azure-devops.md), decision record:
+[azure-setup](../operations/maintenance-0.42.md), decision record:
 [ADR-0024](../adr/0024-azure-devops-adapter.md).
 
 **A run is stuck in `waiting_approval` / `waiting_harness` / `waiting_ci`.**

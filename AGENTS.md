@@ -12,7 +12,7 @@ markdown): [setup](.claude/skills/forge-setup/SKILL.md),
 
 ## What forge is
 
-An agentic software factory for GitLab CE, GitHub, and Azure DevOps: an
+An agentic software factory for GitLab CE and GitHub: an
 authorized issue (`/implement`) becomes a factory branch with code, a green
 pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
 capabilities and platform permissions, never by prompts
@@ -100,11 +100,11 @@ src/forge/
   database.py, migrate.py, models/
                engine and sessions, schema check, `python -m forge.migrate`, the
                declarative Base and the legacy bot's tables
-  gateway/     webhook ingress (GitLab, GitHub, Azure DevOps), command parsing and routing
+  gateway/     webhook ingress (GitLab and GitHub), command parsing and routing
   worker/      Redis task queue, worker loop, step claims, reconciler boot
   durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
                budgets
-  runs/        RunService per provider (service.py, github_service.py, azure_service.py),
+  runs/        RunService per provider (service.py, github_service.py),
                RunSpec, publisher (the only repository writer), CI verification, repair
                loop, revival, reconciler
   adaptive/    the largest package: discovery and planning, operator control,
@@ -112,8 +112,8 @@ src/forge/
                SDK lane drivers
   repository/  ChangeSet (ADR-0001) + ChangesetWriter (Commits API)
   gitlab/, integrations/
-               provider clients: GitLab; GitHub App and Azure DevOps
-  execution/   lane executors on GitHub Actions and Azure Pipelines
+               provider clients: GitLab and GitHub App
+  execution/   lane executor on GitHub Actions
   harnesses/   lane scripts, prompts and MCP config rendered for the target's CI
   harness_entry.py, lane_driver.py
                the lane side: CLI and SDK drivers inside the target's CI
@@ -132,7 +132,7 @@ src/forge/
   doctor.py    environment verification (this is your setup oracle)
 agents/        YAML agent definitions (FORGE_AGENTS_DIR) and the legacy flows in flows/
 alembic/       schema migrations
-ci/templates/  lane CI templates (GitLab CI, GitHub Actions, Azure Pipelines) + log filter
+ci/templates/  lane CI templates (GitLab CI and GitHub Actions) + log filter
 scripts/       program guardrails (metrics, ratchet, prose lint, test ledger), lab and
                release tooling
 tests/         tiered (docs/reference/testing.md); tests/invariants/registry.py lists the

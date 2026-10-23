@@ -24,7 +24,6 @@ from forge.harness_entry import (
     SCRIPTED_DRIVERS,
     _CLAUDE_TOOL_RULES,
     emit_candidate_meta,
-    fetch_workitem,
     main,
     parse_usage,
     render_brief,
@@ -493,6 +492,22 @@ def gh_plan_body(
     )
 
 
+class _FakeResponse:
+    """urllib.urlopen stand-in: a context manager serving one JSON body."""
+
+    def __init__(self, payload: dict):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def install_ghFake(monkeypatch, responses: dict[str, object], requests: list) -> None:
     """Serve *responses* (url-prefix → payload | Exception) to harness_entry's
     urllib calls, recording every request (stdlib-mock style: the lane is
@@ -946,219 +961,6 @@ ORG_URL = "https://dev.azure.com/fabrikam"
 AZDO_PROJECT = "Fabrikam"
 WORK_ITEM = 142
 READ_TOKEN = "azdo-read-pat"  # noqa: S105 — fake value for tests
-
-
-class _FakeResponse:
-    """urllib.urlopen stand-in: a context manager serving one JSON body."""
-
-    def __init__(self, payload: dict):
-        self._payload = json.dumps(payload).encode("utf-8")
-
-    def read(self) -> bytes:
-        return self._payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def install_witFake(monkeypatch, responses: dict[str, dict], requests: list) -> None:
-    """Serve *responses* (url-prefix → payload) to forge.harness_entry's
-    urllib calls, recording every request (stdlib-mock style: no sockets)."""
-
-    def fake_urlopen(request, timeout=30):
-        url = request.full_url
-        requests.append(request)
-        for prefix, payload in responses.items():
-            if url.startswith(prefix):
-                return _FakeResponse(payload)
-        raise AssertionError(f"unexpected URL fetched: {url}")
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-
-def wit_fixtures() -> tuple[dict, dict]:
-    work_item = {
-        "id": WORK_ITEM,
-        "fields": {
-            "System.Title": "Ship the flux capacitor",
-            "System.Description": "<p>Users <b>cannot</b> reset</p>",
-            "System.State": "Approved",
-        },
-    }
-    comments = {
-        "totalCount": 3,
-        "comments": [
-            {
-                "text": "sounds great",
-                "createdBy": {"displayName": "Dev User", "uniqueName": "dev@fabrikam.example"},
-            },
-            {
-                # A bot comment WITHOUT the plan heading — never the plan.
-                "text": "working on it",
-                "createdBy": {
-                    "displayName": "Forge Bot",
-                    "uniqueName": "forge-bot@fabrikam.example",
-                },
-            },
-            {
-                # The plan: the LAST bot comment containing the heading.
-                "text": "## Forge plan — run `abcd`\n\n1. Add the endpoint.\n",
-                "createdBy": {
-                    "displayName": "Forge Bot",
-                    "uniqueName": "forge-bot@fabrikam.example",
-                },
-            },
-        ],
-    }
-    return work_item, comments
-
-
-class TestFetchWorkitem:
-    async def test_fetches_item_and_plan_with_the_documented_contract(self, monkeypatch):
-        import base64
-
-        requests: list = []
-        item, comments = wit_fixtures()
-        base = f"{ORG_URL}/{AZDO_PROJECT}/_apis/wit/workItems/{WORK_ITEM}"
-        install_witFake(
-            monkeypatch,
-            {f"{base}?": item, f"{base}/comments?": comments},
-            requests,
-        )
-
-        body, plan = fetch_workitem(ORG_URL, AZDO_PROJECT, WORK_ITEM, READ_TOKEN)
-
-        assert body == "Ship the flux capacitor\n\nUsers cannot reset"
-        assert plan.startswith("## Forge plan — run `abcd`")
-        item_req, comments_req = requests
-        # Ground truth (research §1.2/§1.3/§5.1): Basic ":"+PAT, GA 7.1 for
-        # the item, the preview stripe + markdown for the comments.
-        expected = "Basic " + base64.b64encode(f":{READ_TOKEN}".encode()).decode()
-        headers = {key.lower(): value for key, value in item_req.headers.items()}
-        assert headers["authorization"] == expected
-        assert headers["user-agent"] == "forge-harness-entry"
-        assert "api-version=7.1" in item_req.full_url
-        assert "api-version=7.1-preview.4" in comments_req.full_url
-        assert "format=markdown" in comments_req.full_url
-
-    async def test_bot_identity_matches_local_part_and_display_name(self):
-        from forge.harness_entry import _is_bot_identity
-
-        assert _is_bot_identity("forge-bot@fabrikam.example", "forge-bot")
-        assert _is_bot_identity("Forge Bot", "Forge Bot")  # display-name equality
-        assert _is_bot_identity("forge-bot", "forge-bot")
-        assert not _is_bot_identity("dev@fabrikam.example", "forge-bot")
-        assert not _is_bot_identity("", "forge-bot")
-        assert not _is_bot_identity("forge-bot@fabrikam.example", "")
-
-    async def test_a_non_bot_plan_comment_is_never_taken(self, monkeypatch):
-        requests: list = []
-        comments = {
-            "comments": [
-                {
-                    "text": "## Forge plan — run `fake`\n",
-                    "createdBy": {"uniqueName": "mallory@fabrikam.example"},
-                }
-            ]
-        }
-        base = f"{ORG_URL}/{AZDO_PROJECT}/_apis/wit/workItems/{WORK_ITEM}"
-        install_witFake(
-            monkeypatch,
-            {f"{base}?": {"fields": {"System.Title": "t"}}, f"{base}/comments?": comments},
-            requests,
-        )
-
-        body, plan = fetch_workitem(ORG_URL, AZDO_PROJECT, WORK_ITEM, READ_TOKEN)
-
-        assert body == "t"
-        assert plan == ""  # no bot-authored plan comment → empty, never guessed
-
-
-class TestRenderBriefAzure:
-    def test_render_brief_azure_mode_fetches_workitem_and_writes_the_brief(
-        self, tmp_path: Path, monkeypatch
-    ):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("FORGE_AZDO_ORG_URL", ORG_URL)
-        monkeypatch.setenv("FORGE_AZDO_PROJECT", AZDO_PROJECT)
-        monkeypatch.setenv("FORGE_AZDO_READ_TOKEN", READ_TOKEN)  # noqa: S105 — fake
-        monkeypatch.setenv("FORGE_AZDO_BOT_NAME", "forge-bot")
-        monkeypatch.setenv("FORGE_ISSUE_NUMBER", str(WORK_ITEM))
-
-        def fake_fetch(org_url, project, issue_number, token, *, bot_name):
-            assert (org_url, project, issue_number, token) == (
-                ORG_URL,
-                AZDO_PROJECT,
-                WORK_ITEM,
-                READ_TOKEN,
-            )
-            assert bot_name == "forge-bot"
-            return ("Users cannot reset their password.", "## Forge plan — run `abcd`\n...")
-
-        monkeypatch.setattr("forge.harness_entry.fetch_workitem", fake_fetch)
-
-        rc = main(["--render-brief-azure"])
-
-        assert rc == 0
-        brief = (tmp_path / ".forge" / "brief.md").read_text()
-        assert "## Approved plan" in brief
-        assert "## Forge plan — run `abcd`" in brief  # the plan, verbatim
-        assert "Users cannot reset their password." in brief
-
-    def test_render_brief_azure_mode_requires_org_project_issue_and_token(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.chdir(tmp_path)
-        for name in (
-            "FORGE_AZDO_ORG_URL",
-            "FORGE_AZDO_PROJECT",
-            "FORGE_AZDO_READ_TOKEN",
-            "FORGE_ISSUE_NUMBER",
-        ):
-            monkeypatch.delenv(name, raising=False)
-
-        rc = main(["--render-brief-azure", "--exit-file", ".forge/exit"])
-
-        assert rc == 1
-        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
-
-    def test_cli_flags_override_the_env(self, tmp_path: Path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("FORGE_AZDO_ORG_URL", "https://dev.azure.com/wrong")
-        monkeypatch.setenv("FORGE_AZDO_READ_TOKEN", "wrong")  # noqa: S105 — fake
-
-        seen: dict = {}
-
-        def fake_fetch(org_url, project, issue_number, token, *, bot_name):
-            seen.update(org_url=org_url, project=project, issue_number=issue_number, token=token)
-            return ("body", "plan")
-
-        monkeypatch.setattr("forge.harness_entry.fetch_workitem", fake_fetch)
-
-        rc = main(
-            [
-                "--render-brief-azure",
-                "--org-url",
-                ORG_URL,
-                "--project",
-                AZDO_PROJECT,
-                "--read-token",
-                READ_TOKEN,
-                "--issue",
-                str(WORK_ITEM),
-            ]
-        )
-
-        assert rc == 0
-        assert seen == {
-            "org_url": ORG_URL,
-            "project": AZDO_PROJECT,
-            "issue_number": WORK_ITEM,
-            "token": READ_TOKEN,
-        }
 
 
 # ----------------------------------------------------------------------
@@ -1780,87 +1582,6 @@ class TestPermissionListsAreTokenized:
         # else is exactly one shell(...) rule.
         for value in copilot_values:
             assert value == "read,write" or value.count("shell(") == 1, value
-
-
-class TestRenderBriefAzureEnforcedB04:
-    """The ENFORCED AzDO brief (B04): with plan_note_id + envelope_digest +
-    spec_digest dispatched, the brief comes from EXACTLY the addressed
-    comment's approved sections re-verified against the frozen digest — an
-    edited comment/work item fails the render CLOSED (rc 1 + .forge/exit
-    failed), never the live-item heuristic, never a fallback brief."""
-
-    ENV = {
-        "FORGE_AZDO_ORG_URL": ORG_URL,
-        "FORGE_AZDO_PROJECT": AZDO_PROJECT,
-        "FORGE_AZDO_READ_TOKEN": READ_TOKEN,  # noqa: S105 — fake
-        "FORGE_ISSUE_NUMBER": str(WORK_ITEM),
-        "FORGE_RUN_ID": "abcd" * 8,
-    }
-
-    def _comment_with(self, sections: str) -> str:
-        return f"## Forge plan — run `abcd`\n\n{sections}\n---\n\n**Plan digest:** `x`"
-
-    def _install(self, monkeypatch, requests: list, *, comment_override: str = "") -> None:
-        from forge.harnesses.brief_envelope import (
-            build_brief_envelope,
-            render_approved_sections,
-        )
-
-        sections = render_approved_sections(
-            task_title="Add a widget",
-            task_description="Make the widget.",
-            plan_text="1. do it",
-        )
-        envelope = build_brief_envelope(
-            run_id=self.ENV["FORGE_RUN_ID"],
-            task_title="Add a widget",
-            task_description="Make the widget.",
-            plan_text="1. do it",
-            spec_digest="spec-digest-1",
-        )
-        monkeypatch.setenv("FORGE_PLAN_NOTE_ID", "77")
-        monkeypatch.setenv("FORGE_ENVELOPE_DIGEST", envelope["envelope_digest"])
-        monkeypatch.setenv("FORGE_SPEC_DIGEST", "spec-digest-1")
-        comment_text = comment_override or self._comment_with(sections)
-        base = f"{ORG_URL}/{AZDO_PROJECT}/_apis/wit/workItems/{WORK_ITEM}"
-        install_witFake(
-            monkeypatch,
-            {f"{base}/comments/77?": {"text": comment_text}},
-            requests,
-        )
-
-    def test_enforced_render_writes_the_verified_brief(self, tmp_path, monkeypatch):
-        import requests as _  # noqa: F401 — ensure import path only
-
-        monkeypatch.chdir(tmp_path)
-        for k, v in self.ENV.items():
-            monkeypatch.setenv(k, v)
-
-        requests: list = []
-        self._install(monkeypatch, requests)
-
-        rc = main(["--render-brief-azure"])
-
-        assert rc == 0
-        brief = (tmp_path / ".forge" / "brief.md").read_text()
-        assert "Add a widget" in brief
-        assert "1. do it" in brief
-
-    def test_an_edited_comment_after_approval_fails_closed(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        for k, v in self.ENV.items():
-            monkeypatch.setenv(k, v)
-        requests: list = []
-        # the SAME addressed comment, its bytes EDITED after approval
-        self._install(
-            monkeypatch, requests, comment_override=self._comment_with("1. do something ELSE")
-        )
-
-        rc = main(["--render-brief-azure", "--exit-file", ".forge/exit"])
-
-        assert rc == 1
-        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
-        assert not (tmp_path / ".forge" / "brief.md").exists()
 
 
 class TestCommandReceiptsC10:

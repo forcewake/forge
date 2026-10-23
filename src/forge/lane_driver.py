@@ -799,14 +799,11 @@ CONSUMPTION_STATUS_CONSUMED = "consumed"
 
 
 def consumer_identity(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """WHO consumed — the runner/job id where the CI provider exposes
-    one (GitLab ``CI_JOB_ID``, GitHub ``GITHUB_RUN_ID``, Azure
-    ``BUILD_BUILDID``), else the host#pid of the lane process."""
+    "WHO consumed — the runner/job id where the CI provider exposes"
     source = os.environ if env is None else env
     for var, kind in (
         ("CI_JOB_ID", "ci-job"),
         ("GITHUB_RUN_ID", "github-run"),
-        ("BUILD_BUILDID", "azure-build"),
     ):
         value = (source.get(var) or "").strip()
         if value:
@@ -832,8 +829,6 @@ def _native_delivery_transport(env: Mapping[str, str]) -> str:
         return "github-native-secret"
     if (env.get("CI_JOB_ID") or "").strip() and (env.get("GITLAB_CI") or "").strip():
         return "gitlab-protected-variable"
-    if (env.get("TF_BUILD") or "").strip():
-        return "azure-variable-group"
     return "native-unknown"
 
 

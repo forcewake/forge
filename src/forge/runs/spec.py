@@ -12,8 +12,8 @@ canonical digest on EVERY read — a missing, tampered or legacy spec raises
 silent fallback to live settings, ever.
 
 Provider-neutral by construction (contracts-v0.2): the type knows nothing
-about GitLab, GitHub or Azure DevOps — the subject is (provider, project id,
-issue id) and the GitLab/GitHub/Azure services freeze and consume it with
+about GitLab or GitHub — the subject is (provider, project id,
+issue id) and the GitLab/GitHub services freeze and consume it with
 their own readers.
 """
 
@@ -163,10 +163,6 @@ class ExecutableRunSpec:
     budget_max_tokens: int | None = None
     budget_wallclock_s: int | None = None
     budget_enforcement: str = ""
-    # A02: the frozen dispatch contract of the provider's harness lane —
-    # the GitHub Actions workflow filename / the Azure DevOps lane pipeline
-    # id the gate approved. Additive (defaulted, like the R13 ceilings): a
-    # lane-less run freezes neither key and stays byte-identical.
     harness_workflow: str = ""
     lane_pipeline_id: int | None = None
     # B06 — the waiver set AT FREEZE TIME: every condition the verdict may

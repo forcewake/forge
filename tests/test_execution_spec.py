@@ -205,7 +205,7 @@ class TestCompositionMatrix:
             assert row.caller_contract == "forge.attempt-start/2"
             assert row.template_contract == EXECUTION_SPEC_SCHEMA
             assert row.consumer_contract == "forge.candidate-meta/2"
-            assert row.provider in {"github", "gitlab", "azure"}
+            assert row.provider in {"github", "gitlab"}
             assert row.credential_route in CREDENTIAL_MODES
 
     def test_resume_capability_is_the_recipe_not_the_spelling(self) -> None:
@@ -216,7 +216,7 @@ class TestCompositionMatrix:
         assert recipes["github-harness-entry"] is True
         assert recipes["gitlab-sdk-lane"] is True
         assert recipes["gitlab-batch-script"] is False  # no restore in the batch lane
-        assert recipes["azure-harness-entry"] is False  # no resume surface on Azure
+        assert "azure-harness-entry" not in recipes
 
     def test_a_supported_combination_passes_with_its_row(self) -> None:
         row = preflight_composition(

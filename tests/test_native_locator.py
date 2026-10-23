@@ -44,7 +44,6 @@ import pytest
 
 from forge.adaptive.credential_broker import (
     CREDENTIAL_SECRET_PREFIX,
-    DELIVERY_MODE_AZURE_GROUP,
     DELIVERY_MODE_GITHUB_NATIVE,
     DELIVERY_MODE_GITLAB_PROTECTED,
     DELIVERY_ROUTE_ENV,
@@ -526,26 +525,6 @@ class TestLocatorDeliveryPlanIntegration:
             plans.append(plan)
         assert plans[0].transport_ref != plans[1].transport_ref
         assert plans[0].dispatch_ref != plans[1].dispatch_ref
-
-    async def test_azure_keeps_the_env_slot_carrier_and_locates_the_dispatch_ref(self):
-        """The Azure carrier is named after the provider's ENV SLOT
-        (fixed per route — macro references cannot be composed at
-        runtime), so there is no ref spelling in it to collide; the
-        locator is still the dispatch identity the guard interpolates."""
-        locator_registry = NativeLocatorRegistry()
-        plan = await delivery_plan(
-            _bound_registry(),
-            StagedBroker(),
-            subject=SUBJECT,
-            provider_route="anthropic-gateway",
-            profile="azure",
-            environ=_delivery_env(DELIVERY_MODE_AZURE_GROUP),
-            locator_registry=locator_registry,
-        )
-        assert plan is not None
-        assert plan.transport_ref == "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN"
-        assert plan.dispatch_ref == native_locator("env:ANTHROPIC_AUTH_TOKEN")
-        assert plan.native_locator == native_locator("env:ANTHROPIC_AUTH_TOKEN")
 
     async def test_without_a_registry_the_legacy_spelling_stays_compatible(self):
         """NEVER a silent rename: without a locator registry the plan

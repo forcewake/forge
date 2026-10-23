@@ -37,15 +37,12 @@ This module is env-clean once (the module-scoped scrub).
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
 import os
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -128,62 +125,6 @@ def _clean_shared_control():
 # ----------------------------------------------------------------------
 
 
-class AzDoSink:
-    """A local HTTP surface for ``POST /{project}/_apis/wit/workItems/{id}/comments``."""
-
-    def __init__(self, server: ThreadingHTTPServer, thread: threading.Thread) -> None:
-        self._server = server
-        self._thread = thread
-        self.comments: list[str] = []
-        self.base_url = f"http://127.0.0.1:{server.server_address[1]}"
-
-    def bodies(self) -> list[str]:
-        return list(self.comments)
-
-    def stop(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=10)
-
-
-@pytest.fixture()
-def azdo_sink():
-    sink_holder: dict[str, AzDoSink] = {}
-
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "azdo-sink/1"
-
-        def do_POST(self) -> None:  # noqa: N802 — http.server spelling
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b"{}"
-            try:
-                text = str(json.loads(raw).get("text") or "")
-            except ValueError:
-                text = ""
-            sink = sink_holder.get("sink")
-            if sink is not None:
-                sink.comments.append(text)
-            body = json.dumps({"commentId": 1, "text": text}).encode("utf-8")
-            self.send_response(201)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args: object) -> None:  # silence the test log
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    sink = AzDoSink(server, threading.Thread(target=server.serve_forever, daemon=True))
-    sink_holder["sink"] = sink
-    sink._thread.start()  # noqa: SLF001 — the fixture owns the thread
-    try:
-        yield sink
-    finally:
-        sink.stop()
-
-
 # ----------------------------------------------------------------------
 # The REAL ASGI gateway subprocess (github / azure_devops ingress)
 # ----------------------------------------------------------------------
@@ -242,19 +183,6 @@ def start_parity_gateway(
                 "FORGE_APPROVERS": GH_AUTHOR,
             }
         )
-    elif gateway == "azure_devops":
-        env.update(
-            {
-                "FORGE_AZDO_ENABLED": "1",
-                "FORGE_AZDO_WEBHOOK_USERNAME": AZ_HOOK_USER,
-                "FORGE_AZDO_WEBHOOK_PASSWORD": DI_WEBHOOK_SECRET,
-                "FORGE_AZDO_ORG_URL": reply_url,
-                "FORGE_AZDO_PAT": AZ_PAT,
-                "FORGE_AZDO_APPROVERS": AZ_AUTHOR,
-                "FORGE_AZDO_BOT_NAME": "",
-                "FORGE_APPROVERS": AZ_AUTHOR,
-            }
-        )
     else:  # pragma: no cover — the two parity gateways only
         raise ValueError(f"unknown gateway: {gateway!r}")
     if redis_url:
@@ -307,30 +235,6 @@ def _github_issue_note(comment_id: int, text: str) -> dict:
     }
 
 
-def _azure_workitem_note(rev: int, text: str) -> dict:
-    """A ``workitem.commented`` delivery, the shape Azure DevOps POSTs."""
-    return {
-        "eventType": "workitem.commented",
-        "id": f"di-ado-{rev}",
-        "resource": {
-            "id": AZ_WORK_ITEM,
-            "rev": rev,
-            "fields": {
-                "System.History": text,
-                "System.TeamProject": AZ_PROJECT,
-                "System.ChangedBy": {
-                    "displayName": "Dev User",
-                    "uniqueName": AZ_AUTHOR,
-                },
-            },
-        },
-        "resourceContainers": {
-            "project": {"id": AZ_PROJECT_GUID},
-            "collection": {"baseUrl": AZ_ORG_URL},
-        },
-    }
-
-
 async def _post_github(gateway: Gateway, comment_id: int, text: str):
     """POST one GitHub comment webhook; a SIGKILLed child surfaces as None."""
     body = json.dumps(_github_issue_note(comment_id, text)).encode()
@@ -345,23 +249,6 @@ async def _post_github(gateway: Gateway, comment_id: int, text: str):
         try:
             return await client.post(
                 gateway.base_url + "/webhook/github", content=body, headers=headers
-            )
-        except httpx.TransportError:
-            return None
-
-
-async def _post_azure(gateway: Gateway, rev: int, text: str):
-    """POST one Azure DevOps comment webhook; a SIGKILLed child → None."""
-    body = json.dumps(_azure_workitem_note(rev, text)).encode()
-    token = base64.b64encode(f"{AZ_HOOK_USER}:{DI_WEBHOOK_SECRET}".encode()).decode()
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Basic {token}",
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            return await client.post(
-                gateway.base_url + "/webhook/azure_devops", content=body, headers=headers
             )
         except httpx.TransportError:
             return None
@@ -383,20 +270,6 @@ def _github_worker_settings(reply_url: str) -> Settings:
         # redirect the reply channel at api.github.com (an explicit None
         # wins over the env_file in pydantic-settings).
         FORGE_GITHUB_PRIVATE_KEY=None,
-    )
-
-
-def _azure_worker_settings(reply_url: str) -> Settings:
-    return gl_settings(
-        FORGE_APPROVERS=AZ_AUTHOR,
-        # The connection-scoped list is what admission reads for
-        # azure_devops — pin it so a developer .env cannot refuse the
-        # trace's author.
-        FORGE_AZDO_APPROVERS=AZ_AUTHOR,
-        FORGE_AZDO_BOT_NAME="",
-        REDIS_URL=None,  # the fresh worker recovers from SQL alone
-        FORGE_AZDO_ORG_URL=reply_url,
-        FORGE_AZDO_PAT=SecretStr(AZ_PAT),
     )
 
 
@@ -600,183 +473,3 @@ class TestGitHubDurableIngressParity:
 # ----------------------------------------------------------------------
 # The parity arms — Azure DevOps
 # ----------------------------------------------------------------------
-
-
-class TestAzureDevOpsDurableIngressParity:
-    async def test_p02_schedule_marker_ok_db_fail_retries_land_one_command(
-        self, pe_db, azdo_sink, tmp_path, redis_server, monkeypatch
-    ):
-        """The #357 P02 schedule on the Azure DevOps ingress: the honest 503,
-        then retries landing ONE durable command."""
-        from forge.gateway.azure_webhook import azure_project_key
-
-        run_id = "4" * 31 + "4"
-        await _seed_active_run(
-            pe_db,
-            run_id,
-            provider="azure_devops",
-            project_id=azure_project_key(AZ_PROJECT_GUID),
-            issue=AZ_WORK_ITEM,
-        )
-        gateway = start_parity_gateway(
-            tmp_path,
-            db_url=pe_db.url,
-            gateway="azure_devops",
-            reply_url=azdo_sink.base_url,
-            redis_url=redis_server.url,
-            db_failures=1,
-        )
-        try:
-            first = await _post_azure(gateway, 21, "/pause")
-            assert first is not None and first.status_code == 503  # honest refusal
-
-            retry = await _post_azure(gateway, 21, "/pause")
-            assert retry is not None and retry.status_code == 202
-            assert retry.json()["adaptive_command"] is True  # NOT an empty duplicate
-
-            manual = await _post_azure(gateway, 21, "/pause")
-            assert manual is not None and manual.status_code == 202
-            assert manual.json()["deduplicated"] is True
-        finally:
-            gateway.stop()
-        inbox, steps = await _command_rows(pe_db, "adaptive_control")
-        assert len(inbox) == 1 and len(steps) == 1  # ONE durable command
-
-        _enable_durable_control_mailbox(monkeypatch, pe_db, tmp_path)
-        await _resume_worker(
-            pe_db,
-            _azure_worker_settings(azdo_sink.base_url),
-            _pause_landed_predicate(pe_db, run_id),
-        )
-        commands = await _control_rows(pe_db, "pause")
-        assert len(commands) == 1
-        pauses = [b for b in azdo_sink.bodies() if "Pause recorded" in b]
-        assert len(pauses) == 1  # ONE operator reply
-
-    async def test_an_orphaned_marker_proceeds_as_a_first_delivery(
-        self, pe_db, azdo_sink, tmp_path, redis_server
-    ):
-        """The orphaned-marker fall-through on the Azure DevOps ingress: the
-        authoritative lookup decides, the cache never suppresses."""
-        from forge.gateway.azure_webhook import azure_connection_id
-        from forge.utils.redis_client import RedisManager
-        from forge.worker.queue import DEDUP_PREFIX
-
-        connection = azure_connection_id(AZ_ORG_URL, AZ_PROJECT)
-        manager = RedisManager(redis_server.url)
-        try:
-            await manager.set_ex(
-                f"{DEDUP_PREFIX}run:{connection}:workitem:{AZ_WORK_ITEM}:comment:22", "1", 300
-            )
-        finally:
-            await manager.close()
-
-        gateway = start_parity_gateway(
-            tmp_path,
-            db_url=pe_db.url,
-            gateway="azure_devops",
-            reply_url=azdo_sink.base_url,
-            redis_url=redis_server.url,
-        )
-        try:
-            response = await _post_azure(gateway, 22, "/pause")
-            assert response is not None and response.status_code == 202
-            body = response.json()
-            assert body["adaptive_command"] is True  # first delivery, not deduplicated
-            assert "deduplicated" not in body
-        finally:
-            gateway.stop()
-        inbox, steps = await _command_rows(pe_db, "adaptive_control")
-        assert len(inbox) == 1 and len(steps) == 1
-
-    async def test_kill_after_response_the_pause_recovers_without_resend(
-        self, pe_db, azdo_sink, tmp_path, monkeypatch
-    ):
-        """The acknowledged /pause killed before the routing, on the Azure
-        DevOps ingress — the committed adaptive step IS the command, the
-        fresh worker routes it with NO resend."""
-        from forge.gateway.azure_webhook import azure_project_key
-
-        run_id = "5" * 31 + "5"
-        await _seed_active_run(
-            pe_db,
-            run_id,
-            provider="azure_devops",
-            project_id=azure_project_key(AZ_PROJECT_GUID),
-            issue=AZ_WORK_ITEM,
-        )
-        gateway = start_parity_gateway(
-            tmp_path,
-            db_url=pe_db.url,
-            gateway="azure_devops",
-            reply_url=azdo_sink.base_url,
-            kill="after-response",
-        )
-        try:
-            response = await _post_azure(gateway, 23, "/pause")
-            assert response is None or (
-                response.status_code == 202 and response.json()["adaptive_command"] is True
-            )
-        finally:
-            gateway.stop()
-
-        async def _rows_landed() -> bool:
-            inbox, steps = await _command_rows(pe_db, "adaptive_control")
-            return bool(inbox) and bool(steps)
-
-        assert await _await_truth(_rows_landed, timeout=10)
-        inbox, steps = await _command_rows(pe_db, "adaptive_control")
-        assert steps[0].status == "scheduled"  # durable, un-routed yet
-
-        _enable_durable_control_mailbox(monkeypatch, pe_db, tmp_path)
-        await _resume_worker(
-            pe_db,
-            _azure_worker_settings(azdo_sink.base_url),
-            _pause_landed_predicate(pe_db, run_id),
-        )
-        commands = await _control_rows(pe_db, "pause")
-        assert len(commands) == 1  # the durable mailbox record
-        assert commands[0].work_id == run_id
-        fences = await _pause_fence_rows(pe_db, run_id)
-        assert len(fences) == 1  # the durable pause fence stands
-        pauses = [b for b in azdo_sink.bodies() if "Pause recorded" in b]
-        assert len(pauses) == 1  # ONE operator reply
-
-    async def test_exact_replay_is_one_logical_command(
-        self, pe_db, azdo_sink, tmp_path, monkeypatch
-    ):
-        """The same delivery twice → ONE logical command and ONE operator
-        reply on the Azure DevOps ingress."""
-        from forge.gateway.azure_webhook import azure_project_key
-
-        run_id = "6" * 31 + "6"
-        await _seed_active_run(
-            pe_db,
-            run_id,
-            provider="azure_devops",
-            project_id=azure_project_key(AZ_PROJECT_GUID),
-            issue=AZ_WORK_ITEM,
-        )
-        gateway = start_parity_gateway(
-            tmp_path, db_url=pe_db.url, gateway="azure_devops", reply_url=azdo_sink.base_url
-        )
-        try:
-            first = await _post_azure(gateway, 24, "/pause")
-            replay = await _post_azure(gateway, 24, "/pause")
-            assert first is not None and first.json()["adaptive_command"] is True
-            assert replay is not None and replay.json()["deduplicated"] is True
-        finally:
-            gateway.stop()
-        inbox, steps = await _command_rows(pe_db, "adaptive_control")
-        assert len(inbox) == 1 and len(steps) == 1
-
-        _enable_durable_control_mailbox(monkeypatch, pe_db, tmp_path)
-        await _resume_worker(
-            pe_db,
-            _azure_worker_settings(azdo_sink.base_url),
-            _pause_landed_predicate(pe_db, run_id),
-        )
-        commands = await _control_rows(pe_db, "pause")
-        assert len(commands) == 1
-        pauses = [b for b in azdo_sink.bodies() if "Pause recorded" in b]
-        assert len(pauses) == 1  # no repeated native effect

@@ -225,16 +225,6 @@ class FlowRun(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
     project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     issue_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    #: R03: which integration owns the subject — ``gitlab`` (default),
-    #: ``github`` or ``azure_devops``. NOT NULL with a server default of
-    #: ``gitlab`` because forge started GitLab-only: legacy rows keep their
-    #: lane without a backfill decision. For non-GitLab runs ``project_id``
-    #: carries the provider's numeric subject id (GitHub repository id, AzDO
-    #: project id) and ``issue_iid`` the issue/PR number or work-item id —
-    #: numerically disjoint namespaces, so the partial unique index
-    #: ``uq_active_run_per_issue`` above keys on (provider, project_id,
-    #: issue_iid) to enforce one active run per subject PER PROVIDER
-    #: (migration 012 rebuilt it that way).
     provider: Mapped[str] = mapped_column(
         String(20), nullable=False, default="gitlab", server_default="gitlab"
     )
@@ -1101,10 +1091,8 @@ class PublicationIntent(Base):
         nullable=False,
         index=True,
     )
-    #: ``gitlab`` | ``github`` | ``azure_devops`` (FlowRun.provider values).
+    #: ``gitlab`` | ``github`` (FlowRun.provider values).
     provider: Mapped[str] = mapped_column(String(20), nullable=False)
-    #: Provider-scoped subject: GitLab project id, GitHub ``owner/name``,
-    #: AzDO ``project/repo`` — probe correlation only.
     repo: Mapped[str] = mapped_column(String(255), nullable=False)
     #: The effect kind: ``commit`` (branch publication) today, extensible to
     #: ``pr`` / ``comment`` / ``dispatch``.

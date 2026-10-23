@@ -16,7 +16,7 @@
      └── never performed by forge                ──► new candidate ──► (loop)
 ```
 
-* Three forges in production shape: GitLab CE, GitHub, Azure DevOps — all three lanes live-verified end to end.
+* Two supported providers: GitHub and GitLab CE.
 * **9,283 tests**, a fail-closed promotion gate, mutation-tested release traces, and a qualification record store that keeps lab proof and customer proof honestly separated.
 * One reviewed-ready task on the reference profile costs about **$0.40** in lane spend. The credential-redemption proof cost less than one cent — because it was designed to be provable without spending money.
 
@@ -73,7 +73,7 @@ A run, end to end, produces things you can point at:
 ### The delivery loop
 
 * **Approved inputs, digest-pinned** — `forge.revision.approved-input/1`: evidence, server and executor agree on the exact brief bytes ([`src/forge/adaptive/revisions.py`](src/forge/adaptive/revisions.py)).
-* **Real harness lanes** — claude-code, codex, copilot and opencode driven through their actual SDKs/binaries on your GitLab/GitHub/Azure runners; the lane template ships in the repo and is frozen into the supported profile by digest ([`ci/templates/`](ci/templates/), [`src/forge/lane_driver.py`](src/forge/lane_driver.py)).
+* **Real harness lanes** — claude-code, codex, copilot and opencode driven through their actual SDKs/binaries on your GitLab/GitHub runners; the lane template ships in the repo and is frozen into the supported profile by digest ([`ci/templates/`](ci/templates/), [`src/forge/lane_driver.py`](src/forge/lane_driver.py)).
 * **Exact-WIP resume** — pause mid-turn, destroy the runner, resume on another: the content-addressed checkpoint restores new/modified/deleted files exactly (proven live with all three shapes in one checkpoint).
 * **Steering and interruption** — `/pause`, `/steer` and material revisions land through a durable mailbox; causal effect verified live on every arm.
 * **Bounded review rounds** — linked child work units after `ready_for_human`: own admission, scope, budget and generation; the original delivery stays immutable; one outstanding round per MR with a deterministic race arbiter ([`docs/operations/review-rounds.md`](docs/operations/review-rounds.md)).
@@ -122,7 +122,7 @@ uv sync && set -o pipefail && .venv/bin/python -m pytest -q
 ### 2. Configure
 
 ```bash
-cp .env.example .env    # GITLAB_URL/GITLAB_TOKEN (or GitHub App / Azure values),
+cp .env.example .env    # GITLAB_URL/GITLAB_TOKEN (or GitHub App values),
                         # DATABASE_URL (Postgres), REDIS_URL, LITELLM_URL,
                         # the model route + spend caps
 ```
@@ -175,37 +175,39 @@ webhook ──► gateway (token-checked ingress, two-layer dedup)
 
 ## Providers and harnesses
 
+Azure DevOps is supported only on the [`release/0.42.x` maintenance line](docs/operations/maintenance-0.42.md).
+
 ### Provider capability matrix
 
-| Capability | GitLab CE | GitHub | Azure DevOps |
-|---|---|---|---|
-| Commands (`/implement`, `/go`, `/cancel`, `/retry`, `/pause`, `/steer`, `/status`, `/why-blocked`, `/reconcile`, `/security`) | ✅ comments | ✅ comments + `forge` label | ✅ work-item + PR comments |
-| Review feedback (`/fix`, `/ask`, `/approve-revision`) and bounded review rounds | ✅ live — the reference path | not yet | not yet |
-| Plan comment + human gate | ✅ | ✅ | ✅ (work-item comment) |
-| Harness execution | ✅ project CI (docker executor) | ✅ Actions (`workflow_dispatch`) | ✅ Pipelines (Runs-API dispatch) |
-| Builtin LLM implementer (no CI needed) | ✅ | ✅ | ✅ |
-| Trusted publisher | Commits API | GraphQL CAS (`expectedHeadOid`) | Push API CAS (`oldObjectId`) |
-| Draft MR / PR before CI — one per run, reserved | ✅ | ✅ | ✅ (`isDraft: true`) |
-| Readonly LLM review | ✅ MR notes | ✅ native reviews | ✅ PR threads (inline, sticky) |
-| CI-failure debug lane | ✅ | ✅ (Actions timeline) | ✅ (Pipelines timeline + task logs) |
-| Reactive review on push | ✅ | ✅ (incremental via before/after) | ✅ (incremental via PR iterations) |
-| Credential delivery | native secrets, protected variables, runner redemption (all live-qualified) | native secrets | staged env |
-| MCP servers in the lane | ✅ | ✅ | ✅ |
-| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) | service account + PAT (Entra SPN = upgrade path) |
-| Webhook authenticity | secret token | HMAC signature | Basic credentials (no HMAC exists) over HTTPS |
+| Capability | GitLab CE | GitHub |
+|---|---|---|
+| Commands (`/implement`, `/go`, `/cancel`, `/retry`, `/pause`, `/steer`, `/status`, `/why-blocked`, `/reconcile`, `/security`) | ✅ comments | ✅ comments + `forge` label |
+| Review feedback (`/fix`, `/ask`, `/approve-revision`) and bounded review rounds | ✅ live — the reference path | not yet |
+| Plan comment + human gate | ✅ | ✅ |
+| Harness execution | ✅ project CI (docker executor) | ✅ Actions (`workflow_dispatch`) |
+| Builtin LLM implementer (no CI needed) | ✅ | ✅ |
+| Trusted publisher | Commits API | GraphQL CAS (`expectedHeadOid`) |
+| Draft MR / PR before CI — one per run, reserved | ✅ | ✅ |
+| Readonly LLM review | ✅ MR notes | ✅ native reviews |
+| CI-failure debug lane | ✅ | ✅ (Actions timeline) |
+| Reactive review on push | ✅ | ✅ (incremental via before/after) |
+| Credential delivery | native secrets, protected variables, runner redemption (all live-qualified) | native secrets |
+| MCP servers in the lane | ✅ | ✅ |
+| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) |
+| Webhook authenticity | secret token | HMAC signature |
 
 Delivery semantics, with the evidence level honestly stated per cell:
 
-| Capability | GitLab CE | GitHub | Azure DevOps |
-|---|---|---|---|
-| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) | contract-tested |
-| Publication policy — harness lane | live | contract-tested (shared publisher validation) | contract-tested |
-| CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks | contract-tested · parity in progress |
-| Repair-in-place | implemented · contract-tested | implemented · contract-tested | implemented · contract-tested |
-| Operator `/retry` + auto-revive | live | live | live |
-| Exact-WIP cross-runner resume | live (three file shapes) | contract-tested | contract-tested |
+| Capability | GitLab CE | GitHub |
+|---|---|---|
+| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) |
+| Publication policy — harness lane | live | contract-tested (shared publisher validation) |
+| CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks |
+| Repair-in-place | implemented · contract-tested | implemented · contract-tested |
+| Operator `/retry` + auto-revive | live | live |
+| Exact-WIP cross-runner resume | live (three file shapes) | contract-tested |
 
-GitLab CE 19.x is the reference profile: every capability this README describes is proven live on it, with the records committed under [`qualification/records/`](qualification/records/). GitHub keeps native CAS semantics explicit, never approximated; Azure verifies pipeline runs against `System.History` semantics.
+GitLab CE 19.x is the reference profile: every capability this README describes is proven live on it, with the records committed under [`qualification/records/`](qualification/records/). GitHub keeps native CAS semantics explicit, never approximated.
 
 ### Drivers
 
@@ -237,7 +239,7 @@ evidence `docs/releases/evidence/v0.42.0/promotion.json`, qualifying CI run `364
 * **Merge, deploy, or resolve your discussions.** Reserved branches and Draft MRs are structural, not configurational.
 * **Turn unknowns into zeros.** Unknown spend, missing evidence and ungraded work stay visible as exactly that.
 * **Substitute silently.** A moved head, a rotated credential, a changed contract invalidates the evidence that depended on it — loudly.
-* **Average your providers away.** GitLab, GitHub and Azure keep their real semantics in their adapters; no generic interface promises more than the platform beneath it delivers.
+* **Average your providers away.** GitLab and GitHub keep their real semantics in their adapters; no generic interface promises more than the platform beneath it delivers.
 
 ## Documentation
 

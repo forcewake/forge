@@ -1,11 +1,5 @@
 """The durable-acceptance helpers every gateway command ingress shares.
 
-R41-02 (#357) — the ONE rule, stated once for all three provider gateways
-(GitLab ``router.py``, GitHub ``github_webhook.py``, Azure DevOps
-``azure_webhook.py``): an actionable command is acknowledged only after the
-inbox + scheduled-step transaction COMMITTED, and the Redis dedup marker is
-a post-commit positive cache — never the dedup authority.
-
 The helpers here are the cache-side halves of that contract:
 
 - :func:`inbox_record_exists` — the authoritative SQL lookup. Before any
@@ -18,8 +12,7 @@ The helpers here are the cache-side halves of that contract:
   anomaly surfaced on the orphaned-marker fall-through.
 - :func:`mark_delivered_best_effort` — the post-commit positive-cache write.
   It runs strictly AFTER the commit and is best-effort: Redis loss changes
-  latency, never correctness.
-"""
+  latency, never correctness."""
 
 from __future__ import annotations
 

@@ -185,7 +185,7 @@ PLANNED_SCRIPT_DELETIONS = re.compile(
 )
 INVARIANT_REGISTRY = Path("tests/invariants/registry.py")
 EDGE_CASE_REGISTER = Path("docs/reference/edge-cases.md")
-PIN_ROW = re.compile(r"^\| EC-\d{2} \|(?P<rest>.*)\|$")
+PIN_ROW = re.compile(r"^\| EC-\d{2,} \|(?P<rest>.*)\|$")
 PIN = re.compile(r"`([^`]+)`")
 
 

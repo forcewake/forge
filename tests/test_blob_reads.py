@@ -21,7 +21,6 @@ from forge.gitlab.blob_reads import (
     decode_blob_content,
 )
 from forge.gitlab.client import GitLabClient
-from forge.integrations.azure import AzureDevOpsClient, AzureRepositoryReader
 from forge.integrations.github import GitHubClient, GitHubRepositoryReader
 
 GL_BASE = "https://gitlab.test/api/v4"
@@ -59,13 +58,6 @@ async def gh_reader():
 
 
 @pytest.fixture()
-async def az_reader():
-    client = AzureDevOpsClient(base_url=AZ_BASE, token="pat", timeout=5.0)
-    async with client:
-        yield AzureRepositoryReader(client, "Fabrikam", "core")
-
-
-@pytest.fixture()
 def no_backoff(monkeypatch):
     """Absorb the transports' exponential backoff so failure paths stay fast."""
 
@@ -74,7 +66,6 @@ def no_backoff(monkeypatch):
 
     monkeypatch.setattr("forge.gitlab.client.asyncio.sleep", _instant)
     monkeypatch.setattr("forge.integrations.github.asyncio.sleep", _instant)
-    monkeypatch.setattr("forge.integrations.azure.asyncio.sleep", _instant)
 
 
 # ----------------------------------------------------------------------
@@ -424,130 +415,3 @@ class TestGitHubReadBlob:
 
 def _az_item_url(path: str, **params: str) -> str:
     return f"{AZ_ITEMS}?{urlencode({'api-version': '7.1', 'path': path, 'includeContent': 'true', **params})}"
-
-
-class TestAzureReadBlob:
-    async def test_found_read_carries_content_and_digest(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader
-    ):
-        httpx_mock.add_response(
-            url=_az_item_url(
-                "/src/app.py",
-                **{
-                    "versionDescriptor.version": AZ_SHA,
-                    "versionDescriptor.versionType": "commit",
-                },
-            ),
-            json={"path": "/src/app.py", "content": "x = 1\n", "isSymLink": False},
-        )
-
-        result = await az_reader.read_blob(0, "/src/app.py", ref=AZ_SHA)
-
-        assert result.usable
-        assert result.text() == "x = 1\n"
-        assert result.content_sha256 == hashlib.sha256(b"x = 1\n").hexdigest()
-
-    async def test_404_is_confirmed_absence(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader
-    ):
-        httpx_mock.add_response(
-            url=_az_item_url(
-                "/gone.py",
-                **{
-                    "versionDescriptor.version": AZ_SHA,
-                    "versionDescriptor.versionType": "commit",
-                },
-            ),
-            status_code=404,
-            json={"message": "TF401174: not found"},
-        )
-
-        result = await az_reader.read_blob(0, "/gone.py", ref=AZ_SHA)
-
-        assert result.confirmed_absent
-
-    async def test_401_is_forbidden(self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader):
-        httpx_mock.add_response(
-            url=_az_item_url(
-                "/src/app.py",
-                **{
-                    "versionDescriptor.version": AZ_SHA,
-                    "versionDescriptor.versionType": "commit",
-                },
-            ),
-            status_code=401,
-            json={"message": "TF400813: resource not available for anonymous access"},
-        )
-
-        result = await az_reader.read_blob(0, "/src/app.py", ref=AZ_SHA)
-
-        assert result.status == "forbidden"
-        assert not result.confirmed_absent
-
-    async def test_missing_inline_content_is_incomplete(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader
-    ):
-        # The reader's own honesty refusal (no inline content) must stay
-        # incomplete — the path EXISTS, it just delivered nothing usable.
-        httpx_mock.add_response(
-            url=_az_item_url(
-                "/big.bin",
-                **{
-                    "versionDescriptor.version": AZ_SHA,
-                    "versionDescriptor.versionType": "commit",
-                },
-            ),
-            json={"path": "/big.bin", "contentMetadata": {"size": 10_000_000}},
-        )
-
-        result = await az_reader.read_blob(0, "/big.bin", ref=AZ_SHA)
-
-        assert result.status == "incomplete"
-        assert "no inline content" in result.detail
-
-    async def test_symlink_is_incomplete(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader
-    ):
-        httpx_mock.add_response(
-            url=_az_item_url(
-                "/link",
-                **{
-                    "versionDescriptor.version": AZ_SHA,
-                    "versionDescriptor.versionType": "commit",
-                },
-            ),
-            json={"path": "/link", "content": "../secret", "isSymLink": True},
-        )
-
-        result = await az_reader.read_blob(0, "/link", ref=AZ_SHA)
-
-        assert result.status == "incomplete"
-        assert "symlink" in result.detail
-
-    async def test_throttle_is_unavailable(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader, no_backoff
-    ):
-        url = _az_item_url(
-            "/src/app.py",
-            **{"versionDescriptor.version": AZ_SHA, "versionDescriptor.versionType": "commit"},
-        )
-        httpx_mock.add_response(
-            url=url, status_code=429, headers={"Retry-After": "0"}, json={"message": "TSTU"}
-        )
-        httpx_mock.add_response(
-            url=url, status_code=429, headers={"Retry-After": "0"}, json={"message": "TSTU"}
-        )
-
-        result = await az_reader.read_blob(0, "/src/app.py", ref=AZ_SHA)
-
-        assert result.status == "unavailable"
-
-    async def test_transport_error_is_unavailable(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader, no_backoff
-    ):
-        for _ in range(3):
-            httpx_mock.add_exception(httpx.ConnectError("boom"))
-
-        result = await az_reader.read_blob(0, "/src/app.py", ref=AZ_SHA)
-
-        assert result.status == "unavailable"

@@ -6,7 +6,7 @@ the mailbox bridge exists, but a human's ``/pause``/``/steer``/``/answer``/
 the classic verb set, so adaptive commands died unrouted. This module is the
 missing application assembly between the two halves:
 
-- the provider gateways (GitLab router, GitHub webhook, Azure DevOps webhook)
+- the provider gateways (GitLab router and GitHub webhook)
   parse the four adaptive verbs alongside the classic set and hand the note
   metadata to :func:`route_adaptive_command_note` — the SAME authenticated
   ingress path every other command travels (webhook signature first, parse
@@ -865,33 +865,6 @@ def _build_note_poster(settings: Any, note: dict[str, Any]) -> NotePoster | None
                 await client.aclose()
 
         return post_github
-
-    if provider == "azure_devops":
-        project = str(note.get("project") or "")
-        work_item = int(note.get("issue_number") or 0)
-        if not project or not work_item:
-            return None
-
-        async def post_azure(body: str) -> Any:
-            # The hidden marker is what the Azure ingress's self-trigger
-            # guard keys on (single-PAT deployments) — every forge-authored
-            # comment must carry it.
-            from forge.gateway.azure_webhook import FORGE_NOTE_MARKER
-            from forge.integrations.azure import AzureDevOpsClient
-            from forge.runs.azure_service import azure_credentials_from_settings
-
-            client = AzureDevOpsClient(
-                base_url=str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or ""),
-                token=azure_credentials_from_settings(settings),
-            )
-            try:
-                return await client.add_work_item_comment(
-                    project, work_item, f"{body}\n\n{FORGE_NOTE_MARKER}"
-                )
-            finally:
-                await client.aclose()
-
-        return post_azure
 
     return None
 

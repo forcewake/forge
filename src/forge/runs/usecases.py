@@ -1,37 +1,7 @@
 """One lifecycle: the ObserveVerification use case (R27 slice 2, ADR-0027).
 
-The A01 wave triplicated verification semantics again: ``github_service.py``
-and ``azure_service.py`` each gained the positive-proof wiring (ordering,
-observation extraction, proof evaluation, verdict classification) as
-hand-maintained twins that differ only by provider vocabulary and field
-spelling. This module is the ONE decision core they both call — the
-``ObserveVerification`` rung of the ADR-0027 use-case ladder.
-
 :func:`observe_verification` is the pure verdict semantics over
 adapter-normalized evidence. It owns:
-
-- **completeness** — a check the provider still reports as running is a
-  WAIT, never a verdict (a late check may still register);
-- **required-checks positive proof** — :func:`forge.runs.verification.
-  evaluate_positive_proof` over the FROZEN spec's ``required_jobs`` (R04:
-  never live settings): verified only when every required check is present
-  with an explicitly successful conclusion (or an explicitly waived
-  inconclusive one); a green optional check never substitutes;
-- **waiver handling** — the deployment's
-  ``FORGE_VERIFICATION_WAIVE_CONCLUSIONS`` policy applies ONLY to genuinely
-  inconclusive conclusions, never to failure-class or cancelled/timed_out
-  ones (the classifier enforces this);
-- **conclusion vocabularies** — the caller supplies its native vocabulary
-  sets (``GITHUB_*_CONCLUSIONS`` / ``AZURE_*_RESULTS``); matching is
-  case-insensitive inside the classifier, so the core is vocabulary-blind;
-- **tested_oid extraction** — the verdict binds to the head oid the
-  PROVIDER observed on the newest entry (*subject_head_oid*), falling back
-  to the candidate sha; a verdict for a neighbour sha never ships
-  (ADR-0008);
-- **the unified verdict** — a :class:`~forge.runs.verification.
-  VerificationResult` in the one R02 evidence shape, stamped with the
-  caller's observation instant so identical inputs yield identical
-  decisions.
 
 The caller (provider service) keeps everything that is genuinely adapter
 duty:
@@ -76,8 +46,7 @@ rules (ADR-0027 slice 1) — and its decision core is the profile contract in
 Import boundary (the enforceable half of R27): this module is core — it
 must never import from ``forge.integrations.*`` or ``forge.gateway.*``
 (``tests/test_usecases.py`` parses the imports), so the verification
-decision stays provider-neutral.
-"""
+decision stays provider-neutral."""
 
 from __future__ import annotations
 
@@ -144,9 +113,6 @@ class VerificationContract(Protocol):
 #: A01 gates already said exactly this).
 VERIFIED_SUMMARY = "required checks succeeded for the tested sha"
 
-#: The no-CI verdict summary — the neutral noun ("checks" covers Actions
-#: workflow runs and AzDO builds alike; the providers used to spell two
-#: variants of this).
 NOT_CONFIGURED_SUMMARY = "no CI checks ran for the candidate commit"
 
 #: The infra-failure verdict summary — the execution died, not the change.
@@ -240,12 +206,7 @@ def observe_verification(
     the verdict binds there, falling back to *candidate_sha*. *provider* is
     the evidence producer identity (a ``PRODUCER_*`` constant). *surface*
     rides into the verdict's evidence detail as-is (the provider's native
-    per-check identity). *now* stamps the verdict (default: wall clock).
-
-    The vocabulary sets default to GitHub's; Azure (or any other provider)
-    passes its own — identical normalized inputs with any provider's
-    vocabulary yield identical decisions, which the parity suite pins.
-    """
+    per-check identity). *now* stamps the verdict (default: wall clock)."""
     now = now or datetime.now(timezone.utc)
 
     if not observations:

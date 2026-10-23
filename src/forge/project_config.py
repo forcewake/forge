@@ -49,7 +49,6 @@ from forge.gitlab.blob_reads import BlobReadResult, decode_blob_content
 
 if TYPE_CHECKING:
     from forge.gitlab.client import GitLabClient
-    from forge.integrations.azure import AzureRepositoryReader
     from forge.integrations.github import GitHubRepositoryReader
 
 
@@ -59,7 +58,7 @@ _CACHE_TTL = 300  # 5 minutes
 # config -> (config or None for confirmed-absent, content sha256, read ref, ts)
 # The key is the CANONICAL AUTHORITY IDENTITY — (provider-connection,
 # repository, ref, path) — never a bare project_id: one project id spans
-# several repositories (Azure repos of one project share it) and
+# several repositories and
 # independent providers can collide on the numeric id, so a project-id
 # cache must never cross repository policies.
 _cache: dict[tuple[str, str, str, str, str], tuple[ProjectConfig | None, str, str, float]] = {}
@@ -75,7 +74,7 @@ def _authority_identity(
     The PUBLIC :class:`~forge.repository.identity.RepositoryIdentity`
     contract owns the identity — adapters implement ``identity()``.
     Private adapter attributes cannot establish repository identity:
-    repositories within one Azure project must have separate policies.
+    repositories within one project must have separate policies.
     """
     from forge.repository.identity import repository_identity
 
@@ -340,7 +339,7 @@ def _parse_project_config(content: str) -> ProjectConfig:
 
 
 async def _read_config_blob(
-    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
+    client: GitLabClient | GitHubRepositoryReader,
     project_id: int,
     ref: str,
 ) -> BlobReadResult:
@@ -368,22 +367,14 @@ async def _read_config_blob(
 
 
 async def read_project_config(
-    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
+    client: GitLabClient | GitHubRepositoryReader,
     project_id: int,
     ref: str = "HEAD",
 ) -> ConfigReadResult:
     """Load ``.forge.yml`` from a project's repo as a TYPED result.
 
-    The client duck-types the shared ``read_blob`` surface, so GitLab,
-    GitHub and Azure DevOps (AZ-2 wiring of the AzureRepositoryReader,
-    ADR-0024) all read project config unchanged. Valid configs and
-    provider-confirmed absences are cached per project with a 5-minute
-    TTL; ``unreadable``/``invalid`` results are NEVER cached — the
-    reconciler's retry pass must see a fresh read.
-
     Never raises: every failure mode is one of the four statuses, so a
-    caller cannot accidentally swallow a read failure into defaults.
-    """
+    caller cannot accidentally swallow a read failure into defaults."""
     now = time.monotonic()
     cache_key = _authority_identity(client, project_id, ref)
     cached = _cache.get(cache_key)
@@ -422,7 +413,7 @@ async def read_project_config(
 
 
 async def load_project_config(
-    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
+    client: GitLabClient | GitHubRepositoryReader,
     project_id: int,
     ref: str = "HEAD",
 ) -> ProjectConfig:

@@ -10,7 +10,7 @@ from tests._nodeids import REPO, nodeid_exists
 
 REGISTER = REPO / "docs" / "reference" / "edge-cases.md"
 ANY_ROW = re.compile(r"^\|\s*(?:EC|OP)-\d+\s*\|")
-ROW = re.compile(r"^\| (?P<ident>(?:EC|OP)-\d{2}) \|(?P<rest>.*)\|$")
+ROW = re.compile(r"^\| (?P<ident>(?:EC|OP)-\d{2,}) \|(?P<rest>.*)\|$")
 PIN = re.compile(r"`([^`]+)`")
 
 

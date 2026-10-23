@@ -283,7 +283,6 @@ class TestRepositoryIdentityContractFND01:
         """The REAL reader constructors over stub HTTP transports (the
         review's acceptance: not doubles that conveniently add _owner)."""
         import httpx
-        from forge.integrations.azure import AzureDevOpsClient
         from forge.integrations.github import GitHubClient
 
         class _StaticToken:
@@ -294,16 +293,14 @@ class TestRepositoryIdentityContractFND01:
         gh_client = GitHubClient(
             "https://api.github.test", token_provider=_StaticToken(), transport=gh_transport
         )
-        az_transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
-        az_client = AzureDevOpsClient("https://dev.azure.test/org", "t", transport=az_transport)
-        return gh_client, az_client
+        return gh_client
 
-    def test_two_azure_repos_of_one_project_have_different_identities(self):
-        from forge.integrations.azure import AzureRepositoryReader
+    def test_two_repos_of_one_owner_have_different_identities(self):
+        from forge.integrations.github import GitHubRepositoryReader
 
-        _, az_client = self._real_readers()
-        reader_a = AzureRepositoryReader(az_client, "Proj", "repo-a")
-        reader_b = AzureRepositoryReader(az_client, "Proj", "repo-b")
+        client = self._real_readers()
+        reader_a = GitHubRepositoryReader(client, "Proj", "repo-a")
+        reader_b = GitHubRepositoryReader(client, "Proj", "repo-b")
 
         key_a = reader_a.identity().cache_key("main", ".forge.yml")
         key_b = reader_b.identity().cache_key("main", ".forge.yml")
@@ -344,13 +341,13 @@ class TestRepositoryIdentityContractFND01:
         )
 
     async def test_real_reader_identities_key_the_authority_cache(self):
-        """End-to-end: two REAL Azure readers of one project, two policies —
+        """End-to-end: two REAL GitHub readers of one owner, two policies —
         the cache must not cross them (the review's first remaining defect)."""
-        from forge.integrations.azure import AzureRepositoryReader
+        from forge.integrations.github import GitHubRepositoryReader
 
-        _, az_client = self._real_readers()
+        client = self._real_readers()
 
-        class ConfigurableReader(AzureRepositoryReader):
+        class ConfigurableReader(GitHubRepositoryReader):
             def __init__(self, client, project, repo, paths):
                 super().__init__(client, project, repo)
                 self._paths = paths
@@ -362,8 +359,8 @@ class TestRepositoryIdentityContractFND01:
                 return BlobReadResult.found(content)
 
         clear_cache()
-        reader_a = ConfigurableReader(az_client, "Proj", "repo-a", ["src/a/**"])
-        reader_b = ConfigurableReader(az_client, "Proj", "repo-b", ["src/b/**"])
+        reader_a = ConfigurableReader(client, "Proj", "repo-a", ["src/a/**"])
+        reader_b = ConfigurableReader(client, "Proj", "repo-b", ["src/b/**"])
 
         result_a = await read_project_config(reader_a, 42, ref="main")
         result_b = await read_project_config(reader_b, 42, ref="main")

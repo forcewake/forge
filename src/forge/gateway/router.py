@@ -252,24 +252,13 @@ def _label_title(label: Any) -> str:
 def _match_issue_lifecycle(event: GitLabEvent, settings) -> dict[str, Any] | None:
     """Detect issue-update events that belong to the #29 lifecycle commands.
 
-    - ``issue`` hook, ``action == "update"``, ``changes`` carrying a
-      title/description change → ``issue_edited``: the new text travels in
-      the metadata and the executor's frozen-snapshot digest compare filters
-      no-op edits.
-    - ``issue`` hook, ``action == "update"``, ``changes.labels`` where the
-      trigger label is in the ``previous`` set but not the ``current`` one →
-      ``unlabeled``. This one is RELIABLE on GitLab: the update payload
-      carries both label sets, so a removal is proven (unlike Azure's
-      old-value-less tags, see azure_webhook.normalize_workitem_updated).
-
     Everything else (state changes, label additions, reopen) takes the
     legacy path. The delivery keys are content-stable per change —
     ``edit:{issue_id}:{digest}:{updated_at}`` and
     ``unlabel:{issue_id}:{updated_at}`` — so a redelivered update collapses
     onto one inbox identity while two genuinely different updates never do
     (the digest alone is not enough identity: an edit landing BACK on a
-    previously-seen text would collide with the first edit's inbox row).
-    """
+    previously-seen text would collide with the first edit's inbox row)."""
     if not isinstance(event, IssueEvent):
         return None
     attrs = event.object_attributes
@@ -360,7 +349,7 @@ def _capture_webhook_payload(
 # shared by all three provider gateways, never duplicated per gateway.
 # R41-17 (#372) closed the residual: this gateway CONSUMES the shared
 # cache_confirms_duplicate/mark_delivered_best_effort helpers like the
-# GitHub and Azure gateways do — the probe→confirm sequence is no longer
+# GitHub gateways do — the probe→confirm sequence is no longer
 # spelled inline here (a second spelling of the #357 decision).
 
 

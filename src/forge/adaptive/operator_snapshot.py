@@ -17,7 +17,7 @@ Canonical-subject scoping is the module's first rule (R37-02): the
 reader takes an authorized scope of :class:`CanonicalSubject` values —
 provider family + connection identity + NATIVE repository identity —
 and selects runs through per-provider predicates (GitHub rows by their
-full name, GitLab/Azure rows by their own ``project_id`` columns, no
+full name, GitLab rows by their own ``project_id`` columns, no
 artificial GitHub-column population) followed by an EXACT canonical
 match that also compares the recorded connection. A display name is
 presentation-only: the same full name on two connections, or the same
@@ -230,7 +230,7 @@ _RESUME_APPLIED_STATUSES: frozenset[str] = frozenset({"applied", "checkpointed"}
 #: ``provider`` values, migration 012; a test asserts the two stay in
 #: sync). A run whose provider is outside this tuple (drill fixtures'
 #: ``fake``) carries NO canonical subject — it is outside every scope.
-PROVIDER_FAMILIES: tuple[str, ...] = ("gitlab", "github", "azure_devops")
+PROVIDER_FAMILIES: tuple[str, ...] = ("gitlab", "github")
 
 #: The connection marker used when a run row records no connection
 #: identity (the single-connection deployment default). A real recorded
@@ -264,7 +264,7 @@ class CanonicalSubject:
     the same three members :class:`~forge.runs.composition.
     RepositoryContext` composes dispatches from, derived here from the
     run row's OWN persisted columns: GitHub rows name ``owner/repo``
-    through ``github_repo_full_name``, GitLab and Azure DevOps rows name
+    through ``github_repo_full_name``, GitLab rows name
     their provider's numeric subject id through ``project_id`` (no
     GitHub-column population for non-GitHub families). ``display`` is
     presentation-only — it never enters :meth:`subject_id`, so a display
@@ -345,7 +345,7 @@ def subject_of_run(run: Any) -> CanonicalSubject | None:
     ``None`` when the row carries no subject a grant could name — an
     unknown provider family (drill fixtures), or a GitHub family row
     without the full-name column (pre-migration residue): such a run is
-    outside every scope, exactly as before. GitLab and Azure DevOps rows
+    outside every scope, exactly as before. GitLab rows
     derive their subject from ``provider`` + ``project_id`` with NO
     GitHub-column population — the R37-02 read adapter.
     """
@@ -655,7 +655,7 @@ class OperatorSnapshotReader:
     def _candidate_filter(subjects: Sequence[CanonicalSubject]) -> Any:
         """The per-provider SQL predicate selecting each subject's
         CANDIDATE rows — cheap and indexable (GitHub rows by full name,
-        GitLab/Azure rows by their own ``project_id``). The recorded
+        GitLab rows by their own ``project_id``). The recorded
         CONNECTION cannot be expressed here; the exact canonical match
         after the fetch closes that discriminator. A non-GitHub subject
         whose native id is not the numeric column spelling (a full-path

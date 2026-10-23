@@ -1,14 +1,5 @@
 """One lifecycle: the shared READY/finalization invariants (R27, ADR-0027).
 
-The three provider services (``service.py`` GitLab, ``github_service.py``,
-``azure_service.py``) hand-maintained parallel implementations of the same
-finalization invariants. The copies had already drifted once — GitHub
-recorded its verification fragment under a ``candidate_sha`` key while
-GitLab/Azure used the unified ``tested_oid`` shape, and the unverified
-GitLab ready reason claimed "checks passed" — which is exactly the
-``/retry``-guard-miss class of bug R27 predicts from "three copies of the
-factory". This module is the ONE source for the invariants that drifted:
-
 - :func:`ready_evidence` — the unified R02
   :class:`~forge.runs.verification.VerificationResult` evidence fragment
   every provider records under ``flow_runs.evidence["verification"]``;
@@ -30,8 +21,7 @@ factory". This module is the ONE source for the invariants that drifted:
 Import boundary (the enforceable half of R27 today): this module is core —
 it must never import from ``forge.integrations.*`` or ``forge.gateway.*``
 (``tests/test_consistency.py`` parses the imports), so the finalization
-invariants stay provider-neutral and the provider packages stay pluggable.
-"""
+invariants stay provider-neutral and the provider packages stay pluggable."""
 
 from __future__ import annotations
 
@@ -205,7 +195,7 @@ def verification_bound_sha(verification: Mapping[str, Any] | None) -> str:
     """The commit oid a persisted verification fragment is bound to.
 
     Tolerates both historical key spellings — the unified ``tested_oid``
-    (GitLab/Azure, and everything written through :func:`ready_evidence`)
+    (GitLab, and everything written through :func:`ready_evidence`)
     and GitHub's pre-consolidation ``candidate_sha`` — so resume paths
     keep reading evidence written before ADR-0027.
     """

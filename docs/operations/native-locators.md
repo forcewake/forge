@@ -15,7 +15,7 @@ consumption half is
 every punctuation character to `_` and upper-casing. Two distinct refs —
 `vault:kv/team-a` and `vault:kv/team_a` (and every dash/dot/case
 variant) — sanitized to the SAME segment `VAULT_KV_TEAM_A`, so the
-GitHub secret / GitLab protected+masked variable / Azure group secret
+GitHub secret / GitLab protected+masked variable
 `FORGE_MODEL_VAULT_KV_TEAM_A` was ONE carrier shared by two credentials:
 rotation between them was a silent alias, and in a shared group
 namespace two projects' credentials overwrote each other.
@@ -36,7 +36,7 @@ carrier name     →  FORGE_MODEL_<locator>
   differences all land in the digest; the readable prefix overlapping
   (`team-a` and `team_a` both read `TEAM…`) is cosmetic.
 - **The charset is `[A-Z0-9_]`** — the intersection GitHub secret names,
-  GitLab CI/CD variable names and Azure variable-group names accept.
+  GitLab CI/CD variable names accept.
   A `-` separator (the issue's illustrative spelling) is NOT
   provisionable: GitHub's secret API refuses a hyphenated name with a
   422, so the landed separator is `_`. Canonical uppercase also cannot
@@ -50,13 +50,6 @@ carrier name     →  FORGE_MODEL_<locator>
   identifier character anywhere (`native_locator_unrepresentable`, with
   the re-bind instruction). An unreadable prefix helps no operator
   reconcile a carrier by hand.
-
-Azure is the documented exception: its carrier is named after the
-provider's ENV SLOT inside the authorized variable group
-(`forge-lane-credentials/ANTHROPIC_AUTH_TOKEN`) because Azure macro
-references cannot be composed from runtime parameters — there is no ref
-spelling in that name to collide. The locator is still the dispatch
-identity (`FORGE_CREDENTIAL_REF`) the lane guard interpolates.
 
 ## The locator map (the persisted registry)
 

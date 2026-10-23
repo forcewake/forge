@@ -1,20 +1,5 @@
 """The lane-side control channel — the CI lane's OUTBOUND steering leg (NXT-10).
 
-The lane job (GitHub Actions / GitLab / AzDO) runs where the control plane
-can never reach IN (EXE-04: no inbound listener on an ephemeral runner),
-while the operator's commands land DURABLY in the forge app's
-``control_commands`` rows. :mod:`forge.lane_driver`'s steering attach
-consumed an in-process in-memory mailbox — a queue the control plane's
-rows can never enter. This module is the missing half: when the dispatch
-env carries ``FORGE_LANE_CONTROL_URL`` + ``FORGE_LANE_CONTROL_TOKEN``,
-:func:`lane_channel_from_env` swaps the lane-local mailbox for a
-:class:`LaneControlChannel` — the SAME sync
-:class:`~forge.adaptive.control.MailboxSurface` names the
-:class:`~forge.adaptive.lane_control.LaneSteeringSession` drain already
-calls (``pending`` / ``authorize`` / ``apply`` / ``checkpoint``), so the
-drain path is UNCHANGED; only the backing store moves from a process
-dictionary to the control plane's durable rows.
-
 The channel is a poller, not a listener:
 
 - an async fetch loop (``FORGE_LANE_CONTROL_POLL_SECONDS``, default 2 s)
@@ -44,8 +29,7 @@ it was (never a guessed command); an ack that cannot be delivered RAISES
 so the mailbox gate REFUSES the command this cycle ("left in the mailbox
 for the reconciler") — the honest no, never a silent optimistic booking
 the durable row cannot support. The channel journal rides the lane meta
-beside the steering journal (:func:`forge.lane_driver._steering_journal`).
-"""
+beside the steering journal (:func:`forge.lane_driver._steering_journal`)."""
 
 from __future__ import annotations
 

@@ -16,7 +16,7 @@ metadata shape the worker's ``execute_run_command`` dispatch carries).
 Scope honesty (the capability-manifest row reads the same bounds): ONE
 native platform is qualified — GitLab MR notes, ingress
 ``forge.gateway.router`` → step runtime → ``RunService.run_command`` →
-``run_reconciler``'s correction pass. GitHub and Azure DevOps parity is
+``run_reconciler``'s correction pass. GitHub parity is
 deliberately NOT claimed until one native path is qualified (#337's
 out-of-scope list); those ingresses never parse the verbs.
 """

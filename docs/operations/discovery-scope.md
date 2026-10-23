@@ -13,7 +13,7 @@ must act on.
 ## Who may be read, and how readers are built
 
 - The `neighbors:` section of `forge.yml` authorizes each neighbor:
-  `provider` (`gitlab` / `github` / `azure`), `repository_id`, an
+  `provider` (`gitlab` / `github`), `repository_id`, an
   immutable `ref` (pin a commit sha — `HEAD` floats), and optional
   `allowed_globs` (empty = the whole repository). Unknown fields or
   providers refuse at parse time; nothing imported or discovered

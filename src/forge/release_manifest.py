@@ -112,7 +112,7 @@ GATING_LEGEND: Final[dict[str, str]] = {
     "none": "not run anywhere",
 }
 
-_PROVIDERS: Final[frozenset[str]] = frozenset({"gitlab", "github", "azure", "*"})
+_PROVIDERS: Final[frozenset[str]] = frozenset({"gitlab", "github", "*"})
 _BACKENDS: Final[frozenset[str]] = frozenset({"builtin", "harness", "*"})
 
 
@@ -130,7 +130,7 @@ class ManifestEntry:
     """
 
     capability: str
-    provider: str  # gitlab | github | azure | "*"
+    provider: str  # gitlab | github | "*"
     backend: str  # builtin | harness | "*"
     level: ManifestLevel
     evidence_class: EvidenceClass
@@ -201,7 +201,7 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         evidence=("tests/test_runs_spec.py",),
         ci_jobs=_CI_TEST,
         note="ExecutableRunSpec v3: digest re-verified on every read; legacy v2 refused "
-        "(R04; A02 wired the same spec to GitHub/Azure builders).",
+        "(R04; A02 wired the same spec to GitHub builders).",
     ),
     ManifestEntry(
         capability="runs/verification-contract",
@@ -235,16 +235,6 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         note="waiting_ci + checks correlation on FakeGitHub; required-checks surface still has an "
         "un-enforced branch-protection path (github_service.py: 'no required checks are enforced "
         "yet') — review A01 not claimed.",
-    ),
-    ManifestEntry(
-        capability="runs/verification-gate",
-        provider="azure",
-        backend="*",
-        level="contract_tested",
-        evidence_class="contract_suite",
-        evidence=("tests/test_azure_runs.py",),
-        ci_jobs=_CI_TEST,
-        note="waiting_ci with Builds correlation by candidate sha (R02 parity).",
     ),
     ManifestEntry(
         capability="publication-boundary",
@@ -540,17 +530,6 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         "this tree (the README prose claims them); NO CI-reproducible or in-tree evidence "
         "exists, so the manifest records not_run — never converted to pass.",
     ),
-    ManifestEntry(
-        capability="real-provider-e2e",
-        provider="azure",
-        backend="*",
-        level="not_run",
-        evidence_class="real_provider_e2e",
-        gating="none",
-        note="Live exercises against a real Azure DevOps org are maintainer-run outside this "
-        "tree (the README prose claims them); NO CI-reproducible or in-tree evidence exists, "
-        "so the manifest records not_run — never converted to pass.",
-    ),
     # ---- explicit not_run gaps (unknown stays explicit) ----
     ManifestEntry(
         capability="release-canary/target-harness-upload",
@@ -825,13 +804,13 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="C03",
         capability="harness-selection",
         level="contract_tested",
-        evidence=("tests/test_azure_integration_joins.py", "tests/test_harness_selection.py"),
+        evidence=("tests/test_harness_selection.py"),
     ),
     FindingClosure(
         finding="C04",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_azure_runs.py",),
+        evidence=(),
     ),
     FindingClosure(
         finding="C05",
@@ -888,7 +867,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="B01",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_github_runs.py", "tests/test_azure_runs.py"),
+        evidence=("tests/test_github_runs.py"),
     ),
     FindingClosure(
         finding="B02",
@@ -906,16 +885,13 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="B04",
         capability="runs/spec-freeze",
         level="contract_tested",
-        evidence=("tests/test_harness_entry.py", "tests/test_azure_integration_joins.py"),
+        evidence=("tests/test_harness_entry.py"),
     ),
     FindingClosure(
         finding="B05",
         capability="runs/spec-freeze",
         level="contract_tested",
-        evidence=(
-            "tests/test_azure_integration_joins.py",
-            "tests/test_azure_pipelines_executor.py",
-        ),
+        evidence=(),
     ),
     FindingClosure(
         finding="B06",
@@ -963,7 +939,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="B13",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_github_harness.py", "tests/test_azure_runs.py"),
+        evidence=("tests/test_github_harness.py"),
     ),
     FindingClosure(
         finding="B14",
@@ -988,7 +964,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="R02",
         capability="runs/verification-contract",
         level="contract_tested",
-        evidence=("tests/test_runs_verification.py", "tests/test_azure_runs.py"),
+        evidence=("tests/test_runs_verification.py"),
     ),
     FindingClosure(
         finding="R03",
@@ -1009,7 +985,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         evidence=(
             "tests/test_runs_service.py",
             "tests/test_github_runs.py",
-            "tests/test_azure_runs.py",
         ),
         note="Brief binding: the plan comment carries the frozen implementation block on all "
         "three providers.",
@@ -1099,10 +1074,9 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         level="contract_tested",
         evidence=(
             "tests/test_github_runs.py",
-            "tests/test_azure_runs.py",
             "tests/test_runs_spec.py",
         ),
-        note="GitHub and Azure builders freeze/consume the SAME executable spec v3 "
+        note="GitHub builders freeze/consume the SAME executable spec v3 "
         "(EXECUTABLE_SPEC_SCHEMA_VERSION) — verified in tree.",
     ),
     FindingClosure(
@@ -1110,7 +1084,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="harness-artifact",
         level="contract_tested",
         evidence=("tests/test_github_harness.py", "tests/test_harness_entry.py"),
-        note="BriefEnvelope landed on the GITHUB lane only — GitLab/Azure legs not verified in "
+        note="BriefEnvelope landed on the GITHUB lane only — GitLab legs not verified in "
         "tree; a scope-limited fix, NOT a full closure.",
     ),
     FindingClosure(
@@ -1120,7 +1094,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         evidence=(
             "tests/test_config_scope.py",
             "tests/test_github_runs.py",
-            "tests/test_azure_runs.py",
         ),
     ),
     # 16339c2 review, R36-22 — profile qualification from separate evidence

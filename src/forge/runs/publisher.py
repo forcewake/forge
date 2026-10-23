@@ -53,7 +53,7 @@ intent parks in the bounded ``probing`` certainty window
 (``FORGE_PUBLISH_SETTLE_SECONDS``, 30s default, ×2 backoff), and only the
 window-end re-probe decides — a late-landing commit is ADOPTED, and an
 exhausted window on GitLab (no branch-wide CAS) parks
-``blocked(unknown_outcome)`` with operator instructions. GitHub and Azure
+``blocked(unknown_outcome)`` with operator instructions. GitHub
 DevOps carry a per-adapter guarantee (see
 :mod:`forge.durable.intents`): their writes are branch-wide CAS
 (``expectedHeadOid`` / ``oldObjectId``), so a redispatch whose
@@ -365,14 +365,7 @@ def sensitive_paths_for_run(
     run: FlowRun,
     pipeline_entrypoints: Mapping[str, Sequence[str]] | None,
 ) -> list[str]:
-    """The configured sensitive pipeline paths for *run*'s project (R18).
-
-    Looks *run*'s :func:`run_project_keys` up in the parsed
-    ``pipeline_entrypoints`` config (forge.yml / FORGE_PIPELINE_ENTRYPOINTS)
-    and returns the union of the matches, de-duplicated in order. Azure's
-    pipeline definition may be any file, so onboarding names the real
-    entrypoints instead of forge assuming ``azure-pipelines.yml``.
-    """
+    "The configured sensitive pipeline paths for *run*'s project (R18)."
     if not pipeline_entrypoints:
         return []
     paths: list[str] = []

@@ -5,7 +5,7 @@ review-feedback scope check the live #364 onboarding record demanded.
 
 THE SAME RESOLVER, TWO CONSUMERS. The dispatch legs resolve their
 delivery plan through :func:`forge.adaptive.credential_broker.delivery_plan`
-(the seam ``RunService``/``GitHubRunService``/``AzureRunService`` call
+(the seam ``RunService``/``GitHubRunService`` call
 before any provider call). This module does NOT re-implement that
 resolution: :func:`resolve_delivery_plan` IS that function, called with
 references-only inputs — the doctor's diagnostic resolution performs NO
@@ -52,7 +52,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from forge.adaptive.credential_broker import (
-    DELIVERY_MODE_AZURE_GROUP,
     DELIVERY_MODE_GITHUB_NATIVE,
     DELIVERY_MODE_GITLAB_PROTECTED,
     DELIVERY_MODE_RUNNER_REDEMPTION,
@@ -430,11 +429,6 @@ MODE_RULE_TABLE: tuple[tuple[str, str, str], ...] = (
         "(environment protection is the GitHub analog, honestly out of this table)",
     ),
     (
-        DELIVERY_MODE_AZURE_GROUP,
-        "the authorized variable group holds the route's secret variable",
-        "template parameters never carry secret values — the group is the carrier",
-    ),
-    (
         DELIVERY_MODE_RUNNER_REDEMPTION,
         "the grant window and the endpoint TTL are configured (parse)",
         "a reference NEVER proves a usable provider key — the lane proves "
@@ -474,7 +468,7 @@ def carrier_compatibility(
     - the protected axis or the ref class UNOBSERVED → unknown, never
       success (``carrier_compatibility_unknown``);
     - the rule is profile-scoped to GitLab (where the docs state it);
-      GitHub/Azure carriers carry no protected axis to check.
+      GitHub carriers carry no protected axis to check.
     """
     if profile != "gitlab":
         return ModePrerequisite(OUTCOME_PASS, "native_carrier_ready", "carrier present")

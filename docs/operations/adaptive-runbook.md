@@ -329,7 +329,6 @@ mutates permissions or creates infrastructure):
 | `gitlab.token` / `forge.bot_token` | The provider credentials work |
 | `redis` / `database` / `litellm` | The infrastructure is reachable |
 | `harness.lanes` | Per-driver credential variables are present |
-| `azdo.*` | The Azure DevOps lane is configured |
 | `credential.legacy_deadline` | The legacy-credential window's anchor, deadline and drain count (Q35-06) |
 | `checkpoint.migration_coverage` | Not-yet-migrated works while the postgres authority is active (Q35-21) |
 | `checkpoint.pointer_conflicts` | JSON/DB active-pointer disagreements → operator resolution, never timestamp selection |

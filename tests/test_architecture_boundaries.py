@@ -925,10 +925,8 @@ def _check_budget_amendment_applicants(modules: dict[str, _ModuleIndex]) -> list
 # ---------------------------------------------------------------------------
 
 #: The run-id branch-derivation callables (the GitLab original and the
-#: GitHub/Azure twins).
-_FACTORY_BRANCH_DERIVATIONS = frozenset(
-    {"factory_branch", "github_factory_branch", "azure_factory_branch"}
-)
+#: GitHub twin).
+_FACTORY_BRANCH_DERIVATIONS = frozenset({"factory_branch", "github_factory_branch"})
 
 #: The ONLY modules that may evaluate a run-id branch derivation:
 #: - the identity home (the derivation's definition),
@@ -953,7 +951,6 @@ _FACTORY_BRANCH_DERIVATION_HOMES = frozenset(
         "forge.runs.publisher",
         "forge.integrations.github_flow",
         "forge.runs.github_service",
-        "forge.runs.azure_service",
     }
 )
 
@@ -1077,7 +1074,6 @@ def _check_gateway_dedup_confinement(modules: dict[str, _ModuleIndex]) -> list[s
     for gateway in (
         "forge.gateway.router",
         "forge.gateway.github_webhook",
-        "forge.gateway.azure_webhook",
     ):
         index = modules.get(gateway)
         if index is None:  # pragma: no cover — the gateways are the registrants
@@ -1503,7 +1499,7 @@ class TestIntentionalViolationTraps:
 
     def test_a_service_hand_building_an_attempt_start_spec_is_caught(self) -> None:
         modules = _synthetic(
-            "forge.runs.azure_service",
+            "forge.runs.service",
             "from forge.runs.composition import AttemptStartSpec\n"
             "\n"
             "\n"
@@ -2110,7 +2106,7 @@ class TestProviderConformance:
     """The same negative inputs, equivalent typed refusals everywhere.
 
     The SHARED core is ``revival.retry_rejection`` / ``why_blocked_reply``
-    — the one refusal table the GitLab, Azure and GitHub handlers all
+    — the one refusal table the GitLab and GitHub handlers all
     call. The GitHub path additionally composes the continuation
     decision; these tests pin that BOTH paths answer the same typed
     codes for the same inputs, with the native detail retained.
@@ -2120,7 +2116,7 @@ class TestProviderConformance:
     async def test_an_unprovable_checkpoint_refuses_the_same_everywhere(self, state: str) -> None:
         outcome = _typed_outcomes()[state]
         run = _dead_run()
-        # The SHARED core (GitLab/Azure/GitHub handlers all call this):
+        # The SHARED core (GitLab/GitHub handlers all call this):
         rejection = retry_rejection(run, checkpoint=outcome)
         assert isinstance(rejection, RetryRejection)
         assert rejection.code == RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE.value
@@ -2167,14 +2163,13 @@ class TestProviderConformance:
         assert "unavailable" in body or "corrupt" in body or "refused" in body
 
     def test_the_one_refusal_table_is_what_every_provider_calls(self) -> None:
-        """AST parity: all three provider services consult the ONE
+        """AST parity: both supported provider services consult the ONE
         ``retry_rejection`` and the ONE typed lookup adapter; only
         ``runs.revival`` constructs refusals — no provider re-derives a
         refusal table (the review's 'same decision in two places')."""
         modules = _src_modules()
         for service in (
             "forge.runs.service",
-            "forge.runs.azure_service",
             "forge.runs.github_service",
         ):
             callees = {callee for _, callee in modules[service].calls()}
@@ -2188,48 +2183,24 @@ class TestProviderConformance:
                     callee.endswith("RetryRejection") and index.module != "forge.runs.revival"
                 ), f"{index.module} constructs RetryRejection — the table is runs.revival's"
 
-    def test_the_gitlab_lane_resume_seam_and_the_azure_gap_are_the_documented_state(self) -> None:
-        """#268's finding, updated by R37-07 (#288): the lane-resume dispatch
-        contract is now wired on GitHub AND the GitLab CE lane (the
-        pipeline-variable envelope; the decision still comes from the ONE
-        owner — runs.service references the vocabulary and passes
-        ``resume_mode=decision.resume_mode()``, never a mode of its own
-        derivation). Azure remains the honest gap — fabricating parity
-        would be worse than the gap; the registry records it and this
-        pins it."""
+    def test_supported_lane_resume_dispatch_uses_the_selected_mode(self) -> None:
+        """Both supported lanes pass through the authorized continuation decision."""
         modules = _src_modules()
-        gitlab = modules["forge.runs.service"]
-        resume_mode_passes = [
-            keyword
-            for node in ast.walk(gitlab.tree)
-            if isinstance(node, ast.Call)
-            for keyword in node.keywords
-            if keyword.arg == "resume_mode"
-        ]
-        assert resume_mode_passes, "the GitLab lane must dispatch the resume contract (R37-07)"
-        for keyword in resume_mode_passes:
-            value = ast.unparse(keyword.value)
-            assert value.endswith(".resume_mode()") or value == "resume_mode", (
-                f"runs.service passes resume_mode={value} — a dispatch carries the "
-                "decision's selected mode, never a fresh expression"
-            )
-        vocabulary = {node.id for node in ast.walk(gitlab.tree) if isinstance(node, ast.Name)}
-        assert any("RESUME_MODE" in name for name in vocabulary)
-        for service in ("forge.runs.azure_service",):
-            for node in ast.walk(modules[service].tree):
-                if isinstance(node, ast.Name) and "RESUME_MODE" in node.id:
-                    raise AssertionError(
-                        f"{service} references {node.id} — the lane-resume contract "
-                        "is not wired on Azure; wire the seam or record the gap"
-                    )
-                if isinstance(node, ast.Call):
-                    for keyword in node.keywords:
-                        assert keyword.arg != "resume_mode", (
-                            f"{service}:{keyword.lineno} passes a resume mode — "
-                            "the lane-resume dispatch contract is not wired on Azure"
-                        )
-        gap = boundary_policy.CONTINUATION_PROVIDER_GAPS
-        assert "Azure remains the honest gap" in gap
+        for service in ("forge.runs.service", "forge.runs.github_service"):
+            index = modules[service]
+            modes = [
+                keyword.value
+                for node in ast.walk(index.tree)
+                if isinstance(node, ast.Call)
+                for keyword in node.keywords
+                if keyword.arg == "resume_mode"
+            ]
+            assert modes, f"{service} must dispatch the resume contract"
+            for mode in modes:
+                value = ast.unparse(mode)
+                assert value.endswith(".resume_mode()") or value == "resume_mode", (
+                    f"{service} invents resume_mode={value} beside the authorization decision"
+                )
 
 
 class TestSyntheticFixtureIsolation:

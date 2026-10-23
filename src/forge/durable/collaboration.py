@@ -181,7 +181,7 @@ def derive_legacy_target(
     one directly — one validation, two entry points.
     """
     if provider != "gitlab":
-        # The GitHub/Azure lanes keep their own per-run branch twins
+        # The GitHub lanes keep their own per-run branch twins
         # (no review rounds exist there); the legacy adapter is the
         # GitLab lane's alone this cycle.
         return TargetDecision(refusal_reason=f"no_legacy_adapter_for_provider:{provider}")

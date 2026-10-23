@@ -129,7 +129,7 @@ _DOTNET_TOOL_RULES: tuple[str, ...] = (
 #: The SDK-lane drivers: the agent is driven by ``forge.lane_driver``
 #: (the REAL interactive driver clients), not a scripted ``-p`` call —
 #: the rendered script only provisions the CLI and hands the lane over
-#: (the Actions/AzDO mirror of the codex/opencode GitLab sdk-lane
+#: (the Actions mirror of the codex/opencode GitLab sdk-lane
 #: templates).
 LANE_DRIVERS = ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane", "copilot-sdk-lane")
 

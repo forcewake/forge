@@ -12,7 +12,7 @@ script from its path and verify BOTH halves:
   CI lint step performs on every push.
 
 The module ALSO owns the production dispatch-payload CAPTURE harness:
-the REAL GitHub/GitLab/Azure run services driven through the REAL
+the REAL GitHub/GitLab run services driven through the REAL
 production-entry fakes, fronted by DECLARING WRAPPER CLIENTS that refuse
 a dispatch whose payload falls outside the shipped templates' declared
 surface (the early guard — the sibling fakes' ledgers accept anything;
@@ -83,7 +83,7 @@ class TestCredentialBlockExtraction:
         assert 'export ANTHROPIC_AUTH_TOKEN="$_CRED_VALUE"' in block
         assert "FORGE_BOOTSTRAP_FAILED" in block
 
-    @pytest.mark.parametrize("name", ["forge-harness.github.yml", "forge-lane.azure-pipelines.yml"])
+    @pytest.mark.parametrize("name", ["forge-harness.github.yml"])
     def test_extracts_the_native_templates_blocks(self, gate: ModuleType, name: str):
         block = gate.credential_block((TEMPLATES_DIR / name).read_text(encoding="utf-8"))
         assert block is not None
@@ -152,12 +152,6 @@ class TestDeclaredSurfaces:
         )
         assert {"credential_ref", "credential_redeem", "run_id", "lane_resume_mode"} <= declared
 
-    def test_azure_parameters_include_the_credential_parameters(self, gate: ModuleType):
-        declared = gate.azure_declared_parameters(
-            gate.yaml_doc(TEMPLATES_DIR / "forge-lane.azure-pipelines.yml")
-        )
-        assert {"credential_ref", "credential_redeem", "run_id", "driver"} <= declared
-
     def test_a_template_without_a_dispatch_surface_refuses(self, gate: ModuleType):
         with pytest.raises(gate.PrerequisiteError):
             gate.github_declared_inputs({"jobs": {}})
@@ -172,7 +166,7 @@ class TestSchemaFindings:
 
     def test_a_declared_key_never_sent_is_a_finding(self, gate: ModuleType):
         findings = gate.declared_vs_captured(
-            "azure", {"run_id", "dead_input"}, {"default": ["run_id"]}
+            "github", {"run_id", "dead_input"}, {"default": ["run_id"]}
         )
         assert [(f.type, f.key) for f in findings] == [("declared_never_sent", "dead_input")]
 
@@ -201,7 +195,7 @@ class TestSchemaFindings:
 
     def test_a_conditional_annotation_for_an_undeclared_key_is_a_finding(self, gate: ModuleType):
         findings = gate.declared_vs_captured(
-            "azure", {"run_id"}, {"default": ["run_id"]}, {"ghost": ("README.md", "forge")}
+            "github", {"run_id"}, {"default": ["run_id"]}, {"ghost": ("README.md", "forge")}
         )
         assert {f.type for f in findings} == {"stale_conditional_annotation"}
 
@@ -274,7 +268,6 @@ class TestSecretConsumerSentinels:
             "claude-code.gitlab-ci.yml",
             "claude-sdk-lane.gitlab-ci.yml",
             "forge-harness.github.yml",
-            "forge-lane.azure-pipelines.yml",
         ):
             arms = {arm["arm"]: arm for arm in by_template[name]["arms"]}
             assert by_template[name]["status"] == "pass", name
@@ -328,7 +321,7 @@ class TestDispatchSchemaOnTheCommittedCaptures:
         report = gate.run_dispatch_schema(seams, gate.load_captures())
         assert report["status"] == "pass"
         assert report["findings"] == []
-        for provider in ("github", "azure", "gitlab"):
+        for provider in ("github", "gitlab"):
             assert report["providers"][provider]["findings"] == []
 
     def test_a_forged_undeclared_key_is_a_finding(self, gate: ModuleType, seams: dict[str, Any]):
@@ -402,7 +395,6 @@ class TestReportAndCli:
         assert report["executed_ids"] == [
             "shipped-recipes/t.gitlab-ci.yml/success",
             "dispatch-schema/github",
-            "dispatch-schema/azure",
             "dispatch-schema/gitlab",
             "secret-consumers/t.gitlab-ci.yml/sentinel",
             "native-locators/encoding",
@@ -507,7 +499,6 @@ class TestReportAndCli:
         assert "native-locators/self-test/legacy_encoder_flagged" in executed
         assert "secret-consumers/claude-code.gitlab-ci.yml/sentinel_locator" in executed
         assert "secret-consumers/forge-harness.github.yml/sentinel_locator" in executed
-        assert "secret-consumers/forge-lane.azure-pipelines.yml/fail_closed_locator" in executed
         # Q39-08 (#327): the consumer-contract arms executed — the grant
         # through the real ASGI endpoint, the runner-side typed
         # verification, the rebind digest, every mutation caught, and the
@@ -585,7 +576,6 @@ class TestLocatorConformance:
         # the digest inventory: every validated template's identity digest
         assert "claude-code.gitlab-ci.yml" in report["digest_inventory"]
         assert "forge-harness.github.yml" in report["digest_inventory"]
-        assert "forge-lane.azure-pipelines.yml" in report["digest_inventory"]
         for digest in report["digest_inventory"].values():
             assert len(digest) == 16 and digest == digest.lower()
 
@@ -627,7 +617,6 @@ class TestSentinelLocatorArms:
             "claude-code.gitlab-ci.yml",
             "claude-sdk-lane.gitlab-ci.yml",
             "forge-harness.github.yml",
-            "forge-lane.azure-pipelines.yml",
         ):
             arms = {arm["arm"]: arm for arm in by_template[name]["arms"]}
             assert arms["sentinel_locator"]["status"] == "pass", name
@@ -710,52 +699,10 @@ class DeclaringGitLabClient:
         return getattr(self._inner, name)
 
 
-class DeclaringAzureClient:
-    """The same guard on the Azure Runs-API boundary: templateParameters
-    must stay inside the shipped template's declared parameters."""
-
-    def __init__(self, inner: Any, declared: set[str]) -> None:
-        self._inner = inner
-        self._declared = declared
-        self.captured_parameters: list[dict[str, str]] = []
-
-    async def run_pipeline(
-        self, project, pipeline_id, *, ref_name=None, template_parameters=None, variables=None
-    ):
-        payload = dict(template_parameters or {})
-        self.captured_parameters.append(dict(payload))
-        undeclared = sorted(set(payload) - self._declared)
-        if undeclared:
-            from forge.integrations.azure import AzureDevOpsError
-
-            raise AzureDevOpsError(
-                400,
-                f"undeclared templateParameters {undeclared} — the shipped lane "
-                "template does not declare them (conformance capture wrapper)",
-            )
-        return await self._inner.run_pipeline(
-            project,
-            pipeline_id,
-            ref_name=ref_name,
-            template_parameters=payload,
-            variables=variables,
-        )
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-
 def _declared_github_inputs() -> set[str]:
     doc = yaml.safe_load((TEMPLATES_DIR / "forge-harness.github.yml").read_text(encoding="utf-8"))
     trigger = doc.get("on", doc.get(True))
     return set(trigger["workflow_dispatch"]["inputs"])
-
-
-def _declared_azure_parameters() -> set[str]:
-    doc = yaml.safe_load(
-        (TEMPLATES_DIR / "forge-lane.azure-pipelines.yml").read_text(encoding="utf-8")
-    )
-    return {entry["name"] for entry in doc["parameters"]}
 
 
 def _consumed_gitlab_variables() -> set[str]:
@@ -1057,125 +1004,6 @@ async def _drive_gitlab_shape(native: Any, database: Any, *, delivery: str | Non
     return keys
 
 
-async def _capture_azure(workroot: Path) -> dict[str, list[str]]:
-    """The REAL AzureRunService over the in-memory fake Azure DevOps —
-    the Runs-API templateParameters per delivery profile."""
-    from forge.adaptive.credential_broker import (
-        DELIVERY_MODE_AZURE_GROUP,
-        DELIVERY_MODE_RUNNER_REDEMPTION,
-    )
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from sqlalchemy.pool import StaticPool
-
-    shapes: dict[str, list[str]] = {}
-    for shape, delivery in (
-        ("unbound", None),
-        ("bound_native", DELIVERY_MODE_AZURE_GROUP),
-        ("bound_redemption", DELIVERY_MODE_RUNNER_REDEMPTION),
-    ):
-        engine = create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        from forge.models.base import Base
-
-        async with engine.begin() as connection:
-            import forge.adaptive.mailbox_db  # noqa: F401 — register every table
-            import forge.durable.models  # noqa: F401
-
-            await connection.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        try:
-            shapes[shape] = await _drive_azure_shape(factory, delivery=delivery)
-        finally:
-            await engine.dispose()
-    return shapes
-
-
-async def _drive_azure_shape(factory: Any, *, delivery: str | None) -> list[str]:
-    from forge.adaptive.credential_broker import (
-        DELIVERY_ROUTE_ENV,
-        DELIVERY_TEMPLATE_DIR_ENV,
-        StagedBroker,
-    )
-    from forge.adaptive.operator_snapshot import subject_of_run
-    from forge.adaptive.project_credentials import ProjectCredentialRegistry
-    from forge.config import ForgeConfig
-    from forge.durable import FlowRun
-    from forge.integrations.azure import AzureRepositoryReader
-    from forge.runs.azure_service import AzureAgents, AzureRunService
-    from forge.runs.stubs import StubImplementer, StubPlanner
-    from tests.test_azure_runs import (
-        FakeAzureDevOps,
-        LANE_PIPELINE_ID,
-        PROJECT,
-        PROJECT_ID,
-        REPO,
-        REPO_FULL,
-        WORK_ITEM,
-        WORK_ITEM_DESC_HTML,
-        WORK_ITEM_TITLE,
-        StubAzureReviewer,
-        make_settings,
-    )
-
-    fake = FakeAzureDevOps()
-    fake.seed_work_item(WORK_ITEM, WORK_ITEM_TITLE, WORK_ITEM_DESC_HTML)
-    client = DeclaringAzureClient(fake, _declared_azure_parameters())
-    registry = None
-    broker = None
-    if delivery is not None:
-        registry = ProjectCredentialRegistry()
-        broker = StagedBroker()
-    service = AzureRunService(
-        factory,
-        make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID),
-        ForgeConfig(),
-        stack=AzureAgents(
-            client=client,
-            reader=AzureRepositoryReader(client, PROJECT, REPO),
-            planner=StubPlanner(),
-            implementer=StubImplementer(),
-            reviewer=StubAzureReviewer(),
-        ),
-        repo_full_name=REPO_FULL,
-        credential_registry=registry,
-        credential_broker=broker,
-    )
-    run_id = await service.start_run(
-        project_id=PROJECT_ID,
-        issue_number=WORK_ITEM,
-        issue_title=WORK_ITEM_TITLE,
-        issue_description=WORK_ITEM_DESC_HTML,
-        author_username="dev@fabrikam.example",
-    )
-    if registry is not None and broker is not None:
-        async with factory() as session:
-            row = await session.get(FlowRun, run_id)
-            subject = subject_of_run(row)
-        registry.bind(subject, "anthropic-gateway", CAPTURE_REF, bound_by="capture")
-        broker.stage(CAPTURE_REF, CAPTURE_SECRET, env_var="ANTHROPIC_AUTH_TOKEN", version="v1")
-    with _env(
-        ANTHROPIC_AUTH_TOKEN=AMBIENT_CAPTURE_VALUE,
-        **{DELIVERY_ROUTE_ENV: delivery or "", DELIVERY_TEMPLATE_DIR_ENV: str(TEMPLATES_DIR)},
-    ):
-        await service.handle_go(
-            project_id=PROJECT_ID,
-            issue_number=WORK_ITEM,
-            note_text=f"/go {run_id}",
-            author_username="dev@fabrikam.example",
-        )
-    if not client.captured_parameters:
-        async with factory() as session:
-            row = await session.get(FlowRun, run_id)
-        raise AssertionError(
-            f"the azure capture drive never dispatched (status={row.status}, "
-            f"reason={row.status_reason})"
-        )
-    return sorted(client.captured_parameters[-1])
-
-
 async def capture_dispatch_payloads_async(workroot: Path | None = None) -> dict[str, Any]:
     """The recorded production dispatch payload KEY SETS, per provider and
     per delivery profile, captured through the real services and fakes.
@@ -1191,15 +1019,14 @@ async def capture_dispatch_payloads_async(workroot: Path | None = None) -> dict[
         "schema": "forge.conformance-dispatch-captures/1",
         "captured_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "provenance": (
-            "fresh captures: the REAL GitHubRunService/RunService/AzureRunService driven "
+            "fresh captures: the REAL GitHubRunService/RunService driven "
             "through the production-entry fakes (fake native server subprocess; in-memory "
-            "fake Azure DevOps), fronted by the declaring wrapper clients in "
+            "fake native HTTP endpoints), fronted by the declaring wrapper clients in "
             "tests/test_gate_conformance.py — keys only, never values"
         ),
         "providers": {
             "github": {"shapes": await _capture_github(root / "github")},
             "gitlab": {"shapes": await _capture_gitlab(root / "gitlab")},
-            "azure": {"shapes": await _capture_azure(root / "azure")},
         },
     }
 
@@ -1219,7 +1046,7 @@ class TestCapturesMatchTheCommittedFixture:
         live = await capture_dispatch_payloads_async(tmp_path)
         committed = json.loads(CAPTURES_PATH.read_text(encoding="utf-8"))
         assert committed["schema"] == live["schema"]
-        for provider in ("github", "gitlab", "azure"):
+        for provider in ("github", "gitlab"):
             assert (
                 committed["providers"][provider]["shapes"] == live["providers"][provider]["shapes"]
             ), (
@@ -1230,7 +1057,6 @@ class TestCapturesMatchTheCommittedFixture:
         # the bound shapes carry the credential ENVELOPE keys (refs only)
         spellings = {
             "github": ("credential_ref", "credential_redeem"),
-            "azure": ("credential_ref", "credential_redeem"),
             "gitlab": ("FORGE_CREDENTIAL_REF", "FORGE_CREDENTIAL_REDEEM"),
         }
         for provider, (ref_key, redeem_key) in spellings.items():

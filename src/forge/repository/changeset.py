@@ -298,18 +298,7 @@ def resolve_write_policy(
     custom_profiles: Mapping[str, Mapping[str, Any]] | None = None,
     extra_denied_paths: Sequence[str] = (),
 ) -> WritePolicy:
-    """The effective :class:`WritePolicy` for profile *name* (R18).
-
-    *custom_profiles* is the parsed forge.yml / FORGE_WRITE_PROFILES mapping
-    (validated by ``forge.config.validate_write_profiles``); a custom name
-    must not shadow a builtin (``ValueError`` — an override could silently
-    relax the default). *extra_denied_paths* carries provider-sensitive
-    paths — e.g. the per-project Azure pipeline entrypoints from config —
-    which are denied under EVERY profile, including ``ci_change``: the
-    pipeline definition is the execution lane itself and forge never lets a
-    candidate rewrite it. Unknown names raise ``ValueError`` (fail closed),
-    never fall back to a more permissive profile.
-    """
+    "The effective :class:`WritePolicy` for profile *name* (R18)."
     key = (name or DEFAULT_WRITE_PROFILE).strip() or DEFAULT_WRITE_PROFILE
     profiles = dict(custom_profiles or {})
     if key in profiles and key in BUILTIN_WRITE_PROFILES:

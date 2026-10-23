@@ -345,10 +345,9 @@ class TestNativeCarrierRule:
         )
         assert outcome.outcome == "pass"
 
-    async def test_the_azure_group_mode_reports_its_own_carrier_rule(self):
+    async def test_every_supported_mode_reports_its_own_carrier_rule(self):
         rows = {row[0] for row in preflight.MODE_RULE_TABLE}
         assert {
-            credential_broker.DELIVERY_MODE_AZURE_GROUP,
             credential_broker.DELIVERY_MODE_GITHUB_NATIVE,
             DELIVERY_MODE_GITLAB_PROTECTED,
             DELIVERY_MODE_RUNNER_REDEMPTION,

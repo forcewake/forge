@@ -325,7 +325,7 @@ UNVERIFIED_DETAIL = "no verification profile configured"
 #: freezes the EXECUTABLE spec (v3, :mod:`forge.runs.spec`) — task text, plan
 #: artifact, model route, verification contract and budgets ride beside the
 #: digests, and every consumption read verifies the document's digest.
-#: A02: the GitHub/Azure lanes freeze and consume the same v3 document; runs
+#: A02: the GitHub lanes freeze and consume the same v3 document; runs
 #: created before that upgrade carry v2 rows and park
 #: ``blocked(spec_legacy: re-approval required)`` on their next leg
 #: (:class:`forge.runs.spec.SpecLegacy`). This historical constant stays 2.
@@ -935,9 +935,7 @@ async def execute_run_command(
     if metadata.get("command") == "security_triage":
         from forge.findings.triage import execute_security_command
 
-        if metadata.get("provider") in ("github", "azure_devops"):
-            # Provider-neutral durable triage: no GitLab client on the
-            # non-GitLab paths (GitHub E3a; Azure DevOps ADR-0024).
+        if metadata.get("provider") in ("github"):
             await execute_security_command(settings, forge_config, session_factory, metadata)
             return
         async with GitLabClient(
@@ -959,15 +957,6 @@ async def execute_run_command(
             await execute_debug_pipeline_command(
                 settings, forge_config, session_factory, metadata, gitlab=gitlab
             )
-        return
-
-    if metadata.get("provider") == "azure_devops":
-        # AZ-2 (ADR-0024): Azure DevOps-subject commands land on the
-        # FlowRun-backed AzureRunService gate path, mirroring the GitHub
-        # dispatch above.
-        from forge.runs.azure_service import execute_azure_run_command
-
-        await execute_azure_run_command(settings, forge_config, session_factory, metadata)
         return
 
     if metadata.get("provider") == "github":
@@ -1713,7 +1702,7 @@ class RunService:
         """The latest non-terminal run for the issue, or None.
 
         R03: scoped to THIS service's provider — ``project_id`` is a
-        provider-local numeric id, so a GitHub/Azure run with the same
+        provider-local numeric id, so a GitHub run with the same
         numbers is a different subject and must never block a GitLab
         /implement.
 
@@ -5527,11 +5516,6 @@ class RunService:
         relabels the appended context block for callers whose context is a
         reviewer's correction rather than a failed-CI repair.
         """
-        # NEXT-11/R32-05: this is the dispatch boundary — the execution
-        # lease is reserved here (idempotently per run), so no path that
-        # reaches the paid proposal (``/go``, ``/retry``, a repair
-        # re-dispatch, the recovery scan) can bypass the project's slot
-        # limit — the same choke point the Azure and GitHub paths cross.
         if not await self._reserve_execution_capacity(project_id, run_id):
             return
         # F22/R13: (re)bind this run's budget guard before any paid call —
@@ -5756,7 +5740,7 @@ class RunService:
                 # A human push on the factory branch is never force-fixed
                 # (review F03): the guarded apply refused, so the run stops
                 # here with the reason — the same contract as the harness
-                # publisher and the GitHub/Azure lanes, and the branch keeps
+                # publisher and the GitHub lanes, and the branch keeps
                 # the human's commit.
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, f"branch_drift: {exc}")
                 return
@@ -7233,7 +7217,7 @@ class RunService:
         evidence, so the resume never re-derives — and never re-pays for —
         an already-recorded result).
 
-        R03: the scan is provider-scoped — GitHub/Azure runs are driven by
+        R03: the scan is provider-scoped — GitHub runs are driven by
         their own reconcilers and would 404 against the GitLab reads here.
         """
         now = now or datetime.now(timezone.utc)
@@ -7322,9 +7306,6 @@ class RunService:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
             issue_iid = run.issue_iid
-            # R03 slice: non-GitLab runs are driven by their own reconcilers
-            # (github_service / azure_service) — the GitLab drift check would
-            # 404 against a foreign provider.
             if getattr(run, "provider", "gitlab") != "gitlab":
                 return
             entry_status = run.status
@@ -8253,7 +8234,7 @@ class RunService:
         await self._release_readiness_hold(run_id)
 
         # ADR-0027: the reason and the finalization iron checks have ONE
-        # shared source (forge.runs.consistency) across GitLab/GitHub/Azure.
+        # shared source (forge.runs.consistency) across GitLab/GitHub.
         reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
         assert_ready_invariants(
             FlowStatus.READY_FOR_HUMAN.value,
@@ -9287,11 +9268,8 @@ class RunService:
             )
             return
 
-        # GitHub/Azure-subject runs are polled by their own harness
-        # reconcilers (runs/github_service.py / runs/azure_service.py) —
-        # the GitLab CI backend cannot read an Actions/Pipelines handle.
-        if getattr(run, "provider", "gitlab") in ("github", "azure_devops") or (
-            '"provider": "github"' in (handle or "") or "azure_pipelines" in (handle or "")
+        if getattr(run, "provider", "gitlab") in ("github") or (
+            '"provider": "github"' in (handle or "")
         ):
             return
 
@@ -9812,11 +9790,7 @@ class RunService:
         ``accepted`` ladder rung and ``forge_runs_accepted``; ``closed``
         records an honest rejection. A run with a recorded decision is never
         re-read — acceptance is counted exactly once — and an API failure
-        just waits for the next tick.
-
-        R03: GitLab-scoped like ``evaluate_ready_evidence`` — the GitHub and
-        Azure lanes get their acceptance reads from their own reconcilers.
-        """
+        just waits for the next tick."""
         async with self._session_factory() as session:
             runs = (
                 (
@@ -11117,22 +11091,7 @@ class RunService:
             )
 
     async def _reserve_execution_capacity(self, project_id: int, run_id: str) -> bool:
-        """NEXT-11/R32-05: take the execution lease at DISPATCH — or park honestly.
-
-        The single choke point every GitLab dispatch leg crosses (``/go``,
-        the ``/retry`` revival, a repair re-dispatch, the recovery scan's
-        re-drive): a durable CAS insert reserves one of the project's
-        execution slots, idempotent per run, held until the terminal
-        transition releases it — the same contract the Azure and GitHub
-        paths enforce. Queue admission counted ACTIVE runs at
-        ``/implement`` time; four approved tasks could otherwise all
-        activate together. A dispatch that cannot reserve parks the run
-        ``blocked(execution_capacity)`` with the capacity snapshot in its
-        evidence and an issue note carrying the precise next action — a
-        queued state with a reason, never work an observer must later
-        stop, and never a repair-budget consumer. Returns whether the
-        dispatch may run.
-        """
+        """Take the execution lease at dispatch or park the run."""
         policy = FairUsePolicy.from_env()
         lease = await try_acquire_lease(
             policy, project_id, self._session_factory, run_id=run_id, provider="gitlab"

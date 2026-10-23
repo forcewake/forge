@@ -181,16 +181,6 @@ class Capability:
         }
 
 
-# ---------------------------------------------------------------------------
-# The seeded registry — honest state of the tree at NXT-02 (2026-09-22).
-#
-# Every entry_point below was verified by reading the dispatch path:
-# gateway/{router,github_webhook,azure_webhook} → runs/service.run_command →
-# runs/backends → ci/templates. Adaptive rows carry entry_point=None because
-# grep found no caller from that path — do not "fix" them by trusting a
-# docstring; wire the path, then flip the row with the wiring's evidence.
-# ---------------------------------------------------------------------------
-
 _RUN_COMMAND_ENTRY = (
     "forge.gateway.router._RUN_COMMANDS -> forge.runs.service.RunService.run_command"
 )
@@ -203,9 +193,7 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         entry_point=_RUN_COMMAND_ENTRY,
         evidence=("tests/test_slash_routing.py", "tests/test_runs_revival.py"),
         commands=CLASSIC_OPERATOR_COMMANDS,
-        note="All three provider ingresses (GitLab router, GitHub webhook, Azure "
-        "webhook) route exactly this set onto the durable run-command path; "
-        "anything else the ingress receives is 'Unknown run command' and ignored.",
+        note="Both provider ingresses (GitLab router and GitHub webhook) route exactly this set onto the durable run-command path; anything else the ingress receives is 'Unknown run command' and ignored.",
     ),
     Capability(
         name="operator-commands/adaptive",
@@ -220,7 +208,6 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
             "tests/test_adaptive_command_router.py",
             "tests/test_gateway_issue_lifecycle.py",
             "tests/test_github_webhook.py",
-            "tests/test_azure_webhook.py",
         ),
         commands=ADAPTIVE_OPERATOR_COMMANDS,
         note="NXT-10: all three provider ingresses parse /pause /resume /steer "
@@ -266,7 +253,7 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         "FORGE_MAX_REVIEW_ROUNDS. Behind "
         "FORGE_REVIEW_FEEDBACK_ENABLED, default OFF (with the flag off the "
         "verbs are not parsed at all: zero routing). PLATFORM-SCOPED: "
-        "GitLab MR notes only — the GitHub and Azure ingresses do not parse "
+        "GitLab MR notes only — the GitHub ingresses do not parse "
         "the verbs (parity deliberately unclaimed until one native path is "
         "qualified).",
     ),
@@ -401,7 +388,7 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         "semantics, content-addressed evidence, evidence:<id> citation "
         "validation) is SPLICED into the GitHub /implement planning path — "
         "DISABLED BY DEFAULT (FORGE_DISCOVERY_ENABLED); the classic flow is "
-        "byte-for-byte identical while off. GitLab/Azure planning paths not "
+        "byte-for-byte identical while off. GitLab planning paths not "
         "spliced yet.",
     ),
     Capability(
@@ -510,18 +497,12 @@ def ingress_routed_commands() -> frozenset[str]:
     gate is disclosed in the owning row's note, like the adaptive rollout
     flag).
     """
-    from forge.gateway import azure_webhook, github_webhook
+    from forge.gateway import github_webhook
     from forge.gateway import router as gateway_router
 
-    classic = (
-        gateway_router._RUN_COMMANDS
-        | github_webhook._GITHUB_RUN_COMMANDS
-        | azure_webhook._AZDO_RUN_COMMANDS
-    )
-    adaptive = (
-        getattr(gateway_router, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
-        | getattr(github_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
-        | getattr(azure_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
+    classic = gateway_router._RUN_COMMANDS | github_webhook._GITHUB_RUN_COMMANDS
+    adaptive = getattr(gateway_router, "_ADAPTIVE_NOTE_COMMANDS", frozenset()) | getattr(
+        github_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset()
     )
     feedback: frozenset[str] = getattr(
         gateway_router, "_REVIEW_FEEDBACK_NOTE_COMMANDS", frozenset()

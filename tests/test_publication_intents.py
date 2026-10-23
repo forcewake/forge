@@ -18,14 +18,14 @@ A12 adds the effect-certainty contract: a NEGATIVE probe (zero marker hits,
 head intact) is not proof that no remote effect is pending — the provider
 may have accepted the first request and be applying it slowly. On GitLab
 (no branch-wide CAS) the intent settles in the bounded ``probing`` window
-and an exhausted window parks a visible unknown; on GitHub/Azure the CAS
+and an exhausted window parks a visible unknown; on GitHub the CAS
 makes the released redispatch inherently duplicate-safe.
 
 Also covered: the pure probe decision table
 (:func:`forge.durable.intents.classify_probe`), the R10 superseded
 interplay (a cancelled/terminal run's intent resolves ``duplicated``, never
 adopted-into-READY), the migration-relevant model state machine, and the
-Azure stale-CAS adoption.
+native stale-CAS adoption.
 """
 
 from __future__ import annotations
@@ -64,11 +64,10 @@ from forge.durable.intents import InvalidIntentTransition
 from forge.integrations.github_flow import GitHubPublishFlow, github_factory_branch
 from forge.models.base import Base
 from forge.repository import Change, ChangeSet, ChangesetWriter, Operation, WriteOutcome
+from forge.repository.changeset import ChangeSet as RepoChangeSet
 from forge.repository.writer import BranchDriftError, WriteResult
-from forge.runs.azure_service import AzureRunService, _changeset_to_commits
 from forge.runs.github_service import GitHubRunService
 from forge.runs.publisher import publish_candidate
-from forge.repository.changeset import ChangeSet as RepoChangeSet
 from tests.fixtures.fake_github import FakeGitHub
 from tests.fixtures.fake_gitlab import FakeGitLab
 
@@ -305,13 +304,13 @@ class TestProbeDecisionTable:
 class TestRedispatchGuaranteeTable:
     """A12 per-adapter guarantees (research doc §summary matrix)."""
 
-    def test_github_and_azure_are_cas_protected(self):
+    def test_only_native_cas_adapters_are_cas_protected(self):
         assert (
             redispatch_guarantee("github") is RedispatchGuarantee.CAS_PROTECTED
         )  # createCommitOnBranch expectedHeadOid — a branch-wide CAS
         assert (
-            redispatch_guarantee("azure_devops") is RedispatchGuarantee.CAS_PROTECTED
-        )  # pushes oldObjectId → staleOldObjectId — a branch-wide CAS
+            redispatch_guarantee("retired-provider") is RedispatchGuarantee.UNPROTECTED
+        )  # Unknown or retired adapters never inherit a CAS guarantee.
 
     def test_gitlab_has_no_cas(self):
         assert redispatch_guarantee("gitlab") is RedispatchGuarantee.UNPROTECTED
@@ -948,7 +947,7 @@ class TestGitHubFlowAdoption:
 
 
 # ---------------------------------------------------------------------------
-# A12: delayed apply on GitHub/Azure CAS — the branch-wide CAS refuses the
+# A12: delayed apply on GitHub CAS — the branch-wide CAS refuses the
 # duplicate, so a redispatch off a negative probe is inherently safe
 # ---------------------------------------------------------------------------
 
@@ -1227,157 +1226,98 @@ class TestGitHubIntentScanner:
 
 
 # ---------------------------------------------------------------------------
-# Azure DevOps: marker + stale-CAS adoption
+# Native provider: marker + stale-CAS adoption
 # ---------------------------------------------------------------------------
 
 
-class TestAzureAdoption:
-    def test_changeset_to_commits_embeds_marker(self):
-        from forge.repository import Change as RepoChange, Operation as RepoOperation
+class TestRetainedNativeCASAdoption:
+    """The retired adapter's marker/adoption contract on the live native port."""
 
-        cs = RepoChangeSet(
-            branch="forge/42/abcd1234",
-            commit_message="forge: implement 42",
-            changes=[RepoChange(path="src/app.py", operation=RepoOperation.UPDATE, content="x")],
+    def _fake(self):
+        fake = FakeGitHub()
+        fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+        fake.heads[REPO]["main"] = BASE_HEAD
+        return fake
+
+    async def test_publication_embeds_the_frozen_operation_marker(self):
+        fake = self._fake()
+        key = "nativeopk1234"
+        result = await GitHubPublishFlow(fake, base_branch="main").publish_changeset(
+            OWNER,
+            REPO_NAME,
+            issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/feature.py"),
+            expected_head=BASE_HEAD,
+            operation_key=key,
         )
-        (commit,) = _changeset_to_commits(cs, operation_key="azureopk1234")
-        assert commit.comment == "forge: implement 42 (forge-op:azureopk1234)"
-        (bare,) = _changeset_to_commits(cs)
-        assert bare.comment == "forge: implement 42"
+        assert result.ok
+        (commit,) = fake.commits[REPO][GBRANCH]
+        assert op_marker(key) in commit["message"]
+        assert len(fake.calls_of("create_commit_on_branch")) == 1
 
-    async def test_stale_cas_adopts_previous_push(self, session_factory):
-        """staleOldObjectId → probe: the previous attempt's landed commit
-        (marker + expected parent) is adopted, never re-pushed."""
-        from tests.test_azure_runs import FakeAzureDevOps
-
-        fake = FakeAzureDevOps()
-        key = "azurestalek12"
-        # Previous attempt landed with its response lost:
+    async def test_stale_cas_adopts_previous_push(self):
+        fake = self._fake()
+        key = "nativestalek12"
         fake.seed_commit(
-            GBRANCH, "a" * 40, f"forge: implement 42 {op_marker(key)}", parents=[BASE_HEAD]
+            REPO, GBRANCH, "a" * 40, f"forge: implement 42 {op_marker(key)}", parents=[BASE_HEAD]
         )
-
-        service = AzureRunService(
-            session_factory,
-            SimpleNamespace(),
-            None,
-            stack=SimpleNamespace(client=fake),
-            repo_full_name="proj/repo",
-        )
-        outcome = await service._publish_changeset(
-            RUN_ID,
+        result = await GitHubPublishFlow(fake, base_branch="main").publish_changeset(
+            OWNER,
+            REPO_NAME,
             issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
             changeset=gh_changeset("src/feature.py"),
-            base_branch="main",
             expected_head=BASE_HEAD,
             operation_key=key,
         )
-
-        assert outcome.ok is True
-        assert outcome.adopted is True
-        assert outcome.commit_oid == "a" * 40
-        # Exactly ONE push attempt — the CAS-refused POST of this re-drive —
-        # and it landed nothing (the adopted commit is the previous
-        # attempt's). No duplicate push survived.
-        assert len(fake.calls_of("push_commits")) == 1
-        assert len(fake.commits[GBRANCH]) == 1
+        assert result.ok and result.adopted
+        assert result.commit_oid == "a" * 40
+        assert len(fake.calls_of("create_commit_on_branch")) == 1
+        assert len(fake.commits[REPO][GBRANCH]) == 1
 
 
-class TestA12DelayedApplyAzureCAS:
-    def _service(self, session_factory, fake) -> AzureRunService:
-        return AzureRunService(
-            session_factory,
-            SimpleNamespace(),
-            None,
-            stack=SimpleNamespace(client=fake),
-            repo_full_name="proj/repo",
-        )
+class TestRetainedDelayedApplyNativeCAS:
+    """Both ordering schedules retain the same branch-wide CAS assertion."""
 
-    async def test_slow_first_push_cannot_double_the_redispatch(self, session_factory):
-        """The first push is ACCEPTED but its application is delayed; the
-        re-drive's negative probe sees the unchanged head and redispatches.
-        The pushes API's branch-wide CAS (``oldObjectId``) makes both landing
-        impossible — exactly one effect survives."""
-        from tests.test_azure_runs import FakeAzureDevOps
-
-        fake = FakeAzureDevOps()
-        key = "azslowpk1234"
-        service = self._service(session_factory, fake)
-
-        fake.delayed_apply = True  # A accepted, application in flight
-        first = await service._publish_changeset(
-            RUN_ID,
-            issue_number=GITHUB_ISSUE,
-            changeset=gh_changeset("src/feature.py"),
-            base_branch="main",
-            expected_head=BASE_HEAD,
-            operation_key=key,
-        )
-        assert first.ok is True
-        assert fake.heads[GBRANCH] == BASE_HEAD, "accepted, not yet applied"
-        assert len(fake.pending_pushes) == 1
-
-        # The negative probe would see exactly this old head. The redispatch
-        # is applied immediately (the CAS evaluates against the same head).
-        fake.delayed_apply = False
-        second = await service._publish_changeset(
-            RUN_ID,
-            issue_number=GITHUB_ISSUE,
-            changeset=gh_changeset("src/other.py"),
-            base_branch="main",
-            expected_head=BASE_HEAD,
-            operation_key=key,
-        )
-        assert second.ok is True
-        assert fake.heads[GBRANCH] == second.commit_oid
-
-        # The slow first push's application finally races in — its CAS
-        # (expected BASE_HEAD, actual = the re-drive's commit) REFUSES it.
-        fake.flush_delayed_pushes()
-        assert fake.delayed_refused == 1
-        assert len(fake.commits[GBRANCH]) == 1, "single effect — no duplicate"
-        assert fake.heads[GBRANCH] == second.commit_oid
-
-    async def test_late_landing_first_push_is_adopted_not_duplicated(self, session_factory):
-        """The delayed application completes BEFORE the redispatch: the
-        re-drive's CAS is refused (``staleObjectId`` — the head moved), the
-        probe finds THIS intent's marker + parent and ADOPTS the
-        late-landing push — one effect, no duplicate."""
-        from tests.test_azure_runs import FakeAzureDevOps
-
-        fake = FakeAzureDevOps()
-        key = "azlatepk1234"
-        service = self._service(session_factory, fake)
-
+    @pytest.mark.parametrize("first_lands", [False, True])
+    async def test_delayed_first_push_has_exactly_one_surviving_effect(self, first_lands):
+        fake = TestRetainedNativeCASAdoption()._fake()
+        key = "nativepending12"
+        flow = GitHubPublishFlow(fake, base_branch="main")
         fake.delayed_apply = True
-        first = await service._publish_changeset(
-            RUN_ID,
+        first = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
             issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
             changeset=gh_changeset("src/feature.py"),
-            base_branch="main",
             expected_head=BASE_HEAD,
             operation_key=key,
         )
-        assert first.ok is True
-        fake.flush_delayed_pushes()  # the slow application lands
-        landed = fake.heads[GBRANCH]
-        assert landed != BASE_HEAD
-        assert op_marker(key) in fake.commits[GBRANCH][0]["comment"]
-
+        assert first.ok
+        assert fake.heads[REPO][GBRANCH] == BASE_HEAD
+        assert len(fake.pending_delayed_commits[GBRANCH]) == 1
+        if first_lands:
+            fake.flush_delayed_apply(GBRANCH)
         fake.delayed_apply = False
-        second = await service._publish_changeset(
-            RUN_ID,
+        second = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
             issue_number=GITHUB_ISSUE,
-            changeset=gh_changeset("src/other.py"),
-            base_branch="main",
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/retry.py"),
             expected_head=BASE_HEAD,
             operation_key=key,
         )
-
-        assert second.ok is True
-        assert second.adopted is True
-        assert second.commit_oid == landed  # the previous attempt's push
-        assert len(fake.commits[GBRANCH]) == 1  # one push, no duplicate
+        assert second.ok
+        assert second.adopted is first_lands
+        if not first_lands:
+            fake.flush_delayed_apply(GBRANCH)
+            assert fake.delayed_refused == 1
+        assert len(fake.commits[REPO][GBRANCH]) == 1
+        assert fake.heads[REPO][GBRANCH] == second.commit_oid
+        assert op_marker(key) in fake.commits[REPO][GBRANCH][0]["message"]
 
 
 # ----------------------------------------------------------------------

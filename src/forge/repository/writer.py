@@ -1,27 +1,14 @@
-"""GitLab write path: materialize a ChangeSet as a real branch + commit.
+"""GitLab write path: materialize a ChangeSet as a branch and commit.
 
-Journaling per ADR-0005: the commit intent is written to ``action_log`` AND
-``publication_intents`` *before* dispatch (one transaction — R11) and
-completed with ``succeeded`` / ``failed`` / ``unknown_outcome`` after. The
-publication intent's ``operation_key`` is minted ONCE per intent and rides
-in the commit message as ``(forge-op:<key>)``; a lost create-commit response
-is reconciled by listing the branch commits and requiring this intent's
-exact marker AND the expected parent OID. Anything else stays
-``unknown_outcome`` and the caller must block the run — never blind-retry.
+Commit the action and publication intent in one transaction before dispatch.
+A stable operation key travels in the commit message. Recovery probes for
+exactly one matching marker and expected parent before any new write.
 
-Re-entry (the R11 recovery): when a previous attempt's intent is still open
-(``requested``/``dispatched``/``probing`` — the process died around the
-effect), ``apply`` PROBES the remote by identity BEFORE any new dispatch:
-exactly one marker+parent match adopts the landed commit (no duplicate);
-zero matches with the head intact does NOT immediately re-dispatch (A12) —
-the intent parks in the ``probing`` certainty window for a bounded settle
-period (``FORGE_PUBLISH_SETTLE_SECONDS``, 30s default, backed off) and only
-a re-probe at the window end may decide: still negative on this CAS-less
-lane means ``unknown_outcome`` with operator instructions (absence of an
-in-flight GitLab effect is unprovable), a late-landing commit is ADOPTED.
-Zero matches with a moved head raises :class:`BranchDriftError` (intent
-``duplicated``); an inconclusive probe stays unknown. A fresh per-call key
-would make the landed commit unfindable — that was the bug.
+A negative read cannot establish that an in-flight GitLab commit will never
+land. Keep bounded, backed-off certainty windows; after the last negative
+probe, park unknown with operator guidance. Adopt a late matching commit.
+A foreign head is BranchDriftError and preserves the human commit; an
+inconclusive probe remains unknown. Never replace the key or blindly retry.
 """
 
 from __future__ import annotations
@@ -454,7 +441,7 @@ class ChangesetWriter:
             return WriteResult(WriteOutcome.UNKNOWN, None)
 
         # SettleDecision.REDISPATCH — reachable ONLY for CAS-protected
-        # adapters (github/azure_devops): the certainty window expired
+        # adapters (github): the certainty window expired
         # still-negative and the release (``probing → dispatched``) already
         # happened inside the settle machine. On this GitLab transport the
         # guarantee table never says redispatch (no branch-wide CAS — the

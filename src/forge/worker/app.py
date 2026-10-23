@@ -18,7 +18,6 @@ from forge.mcp_client.manager import MCPConnectionManager
 from forge.mcp_client.registry import MCPRegistry
 from forge.orchestrator.orchestrator import Orchestrator
 from forge.runs import RunService, execute_run_command, run_reconciler
-from forge.runs.azure_service import run_azure_harness_reconciler
 from forge.runs.github_service import (
     run_github_harness_reconciler,
     run_github_publication_intents_reconciler,
@@ -309,12 +308,6 @@ async def main() -> None:
                 redis_manager,
             ),
             run_reconciler(run_service, interval_seconds=15, shutdown_event=shutdown_event),
-            run_azure_harness_reconciler(
-                settings,
-                forge_config,
-                session_factory,
-                shutdown_event=shutdown_event,
-            ),
             run_github_harness_reconciler(
                 settings,
                 forge_config,

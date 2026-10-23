@@ -127,9 +127,3 @@ ROUND_ADMISSION_CALLERS: tuple[str, ...] = ("forge.runs.round_admission", "forge
 COMMAND_OUTCOME_JOURNALING_MODULE: str = "forge.runs.service"
 
 COMMAND_OUTCOME_PROJECTION_MODULE: str = "forge.adaptive.operator_view"
-
-CONTINUATION_PROVIDER_GAPS = (
-    "The lane-resume dispatch contract is wired on GitHub and GitLab CE. "
-    "Azure remains the honest gap: it carries no resume-mode selection. "
-    "All three lanes share retry refusal semantics through runs.revival.retry_rejection."
-)

@@ -3463,14 +3463,7 @@ class GitHubRunService:
         task text, the plan artifact and the model route come from it, never
         from live settings or a live issue re-read. A missing, tampered or
         legacy (v2) spec parks the run (``spec_invalid`` / ``spec_legacy``),
-        never a silent fallback.
-
-        NEXT-11/R32-05: this is the dispatch boundary — the execution
-        lease is reserved here (idempotently per run), so no path that
-        reaches execution (``/go``, ``/retry``, the reconciler's re-drive)
-        can bypass the project's slot limit — the same choke point the
-        Azure path crosses.
-        """
+        never a silent fallback."""
         if not await self._reserve_execution_capacity(
             run_id, project_id=project_id, issue_number=issue_number
         ):
@@ -6615,7 +6608,7 @@ class GitHubRunService:
 
         verified = bool(verified)
         # ADR-0027: one reason source and the iron finalization checks,
-        # shared with the GitLab/Azure legs (forge.runs.consistency).
+        # shared with the GitLab legs (forge.runs.consistency).
         reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
         assert_ready_invariants(
             FlowStatus.READY_FOR_HUMAN.value,
@@ -6952,7 +6945,7 @@ class GitHubRunService:
         from the connection's own client (the operator-approved
         repository read over the same credential). A neighbor on another
         provider refuses loudly — the GitHub connection cannot honestly
-        read a gitlab/azure repository, and an authorized neighbor
+        read a gitlab repository, and an authorized neighbor
         nothing can read is a half-built context, never a silently
         narrower one. An injected ``neighbor_reader_factory`` (a
         deployment's connection catalog) resolves them its own way.
@@ -7419,15 +7412,7 @@ class GitHubRunService:
     async def _transition_in_session(
         self, session: AsyncSession, run_id: str, status: FlowStatus, reason: str | None = None
     ) -> None:
-        """One transition inside the caller's open session (committed here).
-
-        NEXT-11/R32-05: a TERMINAL transition frees the run's execution
-        lease in the same breath — the slot is held from dispatch until
-        terminal status, and the terminal landing is the single moment it
-        must return (the same contract the Azure path enforces). A worker
-        that dies before any terminal transition leaks only until the
-        next dispatch in the project reclaims the lease of a terminal run.
-        """
+        "One transition inside the caller's open session (committed here)."
         controller = Controller(session)
         await controller.transition(run_id, status, reason=reason)
         await session.commit()
@@ -7527,21 +7512,7 @@ class GitHubRunService:
     async def _reserve_execution_capacity(
         self, run_id: str, *, project_id: int, issue_number: int
     ) -> bool:
-        """NEXT-11/R32-05: take the execution lease at DISPATCH — or park honestly.
-
-        The single choke point every GitHub dispatch leg crosses (``/go``,
-        the ``/retry`` revival, a repair re-dispatch, the recovery scan's
-        re-drive): a durable CAS insert reserves one of the project's
-        execution slots, idempotent per run, held until the terminal
-        transition releases it. Queue admission counted ACTIVE runs at
-        ``/implement`` time — four approved tasks could otherwise all
-        activate together, exactly as on Azure. A dispatch that cannot
-        reserve parks the run ``blocked(execution_capacity)`` with the
-        capacity snapshot in its evidence and an issue comment carrying
-        the precise next action — a queued state with a reason, never
-        work an observer must later stop, and never a repair-budget
-        consumer. Returns whether the dispatch may run.
-        """
+        """Take the execution lease at dispatch or park the run."""
         policy = FairUsePolicy.from_env()
         lease = await try_acquire_lease(
             policy, project_id, self._session_factory, run_id=run_id, provider="github"

@@ -698,14 +698,6 @@ class DiscoveryRunContext:
     ) -> DiscoveryRunContext:
         """A context whose snapshot loads lazily from a repository reader.
 
-        ``reader`` duck-types the shared read surface — ``get_tree`` plus
-        EITHER ``read_text`` (``GitHubRepositoryReader`` and
-        ``AzureRepositoryReader``) OR the GitLab ``get_file`` blob shape
-        (:class:`~forge.gitlab.client.GitLabClient`, whose file reads come
-        back as base64 ``RepositoryFile`` records;
-        :func:`load_snapshot_files` decodes that fallback itself). The
-        loader is deferred: a disabled stage never touches the provider.
-
         NXT-08: this is now a one-entry delegation to
         :meth:`from_readers` — the single-repo shapes it produces are
         byte-identical to the ones this method built directly. NEXT-07:
@@ -715,8 +707,7 @@ class DiscoveryRunContext:
         ``research-harness`` mode actually reaches the bounded loop. The
         one entry is keyed ``"own"`` (the research menu's documented
         namespace for the run's own repository); the repository IDENTITY
-        still fills every dispatch/evidence field.
-        """
+        still fills every dispatch/evidence field."""
         return cls.from_readers(
             {"own": reader},
             {"own": repository_id},
@@ -823,7 +814,7 @@ async def _reader_file_text(reader: Any, project_id: int, path: str, ref: str) -
     The seam's two accepted shapes (NXT-04's construction-surface lesson:
     the REAL readers, not a fake, define what this seam may call):
 
-    - ``read_text(file_path, ref)`` — the GitHub/Azure readers' decoded
+    - ``read_text(file_path, ref)`` — the GitHub readers' decoded
       read;
     - ``get_file(project_id, file_path, ref)`` — the GitLab client's
       base64 ``RepositoryFile`` shape, decoded here so the GitLab client

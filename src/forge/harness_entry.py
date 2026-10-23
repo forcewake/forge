@@ -41,36 +41,6 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   from THIS checkout — :mod:`forge.runs.execution_profile` — the executed
   twin of the digest frozen into the approved spec).
 
-Brief transport (the dispatch-input size question, decided): the lane
-FETCHES its own brief content from the forge API — the approved plan is
-ALREADY posted as the plan comment (E3a/AZ-2 posted it), so
-``--render-brief`` reads the approved bytes + that comment with the
-runner's read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`), and
-``--render-brief-azure`` reads the Azure DevOps work item + its plan
-comment with a repo-owner-provisioned read-only token
-(:func:`fetch_workitem`, FORGE_AZDO_READ_TOKEN — never forge's PAT). No
-dispatch input ever carries plan text, so no input size limit binds.
-R05 interim: the control plane journals the plan comment's id when it
-posts it and dispatches it as the ``plan_note_id`` input — the lane then
-fetches EXACTLY that comment (:envvar:`FORGE_PLAN_NOTE_ID`, validated
-fail-closed) instead of heuristically scanning the thread.
-A03 (approved bytes, not current bytes): identity alone was not enough —
-the comment body could be edited after ``/go`` and the issue body was read
-LIVE. The control plane now freezes a BriefEnvelope at approval (the task
-title/description + plan text, each sha256-digested, bound by an
-``envelope_digest`` over run_id + the bytes + the spec digest) and
-dispatches it as ``envelope_digest`` + ``spec_digest``. The enforced lane
-extracts the APPROVED sections from the bound comment
-(:func:`forge.harnesses.brief_envelope.extract_approved_sections`),
-re-computes the digest over exactly those bytes and FAILS CLOSED on
-mismatch ("approved brief bytes changed after approval (re-approval
-required)"). The live issue is never read for the task text on the
-enforced path — the brief renders the digest-verified frozen bytes. Only
-when the envelope inputs are absent (legacy replay / other repos) does the
-old live-read posture run, loudly unenforced.
-Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
-works as-is (the workflow owner may ship it however they like).
-
 Driver versions (R15): the driver CLIs install PINNED, never off the
 moving npm dist-tag — a CLI release can silently change lane behavior
 (flags, permission semantics, event schema) between the plan gate and
@@ -99,8 +69,7 @@ swapping a subscription for an API key is a configuration decision the
 lane never detects or polices.
 
 Stdlib + the pure prompt builder only: no forge database, no forge
-credentials — the lane runs forge's CODE, never forge's state.
-"""
+credentials — the lane runs forge's CODE, never forge's state."""
 
 from __future__ import annotations
 
@@ -114,7 +83,6 @@ import re
 import subprocess
 from typing import Any
 import sys
-from html import unescape
 from pathlib import Path
 
 #: Re-exported from :mod:`forge.harnesses.script_render` — the render
@@ -383,128 +351,7 @@ def fetch_issue_context(
     return body, plan_text
 
 
-#: Work items read at GA 7.1; WIT comments only exist as the
-#: ``7.1-preview.4`` stripe (docs/research/2026-09-15-azure-devops.md §1.3/§5.1).
-_AZDO_WIT_API_VERSION = "7.1"
-_AZDO_COMMENTS_API_VERSION = "7.1-preview.4"
-
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
-
-
-def _strip_html(html: str) -> str:
-    """Defensive HTML → text: tags out, entities unescaped, whitespace
-    collapsed (work-item fields are HTML; it never belongs in a prompt)."""
-    text = _HTML_TAG_RE.sub(" ", html or "")
-    return " ".join(unescape(text).split())
-
-
-def _is_bot_identity(identity: str, bot_name: str) -> bool:
-    """Case-insensitive identity match (``uniqueName``, its local part, or a
-    bare display name) — the same tolerance the gateway's bot-loop guard
-    uses for AzDO identities."""
-    left = (identity or "").strip().lower()
-    bot = (bot_name or "").strip().lower()
-    if not left or not bot:
-        return False
-    return left == bot or left.split("@", 1)[0] == bot
-
-
-def fetch_workitem(
-    org_url: str,
-    project: str,
-    work_item_id: int,
-    token: str,
-    *,
-    bot_name: str = "forge-bot",
-) -> tuple[str, str]:
-    """Fetch (work-item body, forge plan comment) from Azure DevOps.
-
-    The AzDO brief transport, mirroring :func:`fetch_issue_context`:
-    stdlib only (the lane runs forge's code without forge's dependencies),
-    Basic auth ``":" + token`` — empty username, colon prefix
-    (docs/research/2026-09-15-azure-devops.md §1.2). The work item is read at
-    ``api-version=7.1``, its comments at the ``7.1-preview.4`` stripe with
-    ``format=markdown`` (the only stripe that family has at 7.1).
-
-    ``System.Description`` is HTML and is stripped defensively; the body
-    is the title plus the description (both live in separate fields, unlike
-    GitHub's single issue body). The plan comment is the latest comment by
-    the bot identity that contains the plan heading — the SAME heuristic
-    as :func:`fetch_issue_context`.
-    """
-    import base64
-    import urllib.request
-
-    def _get(url: str) -> Any:
-        encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Basic {encoded}",
-                "Accept": "application/json",
-                "User-Agent": "forge-harness-entry",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
-
-    base = f"{org_url.rstrip('/')}/{project}/_apis/wit/workItems/{work_item_id}"
-    item = _get(f"{base}?api-version={_AZDO_WIT_API_VERSION}")
-    fields = item.get("fields") if isinstance(item, dict) else {}
-    fields = fields if isinstance(fields, dict) else {}
-    title = str(fields.get("System.Title") or "")
-    description = _strip_html(str(fields.get("System.Description") or ""))
-    body = f"{title}\n\n{description}".strip()
-
-    comments = _get(f"{base}/comments?api-version={_AZDO_COMMENTS_API_VERSION}&format=markdown")
-    entries = comments.get("comments") if isinstance(comments, dict) else comments
-    plan_text = ""
-    for comment in reversed(entries if isinstance(entries, list) else []):
-        author = comment.get("createdBy") if isinstance(comment, dict) else {}
-        author = author if isinstance(author, dict) else {}
-        identity = str(author.get("uniqueName") or author.get("displayName") or "")
-        text = str(comment.get("text") or "") if isinstance(comment, dict) else ""
-        if _is_bot_identity(identity, bot_name) and "plan" in text.lower():
-            plan_text = text
-            break
-    return body, plan_text
-
-
-def fetch_workitem_comment(
-    org_url: str,
-    project: str,
-    work_item_id: int,
-    comment_id: int,
-    token: str,
-) -> str:
-    """Fetch ONE work-item comment by its id — the addressed plan transport.
-
-    B04: the control plane journals the plan comment's ``commentId`` and
-    dispatches it as ``plan_note_id``; the lane reads EXACTLY that comment
-    (stdlib only, same Basic-auth shape as :func:`fetch_workitem`).
-    """
-    import base64
-    import urllib.request
-
-    encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
-    url = (
-        f"{org_url.rstrip('/')}/{project}/_apis/wit/workItems/{work_item_id}"
-        f"/comments/{comment_id}"
-        f"?api-version={_AZDO_COMMENTS_API_VERSION}&format=markdown"
-    )
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Basic {encoded}",
-            "Accept": "application/json",
-            "User-Agent": "forge-harness-entry",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = json.loads(response.read())
-    if not isinstance(data, dict):
-        raise PlanBindingError(f"plan comment {comment_id}: unexpected payload shape")
-    return str(data.get("text") or "")
 
 
 def render_driver_script(
@@ -1149,18 +996,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--render-brief-azure",
-        action="store_true",
-        help="fetch work item + forge plan from Azure DevOps and render the quality brief",
-    )
-    parser.add_argument(
-        "--org-url", default=None, help="org/collection URL for --render-brief-azure"
-    )
-    parser.add_argument("--project", default=None, help="AzDO project for --render-brief-azure")
-    parser.add_argument(
-        "--read-token", default=None, help="read-only work-item token for --render-brief-azure"
-    )
-    parser.add_argument(
         "--mcp",
         default=None,
         help="canonical mcpServers JSON (defaults to $FORGE_HARNESS_MCP)",
@@ -1341,82 +1176,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"harness_entry: brief rendered at {brief_path}")
         return 0
 
-    if args.render_brief_azure:
-        org_url = args.org_url or os.environ.get("FORGE_AZDO_ORG_URL", "")
-        project = args.project or os.environ.get("FORGE_AZDO_PROJECT", "")
-        token = args.read_token or os.environ.get("FORGE_AZDO_READ_TOKEN", "")
-        bot_name = os.environ.get("FORGE_AZDO_BOT_NAME", "forge-bot")
-        issue_number = args.issue or int(os.environ.get("FORGE_ISSUE_NUMBER") or 0)
-        if not (org_url and project and issue_number and token):
-            return _finish(
-                "failed",
-                "harness_entry: --render-brief-azure needs --org-url/--project/"
-                "--issue/FORGE_AZDO_READ_TOKEN",
-            )
-        # B04/A03: the ENFORCED approved-bytes transport — when the control
-        # plane dispatched plan_note_id + envelope_digest + spec_digest, the
-        # brief comes from EXACTLY the addressed comment's approved
-        # sections, re-verified against the frozen envelope digest. A
-        # work-item edit, a substituted second plan comment or a tampered
-        # comment fails the lane CLOSED — never the live-item heuristic,
-        # never a fallback brief. Inputs absent (legacy dispatch) keep the
-        # loud UNENFORCED scan below.
-        run_id = (os.environ.get("FORGE_RUN_ID") or "").strip()
-        plan_note_raw = (os.environ.get("FORGE_PLAN_NOTE_ID") or "").strip()
-        envelope_digest = (os.environ.get("FORGE_ENVELOPE_DIGEST") or "").strip()
-        spec_digest = (os.environ.get("FORGE_SPEC_DIGEST") or "").strip()
-        try:
-            plan_note_id = int(plan_note_raw) if plan_note_raw else 0
-        except ValueError:
-            return _finish("failed", f"harness_entry: bad plan note id {plan_note_raw!r}")
-        brief_path = Path(args.brief or ".forge/brief.md")
-        if plan_note_id and envelope_digest and spec_digest:
-            try:
-                comment_text = fetch_workitem_comment(
-                    org_url, project, issue_number, plan_note_id, token
-                )
-                from forge.harnesses.brief_envelope import (
-                    BriefEnvelopeError,
-                    extract_approved_sections,
-                    verify_brief_envelope,
-                )
-
-                task_title, task_description, plan = extract_approved_sections(comment_text)
-                verify_brief_envelope(
-                    envelope_digest,
-                    run_id=run_id,
-                    task_title=task_title,
-                    task_description=task_description,
-                    plan_text=plan,
-                    spec_digest=spec_digest,
-                )
-            except (PlanBindingError, BriefEnvelopeError) as exc:
-                return _finish("failed", f"harness_entry: {exc}")
-            except OSError as exc:
-                return _finish("failed", f"harness_entry: plan comment fetch failed: {exc}")
-            brief_text = render_brief(f"{task_title}\n{task_description}", plan)
-            repair_context = os.environ.get("FORGE_REPAIR_CONTEXT", "")
-            if repair_context.strip():
-                brief_text += (
-                    "\n\n## Repair context — previous candidate failed verification\n\n"
-                    f"{repair_context[:2000]}\n"
-                )
-            brief_path.parent.mkdir(parents=True, exist_ok=True)
-            brief_path.write_text(brief_text)
-            print(f"harness_entry: brief rendered (envelope-verified) at {brief_path}")
-            return 0
-        print(
-            "harness_entry: FORGE_PLAN_NOTE_ID/ENVELOPE_DIGEST/SPEC_DIGEST absent "
-            "(legacy dispatch) — approved-brief-bytes binding NOT enforced; "
-            "reading the LIVE work item",
-            file=sys.stderr,
-        )
-        body, plan = fetch_workitem(org_url, project, issue_number, token, bot_name=bot_name)
-        brief_path.parent.mkdir(parents=True, exist_ok=True)
-        brief_path.write_text(render_brief(body, plan))
-        print(f"harness_entry: brief rendered at {brief_path}")
-        return 0
-
     if args.collect_candidate:
         # Q35-01: the candidate bytes come from the ACTIVE workspace — the
         # tree the checkout's .forge/workspace-generation pointer names
@@ -1508,9 +1267,6 @@ def main(argv: list[str] | None = None) -> int:
 
     mcp_raw = args.mcp if args.mcp is not None else os.environ.get("FORGE_HARNESS_MCP")
     if mcp_raw is not None and mcp_raw.startswith("$(") and mcp_raw.endswith(")"):
-        # AzDO lane reality (LIVE-found, ADR-0024): an UNDEFINED pipeline
-        # variable reaches the process as its literal "$(NAME)" — treat it
-        # as unset instead of failing the fail-closed parse on junk.
         mcp_raw = None
     try:
         mcp_servers = parse_servers(mcp_raw)

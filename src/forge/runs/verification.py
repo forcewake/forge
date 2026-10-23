@@ -11,7 +11,7 @@ Two concerns live here:
 - :class:`VerificationResult` is the ONE evidence dict every provider
   records under ``flow_runs.evidence["verification"]`` (``status``,
   ``tested_oid``, ``observed_at``, ``producer``). R02: verified must mean
-  the same thing on GitLab, GitHub and Azure DevOps — only
+  the same thing on GitLab and GitHub — only
   ``status="passed"`` is verified; every other form (``pending``,
   ``failed``, ``unknown``, ``not_configured``, ``unverified``) reaches the
   human labeled as what it is, never as a green check.
@@ -58,7 +58,6 @@ FRESHNESS_UNKNOWN = "unknown"
 #: operator can tell WHO claimed a check passed.
 PRODUCER_GITLAB_PIPELINE = "gitlab-pipeline"
 PRODUCER_GITHUB_CHECKS = "github-checks"
-PRODUCER_AZURE_BUILD = "azure-build"
 
 
 def _utc_now_iso() -> str:
@@ -208,7 +207,7 @@ def evaluate(
 
 
 # ----------------------------------------------------------------------
-# A01: the positive-proof contract (GitHub Actions / Azure Pipelines)
+# A01: the positive-proof contract (GitHub Actions)
 # ----------------------------------------------------------------------
 #
 # Verification is POSITIVE PROOF that the required checks RAN and SUCCEEDED
@@ -241,14 +240,6 @@ GITHUB_CODE_FAILURE_CONCLUSIONS: frozenset[str] = frozenset(
 #: human/system, runner timeout) — infrastructure, never code repair.
 GITHUB_INFRA_CONCLUSIONS: frozenset[str] = frozenset({"cancelled", "timed_out"})
 
-#: Azure Pipelines build results that PROVE a check succeeded.
-AZURE_SUCCESS_RESULTS: frozenset[str] = frozenset({"succeeded"})
-#: Azure build results that blame the change (not fully green is not green —
-#: branch policy fails ``partiallySucceeded`` too).
-AZURE_CODE_FAILURE_RESULTS: frozenset[str] = frozenset({"failed", "partiallySucceeded"})
-#: Azure build results that mean the EXECUTION died (canceled/abandoned
-#: validation) — infrastructure, never code repair.
-AZURE_INFRA_RESULTS: frozenset[str] = frozenset({"canceled", "abandoned"})
 
 #: The per-check proof states :func:`evaluate_positive_proof` assigns.
 PROOF_SUCCEEDED = "succeeded"
@@ -392,14 +383,7 @@ def evaluate_positive_proof(
     name (the provider service owns the newest-attempt rule). The proof set
     is *required_jobs* when the frozen spec carries one; when the deployment
     froze NO contract, every OBSERVED check becomes the proof set — so even
-    a lone ``skipped`` workflow never verifies without the waiver (A01 AC2).
-
-    The waiver applies ONLY to genuinely inconclusive conclusions
-    (skipped/neutral/unknown): a waiver can never turn a failure-class or
-    cancelled/timed_out conclusion into proof. Conclusion matching is
-    case-insensitive (GitHub's vocabulary is lowercase, Azure's is
-    camelCase — ``partiallySucceeded``).
-    """
+    a lone ``skipped`` workflow never verifies without the waiver (A01 AC2)."""
     success = frozenset(name.lower() for name in success_conclusions)
     code = frozenset(name.lower() for name in code_failure_conclusions)
     infra = frozenset(name.lower() for name in infra_conclusions)

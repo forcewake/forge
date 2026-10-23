@@ -80,7 +80,6 @@ from forge.harness_entry import (
     TASK_PROMPT,
     render_driver_script,
 )
-from forge.integrations.azure import AzureDevOpsClient, AzureRepositoryReader
 from forge.integrations.github import (
     GitHubClient,
     GitHubRepositoryReader,
@@ -566,15 +565,6 @@ def github_reader() -> GitHubRepositoryReader:
 
 
 @pytest.fixture
-def azure_reader() -> AzureRepositoryReader:
-    return AzureRepositoryReader(
-        AzureDevOpsClient(base_url="https://dev.azure.com/example", token="pat"),
-        "project",
-        "repo",
-    )
-
-
-@pytest.fixture
 def gitlab_client() -> GitLabClient:
     return GitLabClient(base_url="https://gitlab.example", token="token")
 
@@ -582,22 +572,19 @@ def gitlab_client() -> GitLabClient:
 class TestDiscoveryReaderDuckType:
     """The snapshot seam's calls fit the REAL GitHub/GitLab/Azure readers."""
 
-    def test_all_three_construct_side_effect_free(self, github_reader, azure_reader, gitlab_client):
+    def test_all_three_construct_side_effect_free(self, github_reader, gitlab_client):
         assert isinstance(github_reader, GitHubRepositoryReader)
-        assert isinstance(azure_reader, AzureRepositoryReader)
         assert isinstance(gitlab_client, GitLabClient)
 
-    def test_get_tree_matches_the_seam_on_all_three(
-        self, github_reader, azure_reader, gitlab_client
-    ):
+    def test_get_tree_matches_the_seam_on_all_three(self, github_reader, gitlab_client):
         # load_snapshot_files issues: reader.get_tree(project_id, "", ref, recursive=True)
-        for reader in (github_reader, azure_reader, gitlab_client):
+        for reader in (github_reader, gitlab_client):
             method = getattr(type(reader), "get_tree")
             assert inspect.iscoroutinefunction(method), f"{type(reader).__name__}.get_tree"
             _binds(method, 1, "", "main", recursive=True)
 
-    def test_read_text_matches_the_seam_on_github_and_azure(self, github_reader, azure_reader):
-        for reader in (github_reader, azure_reader):
+    def test_read_text_matches_the_seam_on_github_and_azure(self, github_reader):
+        for reader in (github_reader,):
             method = getattr(type(reader), "read_text")
             assert inspect.iscoroutinefunction(method)
             _binds(method, "src/app.py", "main")

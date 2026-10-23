@@ -175,7 +175,6 @@ from forge.adaptive.project_credentials import (
 )
 
 __all__ = [
-    "AZURE_CREDENTIAL_GROUP_ENV",
     "BROKER_RECEIPT_SCHEMA",
     "CONSUMER_RECEIPT_SCHEMA",
     "CREDENTIAL_DELIVERY_REF_VARIABLE",
@@ -189,7 +188,6 @@ __all__ = [
     "DELIVERY_PLAN_SCHEMA",
     "DELIVERY_ROUTE_ENV",
     "DELIVERY_TEMPLATE_DIR_ENV",
-    "DEFAULT_AZURE_CREDENTIAL_GROUP",
     "DRIVER_TEMPLATE_FILES",
     "ENV_REF_SCHEME",
     "EVIDENCE_OPERATION_GRANTS_KEY",
@@ -789,15 +787,6 @@ DELIVERY_TEMPLATE_DIR_ENV = "FORGE_CREDENTIAL_TEMPLATE_DIR"
 #: credential ref ONLY; the workflow reads the repo/org/environment secret
 #: named ``FORGE_MODEL_<REF>`` runner-side (research doc 01).
 DELIVERY_MODE_GITHUB_NATIVE = "github-native-secret"
-#: The native Azure Pipelines profile (a): templateParameters carry the
-#: ref only; a secret variable inside an authorized VARIABLE GROUP is the
-#: documented carrier (research doc 02 — parameters are documented "No
-#: support for secret values").
-DELIVERY_MODE_AZURE_GROUP = "azure-variable-group"
-#: The native GitLab CE profile (a): the trigger payload carries the ref
-#: only; a protected+masked project/group CI/CD variable named
-#: ``FORGE_MODEL_<REF>`` is the carrier (research doc 03 — trigger
-#: variables display on job pages and OUTRANK project variables).
 DELIVERY_MODE_GITLAB_PROTECTED = "gitlab-protected-variable"
 #: Profile (b) — runner-time redemption over the EXISTING authenticated
 #: lane-control channel: the lane holds an attempt-scoped HMAC token and
@@ -808,7 +797,6 @@ DELIVERY_MODE_RUNNER_REDEMPTION = "runner-redemption"
 #: modes it supports. Exactly ONE supported transport per profile.
 PROFILE_DELIVERY_MODES: dict[str, frozenset[str]] = {
     "github": frozenset({DELIVERY_MODE_GITHUB_NATIVE, DELIVERY_MODE_RUNNER_REDEMPTION}),
-    "azure": frozenset({DELIVERY_MODE_AZURE_GROUP, DELIVERY_MODE_RUNNER_REDEMPTION}),
     "gitlab": frozenset({DELIVERY_MODE_GITLAB_PROTECTED, DELIVERY_MODE_RUNNER_REDEMPTION}),
 }
 
@@ -816,7 +804,6 @@ PROFILE_DELIVERY_MODES: dict[str, frozenset[str]] = {
 #: validates against (under :data:`DELIVERY_TEMPLATE_DIR_ENV`).
 PROFILE_TEMPLATE_FILES: dict[str, str] = {
     "github": "forge-harness.github.yml",
-    "azure": "forge-lane.azure-pipelines.yml",
     "gitlab": "claude-code.gitlab-ci.yml",
 }
 
@@ -824,7 +811,7 @@ PROFILE_TEMPLATE_FILES: dict[str, str] = {
 #: every driver dispatches through ITS OWN harness recipe — the SDK
 #: lanes and the batch lanes are different files — so the conformance
 #: validates the DISPATCHED driver's template, never claude-code's by
-#: default. The github/azure profiles carry ONE parameterized template
+#: default. The github profiles carry ONE parameterized template
 #: per profile (``FORGE_DRIVER`` / the ``driver`` parameter), so those
 #: profiles keep :data:`PROFILE_TEMPLATE_FILES`.
 DRIVER_TEMPLATE_FILES: dict[str, str] = {
@@ -853,23 +840,9 @@ CREDENTIAL_DELIVERY_REDEEM_VARIABLE = "FORGE_CREDENTIAL_REDEEM"
 #: provisioning step per bound ref; rotation overwrites the secret).
 CREDENTIAL_SECRET_PREFIX = "FORGE_MODEL_"
 
-#: The Azure variable group holding the lane's secret variables (the
-#: protected resource the pipeline is authorized against; research doc 02).
-AZURE_CREDENTIAL_GROUP_ENV = "FORGE_AZURE_CREDENTIAL_GROUP"
-DEFAULT_AZURE_CREDENTIAL_GROUP = "forge-lane-credentials"
-
 
 def credential_secret_segment(credential_ref: str) -> str:
-    """The secret-name-safe segment of a credential ref.
-
-    ``env:ANTHROPIC_AUTH_TOKEN`` → ``ENV_ANTHROPIC_AUTH_TOKEN``;
-    ``vault:kv/eng#42`` → ``VAULT_KV_ENG_42`` (upper-case, every char
-    outside ``[A-Za-z0-9_]`` becomes ``_`` — the charset GitHub secret
-    names, GitLab variable names and Azure variable names all accept).
-    The derivation is lossy by design (two refs MAY share a segment —
-    the native profile's carrier is per provider route anyway, whose
-    env slot :data:`PROVIDER_ENV_VARS` fixes to ONE variable).
-    """
+    "The secret-name-safe segment of a credential ref."
     cleaned = "".join(char if char.isalnum() or char == "_" else "_" for char in credential_ref)
     return cleaned.upper()
 
@@ -890,12 +863,6 @@ def credential_secret_name(credential_ref: str) -> str:
 #: The schema discriminator of the persisted native locator map.
 NATIVE_LOCATOR_SCHEMA = "forge.credential.native-locator-map/1"
 
-#: The separator between the readable prefix and the ref digest. The
-#: carrier must be provisionable on every provider's native secret
-#: facility, and the three charset surfaces accept ``[A-Z0-9_]`` and
-#: NOT hyphens (GitHub's secret API refuses a hyphenated name with a
-#: 422; GitLab CI/CD variable and Azure variable-group names follow
-#: the env-var shape) — so the locator stays inside that intersection.
 NATIVE_LOCATOR_SEPARATOR = "_"
 
 #: The readable prefix's bound (characters): long enough to keep a
@@ -953,24 +920,7 @@ def _locator_prefix(credential_ref: str) -> str:
 def native_locator(credential_ref: str) -> str:
     """The collision-safe native carrier LOCATOR of a credential ref
     (Q39-04): ``<PREFIX><SEP><DIGEST12>`` — a bounded ASCII-readable
-    prefix + the first 12 hex of sha256 over the FULL ref.
-
-    ``vault:kv/team-a`` → ``TEAMA_505D2A14EE03``; the full carrier name
-    (:func:`native_locator_carrier`) is
-    ``FORGE_MODEL_TEAMA_505D2A14EE03``. Two refs differing by
-    slash/dash/underscore/case — or any Unicode detail — can NEVER share
-    a locator: the digest is over the exact ref, so the readable prefix
-    carrying over (``team-a`` and ``team_a`` both read as ``TEAM…``) is
-    cosmetic, never an alias. Overlength and Unicode refs get the same
-    bounded form (the prefix truncates, the digest disambiguates); a ref
-    with no ASCII identifier characters anywhere refuses typed
-    (``native_locator_unrepresentable``). The locator is CANONICAL
-    UPPERCASE ``[A-Z0-9_]`` — the intersection GitHub secret names,
-    GitLab CI/CD variable names and Azure variable-group names all
-    accept (a ``-`` separator would be refused by GitHub's secret API at
-    provisioning), and one canonical case cannot near-miss under
-    GitHub's case-insensitive secret-name uniqueness.
-    """
+    prefix + the first 12 hex of sha256 over the FULL ref."""
     digest = hashlib.sha256(str(credential_ref).encode("utf-8")).hexdigest()
     return (
         f"{_locator_prefix(credential_ref)}"
@@ -1774,21 +1724,11 @@ _NATIVE_ROUTE_EXPORT_RE = re.compile(
     r"^\s*export\s+(?P<var>[A-Z0-9_]+)=\"\$\w+\"\s*$", re.MULTILINE
 )
 
-#: The Azure shape: the block reads the mapped secret variable directly
-#: (``[ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]``) — the YAML env mapping, not
-#: an export, carries the value.
 _NATIVE_ROUTE_SLOT_CHECK_RE = re.compile(r"\[\s+-z\s+\"\$\{(?P<var>[A-Z0-9_]+):-\}\"\s+\]")
 
 
 def native_route_structural_gaps(template_text: str, env_var: str) -> list[str]:
-    """The STRUCTURAL gaps in a template's native credential route for
-    *env_var* (Q39-04): the guard line, a consumer mapping of the env
-    slot (the export form the gitlab/GitHub lanes use, or the direct
-    slot check the Azure block uses), and the fail-closed marker. A
-    restructured-but-equivalent block still passes (the regexes accept
-    the shape, not a frozen string); a block that merely MENTIONS the
-    route in a comment or a removed mapping fails — structural checks
-    over substring presence, per the issue."""
+    """Return structural gaps in the template's native credential route."""
     text = str(template_text)
     gaps: list[str] = []
     if not _NATIVE_ROUTE_GUARD_RE.search(text):
@@ -1840,13 +1780,6 @@ def delivery_template_conformance(
     onboarding instruction — an older delivery schema never reaches paid
     work).
 
-    Per profile (research docs 01–03): GitHub — the ``credential_ref``
-    input is declared AND the workflow maps the env from the ref-derived
-    secret; GitLab — the ref variable's derived-name consumption is
-    present; Azure — the variable group is referenced AND the group's
-    secret is mapped into the lane env; runner-redemption — the
-    redemption flag consumption is present on every profile.
-
     Q39-04 (#323) adds two dimensions on top of the marker checks:
 
     - *driver* — the DISPATCHED driver's template identity. On the
@@ -1863,8 +1796,7 @@ def delivery_template_conformance(
       ``profile_template_digest_mismatch`` (observability
       ``profile.template_digest_mismatch``) BEFORE any marker check:
       the local shipped template passing proves nothing about a target
-      whose installed template is a different text.
-    """
+      whose installed template is a different text."""
     _assert_driver_route_known(driver)
     if expected_template_digest:
         actual = template_identity_digest(template_text)
@@ -1911,21 +1843,6 @@ def delivery_template_conformance(
             "Variables; the value is the credential) — the lane derives the "
             "variable name from the dispatched ref"
         )
-    elif plan.mode == DELIVERY_MODE_AZURE_GROUP:
-        group = plan.transport_ref.partition("/")[0]
-        secret_name = plan.transport_ref.partition("/")[2]
-        required = (
-            group,
-            f"$({secret_name})",
-        )
-        instruction = (
-            "provision the credential as a SECRET variable in the lane pipeline "
-            f"(recommended: the authorized variable group {group}, Pipelines → "
-            f"Library; the secret is named {secret_name} after the provider env "
-            "slot) and authorize the pipeline against it — the lane template "
-            "maps that secret into the step env; template parameters never "
-            "carry secret values"
-        )
     else:  # runner-redemption — the lane must consume the flag on every profile
         required = (CREDENTIAL_DELIVERY_REDEEM_VARIABLE,)
         instruction = (
@@ -1954,7 +1871,7 @@ def delivery_template_conformance(
     # consumer mapping of the plan's env slot, the fail-closed marker.
     # The gitlab SDK lanes and batch routes are validated against THEIR
     # templates here, not claude-code's; a parameterized single template
-    # (github/azure) passes the same structural floor.
+    # (github) passes the same structural floor.
     gaps = native_route_structural_gaps(template_text, plan.env_var)
     if gaps:
         template_name = (
@@ -2101,11 +2018,6 @@ async def delivery_plan(
     locator = ""
     locator_namespace_value = ""
     if locator_registry is not None and mode != DELIVERY_MODE_RUNNER_REDEMPTION:
-        # The collision-safe allocation (Q39-04): the locator carrier
-        # within THIS provider namespace + route. Azure's carrier stays
-        # the env-slot-named group secret (fixed per route — no ref
-        # spelling in it to collide); the locator is still the dispatch
-        # identity the lane's guard interpolates.
         namespace = locator_namespace(dispatch_credential.subject, profile)
         allocation = locator_registry.allocate(
             dispatch_credential.credential_ref, namespace=namespace, route=mode
@@ -2120,21 +2032,10 @@ async def delivery_plan(
             else credential_secret_name(dispatch_credential.credential_ref)
         )
         dispatch_ref, redemption = segment, False
-    elif mode == DELIVERY_MODE_AZURE_GROUP:
-        group = str(source.get(AZURE_CREDENTIAL_GROUP_ENV, "") or "").strip() or (
-            DEFAULT_AZURE_CREDENTIAL_GROUP
-        )
-        # The group's secret variable is named after the provider's ENV
-        # SLOT — the variable the lane template's per-driver conditional
-        # maps into the step env (Azure macro $(NAME) references and
-        # secret-variable mappings cannot be composed from a runtime
-        # parameter, so the name is fixed per provider route).
-        transport_ref = f"{group}/{dispatch_credential.env_var}"
-        dispatch_ref, redemption = segment, False
     else:  # runner-redemption — the value is redeemed at lane startup
         transport_ref, dispatch_ref, redemption = (
             LANE_CREDENTIAL_REDEEM_ROUTE,
-            (dispatch_credential.credential_ref),
+            dispatch_credential.credential_ref,
             True,
         )
     plan = CredentialDeliveryPlan(

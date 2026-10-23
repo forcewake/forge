@@ -17,12 +17,12 @@ each dimension measured by its own axis:
   ``harness/batch-X`` / ``sdk-lane/X`` rows, the shipped-driver set and
   the binary-sharing table);
 - ``source_platform`` — the SOURCE-CONTROL platform whose provider
-  gateway dispatches the lane (``gitlab`` / ``github`` / ``azure``, from
+  gateway dispatches the lane (``gitlab`` / ``github``, from
   :mod:`forge.gateway` — never the model route a registration used);
 - ``runtime_recipe`` — the :mod:`forge.runs.execution_profile` recipe
   the shipped wiring pins for the cell (``dotnet-9`` for the .NET lane's
   digest-pinned image, ``node-22`` for the scripted GitLab CI templates,
-  ``python-3-13`` for the hosted-python Actions/Azure lanes — never the
+  ``python-3-13`` for the hosted-python Actions lanes — never the
   credential mode, which stays a diagnostic note).
 
 The three evidence sources:
@@ -150,11 +150,6 @@ SOURCE_PLATFORMS: dict[str, SourcePlatform] = {
         gateway="forge.gateway.github_webhook",
         evidence=("tests/test_github_webhook.py",),
     ),
-    "azure": SourcePlatform(
-        platform="azure",
-        gateway="forge.gateway.azure_webhook",
-        evidence=("tests/test_azure_webhook.py",),
-    ),
 }
 
 #: The repo root the on-disk evidence-existence checks resolve against
@@ -248,28 +243,14 @@ def _manifest_driver_of(row_name: str) -> str:
 
 
 def _wired_platforms(driver: str) -> tuple[str, ...]:
-    """The source platforms the shipped wiring carries *driver* on.
-
-    Every shipped lane has a GitLab CI template; the Actions workflow
-    and the Azure pipeline carry every driver EXCEPT the .NET lane
-    (whose digest-pinned image and locked build are GitLab-template
-    only — ``docs/harnesses/dotnet-lane.md``).
-    """
+    "The source platforms the shipped wiring carries *driver* on."
     if driver == "dotnet-lane":
         return ("gitlab",)
-    return ("gitlab", "github", "azure")
+    return ("gitlab", "github")
 
 
 def _wired_runtime_recipe(source_platform: str, driver: str) -> str:
-    """The execution-profile recipe the shipped wiring pins for the cell.
-
-    From the templates + :mod:`forge.runs.execution_profile`: the .NET
-    lane's digest-pinned image is the ``dotnet-9`` recipe; the scripted
-    GitLab CI templates run on the pinned ``node-22`` image; the Actions
-    workflow (``setup-python`` 3.13) and the Azure hosted lanes pin
-    ``python-3-13``. A recipe the vocabulary does not carry cannot be
-    wired — the caller validates against ``RUNTIME_RECIPES``.
-    """
+    "The execution-profile recipe the shipped wiring pins for the cell."
     if driver == "dotnet-lane":
         return "dotnet-9"
     if source_platform == "gitlab":

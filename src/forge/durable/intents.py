@@ -9,7 +9,7 @@ AFTER an ambiguous outcome by PROBING the remote by identity — the
 writer) plus the intent-time expected parent OID. This module is the single
 place that owns the key format, the marker format, the decision table and
 the per-adapter redispatch guarantee, so the GitLab writer and the
-GitHub/Azure DevOps lanes cannot drift.
+GitHub DevOps lanes cannot drift.
 
 Nothing here talks to a provider: probes are performed by the callers (they
 own the clients) and classified through :func:`classify_probe` — the pure
@@ -89,18 +89,7 @@ SETTLE_BACKOFF_FACTOR = 2
 #: and the honest outcome is the conservative park (``PARK_UNKNOWN``).
 MAX_SETTLE_ROUNDS = 3
 
-#: Per-adapter redispatch guarantee (docs/research/2026-09-17-remote-effect-reconciliation.md
-#: §summary matrix). GitHub's ``createCommitOnBranch`` (``expectedHeadOid``)
-#: and Azure DevOps' pushes (``oldObjectId`` → ``staleOldObjectId``) are
-#: BRANCH-WIDE compare-and-swap writes: a redispatch carrying
-#: ``expected_parent`` == the unchanged head is INHERENTLY safe even while a
-#: first write is slow-in-flight — whichever write applies second finds the
-#: head moved and the CAS refuses it, so both landing is impossible. GitLab's
-#: ``POST /repository/commits`` has NO CAS and no idempotency: a duplicate
-#: POST produces a second, distinct-SHA commit, so on that lane an exhausted
-#: certainty window must park ``unknown`` — absence of effect is unprovable
-#: during in-flight windows.
-CAS_PROTECTED_PROVIDERS: frozenset[str] = frozenset({"github", "azure_devops"})
+CAS_PROTECTED_PROVIDERS: frozenset[str] = frozenset({"github"})
 
 
 class RedispatchGuarantee(StrEnum):
@@ -384,7 +373,7 @@ def commit_matches(
 
     *commits* is the provider-shaped list each client returns:
     ``{"sha"/"id"/"commit_id", "message"/"comment", "parent_ids"/"parents"}``
-    — both GitLab's ``list_commits`` and the new GitHub/Azure listings, so
+    — both GitLab's ``list_commits`` and the new GitHub listings, so
     the three lanes share one matcher. A commit counts ONLY when the exact
     marker is present AND its parents equal the intent-time expectation; the
     human message repeats across repair cycles and proves nothing (F07).

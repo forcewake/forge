@@ -460,43 +460,6 @@ async def _finalize_github(db, verified: bool) -> str:
     return run_id
 
 
-async def _finalize_azure(db, verified: bool) -> str:
-    """Drive the Azure DevOps service's real finalization leg to ready."""
-    from forge.gateway.azure_webhook import azure_project_key
-    from tests.test_azure_runs import FakeAzureDevOps
-    from tests.test_azure_runs import make_service as make_azure_service
-    from tests.test_azure_runs import make_settings as azure_settings
-    from tests.test_azure_runs import make_stack as make_azure_stack
-
-    project_id = azure_project_key(AZURE_PROJECT_GUID)
-    fake = FakeAzureDevOps()
-    fake.seed_work_item(AZURE_WORK_ITEM, "Ship the flux capacitor", "<p>Users cannot reset.</p>")
-    fragment = ready_evidence(verified, CANDIDATE, "azure-build")
-    run_id = await _add_run(
-        db,
-        provider="azure_devops",
-        project_id=project_id,
-        issue_iid=AZURE_WORK_ITEM,
-        evidence={"verification": fragment},  # the gate already recorded its verdict
-        mr_iid=501,
-    )
-    await _seed_executable_spec(
-        db, run_id, provider="azure_devops", project_id=project_id, issue_iid=AZURE_WORK_ITEM
-    )
-    service = make_azure_service(db, fake, settings=azure_settings(), stack=make_azure_stack(fake))
-    await service._review_and_ready(
-        run_id,
-        project_id=project_id,
-        issue_number=AZURE_WORK_ITEM,
-        pr_id=501,
-        candidate_sha=CANDIDATE,
-        base_sha="1" * 40,
-        verified=verified,
-        verification_evidence=fragment,
-    )
-    return run_id
-
-
 @pytest.fixture()
 async def db():
     engine = create_async_engine(
@@ -510,7 +473,7 @@ async def db():
     await engine.dispose()
 
 
-@pytest.mark.parametrize("finalizer", [_finalize_gitlab, _finalize_github, _finalize_azure])
+@pytest.mark.parametrize("finalizer", [_finalize_gitlab, _finalize_github])
 class TestProvidersAgree:
     """The same finalization inputs must land the same outputs on every
     provider — the R27 property that makes the /retry-guard and

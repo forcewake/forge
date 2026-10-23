@@ -1,7 +1,7 @@
 [project]
 name = "forge"
 version = "0.42.0"
-description = "Agentic software factory for GitLab CE, GitHub, and Azure DevOps — issue to reviewed Draft MR/PR; the bot never merges"
+description = "Agentic software factory for GitLab CE and GitHub — issue to reviewed Draft MR/PR; the bot never merges"
 requires-python = ">=3.13"
 license = "BSD-3-Clause"
 
@@ -155,7 +155,7 @@ id = "authority-native_occupancy"
 name = "native_occupancy: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.admission", "forge.runs.admission"]
-allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.service"]
+allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.github_service", "forge.runs.service"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -163,7 +163,7 @@ id = "authority-verification_applicability"
 name = "verification_applicability: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
-allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.usecases"]
+allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -203,7 +203,7 @@ id = "authority-command_acceptance_dedup"
 name = "command_acceptance_dedup: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.gateway.durable_ingress"]
-allowed_importers = ["forge.gateway.azure_webhook", "forge.gateway.durable_ingress", "forge.gateway.github_webhook", "forge.gateway.router"]
+allowed_importers = ["forge.gateway.durable_ingress", "forge.gateway.github_webhook", "forge.gateway.router"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -234,7 +234,7 @@ id = "reference-direction"
 name = "reference package does not import production entry points"
 type = "forbidden"
 source_modules = ["forge.adaptive.reference"]
-forbidden_modules = ["forge.main", "forge.lane_driver", "forge.adaptive.wiring", "forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service"]
+forbidden_modules = ["forge.main", "forge.lane_driver", "forge.adaptive.wiring", "forge.runs.service", "forge.runs.github_service"]
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]

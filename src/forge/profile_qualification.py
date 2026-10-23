@@ -377,7 +377,7 @@ MANIFEST_TRIGGER_AXIS_LABELS: Final[Mapping[str, str]] = {
     "image_digest": "changed server image identity",
 }
 
-_PROVIDERS: Final[frozenset[str]] = frozenset({"gitlab", "github", "azure", "*"})
+_PROVIDERS: Final[frozenset[str]] = frozenset({"gitlab", "github", "*"})
 _VERSION_RE: Final[re.Pattern[str]] = re.compile(r"\d+\.\d+\.\d+([ab.rc]+\d*)?")
 
 #: Observability name for every record-validation outcome in this module

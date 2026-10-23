@@ -86,9 +86,10 @@ def extract_project_map(files: dict[str, str]) -> dict:
             or name == "package.json"
         ):
             manifests.append(path)
-        if path.startswith(".github/workflows/") or name in (
-            ".gitlab-ci.yml",
-            "azure-pipelines.yml",
+        if (
+            path.startswith(".github/workflows/")
+            or name == ".gitlab-ci.yml"
+            or name.endswith("-pipelines.yml")
         ):
             ci_definitions.append(path)
         public_api.extend(_public_api_lines(path, files[path]))

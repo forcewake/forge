@@ -21,7 +21,7 @@ This module is the provider-neutral read contract that ends that:
   them it never ``errors="replace"``-mangles bytes — an undecodable payload
   is ``incomplete``, never silently corrupted text.
 
-Pure stdlib: every provider adapter (GitLab client, GitHub and Azure
+Pure stdlib: every provider adapter (GitLab client, GitHub
 repository readers) and every consumer (implementer, publisher) imports
 this without cycle or dependency risk.
 """

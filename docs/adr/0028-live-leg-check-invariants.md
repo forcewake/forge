@@ -72,7 +72,7 @@ decisions because each one fixes a *guarantee*, not a bug site:
 - `FORGE_AZDO_BOT_NAME` semantics change: it names forge's identity only
   when a dedicated bot exists; shared-PAT deployments leave it non-matching
   and rely on the marker (documented in
-  [azure-setup](../getting-started/azure-devops.md)).
+  [azure-setup](../operations/maintenance-0.42.md)).
 - The FI suite runs against a disposable real Postgres locally
   (`FORGE_PG_TEST_URL`) — the race was invisible to the SQLite-parallel
   unit suite and to a pure-format CI commit, which is why the CI integration

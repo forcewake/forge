@@ -243,7 +243,7 @@ Four rules pin its contract:
 - **Canonical-subject scoping (R37-02).** The reader takes an authorized
   scope of `CanonicalSubject` values — provider family + connection
   identity + native repository identity, derived from each family's OWN
-  columns (GitHub rows by full name, GitLab/Azure rows by `project_id`;
+  columns (GitHub rows by full name, GitLab rows by `project_id`;
   the connection from the run's recorded `evidence["connection"]`, else
   the single-connection default `-`). Display names are
   presentation-only: the same name on two connections or across families

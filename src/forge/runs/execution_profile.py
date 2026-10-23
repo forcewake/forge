@@ -962,8 +962,7 @@ class MaterializedFiles:
 READER_CI_PATHS = (".gitlab-ci.yml", ".github/workflows/ci.yml")
 
 #: What the local view scans for CI commands, beyond :data:`READER_CI_PATHS`.
-_LOCAL_CI_GLOBS = (".github/workflows/*.yml", ".github/workflows/*.yaml")
-_LOCAL_CI_FILES = ("azure-pipelines.yml",)
+_LOCAL_CI_GLOBS = (".github/workflows/*.yml", ".github/workflows/*.yaml", "*-pipelines.yml")
 
 
 @dataclass(frozen=True)
@@ -985,7 +984,7 @@ class LocalRepoSource:
 
     def workflow_texts(self) -> tuple[str, ...]:
         texts: list[str] = []
-        for path in (*READER_CI_PATHS, *_LOCAL_CI_FILES):
+        for path in READER_CI_PATHS:
             read = self.read_file(path)
             if read.status == "found":
                 texts.append(read.content)
@@ -1281,14 +1280,7 @@ def derive_from_repo(source: ProfileSource) -> ExecutionProfile:
 
 
 async def _read_via_reader(reader: Any, project_id: int, path: str, ref: str) -> FileRead:
-    """One typed file read over the provider blob-read surface.
-
-    The reader duck-types ``read_blob(project_id, path, ref) ->``
-    :class:`~forge.gitlab.blob_reads.BlobReadResult` (GitLab, GitHub and
-    Azure DevOps readers all do). Any exception is ``unknown`` — the
-    profile derivation NEVER raises into the freeze (it sharpens the
-    approval contract; it does not gate it).
-    """
+    "One typed file read over the provider blob-read surface."
     blob_read = getattr(reader, "read_blob", None)
     if blob_read is None:
         return FileRead.unknown()

@@ -82,7 +82,7 @@ def _run_target_ref(run: FlowRun) -> str:
 
     GitHub runs carry their subject path directly (``github_repo_full_name``),
     so path globs like ``allowed/*`` match exactly as on the classic surface.
-    GitLab/AzDO rows keep only the provider's numeric subject id — matching
+    GitLab rows keep only the provider's numeric subject id — matching
     R19 semantics, a numeric ref passes only against an explicitly digit
     pattern (``"42"``), never a path glob, so a restricted principal cannot
     widen its allowlist through IDs. A github row with no resolvable full

@@ -495,43 +495,6 @@ async def test_malformed_note_gets_a_usage_reply_not_silence(
     assert await control.pending(RUN_A) == []
 
 
-async def test_provider_scoped_approvers_apply_github_and_azure(session_factory, control, posted):
-    """Authority comes from the PROVIDER's approver set (FORGE_GITHUB_APPROVERS
-    / FORGE_AZDO_APPROVERS with the FORGE_APPROVERS fallback) — never from
-    the note's authorship."""
-    github_router = ControlCommandRouter(
-        session_factory=session_factory,
-        settings=_settings(FORGE_GITHUB_APPROVERS="octocat"),
-        post_note=posted,
-        control=control,
-    )
-    await _seed_run(
-        session_factory,
-        "99887766" + "4" * 24,
-        provider="github",
-        project_id=70010,
-        issue=42,
-    )
-    note = {
-        "command": "adaptive_control",
-        "provider": "github",
-        "adaptive_verb": "pause",
-        "project_id": 70010,
-        "issue_number": 42,
-        "repo_full_name": "acme/acme-widget",
-        "author_username": "octocat",
-        "note_text": "/pause",
-        "note_id": 9011,
-    }
-
-    assert (await github_router.handle(note))["status"] == "applied"
-
-    note["author_username"] = "alice"  # a GitLab-listed approver, not a GitHub one
-    note["note_id"] = 9012
-    assert (await github_router.handle(note))["status"] == "refused"
-    assert "ignored" in posted.bodies[-1]
-
-
 async def test_a_redelivered_steer_after_a_failed_reply_records_one_command(
     session_factory, control
 ):
@@ -675,37 +638,6 @@ def test_github_normalize_issue_comment_gates_adaptive_verbs():
     assert command["adaptive_verb"] == "pause"
     assert command["provider"] == "github"
     assert command["note_id"] == 9010
-
-
-def test_azure_parse_gates_adaptive_verbs():
-    from forge.gateway.azure_webhook import normalize_workitem_comment
-
-    payload = {
-        "eventType": "workitem.commented",
-        "resource": {
-            "id": 142,
-            "rev": 10,
-            "fields": {
-                "System.TeamProject": "Fabrikam",
-                "System.ChangedBy": "dev@fabrikam.example",
-                "System.History": "/pause",
-            },
-        },
-        "resourceContainers": {
-            "project": {"id": "9f8e7d6c-0000-0000-0000-000000000009"},
-            "collection": {"baseUrl": "https://dev.azure.com/fabrikam/"},
-        },
-    }
-
-    assert normalize_workitem_comment(payload) is None
-
-    env = {"FORGE_ADAPTIVE_COMMANDS_ENABLED": "1"}
-    command = normalize_workitem_comment(payload, adaptive_commands=adaptive_command_set(env))
-    assert command is not None
-    assert command["command"] == "adaptive_control"
-    assert command["adaptive_verb"] == "pause"
-    assert command["provider"] == "azure_devops"
-    assert command["issue_number"] == 142
 
 
 # ---------------------------------------------------------------------------

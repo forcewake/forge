@@ -34,7 +34,7 @@ shape — re-drives the dispatch exactly once, guarded by the dispatch legs'
 own journaled actions (an interrupted leg's unknown remote effect is parked
 for an operator, never re-dispatched blind).
 
-Classification lives here (one table) so the GitLab, GitHub and Azure DevOps
+Classification lives here (one table) so the GitLab and GitHub
 services cannot drift apart — the same reason text classifies the same way on
 every lane, and the limits come from the same settings.
 """
@@ -1512,7 +1512,7 @@ def retry_in_flight_rejection(run_id: str) -> str:
 
 # ----------------------------------------------------------------------
 # R29: operator surface around dead/stuck runs (/status, /why-blocked,
-# /reconcile) — shared by the GitLab, GitHub and Azure DevOps services so
+# /reconcile) — shared by the GitLab and GitHub services so
 # the reply content and the target resolution cannot drift per lane.
 # ----------------------------------------------------------------------
 

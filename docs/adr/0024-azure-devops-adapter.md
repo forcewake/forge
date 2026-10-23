@@ -8,7 +8,7 @@ Context: forge runs at full parity on GitLab CE and GitHub
 Server) is the third enterprise platform where the factory loop — authorized
 work item → plan → human gate → coding harness in ephemeral CI → trusted
 publisher → Draft PR → review → ready_for_human — must work. Research base:
-[specs/azure-devops-brief.md](../specs/azure-devops-brief.md) (API ground
+[specs/azure-devops-brief.md](../operations/maintenance-0.42.md) (API ground
 truths verified against learn.microsoft.com REST references, 2026-09).
 
 ## Decision

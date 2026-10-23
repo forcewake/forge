@@ -1,9 +1,10 @@
 # forge documentation
 
-**forge** is an agentic software factory for GitLab CE, GitHub, and Azure
-DevOps: an authorized issue becomes a plan, a human gate, a coding agent in
+**forge** is an agentic software factory for GitHub and GitLab CE: an authorized issue becomes a plan, a human gate, a coding agent in
 ephemeral CI, a trusted publisher, and a Draft MR/PR ready for human
 review. The bot never merges.
+
+Azure DevOps remains on the [0.42.x maintenance line](operations/maintenance-0.42.md).
 
 Start at the [main README](../README.md); this index maps the docs tree.
 
@@ -13,7 +14,6 @@ Start at the [main README](../README.md); this index maps the docs tree.
 |---|---|
 | [GitLab CE project onboarding](getting-started/gitlab.md) | execution profile, bot identity, webhook, CI variables, harness include, `forge doctor` |
 | [GitHub setup](getting-started/github.md) | GitHub App registration, webhook, secrets, harness workflow, label trigger |
-| [Azure DevOps setup](getting-started/azure-devops.md) | service account + PAT scopes, service hooks, lane pipeline, branch policy, live-verification checklist |
 
 ## Harnesses (coding agents in your CI)
 

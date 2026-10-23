@@ -5,30 +5,6 @@ adapter actually does today — the facts a conformance kit (and a future
 adapter author) needs to tell a genuine capability difference from a
 lifecycle violation:
 
-- **How the write enforces compare-and-swap.** GitHub's
-  ``createCommitOnBranch`` pins ``expectedHeadOid`` and Azure DevOps' push
-  pins ``oldObjectId`` — the PROVIDER refuses a stale head. GitLab's
-  Commits API has no compare-and-swap: forge's own
-  :class:`~forge.repository.writer.ChangesetWriter` checks the branch head
-  before dispatch and raises :class:`~forge.repository.writer.BranchDriftError`
-  (with the R11 intent probe behind lost responses). Both orders REJECT a
-  stale head with zero writes — the invariant is identical, the origin is
-  a record fact, not a test-time guess.
-- **What the merge surface is.** GitHub and Azure DevOps give forge a
-  native pull-request object; GitLab does not anchor the review to provider
-  merge machinery, so forge falls back to a synthetic Draft MR it maintains
-  over the run-owned branch (CI tests the branch head itself). On native-PR
-  lanes the provider may test its own merge ref (GitHub Actions
-  ``pull_request`` runs a synthetic merge revision — a verification-reader
-  concern owned by :mod:`forge.integrations.github_flow`, never conflated
-  with the candidate head).
-- **How harness-lane candidates travel.** On every provider the candidate
-  rides CI artifacts (``candidate.diff`` + ``candidate.meta.json``) — the
-  harness never holds a write token (ADR-0015/0016).
-- **What the readonly review is bound to** — the per-provider surface
-  identity the reviewer reads the candidate diff through, and **whether the
-  lane may record a verified ready verdict at all**.
-
 The registration rule: :func:`verified_ready_capable` returns True only
 when the provider's record claims the capability AND its conformance
 scenarios have passed in this process (:func:`attest_conformance` — the
@@ -48,8 +24,7 @@ with an explicit :class:`AttestationBlockedError`. A helper-level green
 test can no longer smuggle a capability past a mandatory path that was
 never driven, and :func:`conformance_manifest` publishes the
 machine-readable record (per-provider scenario outcomes, skips,
-attestation) CI can attach to a release.
-"""
+attestation) CI can attach to a release."""
 
 from __future__ import annotations
 
@@ -163,16 +138,6 @@ PROVIDER_CAPABILITIES: Mapping[str, ProviderCapability] = {
         readonly_identity=READONLY_IDENTITY_PULL_REQUEST_NUMBER,
         verified_ready_capable=True,
     ),
-    "azure_devops": ProviderCapability(
-        provider="azure_devops",
-        commit_transport="git_push_api",
-        native_cas=True,
-        cas_mechanism=CAS_PUSH_OLD_OBJECT_ID,
-        synthetic_merge_fallback=False,
-        artifact_transport=ARTIFACT_TRANSPORT_CI,
-        readonly_identity=READONLY_IDENTITY_PULL_REQUEST_ID,
-        verified_ready_capable=True,
-    ),
 }
 
 
@@ -241,7 +206,6 @@ COMPOSED_SCENARIOS: Mapping[str, tuple[str, ...]] = {
         # envelope re-verification ("re-approval required").
         "a03_comment_same_id_edited_body",
     ),
-    "azure_devops": (),
 }
 
 

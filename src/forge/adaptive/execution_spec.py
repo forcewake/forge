@@ -128,7 +128,6 @@ RESUME_MODE_WORDS = frozenset({"fresh", "required", "restart"})
 CREDENTIAL_MODES = frozenset(
     {
         "github-native-secret",
-        "azure-variable-group",
         "gitlab-protected-variable",
         "runner-redemption",
         "ambient-legacy",
@@ -137,19 +136,13 @@ CREDENTIAL_MODES = frozenset(
 
 #: The provider legs the matrix knows (the dispatch profiles the
 #: credential broker and the shipped templates name).
-SUPPORTED_PROVIDERS = frozenset({"github", "gitlab", "azure"})
+SUPPORTED_PROVIDERS = frozenset({"github", "gitlab"})
 
-#: The runtime recipes the shipped lane templates implement. The recipe
-#: decides resume capability: the scripted batch lanes restore no
-#: checkpoint (a ``required`` resume refuses in the template itself),
-#: the SDK lane and the GitHub harness restore exactly; the Azure lane
-#: carries no resume-mode surface at all (the registry's honest gap).
 RUNTIME_RECIPES = frozenset(
     {
         "github-harness-entry",
         "gitlab-sdk-lane",
         "gitlab-batch-script",
-        "azure-harness-entry",
     }
 )
 
@@ -228,16 +221,7 @@ def supported_compositions() -> tuple[SupportedComposition, ...]:
     no duplicated approval/publication/continuation logic — the row
     composes the SAME contracts).
 
-    Honest boundaries carried by the set (never fabricated parity):
-
-    - the GitLab BATCH scripted lanes (claude-code and siblings) have
-      NO checkpoint restore — ``resume_supported=False`` — and the
-      GitHub harness + GitLab SDK lanes do;
-    - the Azure lane carries no resume-mode surface (the registry's
-      documented gap) and only the variable-group + redemption routes;
-    - ``ambient-legacy`` (an unbound dispatch) appears only where the
-      shipped template documents it as the legacy window.
-    """
+    Honest boundaries carried by the set (never fabricated parity):"""
     return (
         # GitHub Actions harness — the adopted dispatch leg (ADR-0029's
         # ladder): every driver the workflow input documents, the two
@@ -317,9 +301,6 @@ def supported_compositions() -> tuple[SupportedComposition, ...]:
             consumer_contract=_CONSUMER_CONTRACT,
             resume_supported=False,
         ),
-        # The unbound (ambient-legacy) windows the shipped GitHub and
-        # Azure templates document: a dispatch that predates the #303
-        # ref inputs keeps receiving the unchanged legacy payload.
         SupportedComposition(
             provider="github",
             runtime_recipe="github-harness-entry",
@@ -329,28 +310,6 @@ def supported_compositions() -> tuple[SupportedComposition, ...]:
             template_contract=EXECUTION_SPEC_SCHEMA,
             consumer_contract=_CONSUMER_CONTRACT,
             resume_supported=True,
-        ),
-        # Azure Pipelines (ADR-0024): the variable-group carrier and the
-        # redemption route; no resume surface (the honest gap).
-        SupportedComposition(
-            provider="azure",
-            runtime_recipe="azure-harness-entry",
-            harness="claude-sdk-lane",
-            credential_route="azure-variable-group",
-            caller_contract=_CALLER_CONTRACT,
-            template_contract=EXECUTION_SPEC_SCHEMA,
-            consumer_contract=_CONSUMER_CONTRACT,
-            resume_supported=False,
-        ),
-        SupportedComposition(
-            provider="azure",
-            runtime_recipe="azure-harness-entry",
-            harness="claude-sdk-lane",
-            credential_route="ambient-legacy",
-            caller_contract=_CALLER_CONTRACT,
-            template_contract=EXECUTION_SPEC_SCHEMA,
-            consumer_contract=_CONSUMER_CONTRACT,
-            resume_supported=False,
         ),
     )
 

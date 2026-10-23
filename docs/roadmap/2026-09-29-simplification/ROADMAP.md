@@ -495,6 +495,10 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P1-11 Remove Azure DevOps from `main`
+- **Status:** implemented locally on 2026-10-23. Azure adapters, ingress,
+  executor, templates and settings are removed; runtime source contains
+  no Azure route. Shared publication-intent and safety contracts remain
+  on GitHub/GitLab. Recovery stays on local `release/0.42.x`.
 - **Goal:** Azure lives on `release/0.42.x`.
 - **Work:**
   - Delete `runs/azure_service.py`, `integrations/azure.py`,

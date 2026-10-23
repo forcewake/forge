@@ -300,7 +300,7 @@ def _spec_v2_document() -> dict:
 
     Reconstructed from the pre-R04 builders — GitLab's document grew
     ``allowed_paths`` (v0.7 monorepo scoping) and the frozen ADR-0023
-    harness selection in ``backend_config``; the GitHub/AzDO twins froze
+    harness selection in ``backend_config``; the GitHub twins froze
     a provider key in the subject. Still digest-only: no task text, no
     plan artifact, no model route, no verification contract — which is
     exactly why v3 refuses to execute one.

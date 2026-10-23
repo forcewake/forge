@@ -140,7 +140,7 @@ PROFILE_SOURCE_EXECUTION_PROFILE = "execution_profile"
 PROFILE_SOURCE_SPEC_DIGEST = "spec_digest"
 
 #: The provider family of the one adopted dispatch path (ADR-0027's
-#: ladder: one provider first; GitLab/Azure adopt after this path passes
+#: ladder: one provider first; GitLab adopt after this path passes
 #: the composed suite).
 GITHUB_FAMILY = "github"
 

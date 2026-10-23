@@ -51,17 +51,19 @@ from forge.runs.usecases import (
     observe_verification,
 )
 from forge.runs.verification import (
-    AZURE_CODE_FAILURE_RESULTS,
-    AZURE_INFRA_RESULTS,
-    AZURE_SUCCESS_RESULTS,
     GITHUB_CODE_FAILURE_CONCLUSIONS,
     GITHUB_INFRA_CONCLUSIONS,
     GITHUB_SUCCESS_CONCLUSIONS,
-    PRODUCER_AZURE_BUILD,
     PRODUCER_GITHUB_CHECKS,
     VerificationProfile,
     evaluate,
 )
+
+CUSTOM_SUCCESS_RESULTS = frozenset({"succeeded"})
+CUSTOM_CODE_FAILURE_RESULTS = frozenset({"failed", "partiallysucceeded"})
+CUSTOM_INFRA_RESULTS = frozenset({"canceled", "abandoned"})
+CUSTOM_PRODUCER = "custom-checks"
+
 
 CANDIDATE = "c" * 40
 OBSERVED_HEAD = "9" * 40
@@ -97,11 +99,11 @@ KIT_GITHUB = Vocabulary(
     "cancelled",
     "skipped",
 )
-KIT_AZURE = Vocabulary(
-    PRODUCER_AZURE_BUILD,
-    AZURE_SUCCESS_RESULTS,
-    AZURE_CODE_FAILURE_RESULTS,
-    AZURE_INFRA_RESULTS,
+KIT_CUSTOM = Vocabulary(
+    CUSTOM_PRODUCER,
+    CUSTOM_SUCCESS_RESULTS,
+    CUSTOM_CODE_FAILURE_RESULTS,
+    CUSTOM_INFRA_RESULTS,
     "succeeded",
     "partiallySucceeded",
     "canceled",
@@ -123,7 +125,7 @@ KIT_GITLAB = Vocabulary(
     "skipped",
 )
 
-KITS = [KIT_GITHUB, KIT_AZURE, KIT_GITLAB]
+KITS = [KIT_GITHUB, KIT_CUSTOM, KIT_GITLAB]
 
 
 def _spec(required: tuple[str, ...]) -> SimpleNamespace:
@@ -403,7 +405,9 @@ class TestProviderParity:
         github = _decision(
             KIT_GITHUB, scenario["required"], _spell(KIT_GITHUB, scenario["observed"])
         )
-        azure = _decision(KIT_AZURE, scenario["required"], _spell(KIT_AZURE, scenario["observed"]))
+        azure = _decision(
+            KIT_CUSTOM, scenario["required"], _spell(KIT_CUSTOM, scenario["observed"])
+        )
         gitlab = _decision(
             KIT_GITLAB, scenario["required"], _spell(KIT_GITLAB, scenario["observed"])
         )
@@ -555,33 +559,6 @@ async def _github_gate(db, conclusions: list[tuple[str, str | None]]) -> GateOut
     return _outcome(await _get_run(db, run_id))
 
 
-async def _azure_gate(db, results: list[tuple[str, str | None]]) -> GateOutcome:
-    """Drive the real Azure DevOps gate: start_run → /go → observe."""
-    from tests.test_azure_runs import (
-        FakeAzureDevOps,
-        drive_to_waiting_ci as azure_drive,
-        make_service as make_azure_service,
-        make_settings as azure_settings,
-        make_stack as make_azure_stack,
-    )
-
-    fake = FakeAzureDevOps()
-    fake.seed_work_item(AZURE_WORK_ITEM, "Ship the flux capacitor", "<p>Users cannot reset.</p>")
-    service = make_azure_service(
-        db,
-        fake,
-        settings=azure_settings(FORGE_REQUIRED_JOBS="tests"),
-        stack=make_azure_stack(fake),
-    )
-    run_id, candidate = await azure_drive(service, fake)
-    for name, result in results:
-        fake.seed_build(source_version=candidate, definition_name=name, result=result)
-
-    await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
-
-    return _outcome(await _get_run(db, run_id))
-
-
 GATE_SCENARIOS = [
     # (id, github checks, azure build results, decision class, verdict status)
     # The check NAME is part of the normalized input — identical on both
@@ -619,43 +596,26 @@ async def db():
     ids=[scenario[0] for scenario in GATE_SCENARIOS],
 )
 class TestGatesAgree:
-    """The GitHub and Azure gates — now two adapters over ONE use case —
-    produce identical decisions for equivalent evidence (the R02 property
-    that makes provider-specific verdict drift impossible)."""
+    """The live GitHub gate retains each decision and exact candidate binding."""
 
-    async def test_gates_decide_identically(
+    async def test_gate_decides_from_the_frozen_required_checks(
         self, db, name, github_checks, azure_results, decision, verification_status
     ):
         github = await _github_gate(db, conclusions=github_checks)
-        azure = await _azure_gate(db, results=azure_results)
-
-        assert github.decision == azure.decision == decision, name
-        assert github.verification_status == azure.verification_status == verification_status, name
-        # Both bind the verdict to the provider-verified candidate (or record
-        # nothing at all — the code-failure repair case).
-        assert github.tested_oid == azure.tested_oid, name
-        # The fragment is the ONE unified R02 shape on both adapters — and
-        # the code-failure repair case records NO fragment at all (the
-        # repair is the answer), identically on both.
+        assert github.decision == decision, name
+        assert github.verification_status == verification_status, name
         if verification_status is not None:
             assert github.fragment_keys >= {"status", "tested_oid", "observed_at", "producer"}
-            assert azure.fragment_keys >= {"status", "tested_oid", "observed_at", "producer"}
-            # The producer identity stays provider-native — the adapter's
-            # signature.
             assert github.producer == PRODUCER_GITHUB_CHECKS
-            assert azure.producer == PRODUCER_AZURE_BUILD
         else:
-            assert not github.fragment_keys and not azure.fragment_keys
+            assert not github.fragment_keys
 
-    async def test_ready_reasons_are_word_for_word_shared(
+    async def test_ready_reason_uses_the_shared_contract(
         self, db, name, github_checks, azure_results, decision, verification_status
     ):
         if not decision.startswith("ready"):
             pytest.skip(f"{name} does not reach the ready transition")
         github = await _github_gate(db, conclusions=github_checks)
-        azure = await _azure_gate(db, results=azure_results)
+        from forge.runs.consistency import ready_reason
 
-        # The slice-1 property holds through the slice-2 use case: the ready
-        # reason is byte-identical for the same inputs on every provider.
-        assert github.reason == azure.reason
-        assert ("unverified — " in github.reason) == (decision == "ready_unverified")
+        assert github.reason == ready_reason(True, "ok", "clean implementation")

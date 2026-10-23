@@ -23,7 +23,7 @@ const driver = (process.argv[2] || process.env.FORGE_LOG_DRIVER || "")
   .replace(/^["']|["']$/g, "")
   .trim();
 // Collapse platform: "actions" (::group::), "gitlab" (section_start
-// [collapsed=true]), "flat" (no native folding — Azure DevOps has no log
+// [collapsed=true]), "flat" (no native folding — the runner has no log
 // section commands; the pretty lines render as-is).
 const platform = (process.env.FORGE_LOG_PLATFORM || "actions").trim().toLowerCase();
 

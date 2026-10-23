@@ -67,7 +67,7 @@ IMPLEMENTER_MAX_FILE_CHARS = 6000
 #: can only take the non-negative remainder of the budget: no amount of
 #: evidence can ever push the repair text out of the prompt. The number is
 #: the floor the reservation guarantees; real repair briefs are already
-#: bounded upstream (the GitHub/Azure services pass <= 2000-char briefs, the
+#: bounded upstream (the GitHub services pass <= 2000-char briefs, the
 #: auto-repair loop passes the ADR-0013-bounded context) and are included in
 #: full. Reported in the evidence budget report as ``repair_reserved_chars``.
 IMPLEMENTER_REPAIR_RESERVED_CHARS = 2000
@@ -137,14 +137,7 @@ class AuthoritativeReadError(MaterializationError):
 
 
 class RepositoryReader(Protocol):
-    """The authoritative read surface the implementer needs (ADR-0001/0019).
-
-    :class:`~forge.gitlab.client.GitLabClient`,
-    :class:`~forge.integrations.github.GitHubRepositoryReader` and
-    :class:`~forge.integrations.azure.AzureRepositoryReader` all satisfy it
-    structurally — the implementer is provider-agnostic (GitLab, GitHub or
-    Azure DevOps).
-    """
+    "The authoritative read surface the implementer needs (ADR-0001/0019)."
 
     async def get_file(
         self, project_id: int, file_path: str, ref: str = "HEAD"

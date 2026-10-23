@@ -99,7 +99,7 @@ class TestTheEvidenceRungs:
         )
 
         rows = matrix.of_driver("claude-code")
-        assert len(rows) == 3  # one cell per gateway platform
+        assert len(rows) == 2  # one cell per gateway platform
         for row in rows:
             assert row.status == TESTED
             assert row.source_platform in ("gitlab", "github", "azure")
@@ -149,7 +149,7 @@ class TestTheEvidenceRungs:
         )
 
         rows = matrix.of_driver("grok-build")
-        assert len(rows) == 3
+        assert len(rows) == 2
         for row in rows:
             assert row.status == SUPPORTED
             assert "wired entry point" in row.note
@@ -244,10 +244,10 @@ class TestTheMatrixNeverClaimsMoreThanTheEvidence:
         evidence = _write_evidence(tmp_path, "docs/evaluation/x/claude-live.json")
         platforms = _platforms(tmp_path)
         bare = dict(platforms)
-        bare["azure"] = SourcePlatform(  # the gateway wiring exists...
-            platform="azure", gateway="forge.gateway.azure_webhook"
+        bare["github"] = SourcePlatform(  # the gateway wiring exists...
+            platform="github", gateway="forge.gateway.github_webhook"
         )
-        (tmp_path / "tests/test_azure_webhook.py").unlink()  # ...its proof is gone
+        (tmp_path / "tests/test_github_webhook.py").unlink()  # ...its proof is gone
 
         matrix = support_matrix(
             manifest_rows=[],
@@ -260,8 +260,7 @@ class TestTheMatrixNeverClaimsMoreThanTheEvidence:
 
         by_platform = {row.source_platform: row.status for row in matrix.of_driver("claude-code")}
         assert by_platform["gitlab"] == TESTED
-        assert by_platform["github"] == TESTED
-        assert by_platform["azure"] != TESTED  # no platform evidence, no badge
+        assert by_platform["github"] != TESTED  # no platform evidence, no badge
 
     def test_support_is_never_inherited_from_a_sibling_sdk(self, tmp_path):
         """A registration verifies the binary of the sdk it names — a
@@ -425,7 +424,7 @@ class TestTheR32DimensionNaming:
     def test_the_platform_axis_is_the_gateway_vocabulary(self):
         matrix = support_matrix()
         assert {row.source_platform for row in matrix.rows} <= set(SOURCE_PLATFORMS)
-        assert {row.source_platform for row in matrix.rows} == {"gitlab", "github", "azure"}
+        assert {row.source_platform for row in matrix.rows} == {"gitlab", "github"}
 
 
 class TestTheSeededMatrix:

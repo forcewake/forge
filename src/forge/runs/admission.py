@@ -31,19 +31,9 @@ def _split_names(raw: str | None) -> list[str]:
 
 
 def _approvers_field(provider: str, settings: Settings) -> str:
-    """The settings field *provider*'s approver list is read from.
-
-    ``FORGE_GITHUB_APPROVERS`` scopes the GitHub connection and
-    ``FORGE_AZDO_APPROVERS`` the Azure DevOps one (ADR-0024); empty falls
-    back to the shared ``FORGE_APPROVERS`` for single-list deployments.
-    """
+    "The settings field *provider*'s approver list is read from."
     if provider == "github" and str(getattr(settings, "FORGE_GITHUB_APPROVERS", "") or "").strip():
         return "FORGE_GITHUB_APPROVERS"
-    if (
-        provider == "azure_devops"
-        and str(getattr(settings, "FORGE_AZDO_APPROVERS", "") or "").strip()
-    ):
-        return "FORGE_AZDO_APPROVERS"
     return "FORGE_APPROVERS"
 
 

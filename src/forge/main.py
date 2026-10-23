@@ -167,19 +167,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(router)
 
-    # Azure DevOps ingress (ADR-0024 AZ-2) is mounted unconditionally; the
-    # endpoint itself answers 503 unless FORGE_AZDO_ENABLED and the webhook
-    # Basic credentials are set — fail closed (Azure service hooks have no
-    # HMAC; the Basic pair IS the authenticator).
-    from forge.gateway.azure_webhook import azure_router
-
-    application.include_router(azure_router)
-
-    # The lane control API (NXT-10, the outbound leg) — the surface CI lanes
-    # dial OUT to for their steering commands. Same fail-closed posture as
-    # the Azure ingress: mounted unconditionally, but both routes answer 503
-    # unless FORGE_LANE_CONTROL_SECRET is configured (an unauthenticated
-    # control-plane endpoint is never exposed).
     from forge.api_lane_control import lane_control_router
 
     application.include_router(lane_control_router)

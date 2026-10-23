@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-import forge.gateway.azure_webhook as azure_webhook
 import forge.gateway.github_webhook as github_webhook
 import forge.gateway.router as gateway_router
 from forge.capability_manifest import (
@@ -233,10 +232,9 @@ def _unbind_everywhere(monkeypatch, command: str) -> None:
     for module, attr in (
         (gateway_router, "_RUN_COMMANDS"),
         (github_webhook, "_GITHUB_RUN_COMMANDS"),
-        (azure_webhook, "_AZDO_RUN_COMMANDS"),
     ):
         monkeypatch.setattr(module, attr, frozenset(set(getattr(module, attr)) - {command}))
-    for module in (gateway_router, github_webhook, azure_webhook):
+    for module in (gateway_router, github_webhook):
         bound = getattr(module, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
         monkeypatch.setattr(module, "_ADAPTIVE_NOTE_COMMANDS", frozenset(bound - {command}))
 

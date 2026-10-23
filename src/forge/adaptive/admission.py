@@ -464,12 +464,6 @@ class ExecutionLease(Base):
     native_intent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    #: Q35-04: the correlation marker of the intended start (short,
-    #: provider-shaped: ``github:workflow:<owner>/<repo>/<workflow>@<branch>``,
-    #: ``gitlab:pipeline:<project>@<branch>``,
-    #: ``azure:pipeline:<project>:<pipeline>@<branch>``). The prefix
-    #: before the first ``:`` routes :func:`reconcile_draining` to the
-    #: owning provider's probe when the handle was never recorded.
     native_intent_ref: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
     #: R32-07: the dispatched native job's correlation (pipeline/run id).
     #: NULL until the provider answers dispatch with an id
@@ -593,10 +587,6 @@ class NativeStatus(str, Enum):
 #: accepted for back-compat (``True`` → terminal, ``False`` → running).
 NativeProbe = Callable[[str], "bool | NativeStatus | Awaitable[bool | NativeStatus]"]
 
-#: The probe registry, keyed by the probe key's provider prefix (the
-#: text before the first ``:`` — ``github``, ``gitlab``, ``azure``).
-#: Each service registers its probe; :func:`reconcile_draining` without
-#: an explicit callable routes each lease to its owning provider.
 _NATIVE_PROBES: dict[str, NativeProbe] = {}
 
 
@@ -959,16 +949,7 @@ async def record_native_start_intent(
     reconciler has a correlation marker (``intent_ref``) to probe even
     without a handle. Record it immediately before the provider call —
     after every local pre-flight — so an intent can only exist when the
-    call was actually attempted.
-
-    The *intent_ref* is short and provider-shaped
-    (``github:workflow:...@branch`` / ``gitlab:pipeline:...@branch`` /
-    ``azure:pipeline:...@branch``): its prefix routes the reconciler to
-    the owning provider's probe, its branch names the run-owned ref the
-    job would live on. A re-dispatch (attempt replacement) REUSES the
-    held lease and refreshes the marker. Returns how many leases were
-    stamped (0 when the run holds no open lease — nothing to bind).
-    """
+    call was actually attempted."""
 
     if not intent_ref:
         raise ValueError("intent_ref must be non-empty")

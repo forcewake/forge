@@ -26,9 +26,6 @@ from forge.models.base import Base
 from forge.runs import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
 from forge.runs.verification import (
-    AZURE_CODE_FAILURE_RESULTS,
-    AZURE_INFRA_RESULTS,
-    AZURE_SUCCESS_RESULTS,
     DEFAULT_FRESHNESS_WINDOW_SECONDS,
     GITHUB_CODE_FAILURE_CONCLUSIONS,
     GITHUB_INFRA_CONCLUSIONS,
@@ -44,6 +41,12 @@ from forge.runs.verification import (
 )
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
+
+CUSTOM_SUCCESS_RESULTS = frozenset({"succeeded"})
+CUSTOM_CODE_FAILURE_RESULTS = frozenset({"failed", "partiallysucceeded"})
+CUSTOM_INFRA_RESULTS = frozenset({"canceled", "abandoned"})
+CUSTOM_PRODUCER = "custom-checks"
+
 
 PROJECT_ID = 42
 ISSUE_IID = 7
@@ -290,16 +293,16 @@ class TestPositiveProof:
         observations: dict[str, str | None],
         *,
         waived: frozenset[str] = frozenset(),
-        azure: bool = False,
+        custom: bool = False,
     ) -> PositiveProof:
         return evaluate_positive_proof(
             required,
             observations,
-            success_conclusions=AZURE_SUCCESS_RESULTS if azure else GITHUB_SUCCESS_CONCLUSIONS,
+            success_conclusions=CUSTOM_SUCCESS_RESULTS if custom else GITHUB_SUCCESS_CONCLUSIONS,
             code_failure_conclusions=(
-                AZURE_CODE_FAILURE_RESULTS if azure else GITHUB_CODE_FAILURE_CONCLUSIONS
+                CUSTOM_CODE_FAILURE_RESULTS if custom else GITHUB_CODE_FAILURE_CONCLUSIONS
             ),
-            infra_conclusions=AZURE_INFRA_RESULTS if azure else GITHUB_INFRA_CONCLUSIONS,
+            infra_conclusions=CUSTOM_INFRA_RESULTS if custom else GITHUB_INFRA_CONCLUSIONS,
             waived_conclusions=waived,
         )
 
@@ -375,16 +378,16 @@ class TestPositiveProof:
             )
             assert state == expected, conclusion
 
-    def test_azure_results_classify_the_same_way(self):
+    def test_custom_results_classify_the_same_way(self):
         """Azure parity: succeeded proves; failed/partiallySucceeded blame
         the change; canceled/abandoned are infrastructure. Matching is
         case-insensitive (the Azure vocabulary is camelCase)."""
-        assert self.proof(("ci",), {"ci": "succeeded"}, azure=True).verified is True
-        assert self.proof(("ci",), {"ci": "SUCCEEDED"}, azure=True).verified is True
-        proof = self.proof(("ci",), {"ci": "partiallySucceeded"}, azure=True)
+        assert self.proof(("ci",), {"ci": "succeeded"}, custom=True).verified is True
+        assert self.proof(("ci",), {"ci": "SUCCEEDED"}, custom=True).verified is True
+        proof = self.proof(("ci",), {"ci": "partiallySucceeded"}, custom=True)
         assert proof.code_failures == ("ci",) and proof.verified is False
         for result in ("canceled", "abandoned"):
-            proof = self.proof(("ci",), {"ci": result}, azure=True)
+            proof = self.proof(("ci",), {"ci": result}, custom=True)
             assert proof.infra_failures == ("ci",) and proof.verified is False
 
     def test_empty_required_contract_makes_every_observed_check_required(self):

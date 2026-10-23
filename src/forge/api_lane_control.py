@@ -4,13 +4,10 @@ EXE-04 doctrine: the lane job runs inside an ephemeral CI runner with NO
 inbound listener, so the control plane can never reach INTO it. The lane
 dials OUT instead: this module is the control-plane surface it polls —
 the ``control_commands`` rows the ingress already lands durably
-(GitHub/GitLab/AzDO → :class:`~forge.adaptive.command_router.
+(GitHub/GitLab → :class:`~forge.adaptive.command_router.
 ControlCommandRouter` → :class:`~forge.adaptive.mailbox_db.PostgresMailbox`
 behind ``FORGE_CONTROL_MAILBOX=postgres``) become reachable from the lane
 that must feel them.
-
-Two routes, both mounted unconditionally and FAIL-CLOSED (the
-``azure_webhook`` posture — an unauthenticated endpoint is never exposed):
 
 - ``GET /lane/controls?work_id=<run-id>&after_sequence=<n>`` — the work's
   PENDING commands (``received``/``authorized`` ONLY, durable sequence
@@ -102,8 +99,7 @@ IDEMPOTENT — a replayed ack against an already-checkpointed command
 answers 200 with the current state (a redelivered ack spends nothing),
 and every ack may declare its ``generation``; an ack from a superseded
 generation is refused with 403 (the lane can still READ its queue —
-it just cannot move anyone's state).
-"""
+it just cannot move anyone's state)."""
 
 from __future__ import annotations
 

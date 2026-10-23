@@ -87,7 +87,7 @@ __all__ = [
 #: issue_iid) precisely because the numeric subject namespaces are NOT
 #: comparable across families. A repository context from outside this
 #: tuple is refused at construction.
-PROVIDER_FAMILIES = ("gitlab", "github", "azure_devops")
+PROVIDER_FAMILIES = ("gitlab", "github")
 
 #: NEXT-03's three DISTINCT dispatch modes — ``fresh`` (no checkpoint
 #: needed; a 404-shaped restore failure is normal), ``required`` (the
@@ -266,8 +266,6 @@ class RepositoryContext:
 
     #: One of :data:`PROVIDER_FAMILIES` (the ``FlowRun.provider`` values).
     provider_family: str
-    #: The connection identity — bare or family-qualified
-    #: (``github:owner/repo`` / ``azure_devops:org:project``).
     connection_id: str
     #: The repository identity within that connection.
     repository_id: str

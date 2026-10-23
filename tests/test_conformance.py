@@ -48,10 +48,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -62,19 +59,16 @@ from forge.integrations.github_flow import GitHubPublishFlow, github_factory_bra
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
 from forge.repository.changeset import Change, ChangeSet, Operation
-from forge.runs.azure_service import AzurePipelinesHandle, azure_factory_branch
 from forge.runs.candidate import bundle_from_changeset
 from forge.runs.conformance import (
     AttestationBlockedError,
     CAS_FORGE_WRITER_GUARD,
     CAS_GRAPHQL_EXPECTED_HEAD_OID,
-    CAS_PUSH_OLD_OBJECT_ID,
     ARTIFACT_TRANSPORT_CI,
     COMPOSED_SCENARIOS,
     PROVIDER_CAPABILITIES,
     ProviderCapability,
     READONLY_IDENTITY_MERGE_REQUEST_IID,
-    READONLY_IDENTITY_PULL_REQUEST_ID,
     READONLY_IDENTITY_PULL_REQUEST_NUMBER,
     SCENARIO_FAILED,
     SCENARIO_NOT_RUN,
@@ -96,14 +90,6 @@ from forge.runs.publisher import publish_candidate, publication_grant_valid
 from forge.runs.stubs import factory_branch
 from tests.fixtures.fake_github import FakeGitHub
 from tests.fixtures.fake_gitlab import FakeGitLab
-from tests.test_azure_runs import (
-    FakeAzureDevOps,
-    azure_project_key,
-    go as azure_go,
-    make_service as make_azure_service,
-    make_settings as make_azure_settings,
-    start as azure_start,
-)
 from tests.test_github_runs import (
     composed_a01_required_absent_green_optional,
     composed_a03_comment_same_id_edited_body,
@@ -137,7 +123,6 @@ GH_REPO = "acme/acme-widget"
 GH_OWNER, GH_REPO_NAME = GH_REPO.split("/", 1)
 GH_PROJECT_ID = 70010
 GH_ISSUE = 42
-AZ_PROJECT_ID = azure_project_key("9f8e7d6c-0000-0000-0000-000000000009")
 AZ_WORK_ITEM = 142
 
 RUN_ID = "abcd1234" + "0" * 24
@@ -146,7 +131,6 @@ RUN_ID = "abcd1234" + "0" * 24
 MUTATION_CALL = {
     "gitlab": "create_commit",
     "github": "create_commit_on_branch",
-    "azure_devops": "push_commits",
 }
 
 
@@ -449,119 +433,7 @@ class GitHubLane:
         self.fake.seed_commit(GH_REPO, self.transport_branch(run_id), sha, "forge commit")
 
 
-class AzureLane:
-    provider = "azure_devops"
-    project_id = AZ_PROJECT_ID
-    issue = AZ_WORK_ITEM
-
-    def __init__(self, db, fake: FakeAzureDevOps, service: Any) -> None:
-        self.db = db
-        self.fake = fake
-        self.service = service
-
-    @classmethod
-    async def build(cls, db) -> AzureLane:
-        fake = FakeAzureDevOps()
-        fake.seed_work_item(AZ_WORK_ITEM, ISSUE_TITLE, "<p>Users cannot reset.</p>")
-        service = make_azure_service(db, fake, settings=make_azure_settings())
-        return cls(db, fake, service)
-
-    async def start_run(self) -> str:
-        return await azure_start(self.service)
-
-    async def approve(self, run_id: str) -> None:
-        await azure_go(self.service, run_id)
-
-    def transport_branch(self, run_id: str) -> str:
-        return azure_factory_branch(self.issue, run_id)
-
-    async def publish_transport(
-        self, changeset: ChangeSet, *, attempt_base: str, scope: list[str] | None = None
-    ) -> Verdict:
-        """The CAS push transport — publishes an ALREADY-VALIDATED manifest."""
-        outcome = await self.service._publish_changeset(
-            RUN_ID,
-            issue_number=self.issue,
-            changeset=changeset,
-            base_branch="main",
-            expected_head=attempt_base,
-        )
-        return Verdict(ok=outcome.ok, reason=outcome.reason, drift=outcome.drift)
-
-    async def publish_candidate(
-        self, changeset: ChangeSet, *, attempt_base: str, scope: list[str] | None = None
-    ) -> Verdict:
-        """The lane's boundary-wired candidate leg (materialize + policy)."""
-        run_id = uuid4().hex
-        async with self.db() as session:
-            session.add(
-                FlowRun(
-                    id=run_id,
-                    provider=self.provider,
-                    project_id=self.project_id,
-                    issue_iid=self.issue,
-                    status=FlowStatus.WAITING_HARNESS.value,
-                    base_sha=attempt_base,
-                )
-            )
-            if scope:
-                session.add(
-                    RunSpec(run_id=run_id, document={"allowed_paths": scope}, digest="kit-digest")
-                )
-            await session.commit()
-        handle = AzurePipelinesHandle(
-            provider=self.provider,
-            project="Fabrikam",
-            repo="core",
-            pipeline_id=0,
-            run_id=0,
-            branch=self.transport_branch(run_id),
-            attempt_base=attempt_base,
-            run_spec_digest="",
-            driver="claude-code",
-            forge_run_id=run_id,
-            started_at=datetime.now(timezone.utc).isoformat(),
-        )
-        outcome: Any = SimpleNamespace(
-            bundle=bundle_from_changeset(changeset, attempt_base_oid=attempt_base),
-            summary="",
-        )
-        await self.service._publish_harness_candidate(
-            run_id, self.project_id, self.issue, outcome, handle
-        )
-        run = await get_run(self.db, run_id)
-        reason = run.status_reason or ""
-        return Verdict(ok=False, reason=reason, drift=True)
-
-    def write_attempts(self) -> int:
-        return len(self.fake.calls_of(MUTATION_CALL[self.provider]))
-
-    def service_writes(self) -> int:
-        return self.write_attempts()
-
-    def state(self) -> tuple:
-        snapshots = tuple(
-            (sha, tuple(sorted(files.items()))) for sha, files in self.fake.snapshots.items()
-        )
-        return (tuple(sorted(self.fake.heads.items())), snapshots)
-
-    def head(self, branch: str) -> str:
-        return self.fake.heads.get(branch, "")
-
-    def review_surfaces(self) -> int:
-        return len(self.fake.pull_requests)
-
-    def review_surfaces_are_draft(self) -> bool:
-        return all(pr["isDraft"] is True for pr in self.fake.pull_requests)
-
-    async def evaluate_ci(self, run_id: str) -> None:
-        await self.service.evaluate_waiting_ci_one(run_id)
-
-    def seed_candidate(self, run_id: str, sha: str) -> None:
-        self.fake.seed_commit(self.transport_branch(run_id), sha, "forge commit")
-
-
-LANES: tuple[type, ...] = (GitLabLane, GitHubLane, AzureLane)
+LANES: tuple[type, ...] = (GitLabLane, GitHubLane)
 LANES_BY_PROVIDER = {lane.provider: lane for lane in LANES}
 
 
@@ -891,8 +763,6 @@ class TestCapabilityRecords:
         Commits API has no CAS — forge's writer guard does it forge-side."""
         assert capability_of("github").native_cas is True
         assert capability_of("github").cas_mechanism == CAS_GRAPHQL_EXPECTED_HEAD_OID
-        assert capability_of("azure_devops").native_cas is True
-        assert capability_of("azure_devops").cas_mechanism == CAS_PUSH_OLD_OBJECT_ID
         gitlab = capability_of("gitlab")
         assert gitlab.native_cas is False
         assert gitlab.cas_mechanism == CAS_FORGE_WRITER_GUARD
@@ -902,7 +772,6 @@ class TestCapabilityRecords:
         GitHub/Azure pin the provider's native pull-request object."""
         assert capability_of("gitlab").synthetic_merge_fallback is True
         assert capability_of("github").synthetic_merge_fallback is False
-        assert capability_of("azure_devops").synthetic_merge_fallback is False
 
     def test_harness_candidates_travel_as_artifacts_everywhere(self):
         """No harness lane ever carries a write token — on ANY provider."""
@@ -912,7 +781,6 @@ class TestCapabilityRecords:
     def test_readonly_identities_are_distinct_and_declared(self):
         assert capability_of("gitlab").readonly_identity == READONLY_IDENTITY_MERGE_REQUEST_IID
         assert capability_of("github").readonly_identity == READONLY_IDENTITY_PULL_REQUEST_NUMBER
-        assert capability_of("azure_devops").readonly_identity == READONLY_IDENTITY_PULL_REQUEST_ID
 
     def test_every_recorded_provider_claims_a_verification_producer(self):
         for provider, record in PROVIDER_CAPABILITIES.items():

@@ -56,7 +56,7 @@ __all__ = [
 #: The closed provider vocabulary a neighbor may name — the three
 #: provider gateways forge ships. Anything else is a config error, never
 #: a silently guessed provider.
-NEIGHBOR_PROVIDER_VALUES: tuple[str, ...] = ("gitlab", "github", "azure")
+NEIGHBOR_PROVIDER_VALUES: tuple[str, ...] = ("gitlab", "github")
 
 #: The discovery namespace the run's own repository occupies (the
 #: research menu's documented key — a neighbor may not shadow it).

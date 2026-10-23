@@ -2,7 +2,7 @@
 
 Implementation reference for the Azure DevOps source/execution adapter (ADR-0024).
 Extends (and where necessary corrects) the §1 ground truths of
-[specs/azure-devops-brief.md](../specs/azure-devops-brief.md). Researched against
+[specs/azure-devops-brief.md](../operations/maintenance-0.42.md). Researched against
 learn.microsoft.com live pages (REST reference 7.1/7.2, service-hooks events,
 integrate concepts) on 2026-09-15.
 

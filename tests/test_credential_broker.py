@@ -32,7 +32,6 @@ import pytest
 from forge.adaptive.credential_broker import (
     BROKER_RECEIPT_SCHEMA,
     CREDENTIAL_POLICY_COMPAT,
-    DELIVERY_MODE_AZURE_GROUP,
     DELIVERY_MODE_GITHUB_NATIVE,
     DELIVERY_MODE_GITLAB_PROTECTED,
     DELIVERY_MODE_RUNNER_REDEMPTION,
@@ -368,20 +367,6 @@ class TestDeliveryPlanModeSelection:
         assert plan.mode == DELIVERY_MODE_GITLAB_PROTECTED
         assert plan.transport_ref == "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN"
 
-    async def test_azure_native_selects_the_group_and_env_slot_secret(self):
-        plan = await delivery_plan(
-            _bound_registry(),
-            StagedBroker(),
-            subject=SUBJECT,
-            provider_route="anthropic-gateway",
-            profile="azure",
-            environ=_delivery_env(DELIVERY_MODE_AZURE_GROUP),
-        )
-        assert plan is not None
-        assert plan.mode == DELIVERY_MODE_AZURE_GROUP
-        assert plan.transport_ref == "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN"
-        assert plan.expected_identity["resolver"] == DELIVERY_MODE_AZURE_GROUP
-
     async def test_runner_redemption_selects_the_lane_control_route_and_raw_ref(self):
         broker = StagedBroker()
         plan = await delivery_plan(
@@ -402,7 +387,7 @@ class TestDeliveryPlanModeSelection:
         assert plan.expected_identity["resolver"] == broker.resolver_identity
 
     async def test_redemption_is_uniform_across_all_three_profiles(self):
-        for profile in ("github", "azure", "gitlab"):
+        for profile in ("github", "gitlab"):
             plan = await delivery_plan(
                 _bound_registry(),
                 StagedBroker(),
@@ -568,7 +553,6 @@ class TestDeliveryTemplateConformance:
             transport_ref={
                 DELIVERY_MODE_GITHUB_NATIVE: "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
                 DELIVERY_MODE_GITLAB_PROTECTED: "FORGE_MODEL_ENV_ANTHROPIC_AUTH_TOKEN",
-                DELIVERY_MODE_AZURE_GROUP: "forge-lane-credentials/ANTHROPIC_AUTH_TOKEN",
                 DELIVERY_MODE_RUNNER_REDEMPTION: "/lane/credentials/redeem",
             }[mode],
             dispatch_ref="ENV_ANTHROPIC_AUTH_TOKEN",
@@ -590,18 +574,11 @@ class TestDeliveryTemplateConformance:
             self._template("claude-code.gitlab-ci.yml"),
         )
 
-    def test_the_shipped_azure_pipeline_conforms(self):
-        delivery_template_conformance(
-            self._plan(DELIVERY_MODE_AZURE_GROUP),
-            self._template("forge-lane.azure-pipelines.yml"),
-        )
-
     @pytest.mark.parametrize(
         ("mode", "name"),
         [
             (DELIVERY_MODE_GITHUB_NATIVE, "forge-harness.github.yml"),
             (DELIVERY_MODE_GITLAB_PROTECTED, "claude-code.gitlab-ci.yml"),
-            (DELIVERY_MODE_AZURE_GROUP, "forge-lane.azure-pipelines.yml"),
         ],
     )
     def test_an_older_delivery_schema_is_refused_with_the_instruction(self, mode, name):
@@ -623,7 +600,6 @@ class TestDeliveryTemplateConformance:
         for name in (
             "forge-harness.github.yml",
             "claude-code.gitlab-ci.yml",
-            "forge-lane.azure-pipelines.yml",
             "claude-sdk-lane.gitlab-ci.yml",
         ):
             delivery_template_conformance(

@@ -17,8 +17,6 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
 from forge.durable import ActionLog, Controller, FlowRun, FlowStatus, InvalidTransition
-from forge.gateway.azure_webhook import _COMMAND_MAP as _AZDO_COMMAND_MAP
-from forge.gateway.azure_webhook import _AZDO_RUN_COMMANDS
 from forge.gateway.github_webhook import _COMMAND_MAP as _GITHUB_COMMAND_MAP
 from forge.gateway.github_webhook import _GITHUB_RUN_COMMANDS
 from forge.gateway.router import _RUN_COMMANDS, _match_run_command
@@ -30,7 +28,6 @@ from forge.gitlab.events import (
     UserInfo,
 )
 from forge.models.base import Base
-from forge.runs.azure_service import AzureRunService
 from forge.runs.github_service import GitHubRunService
 from forge.runs.revival import (
     FATAL,
@@ -704,13 +701,12 @@ async def test_retry_of_another_projects_same_iid_run_is_inert(
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("provider", ["gitlab", "github", "azure_devops"])
+@pytest.mark.parametrize("provider", ["gitlab", "github"])
 async def test_all_lanes_classify_and_park_alike(db, provider):
     """GitLab, GitHub and AzDO runs get the same classes and the same park."""
     cls = {
         "gitlab": RunService,
         "github": GitHubRunService,
-        "azure_devops": AzureRunService,
     }[provider]
     service = bare_service(db, make_settings(), cls)
 
@@ -731,9 +727,8 @@ async def test_all_lanes_classify_and_park_alike(db, provider):
 
 async def test_ingress_routes_retry_on_every_lane():
     assert "/retry" in _RUN_COMMANDS
-    assert _GITHUB_RUN_COMMANDS & {"/retry"} and _AZDO_RUN_COMMANDS & {"/retry"}
+    assert _GITHUB_RUN_COMMANDS & {"/retry"}
     assert _GITHUB_COMMAND_MAP["/retry"] == "retry"
-    assert _AZDO_COMMAND_MAP["/retry"] == "retry"
 
 
 def make_note_event(note: str) -> NoteEvent:
@@ -821,7 +816,7 @@ def test_provider_services_never_reimplement_recovery_scans() -> None:
     # legitimate own queries; everything else must live in revival.py.
     allowed_markers = ("Distinct", "distinct GitHub repos", "config-blocked repos")
     offenders: list[str] = []
-    for service in ("runs/service.py", "runs/github_service.py", "runs/azure_service.py"):
+    for service in ("runs/service.py", "runs/github_service.py"):
         text = (repo / service).read_text(encoding="utf-8")
         for match in re.finditer(r"select\(FlowRun\)[\s\S]{0,400}?FlowStatus\.BLOCKED", text):
             # the enclosing function IS the dispatcher's repo enumeration
