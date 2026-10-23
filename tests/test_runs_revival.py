@@ -29,11 +29,13 @@ from forge.gitlab.events import (
 )
 from forge.models.base import Base
 from forge.runs.github_service import GitHubRunService
-from forge.runs.revival import (
+from forge.domain.revival import (
     FATAL,
     MAX_BACKOFF_SECONDS,
     TRANSIENT,
     classify_terminal_failure,
+)
+from forge.runs.revival import (
     revival_backoff_seconds,
     revival_due,
     revival_limit,

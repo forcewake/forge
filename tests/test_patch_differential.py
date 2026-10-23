@@ -24,8 +24,20 @@ import subprocess
 
 import pytest
 
-from forge.repository import Change, ChangeSet, Operation
-from forge.runs.candidate import CandidateError, bundle_from_changeset, parse_unified_diff
+from forge.domain.change_types import (
+    Change,
+    ChangeSet,
+    Operation,
+)
+from forge.domain.patch import (
+    CandidateError,
+)
+from forge.domain.candidate import (
+    bundle_from_changeset,
+)
+from forge.domain.candidate_parser import (
+    parse_unified_diff,
+)
 
 ATTEMPT_BASE = "attempt-base"
 

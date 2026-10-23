@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
+
+from forge.domain.revival import (
+    FailureClass as FailureClass,
+    TRANSIENT as TRANSIENT,
+    FATAL as FATAL,
+    Retryability as Retryability,
+    RevivalKind as RevivalKind,
+    classify_retryability as classify_retryability,
+    DEFAULT_REVIVE_LIMIT as DEFAULT_REVIVE_LIMIT,
+    DEFAULT_BACKOFF_SECONDS as DEFAULT_BACKOFF_SECONDS,
+    MAX_BACKOFF_SECONDS as MAX_BACKOFF_SECONDS,
+    classify_terminal_failure as classify_terminal_failure,
+    backoff_seconds as backoff_seconds,
+)
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, cast
 
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -30,43 +44,15 @@ logger = logging.getLogger(__name__)
 #: Failure classes. ``fatal`` is the default — Tier 1 must be conservative, a mis-classified
 #: fatal costs two bounded retries, a mis-classified transient hides a real quality signal
 #: from the operator.
-FailureClass = Literal["transient", "fatal"]
-TRANSIENT: FailureClass = "transient"
-FATAL: FailureClass = "fatal"
-
-
-class Retryability(StrEnum):
-    """WHY a run is retryable — the typed revival-attempt class."""
-
-    #: Tier-1: a transient infrastructure death (dispatch 5xx / network / rate limit /
-    #: runner startup) the reconciler re-drives on its own.
-    TRANSIENT_INFRASTRUCTURE = "transient_infrastructure"
-    #: Tier-2: an operator explicitly granted the revival (``/retry``).
-    OPERATOR_OVERRIDE = "operator_override"
-    #: Tier-1: the transient cause was a verification/harness timeout.
-    VERIFICATION_TIMEOUT = "verification_timeout"
 
 
 #: The revival action kinds — these ``action_log`` rows ARE the durable revival-attempt
 #: record (written in the SAME transaction as the CAS revival transition,).
 REVIVAL_ACTION_KINDS: frozenset[str] = frozenset({"retry_requested", "auto_revive"})
-RevivalKind = Literal["retry_requested", "auto_revive"]
 
 #: A verification-shaped transient cause (``verification_timeout``): the reason mentions
 #: verification AND a timeout — a harness/verification leg that ran out of time is
 #: infrastructure pacing, not a quality signal.
-_VERIFICATION_TIMEOUT_RE = re.compile(
-    r"verification[_ ]?(timed?|timeout)|timed? ?out[^\n]*verification", re.IGNORECASE
-)
-
-
-def classify_retryability(kind: RevivalKind, reason: str = "") -> Retryability:
-    """The retryability class for a revival attempt of *kind*."""
-    if kind == "retry_requested":
-        return Retryability.OPERATOR_OVERRIDE
-    if _VERIFICATION_TIMEOUT_RE.search(reason or ""):
-        return Retryability.VERIFICATION_TIMEOUT
-    return Retryability.TRANSIENT_INFRASTRUCTURE
 
 
 class RevivalError(Exception):
@@ -98,58 +84,16 @@ class RevivalAttempt:
 
 #: Default revival budget (``FORGE_RUN_AUTO_REVIVE_LIMIT``) and the base of the bounded
 #: backoff ladder (``FORGE_RUN_REVIVE_BACKOFF_SECONDS``).
-DEFAULT_REVIVE_LIMIT = 2
-DEFAULT_BACKOFF_SECONDS = 60
 #: Backoff ceiling: an unrecoverable transient never waits longer than this between
 #: attempts.
-MAX_BACKOFF_SECONDS = 900
 
 #: Markers that make a terminal reason *transient*. Matched case-insensitively against the
 #: whole reason; 4xx status codes are deliberately absent (a 4xx is a config error — exactly
 #: the db5408f4 undeclared-input 422).
-_TRANSIENT_MARKERS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(pattern)
-    for pattern in (
-        r"\b(500|502|503|504|429)\b",
-        r"bad gateway",
-        r"service (temporarily )?unavailable",
-        r"gateway time-?out",
-        r"internal server error",
-        r"rate limit",
-        r"too many requests",
-        r"timed? ?out",
-        r"timeout",
-        r"\bconnection\b",
-        r"\bnetwork\b",
-        r"unreachable",
-        r"try again",
-        r"runner (startup|start|unavailable|failed|failure)",
-        r"no (matching )?runner",
-    )
-)
 
 #: Leg prefixes whose *empty* error detail still counts as transient: a dispatch that died
 #: with an empty message (``httpx`` raises bare ``ConnectError``/``ReadError`` with ``str ==
 #: ""``) is infrastructure silence, not a quality signal.
-_DISPATCH_PREFIXES = ("harness_start_failed",)
-
-
-def classify_terminal_failure(reason: str) -> FailureClass:
-    """Classify a terminal ``failed`` reason as ``transient`` or ``fatal``."""
-    text = (reason or "").strip()
-    lowered = text.lower()
-    if lowered.startswith(_DISPATCH_PREFIXES) and not _detail_of(text):
-        return TRANSIENT
-    for marker in _TRANSIENT_MARKERS:
-        if marker.search(lowered):
-            return TRANSIENT
-    return FATAL
-
-
-def _detail_of(reason: str) -> str:
-    """The part of ``prefix: detail`` after the first colon ("" when absent)."""
-    _, _, detail = reason.partition(":")
-    return detail.strip()
 
 
 def revival_limit(settings: object) -> int:
@@ -166,7 +110,7 @@ def revival_backoff_seconds(attempt: int, settings: object | None = None) -> int
         getattr(settings, "FORGE_RUN_REVIVE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS)
         or DEFAULT_BACKOFF_SECONDS
     )
-    return min(max(base, 1) * (2 ** max(attempt, 0)), MAX_BACKOFF_SECONDS)
+    return backoff_seconds(attempt, base)
 
 
 def revival_of(run: FlowRun) -> dict:

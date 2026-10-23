@@ -22,6 +22,7 @@ Covers the R23 contract end to end:
 """
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -131,7 +132,7 @@ class TestReceiptIdentity:
         assert base != usage_receipt_id(RUN_ID, "501:1", anthropic_usage(input_tokens=101))
 
     def test_normalized_document_excludes_the_raw_block(self):
-        usage = anthropic_usage(raw={"input_tokens": 100, "extra": "verbatim"})
+        usage = anthropic_usage(raw_json=json.dumps({"input_tokens": 100, "extra": "verbatim"}))
         document = usage_document(usage)
         assert "raw" not in document
         assert document["input_tokens"] == 100
@@ -155,7 +156,7 @@ class TestReceiptIdentity:
         assert usage.attempt_id == "501:2"  # in-block identity wins
         assert usage.cache_write_tokens == 5
         assert usage.reasoning_tokens == 3
-        assert usage.raw == {
+        assert usage.raw_document() == {
             "input_tokens": 10,
             "receipt_id": "a" * 64,
             "attempt_id": "501:2",
@@ -203,7 +204,7 @@ class TestNormalization:
         assert usage.completeness == "unknown"
         assert usage.total_known_tokens is None
         assert usage.attempt_id == "501:1"
-        assert usage.raw is None
+        assert usage.raw_document() is None
 
     def test_from_meta_keeps_negative_junk_counters_unknown(self):
         usage = HarnessUsage.from_meta(
@@ -481,3 +482,27 @@ class TestMigration015:
             "raw",
             "created_at",
         }
+
+
+async def test_persistence_uses_the_frozen_raw_usage_snapshot(db):
+    raw = {
+        "input_tokens": 10,
+        "cost_usd": 0.5,
+        "final": False,
+        "cost_basis": "provider-reported",
+        "unknown": {"nested": ["keep"]},
+    }
+    usage = HarnessUsage.from_meta(raw, attempt_id="immutable-1")
+    raw["cost_usd"] = 999
+    raw["unknown"]["nested"].clear()
+    decoded = usage.raw_document()
+    decoded["cost_usd"] = 0
+    decoded["unknown"]["nested"].clear()
+    async with db() as session:
+        _, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=usage)
+        await session.commit()
+    assert created is True
+    (row,) = await receipt_rows(db)
+    assert row.cost_usd == pytest.approx(0.5) and row.final is False
+    assert row.raw["unknown"]["nested"] == ["keep"]
+    assert row.receipt_id == usage_receipt_id(RUN_ID, "immutable-1", usage)

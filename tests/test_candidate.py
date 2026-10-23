@@ -13,20 +13,34 @@ import hashlib
 
 import pytest
 
-from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
-from forge.repository import Change, ChangeSet, Operation
+from forge.domain.patch import (
+    FORGE_MATERIALIZE_MAX_FILE_CHARS,
+)
+from forge.domain.change_types import (
+    Change,
+    ChangeSet,
+    Operation,
+)
 from forge.runs.candidate import (
     AttemptContext,
+    attempt_base_for,
+)
+from forge.domain.candidate import (
     CandidateBundle,
+    FullReplacement,
+    UnifiedPatch,
+    bundle_from_changeset,
+)
+from forge.domain.patch import (
     CandidateError,
     DiffHunk,
-    FullReplacement,
-    HarnessUsage,
     HunkLine,
-    UnifiedPatch,
     apply_unified_hunks,
-    attempt_base_for,
-    bundle_from_changeset,
+)
+from forge.domain.candidate_usage import (
+    HarnessUsage,
+)
+from forge.domain.candidate_parser import (
     parse_unified_diff,
 )
 
@@ -239,7 +253,7 @@ class TestParseRejections:
         assert excinfo.value.reason == "corrupt_patch"
 
     def test_oversized_created_file_rejected(self, monkeypatch):
-        monkeypatch.setattr("forge.runs.candidate.FORGE_MATERIALIZE_MAX_FILE_CHARS", 10)
+        monkeypatch.setattr("forge.domain.patch.FORGE_MATERIALIZE_MAX_FILE_CHARS", 10)
         diff = (
             "diff --git a/big.txt b/big.txt\n"
             "new file mode 100644\n"
@@ -649,11 +663,11 @@ class TestHelpers:
         )
         bundle = parse_unified_diff(diff, BASE, "completed")
         monkeypatch.setattr(
-            "forge.runs.candidate.FORGE_MATERIALIZE_MAX_FILE_CHARS",
+            "forge.domain.patch.FORGE_MATERIALIZE_MAX_FILE_CHARS",
             FORGE_MATERIALIZE_MAX_FILE_CHARS,
         )
         monkeypatch.setattr(
-            "forge.runs.candidate._enforce_cap",
+            "forge.domain.candidate._enforce_cap",
             lambda path, content: (_ for _ in ()).throw(CandidateError("file_too_large", path)),
         )
         with pytest.raises(CandidateError) as excinfo:

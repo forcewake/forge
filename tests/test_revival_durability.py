@@ -41,16 +41,18 @@ from forge.durable.intents import complete_intent, mark_dispatched, record_inten
 from forge.models.base import Base
 from forge.runs.revival import (
     DISPATCH_RECOVERY_PENDING_SECONDS,
-    FATAL,
-    Retryability,
     _begin_auto_revive,
     begin_revival_attempt,
     claim_attempt_dispatch,
-    classify_retryability,
-    classify_terminal_failure,
     evaluate_attempt_recovery,
     open_revival_attempt,
     retry_delivery_key,
+)
+from forge.domain.revival import (
+    FATAL,
+    Retryability,
+    classify_retryability,
+    classify_terminal_failure,
 )
 from forge.runs.service import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer

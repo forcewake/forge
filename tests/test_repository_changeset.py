@@ -2,22 +2,26 @@
 
 import pytest
 
-from forge.repository.changeset import (
+from forge.domain.paths import (
     BUILTIN_WRITE_PROFILES,
     DEFAULT_WRITE_PROFILE,
     DENIED_PATHS,
     MAX_CHANGES,
+    is_lockfile,
+    normalize_repo_path,
+    resolve_write_policy,
+    validate_changeset,
+)
+from forge.domain.change_types import (
     Change,
     ChangeSet,
     MaterializationError,
     Operation,
+)
+from forge.domain.changes import (
     changeset_from_document,
     changeset_to_document,
-    is_lockfile,
     materialize,
-    normalize_repo_path,
-    resolve_write_policy,
-    validate_changeset,
 )
 
 
@@ -96,7 +100,7 @@ class TestDenylist:
         assert MAX_CHANGES == 20
 
     def test_monkeypatched_limit_is_respected(self, monkeypatch):
-        from forge.repository import changeset
+        import forge.domain.paths as changeset
 
         monkeypatch.setattr(changeset, "MAX_CHANGES", 2)
         violations = validate_changeset(_cs(_create("a.md"), _create("b.md")))
@@ -434,7 +438,7 @@ class TestWriteProfileMatrix:
     def test_builtins_read_the_live_module_denylist(self, monkeypatch):
         # The historical monkeypatch contract: module constants shape the
         # default policy.
-        from forge.repository import changeset
+        import forge.domain.paths as changeset
 
         monkeypatch.setattr(changeset, "DENIED_PATHS", frozenset({"forbidden.txt"}))
         assert validate_changeset(_cs(_create("forbidden.txt")))

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from . import models
+from .policy import ExecutionPolicy
 
 WIRE_TYPES = (
     models.LaneDispatch,
@@ -28,7 +29,7 @@ def export(directory: Path, *, check: bool = False) -> list[str]:
     expected = {
         f"{model.__name__}.json": json.dumps(model.model_json_schema(), indent=2, sort_keys=True)
         + "\n"
-        for model in WIRE_TYPES
+        for model in (*WIRE_TYPES, ExecutionPolicy)
     }
     mismatches = []
     if not check:

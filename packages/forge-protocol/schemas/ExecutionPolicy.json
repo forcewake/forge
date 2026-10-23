@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "McpServerPolicy": {
+      "additionalProperties": false,
+      "description": "A trusted server definition, never instructions to discover ambient config.\n\nCredential references name separately granted MCP credentials. They are not\nmodel keys, OIDC tokens or arbitrary environment variable names. A driver\nstill has to prove support for this transport and exact tool permission.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Args",
+          "type": "array"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credential Ref"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "tools": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Tools",
+          "type": "array"
+        },
+        "transport": {
+          "enum": [
+            "http",
+            "stdio"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "tools"
+      ],
+      "title": "McpServerPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The fixed file-only profile plus individually approved MCP capabilities.\n\nThis value authorizes no shell, repository writes, inherited MCP servers or\nambient credentials. Presence is not a driver capability or trust attestation.",
+  "properties": {
+    "mcp_servers": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/McpServerPolicy"
+      },
+      "maxItems": 8,
+      "title": "Mcp Servers",
+      "type": "array"
+    },
+    "profile": {
+      "const": "workspace-files-v1",
+      "default": "workspace-files-v1",
+      "title": "Profile",
+      "type": "string"
+    },
+    "schema": {
+      "const": "forge.execution-policy/1",
+      "default": "forge.execution-policy/1",
+      "title": "Schema",
+      "type": "string"
+    }
+  },
+  "title": "ExecutionPolicy",
+  "type": "object"
+}

@@ -1,7 +1,7 @@
 """Pure lifecycle and cumulative accounting properties independent of adapters."""
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Inexact, ROUND_DOWN, localcontext
 import random
 
 from pydantic import ValidationError
@@ -164,3 +164,50 @@ def test_missing_usage_axes_never_default_to_zero_or_release_liability():
         Observation(usd=Decimal(2))
     with pytest.raises(TypeError):
         pool.observe("a", resource(2), final=True)
+
+
+def test_money_arithmetic_is_exact_under_hostile_decimal_context():
+    with localcontext() as hostile:
+        hostile.prec, hostile.Emax, hostile.Emin = 6, 6, -6
+        hostile.rounding = ROUND_DOWN
+        hostile.traps[Inexact] = True
+        total = resource("12345678901234567890.123456789012345678", 9, 90)
+        closing = resource("0.000000000000123456", 1, 10)
+        result = partition(total, closing)
+        assert result.implementation.usd == Decimal("12345678901234567890.123456789012222222")
+        assert result.implementation.calls == 8 and result.implementation.tokens == 80
+        assert result.implementation + closing == total
+        assert (total + closing).usd == Decimal("12345678901234567890.123456789012469134")
+        assert hostile.prec == 6 and hostile.Emax == 6 and hostile.Emin == -6
+
+
+def test_money_format_refuses_overflow_without_rounding():
+    with localcontext() as hostile:
+        hostile.prec = 6
+        for value in ("100000000000000000000", "1.1234567890123456789", "0.0000000000000000001"):
+            with pytest.raises(ValidationError):
+                resource(value)
+        maximum = resource("99999999999999999999.999999999999999999")
+        with pytest.raises(ValidationError):
+            maximum + resource("0.000000000000000001")
+        assert resource("1.000000000000000000000000000000000000000000").usd.as_tuple().exponent == 0
+        assert resource("0E-999999").usd.as_tuple().exponent == 0
+
+
+def test_small_provider_costs_and_large_caps_settle_without_loss():
+    with localcontext() as hostile:
+        hostile.prec = 6
+        pool = Pool(
+            identity="precise", capacity=resource("12345678901234567890.123456789012345678", 2, 100)
+        )
+        pool = pool.reserve(
+            "a", resource("0.000000000002", 1, 10), resource("0.000000000000000001", 1, 1)
+        )
+        known = Observation(usd=Decimal("0.000000000001234567"), calls=1, tokens=4)
+        pool = pool.observe("a", known, final=False)
+        assert pool.balance.held.usd == Decimal("0.000000000002")
+        pool = pool.observe("a", known, final=True)
+        assert pool.balance.settled.usd == Decimal("0.000000000001234567")
+        assert pool.balance.available.usd == Decimal("12345678901234567890.123456789011111111")
+        assert pool.balance.available.calls == 1 and pool.balance.available.tokens == 96
+        assert pool.observe("a", known, final=True) is pool

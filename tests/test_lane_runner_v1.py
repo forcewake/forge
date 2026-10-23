@@ -1,6 +1,7 @@
 """The lane runs against a real Git tree and an in-process wire server."""
 
 import asyncio
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -25,6 +26,8 @@ from forge_protocol import (
     SessionRequest,
     SessionToken,
     approved_input_digest,
+    canonical_json,
+    digest,
 )
 
 
@@ -323,6 +326,42 @@ async def test_unapproved_or_cross_generation_brief_never_starts_driver(tmp_path
     result = await execute(dispatch, server, driver, workspace)
     assert result.exit_code in (ExitCode.APPROVAL, ExitCode.TRANSPORT)
     assert not driver.starts and not server.candidates and server.model_keys == 0
+
+
+@pytest.mark.parametrize("fault", ["unbound", "unknown_spec", "unknown_policy"])
+async def test_unbound_or_unknown_spec_refuses_before_driver_or_key(tmp_path, fault):
+    workspace = tmp_path / "work"
+    base = checkout(workspace)
+    dispatch, brief = inputs(base)
+    server, driver = WireServer(dispatch, brief), FakeDriver()
+    driver.requires_model_key = True
+    document = {
+        "schema": "forge.run-spec/2",
+        "base_sha": base,
+        "revision": 1,
+        "plan": {"summary": "Approved plan"},
+        "execution_policy": {"schema": "forge.execution-policy/1"},
+    }
+    if fault == "unknown_spec":
+        document["schema"] = "forge.run-spec/999"
+    elif fault == "unknown_policy":
+        document["execution_policy"]["schema"] = "forge.execution-policy/999"
+    server.brief["spec_json"] = canonical_json(document).decode("utf-8")
+    if fault != "unbound":
+        server.brief["spec_digest"] = digest(document)
+        server.brief["plan_digest"] = digest(document["plan"])
+        approval = approved_input_digest(
+            **{
+                key: server.brief[key]
+                for key in ("brief_text", "plan_digest", "spec_digest", "base_sha", "revision")
+            }
+        )
+        server.brief["approved_digest"] = approval
+        dispatch = dispatch.model_copy(update={"approved_digest": approval})
+    assert json.loads(server.brief["spec_json"])["base_sha"] == base
+    result = await execute(dispatch, server, driver, workspace)
+    assert result.classification == "invalid_brief"
+    assert not driver.starts and server.model_keys == 0 and not server.candidates
 
 
 async def test_empty_diff_is_honest_and_git_failure_is_different(tmp_path):

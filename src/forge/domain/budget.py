@@ -1,13 +1,53 @@
 """Cumulative pool arithmetic with unknown liability held until final settlement."""
 
-from decimal import Decimal
+from decimal import (
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, model_validator
 
 from .value import Value
 
-Money = Annotated[Decimal, Field(ge=0, max_digits=24, decimal_places=9, allow_inf_nan=False)]
+
+def _bounded_money(value: Decimal) -> Decimal:
+    # Tuple arithmetic removes only insignificant zeros, without Decimal.normalize rounding.
+    sign, digits, exponent = value.as_tuple()
+    assert isinstance(exponent, int)
+    end = len(digits)
+    while end and digits[end - 1] == 0:
+        end -= 1
+    if end == 0:
+        return Decimal(0)
+    exponent += len(digits) - end
+    digits = digits[:end]
+    if max(-exponent, 0) > 18 or max(len(digits) + exponent, 0) > 20:
+        raise ValueError("money exceeds exact NUMERIC(38,18) representation")
+    return Decimal((sign, digits, exponent))
+
+
+def _money_arithmetic(left: Decimal, right: Decimal, *, subtract: bool = False) -> Decimal:
+    # Accepted operands align within 38 places; even an overflowing sum is exact here.
+    context = Context(
+        prec=80,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+        traps=[Inexact, Rounded, Overflow, Underflow, InvalidOperation],
+    )
+    with localcontext(context):
+        return left - right if subtract else left + right
+
+
+Money = Annotated[Decimal, Field(ge=0, allow_inf_nan=False), AfterValidator(_bounded_money)]
 Count = Annotated[int, Field(ge=0)]
 Positive = Annotated[int, Field(gt=0)]
 Identity = Annotated[str, Field(min_length=1)]
@@ -20,7 +60,7 @@ class Resources(Value):
 
     def __add__(self, other: "Resources") -> "Resources":
         return Resources(
-            usd=self.usd + other.usd,
+            usd=_money_arithmetic(self.usd, other.usd),
             calls=self.calls + other.calls,
             tokens=self.tokens + other.tokens,
         )
@@ -32,7 +72,7 @@ class Resources(Value):
         if not self.covers(other):
             raise ValueError("resources would become negative")
         return Resources(
-            usd=self.usd - other.usd,
+            usd=_money_arithmetic(self.usd, other.usd, subtract=True),
             calls=self.calls - other.calls,
             tokens=self.tokens - other.tokens,
         )

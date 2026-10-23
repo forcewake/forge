@@ -2,12 +2,16 @@
 
 import pytest
 
-from forge.repository.changeset import (
+from forge.domain.change_types import (
     Change,
     ChangeSet,
     MaterializationError,
     Operation,
+)
+from forge.domain.changes import (
     materialize,
+)
+from forge.domain.paths import (
     validate_changeset,
 )
 

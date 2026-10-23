@@ -32,13 +32,26 @@ from forge.integrations.github_flow import (
     github_factory_branch,
 )
 from forge.models.base import Base
-from forge.repository import ChangesetWriter
-from forge.repository.changeset import Change, ChangeSet, Operation, resolve_write_policy
-from forge.runs.candidate import bundle_from_changeset
-from forge.runs.publisher import (
+from forge.repository import (
+    ChangesetWriter,
+)
+from forge.domain.change_types import (
+    Change,
+    ChangeSet,
+    Operation,
+)
+from forge.domain.paths import (
+    resolve_write_policy,
+)
+from forge.domain.candidate import (
+    bundle_from_changeset,
+)
+from forge.domain.candidate import (
     ValidatedCandidate,
-    publish_candidate,
     validate_candidate_bundle,
+)
+from forge.runs.publisher import (
+    publish_candidate,
 )
 from tests.fixtures.fake_github import FakeGitHub
 from tests.fixtures.fake_gitlab import FakeGitLab

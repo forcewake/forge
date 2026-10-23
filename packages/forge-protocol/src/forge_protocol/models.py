@@ -17,6 +17,8 @@ from pydantic import (
 )
 
 from .canonical import approved_input_digest, digest
+from .policy import ExecutionPolicy
+from .spec import frozen_execution_policy
 
 PROTOCOL: Literal["forge.lane/1"] = "forge.lane/1"
 Text = Annotated[str, Field(strict=True, min_length=1)]
@@ -100,6 +102,9 @@ class Brief(RunIdentity):
     spec_digest: Digest
     base_sha: CommitSha
     revision: Positive
+    spec_json: Annotated[str, Field(strict=True, max_length=1024 * 1024)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def verify_approved_input(self) -> Self:
@@ -112,7 +117,21 @@ class Brief(RunIdentity):
         )
         if expected != self.approved_digest:
             raise ValueError("approved input digest mismatch")
+        if self.spec_json is not None:
+            self.execution_policy
         return self
+
+    @property
+    def execution_policy(self) -> ExecutionPolicy:
+        if self.spec_json is None:
+            return ExecutionPolicy()
+        return frozen_execution_policy(
+            self.spec_json,
+            spec_digest=self.spec_digest,
+            plan_digest=self.plan_digest,
+            base_sha=self.base_sha,
+            revision=self.revision,
+        )
 
 
 class ControlCommand(RunIdentity):

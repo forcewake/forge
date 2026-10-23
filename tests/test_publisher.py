@@ -16,15 +16,27 @@ from forge.durable import ActionLog, Controller, FlowRun, RunSpec, bind_claim
 from forge.durable.identity import factory_branch
 from forge.gitlab.blob_reads import BlobReadResult
 from forge.models.base import Base
-from forge.repository import ChangesetWriter
-from forge.runs.candidate import _blob_digests, CandidateError, parse_unified_diff
-from forge.runs.publisher import (
+from forge.repository import (
+    ChangesetWriter,
+)
+from forge.domain.patch import (
+    _blob_digests,
+)
+from forge.domain.patch import (
+    CandidateError,
+)
+from forge.domain.candidate_parser import (
+    parse_unified_diff,
+)
+from forge.domain.candidate import (
     PolicyViolation,
-    PublishResult,
     ValidatedCandidate,
+    validate_candidate_bundle,
+)
+from forge.runs.publisher import (
+    PublishResult,
     publish_candidate,
     publish_validated_candidate,
-    validate_candidate_bundle,
 )
 from tests.fixtures.fake_gitlab import FakeGitLab
 

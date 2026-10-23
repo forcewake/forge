@@ -88,7 +88,7 @@ def test_zeroed_complete_usage_is_unknown_not_measured_zero(completeness):
     usage = HarnessUsage.from_meta(raw)
     assert usage.completeness == "unknown"
     assert usage.total_known_tokens is None
-    assert usage.raw == raw
+    assert usage.raw_document() == raw
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+
+from forge.domain.candidate import (
+    PolicyViolation as PolicyViolation,
+    ValidatedCandidate as ValidatedCandidate,
+    manifest_to_changeset as manifest_to_changeset,
+    validate_candidate_bundle as validate_candidate_bundle,
+)
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -18,20 +25,13 @@ from forge.repository.changeset import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.gitlab.blob_reads import AUTHORITATIVE_READ_FAILED, BlobReadResult
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.repository import (
-    Change,
-    ChangeSet,
-    Operation,
     WriteOutcome,
-    WritePolicy,
-    normalize_repo_path,
     resolve_write_policy,
-    validate_changeset,
 )
 from forge.repository.writer import BranchDriftError, ChangesetWriter
 from forge.runs.candidate import (
     CandidateBundle,
     CandidateError,
-    ChangeManifestEntry,
     attempt_base_for,
 )
 
@@ -42,113 +42,10 @@ logger = logging.getLogger(__name__)
 #: publisher stays independent of the step run).
 FenceCheck = Callable[[], Awaitable[bool]]
 
-_OPERATION_MAP: dict[str, Operation] = {
-    "create": Operation.CREATE,
-    "modify": Operation.UPDATE,
-    "delete": Operation.DELETE,
-}
 
 #: Fetches the AUTHORITATIVE full content of *paths* at *base_ref* (the provider-side half
 #: of materialization).
 BaseContentFetcher = Callable[[str, list[str]], Awaitable[dict[str, str]]]
-
-
-class PolicyViolation(Exception):
-    """The publication boundary rejected a candidate on write policy."""
-
-    def __init__(self, violations: list[str]) -> None:
-        self.violations = violations
-        super().__init__("; ".join(violations))
-
-
-@dataclass(frozen=True)
-class ValidatedCandidate:
-    """A candidate that crossed the publication boundary (ADR-0026)."""
-
-    bundle: CandidateBundle
-    #: The completed manifest (full contents) the digests were verified on.
-    manifest: tuple[ChangeManifestEntry, ...]
-    #: The native-adapter payload mapped 1:1 from the manifest.
-    changeset: ChangeSet
-    #: The frozen scope the paths were validated against (empty = unscoped).
-    allowed_paths: tuple[str, ...]
-
-
-def manifest_to_changeset(
-    entries: Iterable[ChangeManifestEntry],
-    *,
-    branch: str,
-    commit_message: str,
-    attempt_base_oid: str = "",
-) -> ChangeSet:
-    """Map a completed manifest onto the write-path :class:`ChangeSet`."""
-    return ChangeSet(
-        branch=branch,
-        commit_message=commit_message,
-        changes=[
-            Change(
-                path=entry.path,
-                operation=_OPERATION_MAP[entry.operation],
-                content=entry.new_content,
-            )
-            for entry in entries
-        ],
-        attempt_base_oid=attempt_base_oid or None,
-    )
-
-
-def validate_candidate_bundle(
-    bundle: CandidateBundle,
-    *,
-    base_contents: dict[str, str],
-    branch: str,
-    commit_message: str,
-    allowed_paths: Sequence[str] = (),
-    policy: WritePolicy | None = None,
-) -> ValidatedCandidate:
-    """The pure publication-boundary check, shared by EVERY backend (ADR-0026)."""
-    if bundle.is_empty:
-        raise CandidateError("empty_candidate", "candidate contains no changes")
-    _reject_duplicate_paths(bundle)
-    entries = tuple(bundle.materialize(base_contents))
-    changeset = manifest_to_changeset(
-        entries,
-        branch=branch,
-        commit_message=commit_message,
-        attempt_base_oid=bundle.attempt_base_oid,
-    )
-    violations = validate_changeset(
-        changeset,
-        base_contents,
-        allowed_paths=list(allowed_paths),
-        policy=policy,
-    )
-    violations.extend(
-        f"change {entry.path!r} (create): file already exists in the base snapshot"
-        for entry in entries
-        if entry.operation == "create" and entry.path in base_contents
-    )
-    if violations:
-        raise PolicyViolation(violations)
-    return ValidatedCandidate(
-        bundle=bundle,
-        manifest=entries,
-        changeset=changeset,
-        allowed_paths=tuple(allowed_paths),
-    )
-
-
-def _reject_duplicate_paths(bundle: CandidateBundle) -> None:
-    """Refuse a bundle with two entries for one canonical path."""
-    seen: set[str] = set()
-    for path in bundle.paths:
-        canonical = normalize_repo_path(path)
-        if canonical and canonical in seen:
-            raise CandidateError(
-                "duplicate_path",
-                f"{path}: duplicate path ({canonical!r}) — one entry per path per candidate",
-            )
-        seen.add(canonical)
 
 
 @dataclass(frozen=True)

@@ -66,10 +66,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from forge.domain.candidate_usage import HarnessUsage
 
 from forge.durable import (
     AXIS_CALLS,
@@ -459,7 +460,7 @@ async def _green_pipeline_for(gitlab_native, landed: _LandedRun) -> None:
     )
 
 
-async def _ingest(pe_db, run_id: str, usage: SimpleNamespace) -> None:
+async def _ingest(pe_db, run_id: str, usage: HarnessUsage) -> None:
     """The durable receipt front door — exactly as the lane reconciler
     persists a candidate's spend (idempotent, cost-lineage'd)."""
     factory = pe_db.worker_factory()
@@ -469,46 +470,43 @@ async def _ingest(pe_db, run_id: str, usage: SimpleNamespace) -> None:
         assert created, f"the receipt {usage.receipt_id} was not ingested"
 
 
-def _final_receipt(*, receipt_id: str, cost_usd: float) -> SimpleNamespace:
+def _final_receipt(*, receipt_id: str, cost_usd: float) -> HarnessUsage:
     """A settled FINAL receipt: the provider reported the exact figure."""
-    return SimpleNamespace(
-        attempt_id="a-1",
-        receipt_id=receipt_id,
-        driver="claude-code",
-        model=PE_HARNESS_MODEL,
-        input_tokens=100,
-        output_tokens=20,
-        completeness="exact",
-        source="forge-lab",
-        final=True,
-        cost_usd=cost_usd,
-        cost_basis="provider-reported",
-        raw={"cost_usd": cost_usd, "cost_basis": "provider-reported", "final": True},
+    return HarnessUsage.from_meta(
+        {
+            "attempt_id": "a-1",
+            "receipt_id": receipt_id,
+            "driver": "claude-code",
+            "model": PE_HARNESS_MODEL,
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "completeness": "exact",
+            "source": "forge-lab",
+            "final": True,
+            "cost_usd": cost_usd,
+            "cost_basis": "provider-reported",
+        }
     )
 
 
-def _partial_receipt(
-    *, receipt_id: str, subtotal_usd: float, envelope_usd: float
-) -> SimpleNamespace:
+def _partial_receipt(*, receipt_id: str, subtotal_usd: float, envelope_usd: float) -> HarnessUsage:
     """A PARTIAL receipt: the provider streamed a subtotal that is NOT
     settled, inside the worst-case envelope still fenced for it."""
-    return SimpleNamespace(
-        attempt_id="a-1",
-        receipt_id=receipt_id,
-        driver="claude-code",
-        model=PE_HARNESS_MODEL,
-        input_tokens=80,
-        output_tokens=10,
-        completeness="partial",
-        source="forge-lab",
-        final=False,
-        cost_usd=subtotal_usd,
-        cost_basis="estimated",
-        raw={
-            "cost_usd": subtotal_usd,
+    return HarnessUsage.from_meta(
+        {
             "cost_upper_bound_usd": envelope_usd,
+            "attempt_id": "a-1",
+            "receipt_id": receipt_id,
+            "driver": "claude-code",
+            "model": PE_HARNESS_MODEL,
+            "input_tokens": 80,
+            "output_tokens": 10,
+            "completeness": "aggregate",
+            "source": "forge-lab",
             "final": False,
-        },
+            "cost_usd": subtotal_usd,
+            "cost_basis": "estimated",
+        }
     )
 
 

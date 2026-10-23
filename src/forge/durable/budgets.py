@@ -1045,7 +1045,7 @@ async def ingest_usage_receipt(
             return None
         return value
 
-    raw = getattr(usage, "raw", None)
+    raw = usage.raw_document()
     # the durable identity widened to its fourth component — the SOURCE NAMESPACE (the lane
     # label the receipt arrived under, the same value the ``source`` column carries).
     namespace = str(getattr(usage, "source", "") or "")[:100]

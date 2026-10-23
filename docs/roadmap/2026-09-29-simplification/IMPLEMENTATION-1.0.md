@@ -47,7 +47,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-14 dependency diet | Implemented source cleanup; Agno/LiteLLM/MCP/tiktoken and orphan dependencies removed, three distribution dependency checks pass; 13 direct server requirements remain, above the target of ten |
 | P1-13 deferred features | Implemented; MCP server, scanner/triage and standalone CI-debug removed; historical migration schema preserved and /security refuses explicitly |
 | P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
-| P3-01 pure domain | Foundation implemented: closed states, cumulative multi-axis pools, explicit unknown observations and candidate-bound verdicts; candidate/paths/spec extraction in progress; no runtime switch |
+| P3-01 pure domain | Implemented: closed states, exact cumulative multi-axis budgets, immutable candidate/path validation, RunSpec v2, plans and one approved-input contract; 436 focused checks and strict domain typing pass; engine integration follows |
 | P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
 | P2-08 contrib drivers | Implemented as explicit opt-in experimental Codex/OpenCode/Grok ports; protocol fakes only, vendor sandbox and live acceptance unperformed |
 | P2-09 exact checkpoints | Implemented; binary/mode/symlink round trips, safe file/directory transitions, matched server limits and acknowledged blob deduplication; corrupt restore halts before writes |

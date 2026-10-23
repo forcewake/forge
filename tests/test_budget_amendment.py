@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
 
 import pytest
+
+from forge.domain.candidate_usage import HarnessUsage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -519,25 +520,6 @@ class TestClosingPartition:
 # ----------------------------------------------------------------------
 
 
-@dataclass
-class SimpleUsage:
-    attempt_id: str = "att-1"
-    receipt_id: str = ""
-    driver: str = ""
-    model: str = ""
-    input_tokens: int | None = None
-    cached_input_tokens: int | None = None
-    cache_write_tokens: int | None = None
-    output_tokens: int | None = None
-    reasoning_tokens: int | None = None
-    completeness: str = "aggregate"
-    source: str = ""
-    raw: dict | None = None
-    cost_usd: float | None = None
-    cost_basis: str | None = None
-    final: bool | None = None
-
-
 async def receipt_row(db):
     from forge.durable import UsageReceipt
 
@@ -556,7 +538,7 @@ class TestReceiptCostColumns:
         """The legacy receipt: a raw block carrying a cost but none of the
         new columns — the figure LANDS (never silently zero) with an
         honest unknown basis."""
-        usage = SimpleUsage(
+        usage = _usage_receipt(
             input_tokens=100,
             output_tokens=50,
             raw={"cost_usd": 0.42, "unexpected": "shape"},
@@ -570,7 +552,7 @@ class TestReceiptCostColumns:
         assert row.final is True  # the R23 front door default
 
     async def test_the_canonical_lineage_lands(self, db):
-        usage = SimpleUsage(
+        usage = _usage_receipt(
             raw={
                 "cost_usd": 0.5,
                 "cost_basis": "provider-reported",
@@ -590,7 +572,7 @@ class TestReceiptCostColumns:
         assert row.final is False  # the streamed partial's own finality
 
     async def test_a_garbage_basis_never_lands(self, db):
-        usage = SimpleUsage(raw={"cost_usd": 1.0, "cost_basis": "trust-me"})
+        usage = _usage_receipt(raw={"cost_usd": 1.0, "cost_basis": "trust-me"})
         async with db() as session:
             await ingest_usage_receipt(session, run_id=RUN_ID, usage=usage)
             await session.commit()
@@ -601,7 +583,7 @@ class TestReceiptCostColumns:
     async def test_the_counters_and_the_cost_describe_one_observation(self, db):
         """The same receipt feeds the guard's counters AND the USD
         projection — one durable row, both honest."""
-        usage = SimpleUsage(
+        usage = _usage_receipt(
             input_tokens=120,
             output_tokens=30,
             raw={"cost_usd": 0.3, "cost_basis": "provider-reported"},
@@ -864,3 +846,8 @@ class TestRealPostgresRaces:
                 assert len(await budget_amendments_for_run(session, RUN_ID)) == 1
         finally:
             await engine.dispose()
+
+
+def _usage_receipt(**values):
+    document = {"attempt_id": "att-1", **values.pop("raw", {}), **values}
+    return HarnessUsage.from_meta(document)

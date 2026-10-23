@@ -53,6 +53,19 @@
       "pattern": "^[0-9a-f]{64}$",
       "title": "Spec Digest",
       "type": "string"
+    },
+    "spec_json": {
+      "anyOf": [
+        {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Spec Json"
     }
   },
   "required": [
