@@ -43,11 +43,12 @@ class Trace:
             pass
 
     def clean(self, text: str, limit: int = 4096) -> str:
+        text = _CONTROL.sub("", _ANSI.sub("", text))
         for secret in sorted(set(self.secrets) - {""}, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
         text = _CREDENTIAL.sub("[REDACTED]", text)
         text = re.sub(r"(https?://)[^/\s@]+@", r"\1[REDACTED]@", text)
-        text = _CONTROL.sub(" ", _ANSI.sub("", text))
+        text = text.replace("##[", "## [")
         return " ".join(text.split())[:limit]
 
     def line(self, glyph: str, text: str) -> None:

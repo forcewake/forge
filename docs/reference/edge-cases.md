@@ -324,6 +324,9 @@ When a pin breaks:
 | EC-631 | A doc link resolves only in an old source tree or a removed heading | Check actual checkout paths and Markdown heading anchors, ignoring fenced examples rather than accepting dangling links | `tests/test_docs_links.py` | `tests/test_docs_links.py::test_active_markdown_links_resolve`, `tests/test_docs_links.py::test_link_checker_catches_missing_files_and_headings` |
 | EC-632 | A smaller reader count is mistaken for the all-docs exit metric | Exclude only canonical program records and the immutable changelog, include ADRs/register, and leave the all-docs counter unchanged | `docs/archive.md` | `tests/test_docs_links.py::test_documentation_budget_keeps_history_explicit` |
 
+| EC-654 | Legacy GitHub command markers execute even inside timestamped output | Neutralize the legacy command prefix anywhere in every untrusted trace field | `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_legacy_action_commands_are_inert_anywhere_in_untrusted_text` |
+| EC-655 | Terminal normalization reconstructs a key after it was masked | Remove terminal escapes and controls before credential redaction | `packages/forge-lane/src/forge_lane/trace.py` | `tests/test_lane_trace.py::test_terminal_normalization_cannot_reconstruct_a_masked_secret` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

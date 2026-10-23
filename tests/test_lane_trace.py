@@ -92,3 +92,26 @@ def test_closed_log_output_is_not_an_execution_failure():
     trace.event(DriverEvent("message", text="visible"))
     trace.finish("completed", Usage(input_tokens=1, output_tokens=2))
     assert trace.closed
+
+
+@pytest.mark.parametrize(
+    "marker", ["##[error]forged", "##[stop-commands]token", "##[set-output name=x]y"]
+)
+def test_legacy_action_commands_are_inert_anywhere_in_untrusted_text(marker):
+    output = []
+    trace = Trace("driver", "model", platform="actions", emit=output.append)
+    trace.event(DriverEvent("message", text="prefix " + marker))
+    trace.event(DriverEvent("tool_start", tool_name=marker))
+    trace.event(DriverEvent("tool_result", text=marker))
+    trace.finish(marker)
+    assert not any("##[" in line for line in output)
+    assert "::group::" in "\n".join(output) and "::endgroup::" in output
+
+
+@pytest.mark.parametrize("joiner", ["\x1b[31m", "\x1b]0;title\x07", "\x00", "\b", "\n"])
+def test_terminal_normalization_cannot_reconstruct_a_masked_secret(joiner):
+    output = []
+    trace = Trace("driver", "model", secrets=("attempt-key",), emit=output.append)
+    trace.event(DriverEvent("message", text="attempt-" + joiner + "key\x1b[0m"))
+    assert "attempt-key" not in "\n".join(output)
+    assert "[REDACTED]" in "\n".join(output)
