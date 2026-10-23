@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
+from httpx import RemoteProtocolError
+
 from forge.durable import Controller
 from forge.durable.intents import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -277,7 +279,9 @@ class ChangesetWriter:
                 # "already exists" — ensure_branch has already guaranteed
                 # the branch exists.
             )
-        except CommitOutcomeUnknown:
+        except (CommitOutcomeUnknown, RemoteProtocolError):
+            # A closed response channel can follow an accepted commit, just
+            # like a timeout. Probe the existing intent; never replay the POST.
             return await self._resolve_unknown(action_id, intent_id, commit_intent)
         except GitLabAPIError as exc:
             await self._fail(action_id, intent_id, exc, commit_intent.expected_head)
@@ -611,7 +615,7 @@ class ChangesetWriter:
             ]
             if len(matches) == 1:
                 sha = matches[0]["sha"]
-        except GitLabAPIError:
+        except (GitLabAPIError, RemoteProtocolError):
             logger.exception("Reconciliation read failed for branch %r", intent.branch)
 
         if sha is not None:

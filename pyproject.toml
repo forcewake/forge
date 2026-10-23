@@ -157,19 +157,11 @@ allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router"
 as_packages = false
 
 [[tool.importlinter.contracts]]
-id = "authority-candidate_publication"
-name = "candidate_publication: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.publication_saga", "forge.adaptive.saga_durable"]
-allowed_importers = ["forge.adaptive.publication_saga", "forge.adaptive.reference.native_shaped_remote", "forge.adaptive.saga_durable", "forge.adaptive.saga_native", "forge.adaptive.two_writer_qualification"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
 id = "authority-verification_applicability"
 name = "verification_applicability: registered direct importers only"
 type = "protected"
 protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
-allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.two_writer_qualification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.usecases"]
+allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.usecases"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -233,7 +225,7 @@ id = "reference-importers"
 name = "reference package has only registered compatibility importers"
 type = "protected"
 protected_modules = ["forge.adaptive.reference"]
-allowed_importers = ["forge.adaptive.system_verification", "forge.adaptive.saga_durable", "forge.adaptive.steering_causality"]
+allowed_importers = ["forge.adaptive.system_verification", "forge.adaptive.steering_causality"]
 
 [[tool.importlinter.contracts]]
 id = "reference-direction"

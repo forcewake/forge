@@ -321,6 +321,11 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-02 Remove the publication-saga cluster
+- **Status:** implemented locally on 2026-10-23. Four saga modules and
+  their dependent reference leaf are removed. Retained tests now exercise
+  the current writer, intents and publisher; socket-response loss is
+  reconciled without a second POST. Focused integration: 289 passed,
+  six explicitly credential-gated live cases unexecuted.
 - **Goal:** delete test-only authority code.
 - **Work:**
   - Delete `adaptive/publication_saga.py`, `saga_durable.py`,

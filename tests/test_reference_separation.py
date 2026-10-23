@@ -9,7 +9,7 @@ package ``forge.adaptive.reference``), and customer-executed evidence
 
 - **the dependency direction** — runtime entry points (the provider
   services, ``main``, the wiring, the lane entry) must NOT import the
-  reference package, and outside the reference package only the three
+  reference package, and outside the reference package only the remaining
   registered COMPAT HOMES (the modules the scenarios were extracted
   from) may import it at all — a new runtime module pulling a scenario
   in by accident fails here;
@@ -35,7 +35,6 @@ traces) — those acceptance traces ran green before and after the move.
 from __future__ import annotations
 
 import ast
-import asyncio
 import importlib
 import json
 import os
@@ -47,9 +46,8 @@ from pathlib import Path
 import pytest
 
 import forge.adaptive.reference as reference_package
-import forge.adaptive.saga_durable as saga_durable
 import forge.adaptive.steering_causality as steering_causality
-from forge.adaptive.reference import native_shaped_remote, reactive_vendor, system_twin
+from forge.adaptive.reference import reactive_vendor, system_twin
 
 SRC_FORGE = Path(__file__).resolve().parents[1] / "src" / "forge"
 REFERENCE_ROOT = SRC_FORGE / "adaptive" / "reference"
@@ -74,7 +72,6 @@ RUNTIME_ENTRY_MODULES: tuple[str, ...] = (
 REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
     {
         "forge.adaptive.system_verification",
-        "forge.adaptive.saga_durable",
         "forge.adaptive.steering_causality",
     }
 )
@@ -112,10 +109,6 @@ MOVED_SYMBOLS: dict[str, tuple[tuple[str, str], ...]] = {
             # private pre-move attributes the tests import directly
             "_synthetic_seed_rows",
         )
-    ),
-    # saga_durable → reference/native_shaped_remote.py
-    "forge.adaptive.saga_durable": (
-        ("NativeShapedRemote", "forge.adaptive.reference.native_shaped_remote"),
     ),
     # steering_causality → reference/reactive_vendor.py (the pure grader
     # stays; the scenario constants, the grammar and the executable moved)
@@ -187,7 +180,7 @@ class TestDependencyDirection:
 
     def test_only_the_compat_homes_import_the_reference_package(self) -> None:
         """The confinement rule: outside the reference package itself,
-        ONLY the three registered compat homes may import it — any new
+        ONLY the surviving registered compat homes may import it — any new
         runtime module depending on a scenario fails here with an
         instruction to compose the contract instead (or, for an
         extraction, to register as a compat home with a reviewed
@@ -259,7 +252,6 @@ class TestCompatibilitySurface:
 
     def test_the_old_from_import_spellings_still_work(self) -> None:
         """The exact from-import forms the pre-move callers used."""
-        from forge.adaptive.saga_durable import NativeShapedRemote, NativeCommit  # noqa: F401
         from forge.adaptive.system_verification import (  # noqa: F401
             TWIN_REFERENCE_LABEL,
             TwinMigration,
@@ -276,12 +268,10 @@ class TestCompatibilitySurface:
         silent passthrough to the reference module."""
         with pytest.raises(AttributeError):
             _ = steering_causality.definitely_not_a_moved_symbol
-        with pytest.raises(AttributeError):
-            _ = saga_durable.definitely_not_a_moved_symbol
 
     def test_the_reference_package_label_is_documented(self) -> None:
         assert reference_package.REFERENCE_PACKAGE_LABEL == "forge.reference/1"
-        for name in ("system_twin", "native_shaped_remote", "reactive_vendor"):
+        for name in ("system_twin", "reactive_vendor"):
             module = importlib.import_module(f"forge.adaptive.reference.{name}")
             assert module.__doc__, f"reference.{name} carries no labelling docstring"
             assert "REFERENCE" in (module.__doc__ or ""), (
@@ -295,16 +285,13 @@ class TestCompatibilitySurface:
 
 
 class TestNoImplicitReferenceSelection:
-    def test_importing_the_runtime_saga_composition_loads_no_reference(self) -> None:
-        """A clean interpreter importing the durable saga + the native
-        adapters (the production composition) must load NO reference
-        module — the compat home's re-export is lazy precisely so an
-        import can never select the reference-native remote."""
+    def test_importing_product_publishers_loads_no_reference(self) -> None:
+        """The shipped writers never select a reference scenario by import."""
         probe = (
             "import sys\n"
-            "import forge.adaptive.saga_durable\n"
-            "import forge.adaptive.saga_native\n"
-            "import forge.adaptive.publication_saga\n"
+            "import forge.repository.writer\n"
+            "import forge.runs.publisher\n"
+            "import forge.integrations.github_flow\n"
             "leaked = sorted(m for m in sys.modules if m.startswith('forge.adaptive.reference'))\n"
             "print('LEAKED=' + ','.join(leaked))\n"
         )
@@ -313,7 +300,7 @@ class TestNoImplicitReferenceSelection:
         )
         leaked = result.stdout.strip().removeprefix("LEAKED=")
         assert leaked == "", (
-            f"importing the production saga composition loaded reference modules "
+            f"importing the product publishers loaded reference modules "
             f"({leaked}) — a runtime import selected reference-native behavior"
         )
 
@@ -387,13 +374,6 @@ class TestScenariosComposeContracts:
     def test_the_twin_freezes_through_the_owned_tested_world_entry(self) -> None:
         world = system_twin.default_twin_scenario().freeze()
         assert world.tested_world_digest, "the twin's freeze binds to the owned entry"
-
-    def test_the_reference_remote_speaks_the_owned_error_vocabulary(self) -> None:
-        remote = native_shaped_remote.NativeShapedRemote()
-        remote.seed("repo", "main", "a" * 40)
-        remote.pin_expected_head("repo", "main", "b" * 40)
-        with pytest.raises(saga_durable.ProviderRejectedError, match="422"):
-            asyncio.run(remote.commit("repo", "main", "marker"))
 
     def test_the_grader_uses_the_scenario_grammar_it_moved(self) -> None:
         target = steering_causality.parse_instruction(steering_causality.STEERING_TASK_INSTRUCTION)

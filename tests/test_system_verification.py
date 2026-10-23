@@ -872,19 +872,15 @@ class TestFrozenShapes:
             policy_refs=frozen.policy_refs,
         )
 
-    def test_the_ledger_interops_with_the_two_writer_readiness(self):
-        # the evidence records the twin writes are the SAME EvidenceRecord
-        # shape the two-writer can-i-deploy query consumes.
-        from forge.adaptive.two_writer_qualification import DependencyEdge, readiness
-
+    def test_the_ledger_reads_recorded_evidence_without_reexecuting(self):
         twin, frozen = _frozen()
         report = run_system_verification(frozen, default_verifier_environment(twin))
         ledger = EvidenceLedger().record(*report.evidence_records)
-        contract_edge = DependencyEdge(
-            edge_id=CONTRACT_EDGE,
-            kind="contract",
-            repositories=(PRODUCER, CONSUMER),
-            description="twin contract edge",
-        )
-        verdict = readiness(frozen, ledger, [contract_edge])
-        assert verdict.ready is True
+        expected = {record.evidence_id for record in report.evidence_records}
+        assert expected
+        assert ledger.applicable_to(frozen) == expected
+        withdrawn = next(iter(expected))
+        superseded = ledger.supersede({withdrawn}, "verification withdrawn")
+        assert superseded.applicable_to(frozen) == expected - {withdrawn}
+        assert len(superseded.records) == len(ledger.records)
+        assert ledger.applicable_to(frozen) == expected

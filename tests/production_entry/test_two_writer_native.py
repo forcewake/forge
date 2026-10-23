@@ -1,141 +1,225 @@
-"""R37-14 / #295 — the durable two-writer saga through REAL native
-provider effects: real PostgreSQL + the live lab GitLab CE.
+"""Native publication safety on the surviving single-run owners.
 
-R36-18 (``test_two_writer_durable.py``) ran the SAME durable saga over
-the provider-shaped ``NativeShapedRemote`` — an in-process reference
-with chosen duplicate/CAS semantics. This file is the issue's own
-negative-test core: the REAL :class:`DurablePublicationEntry` +
-:class:`SagaCoordinator` over the REAL
-:class:`forge.gitlab.client.GitLabClient` (the existing native client,
-injected behind :class:`forge.adaptive.saga_native.GitLabNativeEffects`),
-against DISPOSABLE lab projects created and deleted by the fixture
-(``forge-tw-<uuid>-producer``/``-consumer`` — bounded to the token's own
-namespace, never project 68 or anything else the lab owns):
-
-- **the kill matrix**: death at the store's COMMIT BOUNDARY after every
-  saga step of the producer (``fence_check`` shares ``commit_intent``'s
-  save — the real coordinator's own batching) through the REAL
-  coordinator + the NATIVE transport; every cell must restart-and-
-  converge with exactly ONE commit carrying the marker in the ACTUAL
-  listed history, ONE merge request per repository, prefix-preserved
-  histories and an inert third pass.
-- **lost first-repo commit response**: the response dies after GitLab
-  accepted the commit; the restarted drive ADOPTS through native
-  correlation (the listed commit's message marker + parent oid) — no
-  duplicate commit in the actual history, exactly one provider write.
-- **human branch edit between partial publication and recovery**: a
-  real commit pushed to the consumer's publication branch while the
-  coordinator is dead; recovery PARKS the repository (the conflict
-  decision is surfaced), the human commit stays the head, nothing is
-  forced anywhere.
-- **two recovering processes / a definitive second-repo failure**: the
-  consumer's review targets its own source branch — GitLab's REAL 400
-  ("You can't use same project/branch for source and target") — leaving
-  the producer's reviewable effect standing as an honest durable
-  PARTIAL state; the second recovering process spends nothing and
-  duplicates nothing.
-- **the bot never merges**: every review the run created stays OPEN and
-  DRAFT with an empty ``merged_at`` — asserted from the provider's own
-  listing, not from local state.
-
-R38-13 / #314 adds the qualification arms (the review's named deltas —
-all CONTENT-verified by blob reads, never by commit-history scans
-alone):
-
-- **the same-file read/apply window**: a REAL human commit to the
-  payload file lands between the publication's preflight read and the
-  server apply (the failpoint schedule inside the effect window) — the
-  pre-apply content recheck refuses with the TYPED conflict BEFORE any
-  effect, the human's content stays the branch head, the saga marker
-  never lands, ``saga.content_conflict`` is outboxed and no review
-  opens;
-- **the unrelated-file window schedule**: the same window, an
-  UNRELATED file — the publication PROCEEDS on top of the human commit
-  (its parent), the unrelated content and the payload are both read
-  back blob-level, and the payload preconditions are DURABLY recorded
-  beside the expected head;
-- **the delayed-apply window**: the commit response dies and the first
-  probe comes back negative (the injected delayed-visibility window)
-  — the same mutation is NOT blindly redispatched (durable
-  ``outcome_unknown``, exactly one commit in the real history), and
-  the recovering process adopts by CONTENT-verified correlation once
-  the effect is visible;
-- **access revoked during recovery**: the consumer's reads ride a
-  project-scoped credential (a REAL project access token, ``read_api``
-  only) that is REVOKED mid-recovery — every consumer read fails
-  closed with that credential's 401 and the surface NEVER falls back
-  to the wider admin credential the process also holds (structurally
-  there is no fallback path: one client per repository).
-
-Gating is honest: real PostgreSQL under ``FORGE_PG_TEST_URL`` (the FI
-convention — point it at a DISPOSABLE database, the pe_db fixture
-resets its whole public schema per test) AND the live GitLab under
-``FORGE_GITLAB_LIVE_URL``/``FORGE_GITLAB_LIVE_TOKEN``. Missing either
-skips visibly; nothing runs half-native.
+The retained filename records the former multiwriter qualification. ADR-0035
+retires that coordinator, its partial-package pivot and synthetic content-
+fence protocol. This file preserves current provider contracts: real HTTP,
+intent recovery, cancellation fencing, native head drift and Draft-only
+review creation. Hermetic HTTP traces run without credentials; the live
+GitLab/PostgreSQL qualification keeps its original explicit environment gate.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
 import uuid
-from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import httpx
 import pytest
 
-from forge.adaptive.publication_saga import ProviderUnavailableError
-from forge.adaptive.saga_durable import (
-    DurablePublicationEntry,
+from forge.durable import Controller, FlowRun
+from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.repository import ChangesetWriter, WriteOutcome
+from forge.repository.writer import BranchDriftError
+
+from .conftest import (
+    GL_ISSUE_DESC,
+    GL_ISSUE_IID,
+    GL_ISSUE_TITLE,
+    gl_settings,
+    make_gitlab_service,
+)
+from .test_two_writer_durable import (
     ProcessDied,
-    SAGA_PRECONDITIONS_KEY,
-    kill_at_boundary,
+    _changeset,
+    _commit_posts,
+    _intent,
+    _new_run,
+    _publish,
 )
-from forge.adaptive.saga_native import (
-    DEFAULT_PAYLOAD_PATH,
-    GitLabNativeEffects,
-    payload_document,
-)
-from forge.adaptive.two_writer_qualification import TwoWriterScenario, default_scenario
-from forge.adaptive.workpackage_service import ChildSubject
-from forge.durable import FlowRun
-from forge.gitlab.client import GitLabClient
 
 pytestmark = pytest.mark.production_entry
-
 _LIVE_URL = os.environ.get("FORGE_GITLAB_LIVE_URL", "")
 _LIVE_TOKEN = os.environ.get("FORGE_GITLAB_LIVE_TOKEN", "")
 _LIVE_REASON = (
     "FORGE_PG_TEST_URL and FORGE_GITLAB_LIVE_URL/FORGE_GITLAB_LIVE_TOKEN not both"
-    " set — the R37-14 native failpoint matrix runs only against a disposable real"
-    " Postgres AND the live lab GitLab (disposable forge-tw-* projects)"
+    " set — native qualification requires disposable Postgres and GitLab projects"
 )
-
-#: The producer-arm kill cells: every journaled step except ``fence_check``,
-#: which shares ``commit_intent``'s durable save (the coordinator's own
-#: batching — see ``kill_at_boundary``).
-KILL_STEPS = ("prepare", "commit_intent", "provider_commit", "verify", "record")
-
 PRODUCER = "repo-producer"
 CONSUMER = "repo-consumer"
 
-#: Short step codes for the kill matrix's scenario ids: ``FlowRun.id`` is a
-#: varchar(32) and the durable parent run id is ``run-<scenario_id>``, so the
-#: scenario id budget is 28 characters (SQLite does not enforce the length —
-#: real PostgreSQL does, which is exactly what the live run is for).
-_STEP_CODE = {
-    "prepare": "pr",
-    "commit_intent": "ci",
-    "provider_commit": "pc",
-    "verify": "vf",
-    "record": "rc",
-}
+
+async def _cancel(factory, run_id):
+    async with factory() as session:
+        await Controller(session).request_cancel(run_id)
+        await session.commit()
 
 
-# ---------------------------------------------------------------------------
-# The disposable live lab: two throwaway projects, deleted on teardown.
-# ---------------------------------------------------------------------------
+class TestNativeHttpPublication:
+    async def test_lost_http_response_adopts_the_one_native_commit(
+        self, pe_db, gitlab_native, gitlab_client
+    ):
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory)
+        branch = f"factory/{run.issue_iid}/{run.id[:8]}"
+        gitlab_native.set_latency(
+            [
+                {
+                    "method": "POST",
+                    "tail": ["repository", "commits"],
+                    "phase": "drop",
+                    "ms": 1,
+                }
+            ]
+        )
+        result = await _publish(factory, gitlab_client, run, branch)
+        assert result.ok and result.commit_sha == gitlab_native.branch_head(branch)
+        intent = await _intent(pe_db.worker_factory(), run.id)
+        assert intent.status == "adopted"
+        assert intent.provider_object_id == result.commit_sha
+        assert len(_commit_posts(gitlab_native)) == 1
+        commits = await gitlab_client.list_commits(run.project_id, branch)
+        assert commits[0]["parent_ids"] == [run.base_sha]
+        assert intent.operation_key in commits[0]["message"]
+
+    @pytest.mark.parametrize("probe_error", ["http_503", "protocol_error"])
+    async def test_dropped_response_with_unavailable_probe_stays_unknown(
+        self,
+        pe_db,
+        gitlab_native,
+        gitlab_client,
+        monkeypatch,
+        probe_error,
+    ):
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory)
+        branch = f"factory/{run.issue_iid}/{run.id[:8]}"
+        gitlab_native.set_latency(
+            [
+                {
+                    "method": "POST",
+                    "tail": ["repository", "commits"],
+                    "phase": "drop",
+                    "ms": 1,
+                }
+            ]
+        )
+
+        async def unavailable(*args, **kwargs):
+            if probe_error == "protocol_error":
+                raise httpx.RemoteProtocolError("probe disconnected")
+            raise GitLabAPIError(503, "probe unavailable")
+
+        monkeypatch.setattr(gitlab_client, "list_commits", unavailable)
+        result = await _publish(factory, gitlab_client, run, branch)
+        assert not result.ok and result.unknown_outcome
+        assert result.reason == "commit_unknown_outcome"
+        intent = await _intent(pe_db.worker_factory(), run.id)
+        assert intent.status == "unknown" and intent.provider_object_id is None
+        assert gitlab_native.branch_head(branch) != run.base_sha  # the write DID land
+        assert len(_commit_posts(gitlab_native)) == 1
+        assert gitlab_native.merge_requests() == {}
+
+    async def test_restarted_review_creators_adopt_one_draft_without_merging(
+        self, pe_db, gitlab_native, gitlab_client
+    ):
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory)
+        branch = f"factory/{run.issue_iid}/{run.id[:8]}"
+        gitlab_native.seed_issue(GL_ISSUE_IID, GL_ISSUE_TITLE, GL_ISSUE_DESC)
+        result = await _publish(factory, gitlab_client, run, branch)
+        assert result.ok
+        settings = gl_settings(GITLAB_URL=gitlab_native.base_url, DATABASE_URL=pe_db.url)
+        first = make_gitlab_service(factory, gitlab_client, settings=settings)
+        iid = await first._create_draft_mr(run.project_id, run.id, branch, result.commit_sha)
+        restarted = make_gitlab_service(
+            pe_db.worker_factory(),
+            gitlab_client,
+            settings=settings,
+        )
+        assert (
+            await restarted._create_draft_mr(
+                run.project_id,
+                run.id,
+                branch,
+                result.commit_sha,
+            )
+            == iid
+        )
+        (mr,) = gitlab_native.merge_requests().values()
+        assert mr["title"].startswith("Draft:")
+        assert mr["state"] == "opened"
+        assert mr.get("merged_at") is None
+        assert (
+            sum(
+                r["method"] == "POST" and r["path"] == "merge_requests"
+                for r in gitlab_native.state()["request_log"]
+            )
+            == 1
+        )
+        assert not any(
+            "merge" in r["path"].split("/") and r["method"] == "PUT"
+            for r in gitlab_native.state()["request_log"]
+        )
+
+    async def test_cancel_during_base_read_prevents_a_new_reservation(
+        self, pe_db, gitlab_native, gitlab_client, monkeypatch
+    ):
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory)
+        branch = f"factory/{run.issue_iid}/{run.id[:8]}"
+        read = asyncio.Event()
+        release = asyncio.Event()
+        original = gitlab_client.read_blob
+
+        async def blocked_read(*args, **kwargs):
+            result = await original(*args, **kwargs)  # actual authoritative HTTP read
+            read.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(gitlab_client, "read_blob", blocked_read)
+        publication = asyncio.create_task(_publish(factory, gitlab_client, run, branch))
+        try:
+            await asyncio.wait_for(read.wait(), timeout=5)
+            await _cancel(pe_db.worker_factory(), run.id)
+        finally:
+            release.set()
+        result = await publication
+        assert not result.ok and result.reason.startswith("publication_revoked:")
+        assert _commit_posts(gitlab_native) == []
+        assert branch not in gitlab_native.state()["branches"]
+
+    async def test_cancel_after_native_acceptance_preserves_superseded_effect(
+        self, pe_db, gitlab_native, gitlab_client, monkeypatch
+    ):
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory)
+        branch = f"factory/{run.issue_iid}/{run.id[:8]}"
+        original = gitlab_client.create_commit
+
+        async def cancel_after_acceptance(*args, **kwargs):
+            committed = await original(*args, **kwargs)
+            await _cancel(pe_db.worker_factory(), run.id)
+            return committed
+
+        monkeypatch.setattr(gitlab_client, "create_commit", cancel_after_acceptance)
+        result = await _publish(factory, gitlab_client, run, branch)
+        assert result.ok and result.superseded
+        assert gitlab_native.branch_head(branch) == result.commit_sha
+        assert len(_commit_posts(gitlab_native)) == 1
+        async with pe_db.worker_factory()() as session:
+            fresh = await session.get(FlowRun, run.id)
+        assert fresh.cancel_requested and fresh.cancellation_generation == 1
+        assert fresh.evidence["superseded"] == {
+            "reason": "cancelled_during_publication",
+            "commit_sha": result.commit_sha,
+            "attempt_base": run.base_sha,
+        }
+        assert gitlab_native.merge_requests() == {}
+        assert not any(r["method"] == "DELETE" for r in gitlab_native.state()["request_log"])
 
 
 class LiveGitLabLab:
@@ -224,659 +308,206 @@ async def live_lab(live_projects: LiveProjects):
         await client.close()
 
 
-# ---------------------------------------------------------------------------
-# Scenario/entry builders over the live branches.
-# ---------------------------------------------------------------------------
-
-
-def _live_scenario(
-    scenario_id: str,
-    producer: tuple[str, str],
-    consumer: tuple[str, str],
-) -> TwoWriterScenario:
-    """The default two-writer scenario with the WRITERS on live branches:
-    real base oids (the branch heads), real branch names, a unique id per
-    arm (a unique durable parent run). The read-only members stay
-    synthetic — no remote effect ever names them."""
-    base = default_scenario()
-    repos = []
-    for repo in base.repos:
-        if repo.kind == "producer":
-            repos.append(replace(repo, branch=producer[0], base_oid=producer[1]))
-        elif repo.kind == "consumer":
-            repos.append(replace(repo, branch=consumer[0], base_oid=consumer[1]))
-        else:
-            repos.append(repo)
-    return replace(base, scenario_id=scenario_id, repos=tuple(repos))
-
-
-def _subjects(lab: LiveGitLabLab) -> dict[str, ChildSubject]:
-    return {
-        PRODUCER: ChildSubject(project_id=lab.producer_project, provider="gitlab"),
-        CONSUMER: ChildSubject(project_id=lab.consumer_project, provider="gitlab"),
-    }
-
-
-def _entry(pe_db, lab: LiveGitLabLab, scenario: TwoWriterScenario, effects, **kwargs):
-    return DurablePublicationEntry(
-        pe_db.worker_factory(),
-        scenario,
-        remote=effects,
-        subjects=_subjects(lab),
-        **kwargs,
-    )
-
-
-async def _assert_one_reviewable_effect_per_repo(effects: GitLabNativeEffects, saga) -> None:
-    """ONE commit carrying the marker in the ACTUAL listed history (parent ==
-    the expected base — native identity, not marker-text idempotency), ONE
-    created review per publication branch, and every review in the project
-    OPEN/DRAFT/unmerged — the bot never merges (AT-12)."""
-    for repository_id in (PRODUCER, CONSUMER):
-        repo = saga.repo(repository_id)
-        assert repo is not None
-        landed = await effects.commits_carrying(repository_id, repo.branch, saga.commit_marker)
-        assert len(landed) == 1, f"{repository_id}: duplicated logical effect in the real history"
-        assert landed[0].parent == repo.expected_base_oid, (
-            f"{repository_id}: the adopted commit's parent is not the expected base —"
-            " correlation must be by native identity"
-        )
-        assert effects.commit_calls[repository_id] == 1
-        assert effects.merge_request_creates(repository_id) == 1
-        opened = await effects.merge_requests(repository_id)
-        on_branch = [review for review in opened if review["source_branch"] == repo.branch]
-        assert len(on_branch) == 1, f"{repository_id}: expected exactly one review on {repo.branch}"
-        assert on_branch[0]["state"] == "opened"
-        assert not on_branch[0]["merged_at"]
-        assert on_branch[0]["draft"] or on_branch[0]["title"].startswith("Draft:")
-        assert on_branch[0]["target_branch"] == "main"
-        # every review the run EVER created in this project is still open,
-        # unmerged and draft-shaped — nothing anywhere was merged
-        for review in opened:
-            assert review["state"] == "opened" and not review["merged_at"]
-    assert effects.destructive_operations() == []
-
-
-# ---------------------------------------------------------------------------
-# The positive trace: one reviewable candidate per repository, live.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.skipif(
     not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
     reason=_LIVE_REASON,
 )
-class TestNativePositiveTrace:
-    async def test_the_full_change_publishes_two_reviewable_candidates(self, pe_db, live_lab):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "pos-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "pos-c")
-        scenario = _live_scenario(f"tw2n-pos-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-        entry = _entry(pe_db, live_lab, scenario, effects)
-        state = await entry.start()
-        assert state["phases"] == [["pinned-baseline", "producer"], ["consumer"]]
-        report = await entry.drive()
-        saga = await entry._saga_state()
-        assert report.package_state == "complete", report.refusal
-        assert str(saga.status) == "complete"
-        await _assert_one_reviewable_effect_per_repo(effects, saga)
-        # the consumer child launched only AFTER the producer's PERSISTED outcome
-        assert [launch["item_id"] for launch in entry.child_launches] == [
-            scenario.PRODUCER_ITEM,
-            scenario.CONSUMER_ITEM,
-        ]
-        trail = await entry.outbox_events()
-        producer_outcome = next(
-            index
-            for index, event in enumerate(trail)
-            if event["event_type"] == "workpackage.outcome_recorded"
-            and event["payload"]["item_id"] == scenario.PRODUCER_ITEM
-        )
-        consumer_intent = next(
-            index
-            for index, event in enumerate(trail)
-            if event["event_type"] == "workpackage.child_intent"
-            and event["payload"]["item_id"] == scenario.CONSUMER_ITEM
-        )
-        assert producer_outcome < consumer_intent
-
-
-# ---------------------------------------------------------------------------
-# The kill matrix: death at the store's commit boundary, native transport.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(
-    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
-    reason=_LIVE_REASON,
-)
-class TestNativeKillMatrix:
-    @pytest.mark.parametrize("step", KILL_STEPS)
-    async def test_death_after_every_step_restarts_and_converges(self, pe_db, live_lab, step):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, f"km-p-{step}")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, f"km-c-{step}")
-        scenario = _live_scenario(
-            f"tw2n-km-{_STEP_CODE[step]}-{uuid.uuid4().hex[:6]}", producer, consumer
-        )
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-
-        # process 1: the pre-crash coordinator, dying at its own save boundary
-        entry_a = _entry(
-            pe_db,
-            live_lab,
-            scenario,
-            effects,
-            on_boundary=kill_at_boundary(PRODUCER, step),
-        )
-        await entry_a.start()
-        with pytest.raises(ProcessDied):
-            await entry_a.drive()
-        histories_at_death = {
-            repository_id: await effects.branch_history(
-                repository_id, (await entry_a._saga_state()).repo(repository_id).branch
-            )
-            for repository_id in (PRODUCER, CONSUMER)
-        }
-
-        # process 2: a genuinely fresh engine over the same rows — recovery
-        entry_b = _entry(pe_db, live_lab, scenario, effects)
-        report = await entry_b.drive()
-        saga = await entry_b._saga_state()
-        assert report.package_state == "complete", report.refusal
-        assert str(saga.status) == "complete"
-        await _assert_one_reviewable_effect_per_repo(effects, saga)
-
-        # the actual histories only grew — prefix-preserved, nothing forced
-        for repository_id, was in histories_at_death.items():
-            now = await effects.branch_history(repository_id, saga.repo(repository_id).branch)
-            assert now[: len(was)] == was
-        # no duplicate MODEL work either: each child launched exactly once
-        launched = [
-            launch["item_id"] for launch in (*entry_a.child_launches, *entry_b.child_launches)
-        ]
-        assert launched.count(scenario.PRODUCER_ITEM) == 1
-        assert launched.count(scenario.CONSUMER_ITEM) == 1
-
-        # process 3: an inert third pass — no effects, no outbox rows
-        journal_size = len(effects.journal)
-        digest = saga.steps_digest
-        events = await entry_b.outbox_events()
-        entry_c = _entry(pe_db, live_lab, scenario, effects)
-        await entry_c.drive()
-        await entry_c.drive()
-        assert len(effects.journal) == journal_size
-        assert entry_c.child_launches == ()
-        assert (await entry_c._saga_state()).steps_digest == digest
-        assert await entry_c.outbox_events() == events
-
-
-# ---------------------------------------------------------------------------
-# Lost first-repo commit response — adoption through NATIVE correlation.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(
-    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
-    reason=_LIVE_REASON,
-)
-class TestNativeLostResponse:
-    async def test_a_lost_commit_response_is_adopted_through_native_correlation(
-        self, pe_db, live_lab
+class TestLiveNativePublication:
+    @pytest.mark.parametrize("boundary", ["before_dispatch", "after_provider", "after_journal"])
+    async def test_death_recovery_preserves_native_history(
+        self,
+        pe_db,
+        live_lab,
+        monkeypatch,
+        boundary,
     ):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "lost-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "lost-c")
-        scenario = _live_scenario(f"tw2n-lost-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-        effects.lose_commit_response = {PRODUCER}  # the response dies, the effect lands
-        entry = _entry(pe_db, live_lab, scenario, effects)
-        await entry.start()
-        report = await entry.drive()  # the drive reconciles within its passes
-        saga = await entry._saga_state()
-        assert report.package_state == "complete", report.refusal
-        repo = saga.repo(PRODUCER)
-        assert repo is not None and repo.adopted is True
-        await _assert_one_reviewable_effect_per_repo(effects, saga)
-        events = [event["event_type"] for event in await entry.outbox_events()]
-        assert "saga.unknown_effects" in events
-        assert "recovery.native_adoption" in events
+        project = live_lab.producer_project
+        branch, base = await live_lab.new_publication_branch(project, boundary)
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory, project_id=project, base_sha=base)
+        writer = ChangesetWriter(live_lab.client, factory, project)
+        original = writer._succeed
 
+        async def die_before_dispatch(*args, **kwargs):
+            assert (await _intent(pe_db.worker_factory(), run.id)).status == "dispatched"
+            raise ProcessDied
 
-# ---------------------------------------------------------------------------
-# Human branch edit between partial publication and recovery.
-# ---------------------------------------------------------------------------
+        async def die_after_provider(*args, **kwargs):
+            if boundary == "after_journal":
+                await original(*args, **kwargs)
+            raise ProcessDied
 
-
-@pytest.mark.skipif(
-    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
-    reason=_LIVE_REASON,
-)
-class TestNativeHumanEdit:
-    async def test_a_human_edit_is_preserved_and_parked_never_forced(self, pe_db, live_lab):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "human-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "human-c")
-        scenario = _live_scenario(f"tw2n-hum-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-
-        # process 1 dies INSIDE the consumer's open effect window (the intent
-        # is durable, the commit never happened)
-        entry_a = _entry(
-            pe_db,
-            live_lab,
-            scenario,
-            effects,
-            on_boundary=kill_at_boundary(CONSUMER, "commit_intent"),
+        monkeypatch.setattr(
+            writer,
+            "_dispatch" if boundary == "before_dispatch" else "_succeed",
+            die_before_dispatch if boundary == "before_dispatch" else die_after_provider,
         )
-        await entry_a.start()
         with pytest.raises(ProcessDied):
-            await entry_a.drive()
+            await _publish(factory, live_lab.client, run, branch, writer=writer)
+        history = await live_lab.client.list_commits(project, branch)
+        restarted = ChangesetWriter(live_lab.client, pe_db.worker_factory(), project)
+        if boundary == "before_dispatch":
+            result = await restarted.apply(
+                run.id,
+                _changeset(run, branch),
+                start_ref=base,
+                expected_head=base,
+            )
+            assert result.outcome is WriteOutcome.SETTLING
+            assert await live_lab.client.get_branch_head(project, branch) == base
+        elif boundary == "after_provider":
+            result = await restarted.apply(
+                run.id,
+                _changeset(run, branch),
+                start_ref=base,
+                expected_head=base,
+            )
+            assert result.outcome is WriteOutcome.COMMITTED
+            assert result.commit_sha == history[0]["sha"]
+            assert (await _intent(pe_db.worker_factory(), run.id)).status == "adopted"
+            assert (
+                await live_lab.client.read_blob(
+                    project,
+                    "forge-demo/candidate.md",
+                    ref=branch,
+                )
+            ).content == "candidate\n"
+        else:
+            with pytest.raises(BranchDriftError):
+                await restarted.apply(
+                    run.id,
+                    _changeset(run, branch),
+                    start_ref=base,
+                    expected_head=base,
+                )
+            assert (await _intent(pe_db.worker_factory(), run.id)).status == "committed"
+        assert await live_lab.client.list_commits(project, branch) == history
 
-        # while the coordinator is dead, a person pushes to the consumer's
-        # PUBLICATION branch — a real commit through the real API
+    async def test_human_edit_after_committed_intent_is_never_overwritten(
+        self,
+        pe_db,
+        live_lab,
+        monkeypatch,
+    ):
+        project = live_lab.consumer_project
+        branch, base = await live_lab.new_publication_branch(project, "human")
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory, project_id=project, base_sha=base)
+        writer = ChangesetWriter(live_lab.client, factory, project)
+
+        async def die(*args, **kwargs):
+            raise ProcessDied
+
+        monkeypatch.setattr(writer, "_dispatch", die)
+        with pytest.raises(ProcessDied):
+            await _publish(factory, live_lab.client, run, branch, writer=writer)
         human = await live_lab.client.create_commit(
-            live_lab.consumer_project,
-            consumer[0],
+            project,
+            branch,
             [
                 {
                     "action": "create",
-                    "file_path": "HUMAN_EDIT.md",
-                    "content": "a person edited this branch while the coordinator was dead\n",
+                    "file_path": "human.md",
+                    "content": "human's content\n",
                 }
             ],
-            "human edit while the coordinator was dead",
+            "human edit",
         )
-        human_sha = str(human["id"])
-        consumer_history_at_edit = await effects.branch_history(CONSUMER, consumer[0])
-        assert consumer_history_at_edit[-1] == human_sha
-
-        # process 2: recovery parks the consumer — the conflict decision is
-        # surfaced, the branch is left exactly as the human left it
-        entry_b = _entry(pe_db, live_lab, scenario, effects)
-        report = await entry_b.drive()
-        saga = await entry_b._saga_state()
-        repo = saga.repo(CONSUMER)
-        assert repo is not None and repo.status == "parked_human"
-        assert "never force-overwritten" in repo.note
-        assert report.package_state != "complete"
-        events = [event["event_type"] for event in await entry_b.outbox_events()]
-        assert "human_edit.conflicts" in events
-        partial = await entry_b.partial_publication()
-        assert [effect.repository_id for effect in partial.standing] == [PRODUCER]
-        assert [effect.repository_id for effect in partial.outstanding] == [CONSUMER]
-        # the producer's reviewable effect stands: one commit, one review
-        producer_repo = saga.repo(PRODUCER)
-        assert producer_repo is not None and producer_repo.status == "ready_for_review"
-        producer_landed = await effects.commits_carrying(PRODUCER, producer[0], saga.commit_marker)
-        assert len(producer_landed) == 1
-        assert effects.merge_request_creates(PRODUCER) == 1
-        assert effects.merge_request_creates(CONSUMER) == 0  # never got that far
-        # NOTHING was forced: the human commit is still the head, prefix intact
-        now = await effects.branch_history(CONSUMER, consumer[0])
-        assert now == consumer_history_at_edit
-        assert now[-1] == human_sha
-        assert effects.destructive_operations() == []
-
-
-# ---------------------------------------------------------------------------
-# Two recovering processes + a definitive second-repo failure (real 400).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(
-    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
-    reason=_LIVE_REASON,
-)
-class TestNativeTwoRecoverers:
-    async def test_one_durable_partial_state_with_a_real_second_repo_refusal(self, pe_db, live_lab):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "two-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "two-c")
-        scenario = _live_scenario(f"tw2n-two-{uuid.uuid4().hex[:6]}", producer, consumer)
-        # the definitive second-repo failure: the consumer's review targets its
-        # OWN source branch — GitLab's REAL 400 ("You can't use same
-        # project/branch for source and target"), through the native transport
-        effects = GitLabNativeEffects(
-            live_lab.client,
-            live_lab.projects(),
-            targets={CONSUMER: consumer[0]},
+        restarted = ChangesetWriter(live_lab.client, pe_db.worker_factory(), project)
+        with pytest.raises(BranchDriftError):
+            await restarted.apply(
+                run.id,
+                _changeset(run, branch),
+                start_ref=base,
+                expected_head=base,
+            )
+        assert await live_lab.client.get_branch_head(project, branch) == human["id"]
+        assert (await live_lab.client.read_blob(project, "human.md", ref=branch)).content == (
+            "human's content\n"
         )
+        assert (await _intent(pe_db.worker_factory(), run.id)).status == "duplicated"
 
-        entry_a = _entry(pe_db, live_lab, scenario, effects)
-        await entry_a.start()
-        report_a = await entry_a.drive()
-        saga_a = await entry_a._saga_state()
-        producer_repo = saga_a.repo(PRODUCER)
-        consumer_repo = saga_a.repo(CONSUMER)
-        assert producer_repo is not None and producer_repo.status == "ready_for_review"
-        assert consumer_repo is not None and consumer_repo.status == "failed"
-        assert "same project/branch for source and target" in consumer_repo.note
-        assert report_a.package_state != "complete"
-        # the producer's effect STANDS as the honest partial: one commit, one
-        # review, open and draft; the consumer has its commit but no review
-        producer_landed = await effects.commits_carrying(
-            PRODUCER, producer[0], saga_a.commit_marker
-        )
-        assert len(producer_landed) == 1 and producer_landed[0].parent == producer[1]
-        assert effects.merge_request_creates(PRODUCER) == 1
-        assert effects.merge_request_creates(CONSUMER) == 0
-        partial_a = await entry_a.partial_publication()
-        assert [effect.repository_id for effect in partial_a.standing] == [PRODUCER]
-        assert [effect.repository_id for effect in partial_a.outstanding] == [CONSUMER]
-
-        # process 2: a second recovering process over the same rows — ONE
-        # durable partial state, no duplicate children, no duplicate effects
-        commits_after_a = dict(effects.commit_calls)
-        reviews_after_a = dict(effects.review_calls)
-        journal_after_a = len(effects.journal)
-        entry_b = _entry(pe_db, live_lab, scenario, effects)
-        report_b = await entry_b.drive()
-        saga_b = await entry_b._saga_state()
-        assert report_b.package_state == report_a.package_state
-        assert saga_b.steps_digest == saga_a.steps_digest
-        assert dict(effects.commit_calls) == commits_after_a
-        assert dict(effects.review_calls) == reviews_after_a
-        assert len(effects.journal) == journal_after_a
-        partial_b = await entry_b.partial_publication()
-        assert partial_b == partial_a
-        launched = [
-            launch["item_id"] for launch in (*entry_a.child_launches, *entry_b.child_launches)
-        ]
-        assert launched.count(scenario.PRODUCER_ITEM) == 1
-        assert launched.count(scenario.CONSUMER_ITEM) == 1
-        # the bot still never merges: the one standing review on this arm's
-        # publication branch is open + draft, and nothing anywhere was merged
-        reviews: list[dict[str, Any]] = await effects.merge_requests(PRODUCER)
-        on_branch = [review for review in reviews if review["source_branch"] == producer[0]]
-        assert len(on_branch) == 1
-        assert on_branch[0]["state"] == "opened" and not on_branch[0]["merged_at"]
-        assert all(review["state"] == "opened" and not review["merged_at"] for review in reviews)
-        assert effects.destructive_operations() == []
-
-
-# ---------------------------------------------------------------------------
-# R38-13 / #314 — the qualification arms: content preconditions, the
-# read/apply-window schedules, delayed apply, and revoked scoped access.
-# ---------------------------------------------------------------------------
-
-
-async def _blob_at(lab: LiveGitLabLab, project: int, path: str, ref: str) -> str | None:
-    """The file's CONTENT at *ref* (None when the provider proves absence) —
-    the CONTENT-level assertion basis: a blob read, never a history scan."""
-    blob = await lab.client.read_blob(project, path, ref=ref)
-    if blob.status == "not_found":
-        return None
-    assert blob.status == "found", blob.detail
-    return str(blob.content)
-
-
-async def _recorded_preconditions(pe_db, entry: DurablePublicationEntry) -> dict[str, Any]:
-    """The payload preconditions the entry durably recorded beside the
-    expected head (the additive evidence key)."""
-    async with pe_db.worker_factory()() as session:
-        run = await session.get(FlowRun, entry.parent_run_id)
-        assert run is not None
-        return dict((run.evidence or {}).get(SAGA_PRECONDITIONS_KEY) or {})
-
-
-_LIVE_ARM_GATES = pytest.mark.skipif(
-    not (os.environ.get("FORGE_PG_TEST_URL") and _LIVE_URL and _LIVE_TOKEN),
-    reason=_LIVE_REASON,
-)
-
-
-@_LIVE_ARM_GATES
-class TestNativeSameFileWindow:
-    """The review's named arm: a human edits THE SAME FILE between the
-    preflight read and the server apply — refused typed, the human's
-    content preserved at the head (content-verified), never a silent
-    full-file replacement."""
-
-    async def test_a_same_file_window_edit_is_refused_with_the_typed_conflict(
-        self, pe_db, live_lab
+    async def test_revoked_scoped_credential_does_not_fall_back_to_admin(
+        self,
+        pe_db,
+        live_lab,
+        live_projects,
+        monkeypatch,
     ):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "same-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "same-c")
-        scenario = _live_scenario(f"tw2n-same-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-        human = "a person edited the payload file inside the window\n"
-        # the failpoint schedule: a REAL commit through the REAL client,
-        # inside the publication's preflight→apply window
-        effects.in_window_human_edits = {PRODUCER: ((DEFAULT_PAYLOAD_PATH, human),)}
-        entry = _entry(pe_db, live_lab, scenario, effects)
-        await entry.start()
-        report = await entry.drive()
+        project = live_lab.consumer_project
+        branch, base = await live_lab.new_publication_branch(project, "revoked")
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory, project_id=project, base_sha=base)
+        writer = ChangesetWriter(live_lab.client, factory, project)
 
-        saga = await entry._saga_state()
-        producer_repo = saga.repo(PRODUCER)
-        assert producer_repo is not None
-        assert producer_repo.status == "failed"
-        assert "content conflict" in producer_repo.note  # the explicit conflict
-        assert report.package_state != "complete"
-        # the conflict is TRACKED, not folded into a generic refusal
-        events = [event["event_type"] for event in await entry.outbox_events()]
-        assert "saga.content_conflict" in events
+        async def die(*args, **kwargs):
+            raise ProcessDied
 
-        # CONTENT preserved at the head — a blob read at the HEAD COMMIT,
-        # not a commit-history assertion
-        head = await live_lab.client.get_branch_head(live_lab.producer_project, producer[0])
-        assert await _blob_at(live_lab, live_lab.producer_project, DEFAULT_PAYLOAD_PATH, head) == (
-            human
-        )
-        # the real history: base + the human commit; the saga's marker
-        # never landed, and no review was ever opened
-        listed = await live_lab.client.list_commits(live_lab.producer_project, producer[0])
-        assert len(listed) == 2
-        assert all(saga.commit_marker not in str(commit.get("message") or "") for commit in listed)
-        assert effects.merge_request_creates(PRODUCER) == 0
-        assert effects.merge_request_creates(CONSUMER) == 0  # the consumer never got admitted
-        # the consumer's publication state was never even persisted (gate)
-        consumer_repo = saga.repo(CONSUMER)
-        assert consumer_repo is not None and consumer_repo.status == "preparing"
+        monkeypatch.setattr(writer, "_dispatch", die)
+        with pytest.raises(ProcessDied):
+            await _publish(factory, live_lab.client, run, branch, writer=writer)
+        with httpx.Client(
+            base_url=f"{live_projects.url.rstrip('/')}/api/v4",
+            headers={"PRIVATE-TOKEN": live_projects.token},
+            timeout=60.0,
+        ) as admin:
+            response = admin.post(
+                f"/projects/{project}/access_tokens",
+                json={
+                    "name": f"forge-publish-scoped-{uuid.uuid4().hex[:6]}",
+                    "scopes": ["read_api"],
+                    "expires_at": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
+                },
+            )
+            response.raise_for_status()
+            token = response.json()
+            scoped = GitLabClient(base_url=live_projects.url, token=token["token"], timeout=60.0)
+            try:
+                assert await scoped.get_branch_head(project, branch) == base
+                response = admin.delete(f"/projects/{project}/access_tokens/{token['id']}")
+                response.raise_for_status()
+                result = await _publish(
+                    pe_db.worker_factory(),
+                    scoped,
+                    run,
+                    branch,
+                )
+                assert not result.ok and "authoritative_read_failed" in result.reason
+                with pytest.raises(GitLabAPIError) as refused:
+                    await scoped.get_branch_head(project, branch)
+                assert refused.value.status_code == 401
+                assert await live_lab.client.get_branch_head(project, branch) == base
+                intent = await _intent(pe_db.worker_factory(), run.id)
+                assert intent.status == "dispatched"
+                assert (
+                    await live_lab.client.read_blob(
+                        project,
+                        "forge-demo/candidate.md",
+                        ref=branch,
+                    )
+                ).confirmed_absent
+            finally:
+                await scoped.close()
 
-    async def test_an_unrelated_window_edit_proceeds_with_the_change_preserved(
-        self, pe_db, live_lab
-    ):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "unrel-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "unrel-c")
-        scenario = _live_scenario(f"tw2n-unrel-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-        # the negative schedule: an UNRELATED file, same window
-        effects.in_window_human_edits = {PRODUCER: (("HUMAN_WINDOW_EDIT.md", "kept\n"),)}
-        entry = _entry(pe_db, live_lab, scenario, effects)
-        await entry.start()
-        report = await entry.drive()
-
-        saga = await entry._saga_state()
-        assert report.package_state == "complete", report.refusal
-        assert str(saga.status) == "complete"
-        # the producer's landed commit built ON the human's commit (its
-        # parent), and the effect counts stay exactly one per repository
-        landed = await effects.commits_carrying(PRODUCER, producer[0], saga.commit_marker)
-        assert len(landed) == 1
-        listed = await live_lab.client.list_commits(live_lab.producer_project, producer[0])
-        human_sha = str(listed[1]["sha"])  # newest-first: [ours, human, base]
-        assert landed[0].parent == human_sha
-        assert effects.commit_calls[PRODUCER] == 1
-        assert effects.merge_request_creates(PRODUCER) == 1
-        # CONTENT assertions, independent of history: the unrelated human
-        # change is still readable at the head, and the payload is exactly
-        # the intended document
-        head = await live_lab.client.get_branch_head(live_lab.producer_project, producer[0])
-        assert await _blob_at(
-            live_lab, live_lab.producer_project, "HUMAN_WINDOW_EDIT.md", head
-        ) == ("kept\n")
-        assert await _blob_at(
-            live_lab, live_lab.producer_project, DEFAULT_PAYLOAD_PATH, head
-        ) == payload_document(saga.commit_marker)
-        # the preconditions are DURABLY recorded beside the expected head —
-        # the payload was proved absent at preflight on this fresh branch
-        recorded = await _recorded_preconditions(pe_db, entry)
-        assert recorded[PRODUCER]["expected_head"] == producer[1]
-        assert recorded[PRODUCER]["payload_base"] == ""
-        assert recorded[PRODUCER]["file_versions"] == {DEFAULT_PAYLOAD_PATH: ""}
-        assert recorded[PRODUCER]["conflicted"] is False
-        # the consumer published normally underneath its own base
-        consumer_landed = await effects.commits_carrying(CONSUMER, consumer[0], saga.commit_marker)
-        assert len(consumer_landed) == 1 and consumer_landed[0].parent == consumer[1]
-
-
-@_LIVE_ARM_GATES
-class TestNativeDelayedApply:
-    """The delayed-apply window: the commit response dies and the first
-    probe comes back negative — the same mutation is never blindly
-    redispatched; the recovering process adopts by CONTENT-verified
-    correlation once the effect is visible."""
-
-    async def test_no_blind_redispatch_then_adoption_by_content(self, pe_db, live_lab):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "delay-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "delay-c")
-        scenario = _live_scenario(f"tw2n-delay-{uuid.uuid4().hex[:6]}", producer, consumer)
-        effects = GitLabNativeEffects(live_lab.client, live_lab.projects())
-        effects.lose_commit_response = {PRODUCER}  # the response dies, the commit lands
-        effects.delayed_visibility = {PRODUCER: 1}  # the first probe is negative
-
-        entry_a = _entry(pe_db, live_lab, scenario, effects)
-        await entry_a.start()
-        report_a = await entry_a.drive()
-        saga_a = await entry_a._saga_state()
-        producer_repo = saga_a.repo(PRODUCER)
-        assert producer_repo is not None
-        # the honest booking: the outcome is unknown (fail-closed, tracked)
-        assert producer_repo.status == "outcome_unknown"
-        assert producer_repo.adopted is False
-        assert report_a.package_state != "complete"
-        events_a = [event["event_type"] for event in await entry_a.outbox_events()]
-        assert "saga.unknown_effects" in events_a
-        # the REAL history holds exactly ONE marker commit (the apply was
-        # real; the process refused to redispatch it against the negative
-        # probe — content-verified count, not a message scan)
-        landed = await effects.commits_carrying(PRODUCER, producer[0], saga_a.commit_marker)
-        assert len(landed) == 1
-        assert effects.commit_calls[PRODUCER] == 1
-
-        # process 2 (the delay resolves — the mutation becomes visible):
-        # adoption by CONTENT-verified correlation, no second commit, ever
-        effects.lose_commit_response = set()
-        effects.delayed_visibility = {}
-        entry_b = _entry(pe_db, live_lab, scenario, effects)
-        report_b = await entry_b.drive()
-        saga_b = await entry_b._saga_state()
-        assert report_b.package_state == "complete", report_b.refusal
-        producer_repo = saga_b.repo(PRODUCER)
-        assert producer_repo is not None
-        assert producer_repo.status == "ready_for_review"
-        assert producer_repo.adopted is True
-        landed = await effects.commits_carrying(PRODUCER, producer[0], saga_b.commit_marker)
-        assert len(landed) == 1 and landed[0].parent == producer[1]
-        assert effects.commit_calls[PRODUCER] == 1
-        assert effects.merge_request_creates(PRODUCER) == 1
-        events_b = [event["event_type"] for event in await entry_b.outbox_events()]
-        assert "recovery.native_adoption" in events_b
-
-
-def _admin_client(live_projects: LiveProjects) -> httpx.Client:
-    return httpx.Client(
-        base_url=f"{live_projects.url.rstrip('/')}/api/v4",
-        headers={"PRIVATE-TOKEN": live_projects.token},
-        timeout=60.0,
-    )
-
-
-def _mint_scoped_credential(live_projects: LiveProjects, project_id: int) -> tuple[int, str]:
-    """A REAL project access token (``read_api`` only — the consumer's own
-    scoped credential, narrower than the admin token the fixture holds)."""
-    admin = _admin_client(live_projects)
-    try:
-        expires = (datetime.date.today() + datetime.timedelta(days=2)).isoformat()
-        response = admin.post(
-            f"/projects/{project_id}/access_tokens",
-            json={
-                "name": f"forge-tw3-scoped-{uuid.uuid4().hex[:6]}",
-                "scopes": ["read_api"],
-                "expires_at": expires,
-            },
-        )
-        response.raise_for_status()
-        created = response.json()
-        return int(created["id"]), str(created["token"])
-    finally:
-        admin.close()
-
-
-def _revoke_scoped_credential(live_projects: LiveProjects, project_id: int, token_id: int) -> None:
-    admin = _admin_client(live_projects)
-    try:
-        response = admin.delete(f"/projects/{project_id}/access_tokens/{token_id}")
-        response.raise_for_status()
-    finally:
-        admin.close()
-
-
-@_LIVE_ARM_GATES
-class TestNativeRevokedAccess:
-    """Access to one target revoked during recovery: every read of the
-    revoked target fails CLOSED with ITS OWN credential's refusal, and no
-    differently-scoped credential is ever reached for — the surface has
-    exactly one client per repository and no fallback path exists."""
-
-    async def test_a_revoked_scoped_credential_fails_closed_without_fallback(
+    async def test_review_stays_open_draft_and_recovery_creates_no_second_review(
         self, pe_db, live_lab, live_projects
     ):
-        producer = await live_lab.new_publication_branch(live_lab.producer_project, "revo-p")
-        consumer = await live_lab.new_publication_branch(live_lab.consumer_project, "revo-c")
-        scenario = _live_scenario(f"tw2n-revo-{uuid.uuid4().hex[:6]}", producer, consumer)
-
-        token_id, token_value = _mint_scoped_credential(live_projects, live_lab.consumer_project)
-        scoped = GitLabClient(
-            base_url=live_projects.url,
-            token=token_value,
-            timeout=60.0,  # noqa: S106 — a test credential
-        )
-        try:
-            # the consumer's reads ride the SCOPED credential only
-            effects = GitLabNativeEffects(
-                live_lab.client,
-                live_lab.projects(),
-                scoped_clients={CONSUMER: scoped},
-            )
-            # process 1 dies with the consumer's intent recorded (no commit)
-            entry_a = _entry(
-                pe_db,
-                live_lab,
-                scenario,
-                effects,
-                on_boundary=kill_at_boundary(CONSUMER, "commit_intent"),
-            )
-            await entry_a.start()
-            with pytest.raises(ProcessDied):
-                await entry_a.drive()
-            assert effects.commit_calls.get(CONSUMER, 0) == 0
-
-            # the credential is REVOKED while the coordinator is dead
-            _revoke_scoped_credential(live_projects, live_lab.consumer_project, token_id)
-
-            # process 2: recovery — the consumer's surface reads fail CLOSED
-            # with the revoked credential's own 401 (never a wider token)
-            entry_b = _entry(pe_db, live_lab, scenario, effects)
-            report_b = await entry_b.drive()
-            saga_b = await entry_b._saga_state()
-            consumer_repo = saga_b.repo(CONSUMER)
-            assert consumer_repo is not None
-            assert consumer_repo.status == "intent_recorded"  # uncertain, not failed
-            assert report_b.package_state != "complete"
-            assert effects.commit_calls.get(CONSUMER, 0) == 0  # nothing written blind
-            assert effects.effects_for(CONSUMER) == []  # no consumer effect anywhere
-            with pytest.raises(ProviderUnavailableError, match="401"):
-                await effects.remote_head(CONSUMER, consumer[0])
-            # the producer's reviewable effect stands as the honest partial
-            producer_repo = saga_b.repo(PRODUCER)
-            assert producer_repo is not None
-            assert producer_repo.status == "ready_for_review"
-            producer_landed = await effects.commits_carrying(
-                PRODUCER, producer[0], saga_b.commit_marker
-            )
-            assert len(producer_landed) == 1
-            assert effects.merge_request_creates(PRODUCER) == 1
-            partial = await entry_b.partial_publication()
-            assert [effect.repository_id for effect in partial.standing] == [PRODUCER]
-            assert [effect.repository_id for effect in partial.outstanding] == [CONSUMER]
-        finally:
-            await scoped.close()
+        project = live_lab.producer_project
+        branch, base = await live_lab.new_publication_branch(project, "draft")
+        factory = pe_db.worker_factory()
+        run = await _new_run(factory, project_id=project, base_sha=base)
+        result = await _publish(factory, live_lab.client, run, branch)
+        assert result.ok
+        settings = gl_settings(GITLAB_URL=live_projects.url, DATABASE_URL=pe_db.url)
+        service = make_gitlab_service(factory, live_lab.client, settings=settings)
+        iid = await service._create_draft_mr(project, run.id, branch, result.commit_sha)
+        restarted = make_gitlab_service(pe_db.worker_factory(), live_lab.client, settings=settings)
+        assert await restarted._create_draft_mr(project, run.id, branch, result.commit_sha) == iid
+        matching = [
+            mr
+            for mr in await live_lab.client.list_merge_requests(project, state="all")
+            if mr.source_branch == branch
+        ]
+        assert len(matching) == 1
+        assert matching[0].state == "opened"
+        assert matching[0].draft and matching[0].merged_at is None

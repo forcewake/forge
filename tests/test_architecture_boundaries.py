@@ -1597,11 +1597,11 @@ class TestIntentionalViolationTraps:
     def test_a_runtime_entry_point_importing_the_reference_package_is_caught(self) -> None:
         modules = _synthetic(
             "forge.runs.service",
-            "from forge.adaptive.reference.native_shaped_remote import NativeShapedRemote\n"
+            "from forge.adaptive.reference.system_twin import TwinScenario\n"
             "\n"
             "\n"
             "def build():\n"
-            "    return NativeShapedRemote()\n",
+            "    return TwinScenario()\n",
         )
         violations = _check_reference_separation(modules)
         assert any(
@@ -1634,7 +1634,7 @@ class TestIntentionalViolationTraps:
         assert any("hidden_leg" in text for text in violations)
 
     def test_a_drained_compat_home_registration_is_caught(self) -> None:
-        modules = _synthetic("forge.adaptive.saga_durable", "X = 1\n")
+        modules = _synthetic("forge.adaptive.system_verification", "X = 1\n")
         violations = _check_reference_separation(modules)
         assert any("drained" in text or "does not exist" in text for text in violations)
 
