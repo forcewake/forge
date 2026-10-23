@@ -912,6 +912,16 @@ run last so that they do not churn code about to be deleted.
 
 ## Phase 3 — Unify: one lifecycle engine (weeks 4–10)
 
+**Local rewrite amendment, 2026-10-23:** the owner's explicit clean-break
+direction replaces coexistence/flag rollback in P3-03, P3-17 and P3-20 with
+one engine and an offline schema cutover. Do not build compatibility claim
+tables or mixed-owner routing. The final API/worker refuse an old schema.
+Canonical admission, digest-bound gates, fencing, export/backup and the
+applicable invariant/edge-case evidence remain required. The original
+phased rollout details below are historical sequencing; they do not block
+local source deletion or require a dual-engine implementation. See the
+[ADR amendment](../../adr/0035-simplification-program.md#owner-directed-clean-cutover-2026-10-23).
+
 **Exit criteria:**
 
 - `runs/service.py`, `runs/github_service.py`, the old lane, `adaptive/`

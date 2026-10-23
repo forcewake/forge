@@ -35,8 +35,9 @@ now slows every change:
 
 ## Decision
 
-forge follows a strangler program, called "subtract → separate → unify →
-productize". The product stays deployable after every phase. The details
+forge follows the program "subtract → separate → unify → productize".
+The original design used a strangler rollout; the owner-directed local
+1.0 rewrite now uses the cold cutover described below. The details
 are in the design document; the binding decisions are:
 
 1. **Invariants I1–I8 are non-negotiable.**
@@ -122,10 +123,8 @@ are in the design document; the binding decisions are:
     credential broker, and Redis becomes optional.
   - Agents work in a codebase that fits in their context.
 - **Negative:**
-  - A period of dual paths exists, guarded by per-provider
-    `FORGE_ENGINE_<PROVIDER>=v2` flags. Engine tables (`eng_*`) coexist
-    with the legacy tables until both providers migrate. Flag rollback
-    cancels in-flight engine runs and needs no database restore.
+  - Existing installations require an explicit migration boundary. The new
+    service refuses an old schema; no flag restores the retired engine.
   - The model gateway becomes a required, critical component.
   - OIDC is required: GitLab ≥ 15.7, or GHES with OIDC.
   - Azure users stay on 0.42.x until the port adapter returns.
@@ -199,3 +198,28 @@ server restart; expired or unauthenticatable cache entries fail closed.
 Cancellation is rechecked before storing and delivering the grant. No raw
 gateway key is stored in run evidence. Actual gateway minting belongs to
 the model-gateway task. The old `/lane` surfaces remain separate.
+
+## Owner-directed clean cutover (2026-10-23)
+
+The owner requested a new 1.0 implementation and then explicitly required
+"no legacy bullshit". The local rewrite therefore removes the planned
+dual-engine routing, compatibility shims and flag rollback. It delivers one
+engine, one schema and one required frozen-input contract. This amends the
+original deployment sequence in DESIGN §6.10 and the coexistence portions
+of P3-03, P3-17 and P3-20; their engine functionality and safety requirements
+remain.
+
+Additive tables may exist in disposable development databases while the
+source is assembled. This does not authorize a mixed production deployment
+or new compatibility tables/triggers. The assembled service must refuse an
+old schema before accepting commands or starting a worker. Migration is an
+explicit offline operation with backup and export; fresh installations use
+one baseline. There is no automatic migration during startup.
+
+The old service must be stopped before migration and cannot run against
+the final schema. The new engine enforces canonical subject uniqueness,
+consume-once digest-bound gates, cancellation fencing and effect recovery
+itself. Historical invariants and applicable edge-case pins are ported to
+these owners. No existing database, provider repository or hosted setting
+is changed by this source decision. Hosted, live and pilot acceptance
+remain separate from local implementation.

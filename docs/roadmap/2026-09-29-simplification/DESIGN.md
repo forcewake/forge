@@ -629,11 +629,13 @@ repository is the optional, customer-managed Copilot token.
 
 ### 6.10 Persistence and cutover
 
-The schema can break (lab and dogfooding only). **During the transition,
-the engine's tables coexist with the legacy tables in the same database.**
-Additive migrations in the existing chain (033 onward) create tables with
-the `eng_` prefix, so the legacy GitLab services keep running while GitHub
-moves.
+The owner-directed 2026-10-23 amendment to ADR-0035 replaces the dual-path
+rollout with a cold cutover. The final package contains one engine and one
+schema. Development may append engine tables to a disposable database
+while implementation is assembled; this does not enable both services.
+Existing installations need an explicit offline backup/export/migration,
+with the old service stopped. The final API and worker refuse an old schema
+before accepting work and never auto-migrate it.
 
 | Table | Purpose |
 | --- | --- |
@@ -651,31 +653,16 @@ moves.
 | `eng_review_rounds` | Round lineage and slot per root `ReviewRef` |
 | `eng_lane_sessions` | Nonce, OIDC identity binding and `jti` replay cache |
 
-`event_inbox` is shared: one dedup table for both paths.
+The final `event_inbox` is the single ingress and replay dedup authority.
+Canonical connection/repository/subject uniqueness belongs to the new run
+store. There are no routing flags, shadow legacy runs or compatibility
+claim tables.
 
-**Routing and fencing during the transition:**
-
-- Each provider has a flag `FORGE_ENGINE_<PROVIDER>=v2`. It routes **new**
-  runs of that provider to the engine.
-- A subject with an active legacy run stays on the legacy path until that
-  run terminates. Its commands route by run ownership.
-- The engine's admission also checks legacy `flow_runs`, so one active run
-  per subject holds across both paths.
-
-**Rollback (flag off) needs no database restore:**
-
-1. New runs route to the legacy path again.
-2. In-flight engine runs of that provider are cancelled with an
-   explanatory comment. Their branches and Draft PRs stay for humans to
-   close or reuse.
-3. Engine tables keep their history.
-
-**After both providers migrate (P3-20):**
-
-1. The legacy tables are dropped.
-2. The `eng_` prefix is removed by migration.
-3. The alembic chain is squashed into a fresh baseline.
-4. Old runs are exported to JSON first (`forge export-runs`).
+At final source integration the old tables and `eng_` development prefix
+are removed, and fresh installations use one Alembic baseline. Historical
+run export and an automatic backup precede an explicitly invoked upgrade.
+Startup is read-only with respect to an existing schema. No installed
+database is changed as part of implementing this source.
 
 ### 6.11 Configuration, doctor, observability
 
@@ -688,7 +675,6 @@ moves.
   - `FORGE_SECRET_KEY` (encryption at rest for attempt keys, signing for
     lane session tokens);
   - `FORGE_LANE_CHECKPOINT_INTERVAL`;
-  - `FORGE_ENGINE_<PROVIDER>`.
 
   The configuration reference is generated from `Settings`.
 - **doctor** never raises. Each check yields PASS, WARN or FAIL with a fix

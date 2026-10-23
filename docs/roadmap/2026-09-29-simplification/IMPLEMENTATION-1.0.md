@@ -62,7 +62,11 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 
 The final 1.0 package has one engine, one schema and the new lane API.
 Old services, compatibility shims and fallback execution paths are removed
-at integration; they are not part of the target public API. No owner lab
+at integration; they are not part of the target public API. The owner
+subsequently required a clean break: no dual-engine rollout, routing flags
+or new coexistence tables/triggers. The final API/worker refuse old schemas;
+an existing installation needs an explicit offline migration with backup
+and export, with its old service stopped. No owner lab
 database is modified by source implementation.
 
 The owner completed review of all 129 required ledger rows on 2026-10-23,
