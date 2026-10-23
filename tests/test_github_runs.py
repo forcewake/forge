@@ -2373,75 +2373,39 @@ def test_gateway_commands_are_reachable_through_the_dispatch_guard():
         )
 
 
-def test_azure_gateway_commands_are_reachable_through_the_dispatch_guard():
-    import inspect
-    import re
+async def test_retired_provider_cannot_dispatch_run_commands():
+    from forge.main import create_app
 
-    from forge.gateway import azure_webhook
-    from forge.runs import azure_service
-
-    gateway_cmds = set(
-        re.findall(r'"/[a-z_]+":\s*"([a-z_]+)"', inspect.getsource(azure_webhook))
-    ) - {"security_triage"}
-    dispatch_src = inspect.getsource(azure_service)
-    guard = re.search(r"command not in \{([^}]+)\}", dispatch_src)
-    assert guard, "dispatch guard not found"
-    for cmd in gateway_cmds:
-        assert f'"{cmd}"' in guard.group(1), (
-            f"gateway command /{cmd} is rejected by the Azure dispatch guard"
-        )
+    app = create_app(Settings(_env_file=None, FORGE_GITLAB_ENABLED=False))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for command in ("/implement", "/go", "/retry", "/cancel"):
+            response = await client.post("/webhooks/azure", json={"command": command})
+            assert response.status_code == 404
 
 
 def test_provider_command_sets_stay_in_parity():
-    """R27 guard: every feature command must be dispatched by ALL THREE
-    provider services unless explicitly whitelisted. LIVE-found twice:
-    /retry shipped with a missing Azure guard entry, and the #29 lifecycle
-    commands (issue_edited/unlabeled) shipped GitHub-only despite the
-    issue's mirror promise. A deviation here must carry a reason in the
-    whitelist below — otherwise this test fails until parity is restored."""
+    """Both supported services must dispatch every required lifecycle command."""
     import inspect
     import re
 
-    from forge.runs import azure_service, github_service, service
+    from forge.runs import github_service, service
 
-    def dispatched_commands(module_src: str) -> set[str]:
-        return set(re.findall(r'command == "([a-z_]+)"', module_src))
-
-    gitlab_cmds = dispatched_commands(inspect.getsource(service))
-    github_cmds = dispatched_commands(inspect.getsource(github_service))
-    azure_cmds = dispatched_commands(inspect.getsource(azure_service))
-
-    # reactive/observation commands are single-provider by design (GitHub
-    # PR review fanout, GitLab pipeline debug) — not part of the run
-    # lifecycle parity contract.
-    lifecycle_only = {
+    required = {
         "start_run",
         "go",
         "cancel",
         "retry",
         "issue_edited",
         "unlabeled",
-        # R29 operator commands: /status, /why-blocked (read-only) and
-        # /reconcile (the explicit R11 recovery driver) are lifecycle
-        # commands too — every provider service must dispatch them.
         "status",
         "why_blocked",
         "reconcile",
     }
-    gitlab_cmds &= lifecycle_only
-    github_cmds &= lifecycle_only
-    azure_cmds &= lifecycle_only
-
-    # #29 propagation landed: every lifecycle command is dispatched by all
-    # three provider services — the whitelist stays empty, and a deviation
-    # must carry a reason HERE (a new known_gaps entry with an issue pointer)
-    # rather than shipping silent.
-    known_gaps: set[tuple[str, str]] = set()
-    all_sets = {"gitlab": gitlab_cmds, "github": github_cmds, "azure": azure_cmds}
-    union = set().union(*all_sets.values())
-    for provider, cmds in all_sets.items():
-        missing = union - cmds - {cmd for p, cmd in known_gaps if p == provider}
-        assert not missing, f"{provider} is missing lifecycle commands: {sorted(missing)}"
+    for provider, module in (("gitlab", service), ("github", github_service)):
+        dispatched = set(re.findall(r'command == "([a-z_]+)"', inspect.getsource(module)))
+        assert dispatched & required == required, (
+            f"{provider} is missing lifecycle commands: {sorted(required - dispatched)}"
+        )
 
 
 # ----------------------------------------------------------------------
