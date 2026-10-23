@@ -1,0 +1,124 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "approved_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Approved Digest",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "base_sha": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Base Sha",
+      "type": "string"
+    },
+    "checkpoint_id": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Checkpoint Id"
+    },
+    "driver": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Driver",
+      "type": "string"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "model": {
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "nonce": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[\\w.-]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Nonce"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "github",
+        "gitlab"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "ref": {
+      "minLength": 1,
+      "title": "Ref",
+      "type": "string"
+    },
+    "repository": {
+      "minLength": 1,
+      "title": "Repository",
+      "type": "string"
+    },
+    "server_url": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Server Url",
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "minimum": 1,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "server_url",
+    "provider",
+    "repository",
+    "ref",
+    "base_sha",
+    "approved_digest",
+    "driver",
+    "model",
+    "timeout_seconds"
+  ],
+  "title": "LaneDispatch",
+  "type": "object"
+}

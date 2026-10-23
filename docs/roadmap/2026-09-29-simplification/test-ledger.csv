@@ -240,6 +240,7 @@ tests/test_project_config.py,23,372,true,false,P1-11,edge-case pin,partly delete
 tests/test_project_config_location.py,5,145,true,false,"P1-12,P1-13",edge-case pin,partly deleted,project,keep,-,
 tests/test_prompt_budgets.py,10,336,true,false,P1-10,,,prompt,drop-with-code,P1-10,
 tests/test_prompts.py,15,148,true,false,P1-12,,,prompts,drop-with-code,P1-12,
+tests/test_protocol_v1.py,5,64,false,true,,,,protocol,keep,-,Protocol v1 wire contract for the separate shipped distribution
 tests/test_provider_namespaces.py,22,829,true,false,,,,provider,port-engine,P3,
 tests/test_publication_boundary.py,13,503,true,false,,invariant evidence,,publication,port-adapter,P3,
 tests/test_publication_intents.py,40,1422,true,false,P1-11,invariant evidence; edge-case pin,partly deleted,publication,port-engine,P3,

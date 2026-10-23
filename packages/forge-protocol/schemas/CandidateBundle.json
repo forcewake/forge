@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "Usage": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "protocol": {
+          "const": "forge.lane/1",
+          "default": "forge.lane/1",
+          "title": "Protocol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "title": "Usage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "approved_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Approved Digest",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "base_sha": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Base Sha",
+      "type": "string"
+    },
+    "diff_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Diff Sha256",
+      "type": "string"
+    },
+    "diff_size_bytes": {
+      "minimum": 1,
+      "title": "Diff Size Bytes",
+      "type": "integer"
+    },
+    "driver": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Driver",
+      "type": "string"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "model": {
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "terminal_reason": {
+      "minLength": 1,
+      "title": "Terminal Reason",
+      "type": "string"
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "diff_sha256",
+    "diff_size_bytes",
+    "base_sha",
+    "approved_digest",
+    "driver",
+    "model",
+    "terminal_reason"
+  ],
+  "title": "CandidateBundle",
+  "type": "object"
+}

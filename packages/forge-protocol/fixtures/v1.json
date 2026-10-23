@@ -1,0 +1,151 @@
+{
+  "Brief": {
+    "approved_digest": "5e63ad8681adb5db2070ad88ce19b22709ccdb21309a9d0fd81924d343be31b5",
+    "attempt": 0,
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "brief_text": "Change one file.",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "protocol": "forge.lane/1",
+    "revision": 1,
+    "spec_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "CandidateBundle": {
+    "approved_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attempt": 0,
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diff_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "diff_size_bytes": 16,
+    "driver": "claude-code",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "model": "model",
+    "protocol": "forge.lane/1",
+    "terminal_reason": "completed",
+    "usage": {
+      "cost_usd": "0.01",
+      "input_tokens": 10,
+      "output_tokens": 20,
+      "protocol": "forge.lane/1"
+    }
+  },
+  "CheckpointEntry": {
+    "mode": "100644",
+    "path": "src/app.py",
+    "protocol": "forge.lane/1",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size_bytes": 16,
+    "state": "new"
+  },
+  "CheckpointManifest": {
+    "approved_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attempt": 0,
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "driver": "claude-code",
+    "entries": [
+      {
+        "mode": "100644",
+        "path": "src/app.py",
+        "protocol": "forge.lane/1",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size_bytes": 16,
+        "state": "new"
+      }
+    ],
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "protocol": "forge.lane/1",
+    "resume_session": null,
+    "sequence": 1
+  },
+  "ControlAck": {
+    "attempt": 0,
+    "checkpoint_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "command_id": "control-1",
+    "detail": "",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "protocol": "forge.lane/1",
+    "sequence": 1,
+    "status": "applied"
+  },
+  "ControlCommand": {
+    "action": "pause",
+    "attempt": 0,
+    "command_id": "control-1",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "protocol": "forge.lane/1",
+    "sequence": 1,
+    "text": null
+  },
+  "Heartbeat": {
+    "attempt": 0,
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "observed_at": "2026-10-23T10:00:00Z",
+    "phase": "running",
+    "protocol": "forge.lane/1",
+    "sequence": 1
+  },
+  "LaneDispatch": {
+    "approved_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attempt": 0,
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "checkpoint_id": null,
+    "driver": "claude-code",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "model": "model",
+    "nonce": "nonce-1",
+    "protocol": "forge.lane/1",
+    "provider": "github",
+    "ref": "forge/run-1",
+    "repository": "owner/repo",
+    "server_url": "https://forge.example/",
+    "timeout_seconds": 600
+  },
+  "LaneReport": {
+    "approved_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attempt": 0,
+    "candidate_diff_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checkpoint_id": null,
+    "classification": "success",
+    "driver": "claude-code",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "model": "model",
+    "protocol": "forge.lane/1",
+    "status": "completed",
+    "terminal_reason": "completed",
+    "usage": null
+  },
+  "ModelKeyGrant": {
+    "attempt": 0,
+    "expires_at": "2026-10-23T10:00:00Z",
+    "forge_run_id": "run-1",
+    "gateway_url": "https://gateway.example/",
+    "generation": 0,
+    "key": "fixture-grant",
+    "model": "model",
+    "protocol": "forge.lane/1"
+  },
+  "SessionRequest": {
+    "attempt": 0,
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "oidc_token": "fixture-oidc",
+    "protocol": "forge.lane/1",
+    "provider": "github"
+  },
+  "SessionToken": {
+    "access_token": "fixture-session",
+    "attempt": 0,
+    "expires_at": "2026-10-23T10:00:00Z",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "protocol": "forge.lane/1",
+    "token_type": "Bearer"
+  }
+}

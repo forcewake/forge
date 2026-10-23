@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "starting",
+        "restoring",
+        "running",
+        "checkpointing",
+        "collecting",
+        "uploading"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "sequence": {
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "sequence",
+    "observed_at",
+    "phase"
+  ],
+  "title": "Heartbeat",
+  "type": "object"
+}

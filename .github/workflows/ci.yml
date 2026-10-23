@@ -40,6 +40,9 @@ jobs:
       - name: Import contracts
         run: uv run lint-imports
 
+      - name: Protocol schema drift
+        run: uv run python -m forge_protocol.schema --check
+
       - name: Size ratchet (oversized code may only shrink)
         run: uv run python scripts/ratchet.py
 

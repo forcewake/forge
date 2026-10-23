@@ -660,6 +660,10 @@ run last so that they do not churn code about to be deleted.
 - **Size:** M
 
 ### P2-02 Protocol v1 models
+- **Status:** implemented locally on 2026-10-23. Frozen wire models,
+  canonical JSON/digests, twelve exported schemas and golden documents
+  are present. Approval tampering, unknown fields/versions and unsafe
+  checkpoint paths refuse; schema drift is checked in CI.
 - **Goal:** one versioned wire contract.
 - **Work:**
   - Frozen pydantic models (`extra=forbid`): `LaneDispatch`,

@@ -1,0 +1,51 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "oidc_token": {
+      "minLength": 1,
+      "title": "Oidc Token",
+      "type": "string",
+      "writeOnly": true
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "github",
+        "gitlab"
+      ],
+      "title": "Provider",
+      "type": "string"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "provider",
+    "oidc_token"
+  ],
+  "title": "SessionRequest",
+  "type": "object"
+}

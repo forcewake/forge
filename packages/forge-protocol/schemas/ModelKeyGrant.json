@@ -1,0 +1,61 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "gateway_url": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Gateway Url",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "key": {
+      "minLength": 1,
+      "title": "Key",
+      "type": "string"
+    },
+    "model": {
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "gateway_url",
+    "key",
+    "model",
+    "expires_at"
+  ],
+  "title": "ModelKeyGrant",
+  "type": "object"
+}

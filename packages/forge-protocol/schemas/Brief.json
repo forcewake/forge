@@ -1,0 +1,71 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "approved_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Approved Digest",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "base_sha": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Base Sha",
+      "type": "string"
+    },
+    "brief_text": {
+      "minLength": 1,
+      "title": "Brief Text",
+      "type": "string"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "plan_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Digest",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "spec_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Spec Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "brief_text",
+    "approved_digest",
+    "plan_digest",
+    "spec_digest",
+    "base_sha",
+    "revision"
+  ],
+  "title": "Brief",
+  "type": "object"
+}

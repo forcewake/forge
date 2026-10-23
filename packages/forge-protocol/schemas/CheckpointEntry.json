@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "enum": [
+        "100644",
+        "100755",
+        "120000"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "path": {
+      "minLength": 1,
+      "title": "Path",
+      "type": "string"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Sha256"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "state": {
+      "enum": [
+        "new",
+        "modified",
+        "deleted"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "mode",
+    "sha256",
+    "state",
+    "size_bytes"
+  ],
+  "title": "CheckpointEntry",
+  "type": "object"
+}

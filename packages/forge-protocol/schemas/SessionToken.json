@@ -1,0 +1,53 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "access_token": {
+      "minLength": 1,
+      "title": "Access Token",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 0,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "forge_run_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[\\w.-]+$",
+      "title": "Forge Run Id",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "protocol": {
+      "const": "forge.lane/1",
+      "default": "forge.lane/1",
+      "title": "Protocol",
+      "type": "string"
+    },
+    "token_type": {
+      "const": "Bearer",
+      "default": "Bearer",
+      "title": "Token Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "forge_run_id",
+    "attempt",
+    "generation",
+    "access_token",
+    "expires_at"
+  ],
+  "title": "SessionToken",
+  "type": "object"
+}
