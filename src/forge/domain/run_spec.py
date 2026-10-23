@@ -32,6 +32,7 @@ class RunPolicy(Value):
 
     driver: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")]
     model: ShortText
+    metering: Literal["metered", "copilot-scoped-unmetered"] = "metered"
     target_branch: ShortText
     verification: VerificationContract
     write_policy: PathPolicy
@@ -42,6 +43,8 @@ class RunPolicy(Value):
 
     @model_validator(mode="after")
     def planning_is_inside_the_total(self) -> Self:
+        if (self.driver == "copilot_cli") != (self.metering == "copilot-scoped-unmetered"):
+            raise ValueError("Copilot alone requires explicit scoped unmetered authorization")
         pools = partition(self.limits, self.closing_reserve)
         if not pools.implementation.covers(self.planning_allowance):
             raise ValueError("planning allowance must fit inside total minus closing reserve")

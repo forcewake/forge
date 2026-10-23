@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: litellm/litellm:v1.80.0-stable
+    image: ghcr.io/berriai/litellm:v1.106.2
     ports:
       - "4000:4000"
     volumes:

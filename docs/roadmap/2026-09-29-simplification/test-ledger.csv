@@ -85,6 +85,7 @@ tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,bou
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
 tests/test_budget_amendment.py,25,853,true,false,,invariant evidence,,budget,keep,-,
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
+tests/test_budget_engine.py,22,637,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
 tests/test_candidate.py,49,675,true,false,,edge-case pin,,candidate,keep,-,
@@ -191,7 +192,7 @@ tests/test_lane_claude_code.py,11,318,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_copilot_cli.py,12,360,false,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_driver.py,120,2359,true,false,,edge-case pin,,lane,keep,-,
-tests/test_lane_frozen_policy.py,6,205,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
+tests/test_lane_frozen_policy.py,7,219,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_mcp.py,7,264,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-engine,P3,
 tests/test_lane_runner_v1.py,14,539,true,false,,edge-case pin,,lane,keep,-,

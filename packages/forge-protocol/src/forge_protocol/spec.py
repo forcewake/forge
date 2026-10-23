@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from .canonical import canonical_json, digest
 from .policy import ExecutionPolicy, PolicyValue
@@ -42,9 +42,16 @@ class FrozenRunSpec(PolicyValue):
     model_config = ConfigDict(extra="ignore")
     driver: Annotated[str, Field(min_length=1, max_length=64)]
     model: Annotated[str, Field(min_length=1, max_length=1024)]
+    metering: Literal["metered", "copilot-scoped-unmetered"]
     limits: FrozenLimits
     write_policy: FrozenWriteScope
     execution_policy: ExecutionPolicy
+
+    @model_validator(mode="after")
+    def scoped_metering(self) -> Self:
+        if (self.driver == "copilot_cli") != (self.metering == "copilot-scoped-unmetered"):
+            raise ValueError("Copilot alone requires explicit scoped unmetered authorization")
+        return self
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

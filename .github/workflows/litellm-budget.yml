@@ -1,0 +1,44 @@
+name: LiteLLM budget contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/forge/budget/**"
+      - "src/forge/store/*budget*"
+      - "src/forge/store/gateway_keys.py"
+      - "tests/fixtures/litellm/**"
+      - "tools/verify_litellm_budget.py"
+      - ".github/workflows/litellm-budget.yml"
+      - "docker-compose.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: Pull pinned provider-free fixtures
+        run: |
+          docker pull postgres:16-alpine
+          docker pull ghcr.io/berriai/litellm:v1.106.2
+      - name: Start isolated native gateway
+        run: |
+          docker network create --internal forge-budget
+          docker run -d --name forge-budget-db --network forge-budget -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=synthetic -e POSTGRES_DB=litellm postgres:16-alpine
+          docker run -d --name forge-budget-gateway --network forge-budget -p 127.0.0.1:4000:4000 -e LITELLM_MASTER_KEY=sk-synthetic-ci-admin-key -e DATABASE_URL=postgresql://litellm:synthetic@forge-budget-db:5432/litellm -e LITELLM_LOCAL_MODEL_COST_MAP=true -v "$PWD/tests/fixtures/litellm/budget-proxy.yaml:/app/config.yaml:ro" ghcr.io/berriai/litellm:v1.106.2 --config /app/config.yaml --port 4000
+      - name: Verify native limits without provider access
+        env:
+          FORGE_LITELLM_TEST_URL: http://127.0.0.1:4000
+          FORGE_LITELLM_TEST_MASTER_KEY: sk-synthetic-ci-admin-key
+        run: uv run python tools/verify_litellm_budget.py
+      - name: Remove isolated fixture
+        if: always()
+        run: |
+          docker rm -f forge-budget-gateway forge-budget-db || true
+          docker network rm forge-budget || true

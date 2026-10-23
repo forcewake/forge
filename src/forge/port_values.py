@@ -188,6 +188,7 @@ class GatewayKeyRef(Value):
     allowance: Resources
     expires_at: AwareDatetime
     blocked: bool
+    enforced_axes: tuple[Literal["usd"]] = ("usd",)
 
 
 class Applied(Value, Generic[T]):

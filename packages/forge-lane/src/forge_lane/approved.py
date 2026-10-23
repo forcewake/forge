@@ -40,3 +40,10 @@ async def prepare_policy(
             "policy_capability_unavailable",
             "Driver cannot enforce this frozen policy",
         )
+
+    if spec is not None and (spec.metering == "metered") != driver.requires_model_key:
+        raise LaneFailure(
+            ExitCode.DRIVER,
+            "unsupported_metering_policy",
+            "Driver credential mode differs from the approved metering policy",
+        )

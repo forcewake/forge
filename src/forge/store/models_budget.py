@@ -77,6 +77,8 @@ class EngineBudgetAmendment(RunBound, Timestamps, Base):
     amount_json: Mapped[str] = mapped_column(Text)
     state: Mapped[str] = mapped_column(String(20))
     gateway_effect_key: Mapped[str | None] = mapped_column(String(300))
+    reservation_key: Mapped[str | None] = mapped_column(String(300))
+    target_json: Mapped[str | None] = mapped_column(Text)
 
 
 class EngineUsage(RunBound, Timestamps, Base):
@@ -109,7 +111,7 @@ class EngineUsage(RunBound, Timestamps, Base):
 class EngineGatewayKey(RunBound, Timestamps, Base):
     __tablename__ = "eng_gateway_keys"
     __table_args__ = (
-        UniqueConstraint("run_id", "attempt", "generation", name="uq_eng_key_dispatch"),
+        UniqueConstraint("run_id", "attempt", "generation", "purpose", name="uq_eng_key_dispatch"),
         CheckConstraint(
             "state IN ('reserved','active','unknown','blocked','purged')", name="ck_eng_key_state"
         ),
@@ -117,9 +119,14 @@ class EngineGatewayKey(RunBound, Timestamps, Base):
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     alias: Mapped[str] = mapped_column(String(200), unique=True)
+    purpose: Mapped[str] = mapped_column(
+        String(20), default="implementation", server_default="implementation"
+    )
+    reference_json: Mapped[str | None] = mapped_column(Text)
     attempt: Mapped[int] = mapped_column(Integer)
     generation: Mapped[int] = mapped_column(Integer)
     ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    token_digest: Mapped[str | None] = mapped_column(String(64))
     aad_digest: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(20), default="reserved", server_default="reserved")

@@ -1,0 +1,18 @@
+model_list:
+  - model_name: forge-budget-mock
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: synthetic-no-provider-credential
+      mock_response: "Synthetic budget contract response"
+    model_info:
+      input_cost_per_token: 0.001
+      output_cost_per_token: 0.001
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  request_timeout: 5
+  num_retries: 0
+  set_verbose: false

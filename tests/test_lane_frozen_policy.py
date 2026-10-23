@@ -131,7 +131,10 @@ async def test_unsupported_mcp_refuses_before_grant_or_process(tmp_path, kind, m
         server_policy = server_policy.model_copy(update={"credential_ref": "docs-token"})
     name = "copilot_cli" if kind == "copilot" else "claude_code"
     dispatch, brief = frozen_inputs(
-        base, driver=name, execution_policy=ExecutionPolicy(mcp_servers=(server_policy,))
+        base,
+        driver=name,
+        metering="copilot-scoped-unmetered" if name == "copilot_cli" else "metered",
+        execution_policy=ExecutionPolicy(mcp_servers=(server_policy,)),
     )
     server = WireServer(dispatch, brief)
     monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "synthetic-explicit-token")
@@ -203,3 +206,14 @@ async def test_checkpoint_scope_refuses_before_download_write_or_key(tmp_path, p
     assert (workspace / "base.txt").read_text() == "base\n" and not (
         workspace / ".mcp.json"
     ).exists()
+
+
+async def test_metered_driver_without_gateway_credential_capability_refuses_before_key(tmp_path):
+    workspace = tmp_path / "work"
+    dispatch, brief = frozen_inputs(checkout(workspace))
+    server = WireServer(dispatch, brief)
+    driver = PolicyDriver()
+    driver.requires_model_key = False
+    result = await execute(dispatch, server, driver, workspace)
+    assert result.classification == "unsupported_metering_policy"
+    assert server.model_keys == 0 and not driver.starts
