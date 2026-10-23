@@ -339,10 +339,11 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-03 Remove the test-only adaptive modules
-- **Status:** cluster A implemented locally: synthetic runtime,
-  work-package coordinator, dedup and snapshots are removed. Retained
-  lessons exercise the actual single-run publisher, mailbox and readiness
-  owners. Reader, topology, verifier and provider clusters follow separately.
+- **Status:** all five clusters are implemented locally on 2026-10-23;
+  all 18 named modules are absent. Retained tests use real publication,
+  reader, checkpoint, usage and verification owners. Reference twins,
+  the closure matrix and qualification modules remain for P1-04/06/07;
+  the assembled-version verification is still pending.
 - **Goal:** delete the rest of the 19.4K test-only lines.
 - **Work:**
   - Delete `workpackage_service`, `runtime`, `compat`, `compat_fixtures`,

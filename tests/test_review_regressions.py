@@ -14,8 +14,8 @@ The A05 composed scenario (docs/reviews/2026-09-18-d16f523 A14) lives here
 because it needs the GitLab service leg: the durable claim loop drives REAL
 ``execute_run_command`` legs (run creation + plan notes on the fake), two
 workers, a batch whose unstarted leases die mid-handler. The conformance
-kit imports and drives the same driver, recording the outcome into the
-attestation ledger (:data:`forge.runs.conformance.COMPOSED_SCENARIOS`).
+battery keeps its direct production-entry assertions. Its original owning
+suite remains responsible for this two-worker scenario.
 """
 
 import asyncio

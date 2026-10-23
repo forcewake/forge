@@ -240,8 +240,8 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         evidence_class="contract_suite",
         evidence=("tests/test_conformance.py", "tests/test_publication_boundary.py"),
         ci_jobs=_CI_TEST,
-        note="R01: one publication boundary; negative conformance kit attests each lane "
-        "(attest_conformance) — deny scenarios publish with zero commit-API calls.",
+        note="One publication boundary; each provider's negative scenarios assert zero "
+        "commit-API calls through the actual publication entry.",
     ),
     ManifestEntry(
         capability="publication-intents",
@@ -814,9 +814,8 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         level="contract_tested",
         evidence=("tests/test_release_manifest.py",),
     ),
-    # e53ffd2 review (B01-B15, closed 2026-09-21 — every finding carries its
-    # composed regression on a production service path; B14's own coverage
-    # IS this block, machine-validated like the R-series)
+    # Historical review closures retain their production-path evidence.
+    # The removed in-process attestation claim is deliberately absent.
     FindingClosure(
         finding="B01",
         capability="runs/verification-contract",
@@ -882,12 +881,6 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         capability="runs/verification-contract",
         level="contract_tested",
         evidence=("tests/test_github_harness.py", "tests/test_github_runs.py"),
-    ),
-    FindingClosure(
-        finding="B14",
-        capability="durable-failure-injection",
-        level="contract_tested",
-        evidence=("tests/test_conformance.py",),
     ),
     FindingClosure(
         finding="B15",

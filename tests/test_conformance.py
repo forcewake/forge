@@ -1,53 +1,14 @@
-"""R21: the ProviderConformanceKit — one invariant suite over ALL providers.
+"""GitHub/GitLab publication and CI parity on the shipped lane-only paths.
 
-A new adapter must not be able to be green in its own tests while violating
-the core promise. This kit parametrizes the forbidden and positive
-scenarios over every lane in
-:data:`forge.runs.conformance.PROVIDER_CAPABILITIES` and drives each lane's
-REAL publish/gate/finalization legs over its in-memory fake (no live
-calls) — the generalized form of the parity suites
-(``tests/test_github_runs.py``, ``tests/test_consistency.py``).
-
-The forbidden scenarios — every provider behaves IDENTICALLY:
-
-1. a bad candidate (the R01 boundary matrix: denylisted CI config, lockfile,
-   path traversal, oversized content, duplicate path) → refused with ZERO
-   commit-API calls;
-2. a stale head → drift refusal, zero writes — the refusal ORIGIN comes
-   from the capability record (``native_cas``: the provider refuses the
-   CAS'd mutation vs GitLab, where forge's writer guard refuses before
-   dispatch), never from scattered per-provider ifs;
-3. a missing/altered approved spec (the decision's digest binding) → the
-   gate refuses, nothing publishes;
-4. a cancelled generation (F13/R10) → no new publication;
-5. failed CI → never verified-ready (R02);
-6. an unverified run → honestly labeled (R02).
-
-Positive control: each lane publishes EXACTLY the validated manifest.
-Where the lanes genuinely differ (the synthetic Draft MR vs the native PR
-surface), the assertion branches on the CAPABILITY RECORD
-(``synthetic_merge_fallback``), not on provider names.
-
-Clearing every scenario attests the lane (:func:`attest_conformance`) —
-the registration rule ``verified_ready_capable`` demands both the record's
-claim and this attestation, so future CI can assert registration off the
-same suite.
-
-A14 (docs/reviews/2026-09-18-d16f523): the attestation is SCENARIO-ACCOUNTED.
-Beyond the battery, every mandatory COMPOSED service-leg scenario
-(:data:`forge.runs.conformance.COMPOSED_SCENARIOS` — scoped token over the
-run mirror, required-absent verification, the two-worker claim loop, the
-delayed-apply recovery, the edited-plan-comment lane render) is driven here
-through the same production drivers its owning suite uses and recorded via
-:func:`record_scenario`; a failed, skipped, or never-run mandatory scenario
-makes :func:`attest_conformance` raise instead of registering the lane, and
-:func:`conformance_manifest` publishes the machine-readable record.
+Each parameter drives actual provider services, native publication and
+verification over transport fakes. No capability claims or attestation
+interpreter stands between the assertions and their production owners.
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -60,52 +21,23 @@ from forge.models.base import Base
 from forge.repository import ChangesetWriter
 from forge.repository.changeset import Change, ChangeSet, Operation
 from forge.runs.candidate import bundle_from_changeset
-from forge.runs.conformance import (
-    AttestationBlockedError,
-    CAS_FORGE_WRITER_GUARD,
-    CAS_GRAPHQL_EXPECTED_HEAD_OID,
-    ARTIFACT_TRANSPORT_CI,
-    COMPOSED_SCENARIOS,
-    PROVIDER_CAPABILITIES,
-    ProviderCapability,
-    READONLY_IDENTITY_MERGE_REQUEST_IID,
-    READONLY_IDENTITY_PULL_REQUEST_NUMBER,
-    SCENARIO_FAILED,
-    SCENARIO_NOT_RUN,
-    SCENARIO_PASSED,
-    SCENARIO_SKIPPED,
-    UnknownProviderError,
-    attest_conformance,
-    capability_of,
-    conformance_attested,
-    conformance_manifest,
-    mandatory_scenarios,
-    record_scenario,
-    registration_allowed,
-    reset_conformance_attestations,
-    scenario_outcomes,
-    verified_ready_capable,
-)
+
 from forge.runs.publisher import publish_candidate, publication_grant_valid
 from forge.runs.stubs import factory_branch
 from tests.fixtures.fake_github import FakeGitHub
 from tests.fixtures.fake_gitlab import FakeGitLab
-from tests.test_github_runs import (
-    composed_a01_required_absent_green_optional,
-    composed_a03_comment_same_id_edited_body,
-    composed_a06_run_mirror_scoped_token,
-    composed_a12_pending_remote_application,
+from tests.test_github_harness import (
     go as github_go,
     make_service as make_github_service,
     make_settings as make_github_settings,
     make_stack as make_github_stack,
+    seed_success_with_candidate as seed_github_candidate,
     start as github_start,
 )
-from tests.test_review_regressions import composed_a05_leased_batch_expiry_two_workers
-from tests.test_runs_service import FakeWriter
-from tests.test_runs_verification import (
+from tests.test_runs_harness_service import (
     make_service as make_gitlab_service,
     make_settings as make_gitlab_settings,
+    seed_success_with_candidate as seed_gitlab_candidate,
 )
 
 # ----------------------------------------------------------------------
@@ -123,7 +55,6 @@ GH_REPO = "acme/acme-widget"
 GH_OWNER, GH_REPO_NAME = GH_REPO.split("/", 1)
 GH_PROJECT_ID = 70010
 GH_ISSUE = 42
-AZ_WORK_ITEM = 142
 
 RUN_ID = "abcd1234" + "0" * 24
 
@@ -223,21 +154,16 @@ async def _fresh_db():
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture()
 async def db():
     async with _fresh_db() as session_factory:
         yield session_factory
-
-
-@pytest.fixture(autouse=True)
-def _clean_attestations():
-    reset_conformance_attestations()
-    yield
-    reset_conformance_attestations()
 
 
 async def update_run(db, run_id: str, **fields: Any) -> None:
@@ -275,13 +201,15 @@ class GitLabLane:
         self.service = service
 
     @classmethod
-    async def build(cls, db) -> GitLabLane:
-        FakeWriter.reset()  # per-test writer call accounting
+    async def build(cls, db, *, required_jobs="") -> GitLabLane:
         fake = FakeGitLab()
         fake.seed_commit("main", BASE, "initial")
         fake.seed_file("src/app.py", "print('hi')\n")
         fake.seed_issue(GL_ISSUE, ISSUE_TITLE, ISSUE_DESC)
-        service = make_gitlab_service(db, fake, settings=make_gitlab_settings())
+        fake.ci_configuration = {"valid": True, "jobs": [{"name": "forge-agent"}]}
+        service = make_gitlab_service(
+            db, fake, settings=make_gitlab_settings(FORGE_REQUIRED_JOBS=required_jobs)
+        )
         return cls(db, fake, service)
 
     async def start_run(self) -> str:
@@ -321,15 +249,14 @@ class GitLabLane:
         )
         return Verdict(ok=result.ok, reason=result.reason, drift="branch_drift" in result.reason)
 
-    # On GitLab the boundary IS the transport entry: every candidate
-    # (builtin and harness alike) crosses publish_candidate.
+    # The harness candidate crosses the same trusted publisher boundary.
     publish_candidate = publish_transport
 
     def write_attempts(self) -> int:
         return len(self.fake.calls_of(MUTATION_CALL[self.provider]))
 
     def service_writes(self) -> int:
-        return sum(len(writer.calls) for writer in FakeWriter.instances)
+        return self.write_attempts()
 
     def state(self) -> tuple:
         branches = tuple(
@@ -346,6 +273,12 @@ class GitLabLane:
 
     def review_surfaces_are_draft(self) -> bool:
         return True  # the synthetic Draft MR leg only ever creates drafts
+
+    async def complete_harness(self, run_id: str) -> None:
+        run = await get_run(self.db, run_id)
+        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
+        seed_gitlab_candidate(self.fake, pipeline_id, attempt_base=BASE)
+        await self.service.evaluate_waiting_harness()
 
     async def evaluate_ci(self, run_id: str) -> None:
         await self.service.evaluate_waiting_ci()
@@ -366,13 +299,22 @@ class GitHubLane:
         self.flow = flow
 
     @classmethod
-    async def build(cls, db) -> GitHubLane:
+    async def build(cls, db, *, required_jobs="") -> GitHubLane:
         fake = FakeGitHub()
-        fake.seed_repo(GH_REPO, {"src/app.py": "print('hi')\n"})
+        fake.seed_repo(
+            GH_REPO,
+            {
+                "src/app.py": "print('hi')\n",
+                ".github/workflows/forge-harness.github.yml": "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n",
+            },
+        )
         fake.heads[GH_REPO]["main"] = BASE
         fake.seed_issue(GH_REPO, GH_ISSUE, ISSUE_TITLE, ISSUE_DESC)
         service = make_github_service(
-            db, fake, settings=make_github_settings(), stack=make_github_stack(fake)
+            db,
+            fake,
+            settings=make_github_settings(FORGE_REQUIRED_JOBS=required_jobs),
+            stack=make_github_stack(fake),
         )
         return cls(db, fake, service, service._stack.flow)
 
@@ -426,6 +368,10 @@ class GitHubLane:
     def review_surfaces_are_draft(self) -> bool:
         return all(pr["draft"] is True for pr in self.fake.pull_requests.get(GH_REPO, []))
 
+    async def complete_harness(self, run_id: str) -> None:
+        seed_github_candidate(self.fake, run_id)
+        await self.service.evaluate_waiting_harness()
+
     async def evaluate_ci(self, run_id: str) -> None:
         await self.service.evaluate_waiting_ci_one(run_id)
 
@@ -434,7 +380,6 @@ class GitHubLane:
 
 
 LANES: tuple[type, ...] = (GitLabLane, GitHubLane)
-LANES_BY_PROVIDER = {lane.provider: lane for lane in LANES}
 
 
 def _assert_untouched(lane, before: tuple) -> None:
@@ -450,6 +395,7 @@ async def scenario_positive_control(lane) -> str:
     """The lane publishes EXACTLY the validated manifest."""
     branch = lane.transport_branch(RUN_ID)
     before = lane.state()
+    original_files = dict(lane.fake.files[GH_REPO]) if lane.provider == "github" else {}
     verdict = await lane.publish_transport(good_changeset(), attempt_base=BASE)
 
     assert verdict.ok is True, verdict.reason
@@ -463,24 +409,22 @@ async def scenario_positive_control(lane) -> str:
             ("create" if change.operation is Operation.CREATE else "update", change.path)
             for change in GOOD_MANIFEST
         ]
-        assert actions[0]["content"] == GOOD_MANIFEST[0].content
+        assert [action["content"] for action in actions] == [
+            change.content for change in GOOD_MANIFEST
+        ]
     elif lane.provider == "github":
         files = lane.fake.files[GH_REPO]
         assert files["src/feature.py"] == "VALUE = 1\n"
         assert files["src/app.py"] == "print('hello')\n"
-        assert set(files) == {"src/app.py", "src/feature.py"}
-    else:
-        snapshot = lane.fake.snapshots[lane.head(branch)]
-        assert snapshot["src/feature.py"] == "VALUE = 1\n"
-        assert snapshot["src/app.py"] == "print('hello')\n"
-        assert set(snapshot) == {"src/app.py", "src/feature.py"}
-
-    # The record declares the merge surface: native-PR lanes ensure the
-    # draft PR inside the publish leg; the synthetic-MR lane's Draft MR is
-    # a SEPARATE journaled service leg the transport never performs.
-    capability = capability_of(lane.provider)
-    if capability.synthetic_merge_fallback:
-        assert lane.review_surfaces() == 0
+        workflow = ".github/workflows/forge-harness.github.yml"
+        assert files[workflow] == original_files[workflow]
+        assert set(files) == {
+            "src/app.py",
+            "src/feature.py",
+            ".github/workflows/forge-harness.github.yml",
+        }
+    if lane.provider == "gitlab":
+        assert lane.review_surfaces() == 0  # RunService owns its separate Draft MR leg.
     else:
         assert lane.review_surfaces() == 1
         assert lane.review_surfaces_are_draft() is True
@@ -510,8 +454,7 @@ async def scenario_out_of_scope(lane) -> None:
 
 
 async def scenario_stale_head(lane) -> None:
-    """A stale head is refused with zero writes; the ORIGIN is the record's."""
-    capability = capability_of(lane.provider)
+    """A stale head preserves the provider's native CAS semantics."""
     lane.seed_candidate(RUN_ID, MOVED)  # a concurrent writer moved the branch
     before = lane.state()
     attempts_before = lane.write_attempts()
@@ -523,19 +466,10 @@ async def scenario_stale_head(lane) -> None:
     assert "branch_drift" in verdict.reason
     _assert_untouched(lane, before)
 
-    # The refusal origin is a CAPABILITY fact, not a per-provider guess:
-    # a native-CAS lane hands the mutation to the provider, which refuses
-    # it; GitLab's writer guard refuses BEFORE any dispatch.
-    if capability.native_cas:
-        assert lane.write_attempts() == attempts_before + 1, (
-            f"{lane.provider} declares native CAS ({capability.cas_mechanism}) — "
-            "the provider itself must have received (and refused) the mutation"
-        )
+    if lane.provider == "github":
+        assert lane.write_attempts() == attempts_before + 1  # native expectedHeadOid refusal
     else:
-        assert lane.write_attempts() == attempts_before, (
-            f"{lane.provider} declares the forge writer guard "
-            f"({capability.cas_mechanism}) — nothing may reach the commit API"
-        )
+        assert lane.write_attempts() == attempts_before  # GitLab has no native CAS.
 
 
 async def scenario_missing_spec(lane) -> None:
@@ -568,13 +502,15 @@ async def scenario_cancelled_generation(lane) -> None:
 
 
 async def drive_to_waiting_ci(lane) -> tuple[str, str]:
-    """/implement → /go on the builtin lane → waiting_ci. Returns (run, sha)."""
+    """Approve, dispatch current CI, ingest its artifact, then wait for verification."""
     run_id = await lane.start_run()
     await lane.approve(run_id)
     run = await get_run(lane.db, run_id)
+    assert run.status == FlowStatus.WAITING_HARNESS.value
+    await lane.complete_harness(run_id)
+    run = await get_run(lane.db, run_id)
     assert run.status == FlowStatus.WAITING_CI.value
     candidate = run.candidate_shas[-1]
-    lane.seed_candidate(run_id, candidate)  # the branch head == candidate
     return run_id, candidate
 
 
@@ -600,8 +536,6 @@ async def scenario_failed_ci_never_ready(lane) -> None:
                 }
             ]
         )
-    else:
-        lane.fake.seed_build(source_version=candidate, result="failed")
     writes_before = lane.service_writes()
 
     await lane.evaluate_ci(run_id)
@@ -624,8 +558,7 @@ async def scenario_unverified_honest(lane) -> None:
             await lane.fake.create_pipeline(GL_PROJECT_ID, lane.transport_branch(run_id))
         )["id"]
         lane.fake.set_pipeline_status(pipeline_id, "success", candidate)
-    # GitHub/Azure: no checks/builds at all — with the grace window zeroed
-    # at build(), the gate proceeds as honestly not_configured.
+    # No independent GitHub checks exist; the lane run is not verification.
 
     await lane.evaluate_ci(run_id)
 
@@ -637,79 +570,6 @@ async def scenario_unverified_honest(lane) -> None:
     verification = (run.evidence or {}).get("verification") or {}
     assert verification.get("status") in {"unverified", "not_configured"}
     assert verification.get("producer"), "the verdict must name WHO claimed it"
-
-
-#: The A14 composed invariant-failure drivers (each lives next to the
-#: service-leg suite it composes) — ledger name → driver. Every driver
-#: takes the pytest MonkeyPatch instance so the kit can run it standalone.
-_COMPOSED_DRIVERS: dict[str, Any] = {
-    "a05_leased_batch_expiry_two_workers": lambda monkeypatch: (
-        composed_a05_leased_batch_expiry_two_workers(monkeypatch)
-    ),
-    "a06_run_mirror_scoped_token_http": lambda _monkeypatch: composed_a06_run_mirror_scoped_token(),
-    "a01_required_absent_green_optional": lambda _monkeypatch: (
-        composed_a01_required_absent_green_optional()
-    ),
-    "a12_pending_remote_application": lambda _monkeypatch: (
-        composed_a12_pending_remote_application()
-    ),
-    "a03_comment_same_id_edited_body": lambda monkeypatch: composed_a03_comment_same_id_edited_body(
-        monkeypatch
-    ),
-}
-
-
-async def run_forbidden_scenarios(lane_cls) -> None:
-    """The kit battery one lane must clear to earn its attestation.
-
-    Every scenario gets its own pristine fake AND database — the
-    one-active-run invariant must never arbitrate between scenarios (a
-    scenario that parks a live run on the subject would otherwise be
-    adopted by the next one). Each scenario's outcome is RECORDED into the
-    attestation ledger as it passes (A14): the ledger, not the test's
-    return, is what :func:`attest_conformance` audits.
-    """
-    provider = lane_cls.provider
-    for candidate in bad_candidates():
-        async with _fresh_db() as scenario_db:
-            await scenario_bad_candidate(await lane_cls.build(scenario_db), candidate)
-    record_scenario(provider, "bad_candidate_refused_with_zero_writes")
-    scenarios = (
-        ("out_of_scope_candidate_refused", scenario_out_of_scope),
-        ("stale_head_drifts_with_zero_writes", scenario_stale_head),
-        ("missing_spec_refused", scenario_missing_spec),
-        ("cancelled_generation_never_publishes", scenario_cancelled_generation),
-        ("failed_ci_never_verified_ready", scenario_failed_ci_never_ready),
-        ("unverified_run_honestly_labeled", scenario_unverified_honest),
-    )
-    for name, scenario in scenarios:
-        async with _fresh_db() as scenario_db:
-            await scenario(await lane_cls.build(scenario_db))
-        record_scenario(provider, name)
-    async with _fresh_db() as scenario_db:
-        await scenario_positive_control(await lane_cls.build(scenario_db))
-    record_scenario(provider, "positive_control_publishes_exactly_the_validated_manifest")
-
-
-async def run_composed_scenarios(provider: str, monkeypatch) -> None:
-    """Drive *provider*'s A14 composed service-leg scenarios (A14).
-
-    The combined invariant-failure cases live beside the suites that own
-    their production entry points; the kit drives them HERE — same
-    functions, no re-implementation — and records each outcome. A driver
-    that fails (or a name with no driver wired) propagates: the ledger
-    stays unproven and the attestation refuses.
-    """
-    for name in COMPOSED_SCENARIOS.get(provider, ()):
-        driver = _COMPOSED_DRIVERS.get(name)
-        assert driver is not None, f"no composed driver wired for {provider}/{name}"
-        await driver(monkeypatch)
-        record_scenario(provider, name)
-
-
-# ----------------------------------------------------------------------
-# The kit, parametrized over every capability record
-# ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
@@ -753,169 +613,6 @@ class TestConformanceKit:
 
 
 # ----------------------------------------------------------------------
-# The capability records themselves (honest by construction, pinned here)
-# ----------------------------------------------------------------------
-
-
-class TestCapabilityRecords:
-    def test_cas_origins_match_the_records(self):
-        """GitHub/Azure enforce the compare-and-swap server-side; GitLab's
-        Commits API has no CAS — forge's writer guard does it forge-side."""
-        assert capability_of("github").native_cas is True
-        assert capability_of("github").cas_mechanism == CAS_GRAPHQL_EXPECTED_HEAD_OID
-        gitlab = capability_of("gitlab")
-        assert gitlab.native_cas is False
-        assert gitlab.cas_mechanism == CAS_FORGE_WRITER_GUARD
-
-    def test_merge_surface_fallback_is_declared_not_guessed(self):
-        """Only GitLab synthesizes the review surface (the Draft MR leg);
-        GitHub/Azure pin the provider's native pull-request object."""
-        assert capability_of("gitlab").synthetic_merge_fallback is True
-        assert capability_of("github").synthetic_merge_fallback is False
-
-    def test_harness_candidates_travel_as_artifacts_everywhere(self):
-        """No harness lane ever carries a write token — on ANY provider."""
-        for provider, record in PROVIDER_CAPABILITIES.items():
-            assert record.artifact_transport == ARTIFACT_TRANSPORT_CI, provider
-
-    def test_readonly_identities_are_distinct_and_declared(self):
-        assert capability_of("gitlab").readonly_identity == READONLY_IDENTITY_MERGE_REQUEST_IID
-        assert capability_of("github").readonly_identity == READONLY_IDENTITY_PULL_REQUEST_NUMBER
-
-    def test_every_recorded_provider_claims_a_verification_producer(self):
-        for provider, record in PROVIDER_CAPABILITIES.items():
-            assert record.verified_ready_capable is True, provider
-
-    def test_unknown_provider_has_no_record_and_never_attests(self):
-        with pytest.raises(UnknownProviderError):
-            capability_of("gerrit")
-        with pytest.raises(UnknownProviderError):
-            attest_conformance("gerrit")
-        assert not conformance_attested("gerrit")
-
-    def test_every_recorded_provider_has_a_kit_lane(self):
-        """A new capability record without a kit lane fails here — and a
-        lane without a record cannot even build. R21's meta-invariant: the
-        suite grows WITH the provider table, never behind it."""
-        assert set(LANES_BY_PROVIDER) == set(PROVIDER_CAPABILITIES)
-
-
-# ----------------------------------------------------------------------
-# The registration rule: record claim AND conformance pass
-# ----------------------------------------------------------------------
-
-
-def _hypothetical_record(**overrides: Any) -> ProviderCapability:
-    base = capability_of("github")
-    return replace(base, **overrides)
-
-
-class TestRegistrationRule:
-    def test_registration_requires_both_claim_and_pass(self):
-        claim = _hypothetical_record()
-        no_claim = _hypothetical_record(verified_ready_capable=False)
-
-        assert registration_allowed(claim, conformance_passed=False) is False
-        assert registration_allowed(no_claim, conformance_passed=True) is False
-        assert registration_allowed(claim, conformance_passed=True) is True
-
-    def test_conformance_pass_is_per_process_state(self):
-        assert verified_ready_capable("github") is False  # claimed, not attested
-        for name in mandatory_scenarios("github"):
-            record_scenario("github", name)
-        attest_conformance("github")
-        assert conformance_attested("github") is True
-        assert verified_ready_capable("github") is True
-        reset_conformance_attestations()
-        assert verified_ready_capable("github") is False
-
-    @pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
-    async def test_kit_pass_registers_verified_ready(self, lane_cls, monkeypatch):
-        """The live hook: a lane clearing EVERY mandatory scenario — the
-        forbidden battery AND the A14 composed service-leg drivers —
-        attests, and only then does the registration rule open. This is
-        what future CI asserts after running the kit."""
-        await run_forbidden_scenarios(lane_cls)
-        await run_composed_scenarios(lane_cls.provider, monkeypatch)
-
-        assert verified_ready_capable(lane_cls.provider) is False
-        attest_conformance(lane_cls.provider)
-        assert verified_ready_capable(lane_cls.provider) is True
-
-
-class TestAttestationIntegrity:
-    """A14 acceptance: the capability contract cannot go attested while a
-    mandatory path is untested. The attestation audits the scenario
-    ledger — a battery that never drove a composed scenario, a failed
-    scenario, or an explicit skip all leave the lane unregistered."""
-
-    @pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
-    async def test_battery_alone_cannot_attest_when_composed_scenarios_exist(self, lane_cls):
-        await run_forbidden_scenarios(lane_cls)
-        composed = COMPOSED_SCENARIOS.get(lane_cls.provider, ())
-        if composed:
-            with pytest.raises(AttestationBlockedError, match=composed[0]):
-                attest_conformance(lane_cls.provider)
-            assert verified_ready_capable(lane_cls.provider) is False, (
-                "the kit battery alone must never register the lane"
-            )
-        else:
-            # No composed scenarios wired for this lane yet: the battery
-            # alone is the complete mandatory set.
-            attest_conformance(lane_cls.provider)
-            assert verified_ready_capable(lane_cls.provider) is True
-
-    async def test_a_failed_scenario_blocks_the_attestation_with_its_name(self):
-        record_scenario("github", "a01_required_absent_green_optional", outcome=SCENARIO_FAILED)
-        for name in mandatory_scenarios("github"):
-            if name != "a01_required_absent_green_optional":
-                record_scenario("github", name)
-        with pytest.raises(AttestationBlockedError, match="a01_required_absent_green_optional"):
-            attest_conformance("github")
-        assert verified_ready_capable("github") is False
-
-    async def test_a_skipped_scenario_blocks_the_attestation_and_is_manifested(self):
-        for name in mandatory_scenarios("github"):
-            record_scenario("github", name)
-        record_scenario(
-            "github",
-            "a03_comment_same_id_edited_body",
-            outcome=SCENARIO_SKIPPED,
-            note="ci: composed lane skipped in this profile",
-        )
-        with pytest.raises(AttestationBlockedError, match="skipped"):
-            attest_conformance("github")
-
-        manifest = conformance_manifest()
-        github = manifest["providers"]["github"]
-        assert "a03_comment_same_id_edited_body" in github["skipped"]
-        assert github["attested"] is False
-
-    async def test_never_run_scenarios_block_the_attestation(self):
-        # No record_scenario call at all: the whole mandatory set reads
-        # ``not_run`` — a silently-shrunk suite cannot attest either.
-        with pytest.raises(AttestationBlockedError, match="not_run"):
-            attest_conformance("github")
-        outcomes = scenario_outcomes("github")
-        assert set(outcomes.values()) == {SCENARIO_NOT_RUN}
-
-    def test_manifest_is_machine_readable_and_complete(self):
-        record_scenario("gitlab", "a05_leased_batch_expiry_two_workers")
-        manifest = conformance_manifest()
-        assert manifest["schema_version"] == 1
-        providers = manifest["providers"]
-        assert set(providers) == set(PROVIDER_CAPABILITIES), (
-            "the manifest covers exactly the capability table"
-        )
-        gitlab = providers["gitlab"]
-        assert gitlab["scenarios"]["a05_leased_batch_expiry_two_workers"] == SCENARIO_PASSED
-        assert gitlab["attested"] is False  # recorded, not attested
-        for provider, entry in providers.items():
-            assert set(entry["scenarios"]) == set(mandatory_scenarios(provider))
-            assert isinstance(entry["skipped"], list)
-
-
-# ----------------------------------------------------------------------
 # Core pins the kit leans on (the grant fence the services share)
 # ----------------------------------------------------------------------
 
@@ -940,3 +637,116 @@ class TestPublicationGrantFence:
             status=FlowStatus.CANCELLED.value,
         )
         assert publication_grant_valid(run, None) is False
+
+
+@pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
+async def test_required_ci_absence_never_becomes_verified(db, lane_cls):
+    lane = await lane_cls.build(db, required_jobs="tests")
+    run_id, candidate = await drive_to_waiting_ci(lane)
+    writes = lane.service_writes()
+    if lane.provider == "gitlab":
+        pipeline_id = (
+            await lane.fake.create_pipeline(GL_PROJECT_ID, lane.transport_branch(run_id))
+        )["id"]
+        lane.fake.set_pipeline_status(pipeline_id, "success", candidate)
+        lane.fake.set_pipeline_jobs(pipeline_id, [{"id": 900, "name": "docs", "status": "success"}])
+    else:
+        lane.fake.seed_workflow_runs(
+            [
+                {
+                    "head_sha": candidate,
+                    "name": "docs",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ]
+        )
+    await lane.evaluate_ci(run_id)
+    waiting = await get_run(db, run_id)
+    if lane.provider == "gitlab":
+        assert waiting.status == FlowStatus.BLOCKED.value
+        assert "quality_contract" in waiting.status_reason
+        assert (waiting.evidence.get("verification") or {}).get("status") != "passed"
+        assert lane.service_writes() == writes
+        return
+    assert waiting.status == FlowStatus.WAITING_CI.value
+    assert waiting.evidence["verification"]["status"] == "unknown"
+    assert lane.service_writes() == writes
+    if lane.provider == "gitlab":
+        lane.fake.set_pipeline_jobs(
+            pipeline_id,
+            [
+                {"id": 900, "name": "docs", "status": "success"},
+                {"id": 901, "name": "tests", "status": "success"},
+            ],
+        )
+    else:
+        lane.fake.seed_workflow_runs(
+            [
+                {
+                    "head_sha": candidate,
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                for name in ("docs", "tests")
+            ]
+        )
+    await lane.evaluate_ci(run_id)
+    ready = await get_run(db, run_id)
+    assert ready.status == FlowStatus.READY_FOR_HUMAN.value
+    assert ready.evidence["verification"]["status"] == "passed"
+    assert ready.evidence["verification"]["tested_oid"] == candidate
+    assert lane.service_writes() == writes
+
+
+async def test_same_plan_comment_id_with_changed_approved_bytes_is_refused(monkeypatch):
+    from tests import test_github_runs as owner
+
+    original = owner._composed_db
+
+    async def current_lane_db():
+        db, fake = await original()
+        fake.files[GH_REPO][".github/workflows/forge-harness.github.yml"] = (
+            "on: workflow_dispatch\njobs:\n  lane:\n    runs-on: ubuntu-latest\n"
+        )
+        return db, fake
+
+    monkeypatch.setattr(owner, "_composed_db", current_lane_db)
+    try:
+        await owner.composed_a03_comment_same_id_edited_body(monkeypatch)
+    finally:
+        while owner._composed_db_engines:
+            await owner._composed_db_engines.pop().dispose()
+
+
+@pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
+async def test_required_ci_success_is_bound_to_the_current_candidate(db, lane_cls):
+    lane = await lane_cls.build(db, required_jobs="tests")
+    run_id, candidate = await drive_to_waiting_ci(lane)
+    writes = lane.service_writes()
+    if lane.provider == "gitlab":
+        pipeline_id = (
+            await lane.fake.create_pipeline(GL_PROJECT_ID, lane.transport_branch(run_id))
+        )["id"]
+        lane.fake.set_pipeline_status(pipeline_id, "success", candidate)
+        lane.fake.set_pipeline_jobs(
+            pipeline_id, [{"id": 901, "name": "tests", "status": "success"}]
+        )
+    else:
+        lane.fake.seed_workflow_runs(
+            [
+                {
+                    "head_sha": candidate,
+                    "name": "tests",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ]
+        )
+    await lane.evaluate_ci(run_id)
+    ready = await get_run(db, run_id)
+    assert ready.status == FlowStatus.READY_FOR_HUMAN.value
+    assert ready.evidence["verification"]["status"] == "passed"
+    assert ready.evidence["verification"]["tested_oid"] == candidate
+    assert lane.service_writes() == writes

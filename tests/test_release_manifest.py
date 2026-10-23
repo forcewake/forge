@@ -45,7 +45,7 @@ UNCLAIMED_FINDINGS: frozenset[str] = frozenset(
 #: Grep marker per claimed finding: each closure's evidence must contain it,
 #: so a closure is only ever pointed at test files that actually test it.
 FINDING_MARKERS: dict[str, str] = {
-    "R01": "attest_conformance",
+    "R01": "scenario_bad_candidate",
     "R02": "waiting_ci",
     "R03": "across_providers",
     "R04": "test_spec_frozen_at_plan_acceptance",
@@ -77,7 +77,6 @@ FINDING_MARKERS: dict[str, str] = {
     "B11": "TestCurrentPlanSelectionB11",
     "B12": "observed_execution",
     "B13": "verification pending",
-    "B14": "TestRegistrationRule",
     "B15": "test_provider_services_never_reimplement_recovery_scans",
     "C01": "ambiguous_check_identity",
     "C02": "one_set_of_numbers",
