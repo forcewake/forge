@@ -30,7 +30,7 @@ class OwnedCLI:
         self.wrapper = self.path / "claude-wrapper"
         script = (
             "import os, sys\n"
-            "if sys.argv[1:] != ['--version']:\n"
+            "if sys.argv[1:] not in (['-v'], ['--version']):\n"
             "    os.setsid()\n"
             f"    with open({str(self.pid_file)!r}, 'x') as receipt: receipt.write(str(os.getpid()))\n"
             f"os.execv({str(self.cli)!r}, [{str(self.cli)!r}, *sys.argv[1:]])\n"

@@ -132,6 +132,9 @@ async def test_options_use_only_scoped_gateway_and_fixed_file_capabilities(tmp_p
     assert options.env["ANTHROPIC_AUTH_TOKEN"] == grant().key
     assert options.env["ANTHROPIC_API_KEY"] == options.env["GITHUB_TOKEN"] == ""
     assert options.env["ANTHROPIC_BASE_URL"] == "https://scoped-gateway.invalid"
+    assert options.env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
+    assert options.env["CLAUDE_CODE_DISABLE_FAST_MODE"] == "1"
+    assert options.env["ENABLE_TOOL_SEARCH"] == "false"
     assert not Path(options.env["CLAUDE_CONFIG_DIR"]).is_relative_to(workspace)
     assert not Path(options.env["HOME"]).exists()
     assert sdk.clients[0].disconnected
@@ -255,6 +258,37 @@ async def test_policy_denial_and_real_sdk_error_classification_are_honest(tmp_pa
         await ClaudeCodeDriver(sdk).start(brief, workspace, DriverEnv("test-model", grant()))
     assert caught.value.classification == "driver_process_error"
     assert grant().key not in str(caught.value)
+
+
+@pytest.mark.slow
+async def test_owned_cli_sdk_short_version_probe_does_not_claim_the_session_pid(tmp_path):
+    sdk = FakeSDK(tmp_path)
+    cli = Path(sdk.__file__).parent / "_bundled" / "claude"
+    cli.write_text(
+        f"#!{sys.executable}\nimport sys, time\n"
+        "if sys.argv[1:] in (['-v'], ['--version']):\n print('2.1.277'); sys.exit(0)\n"
+        "while True: time.sleep(1)\n"
+    )
+    owned = OwnedCLI(sdk)
+    process = None
+    try:
+        for argument in ("-v", "--version"):
+            probe = await asyncio.create_subprocess_exec(
+                str(owned.wrapper), argument, stdout=asyncio.subprocess.PIPE
+            )
+            output, _ = await probe.communicate()
+            assert probe.returncode == 0 and output.strip() == b"2.1.277"
+            assert not owned.pid_file.exists()
+        process = await asyncio.create_subprocess_exec(str(owned.wrapper), "--stream-json")
+        async with asyncio.timeout(3):
+            while not owned.pid_file.exists():
+                await asyncio.sleep(0.01)
+        assert int(owned.pid_file.read_text()) == process.pid
+    finally:
+        await owned.terminate()
+        if process is not None and process.returncode is None:
+            await process.wait()
+        owned.cleanup()
 
 
 @pytest.mark.slow

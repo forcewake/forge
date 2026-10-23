@@ -79,7 +79,7 @@ class FilePolicy:
                 return False
         return bool(lexical.parts)
 
-    async def permission(self, name: str, arguments: dict[str, Any], context: Any):
+    async def permission(self, name: str, arguments: dict[str, Any], context: Any) -> Any:
         if not self.permitted(name, arguments):
             self.denials.add("tool_policy_refused")
             return self.sdk.PermissionResultDeny(
@@ -87,7 +87,9 @@ class FilePolicy:
             )
         return self.sdk.PermissionResultAllow(updated_input=arguments)
 
-    async def pre_tool(self, event: dict[str, Any], tool_id: str | None, context: Any):
+    async def pre_tool(
+        self, event: dict[str, Any], tool_id: str | None, context: Any
+    ) -> dict[str, Any]:
         if self.permitted(event.get("tool_name", ""), event.get("tool_input", {})):
             return {"continue_": True}
         self.denials.add("tool_policy_refused")
@@ -141,6 +143,9 @@ def child_environment(config: Path, gateway: str, key: str) -> dict[str, str]:
         ANTHROPIC_AUTH_TOKEN=key,
         ANTHROPIC_API_KEY="",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1",
+        CLAUDE_CODE_DISABLE_FAST_MODE="1",
+        ENABLE_TOOL_SEARCH="false",
     )
     return env
 
