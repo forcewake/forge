@@ -1,55 +1,10 @@
-"""ADR-0030 / R36-20 (issue #279): mechanically enforced authority-boundary ownership.
+"""Authority imports are declared in TOML; focused tests pin call-site rules.
 
-The 16339c2 review's thesis: repeated findings are the SAME decision
-made in two places. Every R36 sibling landed ONE owning module per
-decision; this suite makes the ownership VISIBLE and MECHANICAL — no
-new framework, no extraction wave:
-
-- **the registry** (``forge.adaptive.boundary_registry``) declares the
-  owning boundaries (the six of ADR-0030 plus the execution/delivery
-  spec contract of R38-17/#318), their owners and their REGISTERED
-  production callers. A module that imports an owner without
-  registration fails the boundary check with an instruction to
-  register or route through the owner — the intentional-legacy-call
-  trap proves detection;
-- **the legacy escape hatch is confined**: ``revival._legacy_http_
-  lookup``, ``CheckpointStore._load_index`` and direct ``CheckpointStore``
-  construction are reachable ONLY from the enumerated allow-set, and
-  inside ``runs.revival`` only from the opt-in adapter itself
-  (``architecture.legacy_call_sites``);
-- **the composition monopolies**: ``resolve_repository`` is the one
-  checkpoint-authority composition point; ``AttemptStartSpec`` is
-  constructed only by its home and the one adopted adapter (services
-  compose through ``compose_attempt_start``);
-- **continuation modes are decided, not re-derived**: only
-  ``continuation.decide_continuation`` / ``parse_recovery_request``
-  produce modes; the dispatch vocabulary constants in
-  ``github_service`` may be referenced only as the documented
-  initial-dispatch default and the vocabulary validation;
-- **blob unlinks happen only inside the locked sweep entries**
-  (``_sweep_locked`` / ``_asweep_locked``); the pins/journal overlay and
-  atomic-write temp files are the enumerated exemptions;
-- **provider conformance** (``contract.provider_conformance``): the
-  same negative contract inputs — a fenced authority, a typed
-  checkpoint-unavailable, a stale epoch — produce equivalent typed
-  refusals on the GitHub path and the SHARED core
-  (``retry_rejection`` / ``why_blocked_reply`` that GitLab and Azure
-  consume verbatim); the GitLab/Azure lane-resume gap (#268) is
-  asserted as the documented HONEST state, never fabricated parity;
-- **the Q39-17 consolidation rules** (#336, ADR-0033 §5): the
-  redemption endpoint loads THE persisted operation grant (a
-  registry-lookup authorization path is the pre-#320 shape); the
-  GitLab dispatch resolves ApprovedInput at every dispatch entry (a
-  direct ``spec.plan_summary`` brief is the pre-#321 shape); the
-  native locator allocation goes through the registry (a direct
-  legacy-carrier derivation bypasses the collision check);
-- **fixture isolation** (R40-17/#353): the synthetic reference
-  executors and the qualification fixtures are never imported by
-  default production startup — the AST rule bars any src/forge module
-  from importing the fixture set outright, the reference axis above
-  bars the executors from every runtime entry point, and a runtime
-  probe imports the production startup surface in a clean interpreter
-  to prove neither loads.
+The same intentional-violation traps guard checkpoint authority, publication,
+continuation modes, locked garbage collection, persisted grants, approval
+bytes, native locators, deduplication, round admission and outcome parity.
+Provider behavior and clean-interpreter fixture isolation remain independent
+proofs. Import ownership has no production registry.
 """
 
 from __future__ import annotations
@@ -64,7 +19,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from forge.adaptive import boundary_registry
+from tests.fixtures import boundary_policy
 from forge.adaptive.checkpoint_repository import (
     LOOKUP_ABSENT,
     LOOKUP_CORRUPT,
@@ -122,46 +77,16 @@ _MODE_CONSTANTS = frozenset(
 #: forge through. NONE of them may import the reference package: an
 #: evaluation scenario beside a runtime contract must never become a
 #: deployed guarantee by import.
-REFERENCE_ENTRY_POINTS: tuple[str, ...] = (
-    "forge.main",
-    "forge.lane_driver",
-    "forge.adaptive.wiring",
-    "forge.runs.service",
-    "forge.runs.github_service",
-    "forge.runs.azure_service",
+REFERENCE_ENTRY_POINTS: tuple[str, ...] = tuple(
+    boundary_policy.IMPORT_CONTRACTS["reference-direction"]["forbidden_modules"]
 )
-
-#: The ONLY non-reference modules that may import
-#: ``forge.adaptive.reference.*``: the compat homes the scenarios were
-#: extracted from (ADR-0031's migration policy — a compat import is
-#: removed only when its callers are drained to the reference path).
 REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
-    {
-        "forge.adaptive.system_verification",
-        "forge.adaptive.saga_durable",
-        "forge.adaptive.steering_causality",
-    }
+    boundary_policy.IMPORT_CONTRACTS["reference-importers"]["allowed_importers"]
 )
-
-#: What the reference package may never import — the provider services,
-#: the wiring, ``main`` and the lane entry (it composes runtime
-#: contracts only; ADR-0031 §2).
 REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(REFERENCE_ENTRY_POINTS)
-
-#: R40-17 (#353): the SYNTHETIC/QUALIFICATION FIXTURE modules — code that
-#: exists for tests and the versioned compat documents, never for the
-#: production composition. NO module under src/forge may import one
-#: (module-level or lazy): a fixture entering the production import
-#: graph is a scenario's assumptions becoming a deployed guarantee by
-#: import. The synthetic reference EXECUTORS are the reference axis
-#: above (barred from every runtime entry point); this set names the
-#: fixture modules that carry no registered home at all.
-FIXTURE_MODULES: tuple[str, ...] = ("forge.adaptive.compat_fixtures",)
-
-
-# ---------------------------------------------------------------------------
-# The AST scan substrate
-# ---------------------------------------------------------------------------
+FIXTURE_MODULES: tuple[str, ...] = tuple(
+    boundary_policy.IMPORT_CONTRACTS["fixture-isolation"]["protected_modules"]
+)
 
 
 @dataclass(frozen=True)
@@ -275,8 +200,8 @@ def _check_legacy_lookup_confinement(modules: dict[str, _ModuleIndex]) -> list[s
     around the configured authority.
     """
     violations: list[str] = []
-    chain_modules = set(boundary_registry.LEGACY_LOOKUP_CHAIN_MODULES)
-    confined_function = boundary_registry.LEGACY_LOOKUP_CONFINED_FUNCTION
+    chain_modules = set(boundary_policy.LEGACY_LOOKUP_CHAIN_MODULES)
+    confined_function = boundary_policy.LEGACY_LOOKUP_CONFINED_FUNCTION
     for index in modules.values():
         for node in ast.walk(index.tree):
             references_legacy = (
@@ -305,7 +230,7 @@ def _check_legacy_lookup_confinement(modules: dict[str, _ModuleIndex]) -> list[s
                         f"{index.module}:{node.lineno} reads CheckpointStore."
                         "_load_index — a checkpoint index read outside the "
                         "boundary's allow-set "
-                        f"({sorted(boundary_registry.LEGACY_LOOKUP_CHAIN_MODULES)})"
+                        f"({sorted(boundary_policy.LEGACY_LOOKUP_CHAIN_MODULES)})"
                     )
         for call, callee in index.calls():
             if callee.split(".")[-1] != "CheckpointStore":
@@ -332,7 +257,7 @@ def _check_legacy_lookup_confinement(modules: dict[str, _ModuleIndex]) -> list[s
 
 def _check_resolve_repository_monopoly(modules: dict[str, _ModuleIndex]) -> list[str]:
     violations: list[str] = []
-    allowed = set(boundary_registry.RESOLVE_REPOSITORY_CALLERS)
+    allowed = set(boundary_policy.RESOLVE_REPOSITORY_CALLERS)
     for index in modules.values():
         for call, callee in index.calls():
             if callee != "resolve_repository" and not callee.endswith(".resolve_repository"):
@@ -342,7 +267,7 @@ def _check_resolve_repository_monopoly(modules: dict[str, _ModuleIndex]) -> list
                     f"{index.module}:{call.lineno} calls {callee or 'resolve_repository'}() "
                     "— resolve_repository is the ONE checkpoint-authority "
                     "composition point; add the caller to "
-                    "boundary_registry.RESOLVE_REPOSITORY_CALLERS only with a "
+                    "boundary_policy.RESOLVE_REPOSITORY_CALLERS only with a "
                     "reviewed reason (or route through an already-composed seam)"
                 )
     return violations
@@ -355,7 +280,7 @@ def _check_resolve_repository_monopoly(modules: dict[str, _ModuleIndex]) -> list
 
 def _check_attempt_start_construction(modules: dict[str, _ModuleIndex]) -> list[str]:
     violations: list[str] = []
-    allowed = set(boundary_registry.ATTEMPT_START_CONSTRUCTORS)
+    allowed = set(boundary_policy.ATTEMPT_START_CONSTRUCTORS)
     for index in modules.values():
         for call, callee in index.calls():
             if callee.split(".")[-1] != "AttemptStartSpec":
@@ -369,7 +294,7 @@ def _check_attempt_start_construction(modules: dict[str, _ModuleIndex]) -> list[
                 )
     # The registry's claim runs both ways: every registered composed
     # dispatch entry ACTUALLY composes through the adapter.
-    for entry in boundary_registry.COMPOSED_DISPATCH_ENTRIES:
+    for entry in boundary_policy.COMPOSED_DISPATCH_ENTRIES:
         index = modules.get(entry)
         if index is None:
             violations.append(
@@ -402,7 +327,7 @@ def _check_gc_unlink_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
     lock holds from the final reference scan through the last unlink).
     """
     violations: list[str] = []
-    sweeps = set(boundary_registry.GC_SWEEP_ENTRYPOINTS)
+    sweeps = set(boundary_policy.GC_SWEEP_ENTRYPOINTS)
     seen_sweep_blobs: set[str] = set()
     for index in modules.values():
         if index.module not in _GC_CONFINED_MODULES:
@@ -468,7 +393,7 @@ def _check_gc_unlink_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
             violations.append(
                 f"{index.module}:{call.lineno} unlinks an unclassified receiver "
                 f"({receiver_dotted or '<expr>'}) — enumerate the exemption in "
-                "boundary_registry.GC_UNLINK_EXEMPT_RECEIVERS or route the "
+                "boundary_policy.GC_UNLINK_EXEMPT_RECEIVERS or route the "
                 "unlink through the sweep entry points"
             )
     # The inverse guard: every registered sweep entry point must EXIST and
@@ -479,7 +404,7 @@ def _check_gc_unlink_confinement(modules: dict[str, _ModuleIndex]) -> list[str]:
                 f"the registered GC sweep entry point {entrypoint!r} was not "
                 "seen unlinking CAS blobs in "
                 f"{sorted(_GC_CONFINED_MODULES)} — the registry or the seam "
-                "renamed; update boundary_registry.GC_SWEEP_ENTRYPOINTS"
+                "renamed; update boundary_policy.GC_SWEEP_ENTRYPOINTS"
             )
     return violations
 
@@ -540,16 +465,16 @@ def _collect_module_level_facts(tree: ast.Module) -> tuple[set[int], set[int], s
 def _check_continuation_mode_selection(modules: dict[str, _ModuleIndex]) -> list[str]:
     violations: list[str] = []
     owner = "forge.adaptive.continuation"
-    boundary = boundary_registry.boundary_by_name("continuation_authorization")
+    boundary = boundary_policy.boundary_by_name("continuation_authorization")
     consumers = set(boundary.allowed_dependents)
-    mode_builders = set(boundary_registry.CONTINUATION_MODE_CONSTRUCTION_MODULES)
+    mode_builders = set(boundary_policy.CONTINUATION_MODE_CONSTRUCTION_MODULES)
     for index in modules.values():
         if index.module != owner and owner in index.imported_modules():
             if index.module not in consumers:
                 violations.append(
                     f"{index.module} imports the continuation owner "
                     f"({owner}) but is not registered in "
-                    "boundary_registry (the continuation_authorization "
+                    "boundary_policy (the continuation_authorization "
                     "boundary's allowed_dependents) — the continuation "
                     "decision is owned; register the caller or consume its "
                     "persisted document"
@@ -562,10 +487,10 @@ def _check_continuation_mode_selection(modules: dict[str, _ModuleIndex]) -> list
                     "matching_decision (and re-materialized by the compat "
                     "reader), never re-derived elsewhere"
                 )
-    home = modules.get(boundary_registry.MODE_VOCABULARY_HOME)
+    home = modules.get(boundary_policy.MODE_VOCABULARY_HOME)
     if home is None:  # pragma: no cover — the vocabulary home must exist
         violations.append(
-            f"the mode vocabulary home {boundary_registry.MODE_VOCABULARY_HOME} "
+            f"the mode vocabulary home {boundary_policy.MODE_VOCABULARY_HOME} "
             "was not found under src/forge"
         )
         return violations
@@ -621,7 +546,7 @@ def _check_continuation_mode_selection(modules: dict[str, _ModuleIndex]) -> list
 
 def _check_boundary_registration(modules: dict[str, _ModuleIndex]) -> list[str]:
     violations: list[str] = []
-    for boundary in boundary_registry.BOUNDARIES:
+    for boundary in boundary_policy.BOUNDARIES:
         owners = set(boundary.owner_modules)
         allowed = owners | set(boundary.allowed_dependents)
         for index in modules.values():
@@ -632,9 +557,9 @@ def _check_boundary_registration(modules: dict[str, _ModuleIndex]) -> list[str]:
                 violations.append(
                     f"boundary {boundary.name!r}: {index.module} imports the "
                     f"owner ({sorted(hit)}) but is not registered in "
-                    "boundary_registry — add the caller to the boundary's "
+                    "boundary_policy — add the caller to the boundary's "
                     "allowed_dependents with a reviewed reason, or route the "
-                    f"decision through the owner ({boundary.negative_contract})"
+                    f"decision through the owner (import contract {boundary.name})"
                 )
         # The registry stays honest in the other direction too: a registered
         # dependent that no longer imports anything the boundary owns is a
@@ -680,7 +605,7 @@ def _check_redemption_grant_authority(modules: dict[str, _ModuleIndex]) -> list[
     where a live binding for the subject+route was treated as
     operation authorization) is caught, and the registered loaders must
     still reach the broker's persisted-grant surfaces."""
-    endpoint = boundary_registry.REDEMPTION_ENDPOINT_MODULE
+    endpoint = boundary_policy.REDEMPTION_ENDPOINT_MODULE
     violations: list[str] = []
     index = modules.get(endpoint)
     if index is None:
@@ -688,8 +613,8 @@ def _check_redemption_grant_authority(modules: dict[str, _ModuleIndex]) -> list[
             f"the redemption endpoint module {endpoint} does not exist under "
             "src/forge — the operation grant's judge is gone; update the rule"
         ]
-    loaders = set(boundary_registry.REDEMPTION_GRANT_LOADERS)
-    lookups = set(boundary_registry.REDEMPTION_REGISTRY_LOOKUPS)
+    loaders = set(boundary_policy.REDEMPTION_GRANT_LOADERS)
+    lookups = set(boundary_policy.REDEMPTION_REGISTRY_LOOKUPS)
     for fn in _functions(index.tree):
         calls = {_dotted(call.func) for call in ast.walk(fn) if isinstance(call, ast.Call)}
         hit = {callee.split(".")[-1] for callee in calls} & lookups
@@ -709,14 +634,14 @@ def _check_redemption_grant_authority(modules: dict[str, _ModuleIndex]) -> list[
     # broker's persisted-grant surfaces — a renamed or hollowed seam may
     # not keep its registration.
     defined = {fn.name: fn for fn in _functions(index.tree)}
-    surfaces = set(boundary_registry.GRANT_PERSISTED_SURFACES)
-    for loader in boundary_registry.REDEMPTION_GRANT_LOADERS:
+    surfaces = set(boundary_policy.GRANT_PERSISTED_SURFACES)
+    for loader in boundary_policy.REDEMPTION_GRANT_LOADERS:
         fn = defined.get(loader)
         if fn is None:
             violations.append(
                 f"the registered redemption grant loader {loader!r} no longer "
                 f"exists in {endpoint} — the registry or the seam renamed; "
-                "update boundary_registry.REDEMPTION_GRANT_LOADERS"
+                "update boundary_policy.REDEMPTION_GRANT_LOADERS"
             )
             continue
         names, _attrs = _names_and_attrs(fn)
@@ -736,8 +661,8 @@ def _check_approved_input_brief(modules: dict[str, _ModuleIndex]) -> list[str]:
     the approved input, or that briefs from a direct ``spec.plan_summary``
     read (the pre-#321 shape), is caught."""
     violations: list[str] = []
-    brief_vars = set(boundary_registry.BRIEF_DISPATCH_VARIABLES)
-    for module_name in boundary_registry.APPROVED_INPUT_DISPATCH_MODULES:
+    brief_vars = set(boundary_policy.BRIEF_DISPATCH_VARIABLES)
+    for module_name in boundary_policy.APPROVED_INPUT_DISPATCH_MODULES:
         index = modules.get(module_name)
         if index is None:
             violations.append(
@@ -802,8 +727,8 @@ def _check_native_locator_allocation(modules: dict[str, _ModuleIndex]) -> list[s
     collision check (Q39-04/#323: two refs sharing one native secret
     name was a silent rotation alias)."""
     violations: list[str] = []
-    allowed = set(boundary_registry.LEGACY_CARRIER_DERIVATION_MODULES)
-    funcs = set(boundary_registry.LEGACY_CARRIER_FUNCTIONS)
+    allowed = set(boundary_policy.LEGACY_CARRIER_DERIVATION_MODULES)
+    funcs = set(boundary_policy.LEGACY_CARRIER_FUNCTIONS)
     for index in modules.values():
         if index.module in allowed:
             continue
@@ -939,7 +864,7 @@ def _check_budget_amendment_applicants(modules: dict[str, _ModuleIndex]) -> list
     not an import registration. The inverse guard keeps the seam honest:
     the applicants that remain must still reach the seam (a drained
     applicant is a stale registration)."""
-    allowed = set(boundary_registry.BUDGET_AMENDMENT_APPLICANTS)
+    allowed = set(boundary_policy.BUDGET_AMENDMENT_APPLICANTS)
     seam_names = {"apply_budget_amendment", "BudgetAmendmentCommand"}
     violations: list[str] = []
     for index in modules.values():
@@ -1102,8 +1027,8 @@ def _check_gateway_dedup_confinement(modules: dict[str, _ModuleIndex]) -> list[s
     orchestrator event lane, whose answer certifies nothing durable. The
     inverse guards keep the contract honest: the owner still defines the
     helpers, and every gateway still answers through them."""
-    probe_homes = set(boundary_registry.DEDUP_CACHE_PROBE_MODULES)
-    legacy_lane = set(boundary_registry.LEGACY_EVENT_DEDUP_CALLERS)
+    probe_homes = set(boundary_policy.DEDUP_CACHE_PROBE_MODULES)
+    legacy_lane = set(boundary_policy.LEGACY_EVENT_DEDUP_CALLERS)
     violations: list[str] = []
     for index in modules.values():
         for call, callee in index.calls():
@@ -1192,7 +1117,7 @@ def _check_round_admission_confinement(modules: dict[str, _ModuleIndex]) -> list
     the service must still admit THROUGH the owner, and the owner must
     still compose the transaction (the child flush, the budget seam, the
     round row)."""
-    allowed = set(boundary_registry.ROUND_ADMISSION_CALLERS)
+    allowed = set(boundary_policy.ROUND_ADMISSION_CALLERS)
     violations: list[str] = []
     for index in modules.values():
         if index.module in allowed:
@@ -1391,18 +1316,18 @@ def _check_command_outcome_parity(modules: dict[str, _ModuleIndex]) -> list[str]
     stay representable (the projection maps an unmapped word to the honest
     ``unknown`` axis word) — the rule pins that NO known word is ever
     silently degraded, both directions."""
-    authority = modules.get(boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE)
-    projection = modules.get(boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE)
+    authority = modules.get(boundary_policy.COMMAND_OUTCOME_JOURNALING_MODULE)
+    projection = modules.get(boundary_policy.COMMAND_OUTCOME_PROJECTION_MODULE)
     violations: list[str] = []
     if authority is None:
         return [
-            f"{boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE} was not "
+            f"{boundary_policy.COMMAND_OUTCOME_JOURNALING_MODULE} was not "
             "found under src/forge — the #374 outcome journaling authority "
             "is gone; update the parity rule"
         ]
     if projection is None:
         return [
-            f"{boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE} was not "
+            f"{boundary_policy.COMMAND_OUTCOME_PROJECTION_MODULE} was not "
             "found under src/forge — the command-axis projection is gone; "
             "update the parity rule"
         ]
@@ -1515,33 +1440,6 @@ class TestAuthorityBoundaryRules:
         violations = check(_src_modules())
         assert not violations, f"{name} violations:\n" + "\n".join(violations)
 
-    def test_the_registry_boundaries_are_the_declared_set(self) -> None:
-        assert [boundary.name for boundary in boundary_registry.BOUNDARIES] == [
-            "repository_identity_checkpoint_lifecycle",
-            "continuation_authorization",
-            "native_occupancy",
-            "candidate_publication",
-            "verification_applicability",
-            "operator_projection",
-            # R38-17 (#318, ADR-0032): the versioned execution/delivery
-            # spec the lane templates consume as pins.
-            "execution_delivery_spec",
-            # R40-17 (#353, ADR-0034 §1): the budget-amendment application
-            # decision and the feedback admission decision.
-            "budget_amendment_application",
-            "feedback_admission",
-            # R41-17 (#372, ADR-0034's map refreshed): the command-acceptance
-            # dedup decision (#357's one owner) and the review-round child
-            # admission (the #372 extraction).
-            "command_acceptance_dedup",
-            "review_round_admission",
-        ]
-
-    def test_every_boundary_declares_owners_callers_and_negative_contract(self) -> None:
-        for boundary in boundary_registry.BOUNDARIES:
-            assert boundary.owner_modules, f"{boundary.name} names no owner"
-            assert boundary.decision and boundary.enforcement and boundary.negative_contract
-
 
 class TestIntentionalViolationTraps:
     """The negative tests the issue demands: a legacy call introduced → FAIL.
@@ -1643,7 +1541,7 @@ class TestIntentionalViolationTraps:
         assert not any(":13" in text or "line 13" in text for text in violations)
 
     def test_a_mode_rederivation_is_caught(self) -> None:
-        home = _src_modules()[boundary_registry.MODE_VOCABULARY_HOME]
+        home = _src_modules()[boundary_policy.MODE_VOCABULARY_HOME]
         extra = ast.parse(
             "class _Trap:\n"
             "    def dispatch(self, run_id, decision):\n"
@@ -2123,8 +2021,8 @@ class TestIntentionalViolationTraps:
         vacuously over two silently-empty extractions."""
         assert not _check_command_outcome_parity(_src_modules())
         modules = _src_modules()
-        authority = modules[boundary_registry.COMMAND_OUTCOME_JOURNALING_MODULE]
-        projection = modules[boundary_registry.COMMAND_OUTCOME_PROJECTION_MODULE]
+        authority = modules[boundary_policy.COMMAND_OUTCOME_JOURNALING_MODULE]
+        projection = modules[boundary_policy.COMMAND_OUTCOME_PROJECTION_MODULE]
         refused = _assigned_name_strings(authority, "_FEEDBACK_REFUSED_STATUSES", modules)
         assert refused == {
             "refused_unauthorized",
@@ -2330,7 +2228,7 @@ class TestProviderConformance:
                             f"{service}:{keyword.lineno} passes a resume mode — "
                             "the lane-resume dispatch contract is not wired on Azure"
                         )
-        gap = boundary_registry.boundary_by_name("continuation_authorization").honest_gaps
+        gap = boundary_policy.CONTINUATION_PROVIDER_GAPS
         assert "Azure remains the honest gap" in gap
 
 

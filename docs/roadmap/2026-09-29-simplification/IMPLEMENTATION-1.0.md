@@ -20,7 +20,9 @@ new 1.0.0 architecture, not only a plan or a renamed 0.42 release.
 Use ROADMAP task boundaries and internal dependencies. GitHub publication,
 required hosted checks, maintenance-branch publication and recovery-tag
 creation do not block local work under the owner's explicit override.
-All local precommit gates remain required. Do not weaken or skip evidence.
+The owner's later instruction stops repeated full runs at each step:
+use focused checks while implementing, then verify the assembled version.
+Keep the existing gates and tests intact; record actual verification.
 
 ## Current work
 
@@ -32,7 +34,7 @@ Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
 | P1-02 saga removal | Module deletion and retained behavior-test ports in isolated worker branches |
 | P1-03 test-only modules | Waits for completed P1-02 |
 | P1-04 reference twins | Waits for P1-03 and P1-07 under the adopted plan |
-| P1-05 boundary registry | Actual registry-retirement patch and preserved focused architecture tests in a worker branch |
+| P1-05 boundary registry | Implemented; 901 source lines removed, 15 contracts added, 48 architecture checks retained; 186 focused passes |
 | P1-06 closure matrix | Waits for completed P1-03 |
 | P1-08 release and CI flow | Build-once artifact verification and workflow rewrite in an isolated worker branch |
 | P1-10 lane-only implementation | Removing the builtin backend and adding admission refusal before paid work |

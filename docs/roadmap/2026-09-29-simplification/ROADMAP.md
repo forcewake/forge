@@ -361,6 +361,10 @@ run last so that they do not churn code about to be deleted.
 - **Size:** S
 
 ### P1-05 Replace the boundary registry with import contracts
+- **Status:** implemented locally on 2026-10-23. Fifteen authority/import
+  contracts replace the registry; all 48 surviving architecture checks
+  remain. Focused integration: 186 passed. Full repeated verification
+  deferred to the assembled version under the owner's later instruction.
 - **Goal:** one boundary mechanism.
 - **Work:**
   - Translate the enforceable rules of `adaptive/boundary_registry.py`

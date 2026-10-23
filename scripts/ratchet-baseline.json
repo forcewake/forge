@@ -1,7 +1,6 @@
 {
  "files": {
   "src/forge/adaptive/admission.py": 1647,
-  "src/forge/adaptive/boundary_registry.py": 901,
   "src/forge/adaptive/checkpoint_channel.py": 685,
   "src/forge/adaptive/checkpoint_migration.py": 1860,
   "src/forge/adaptive/checkpoint_repository.py": 2588,

@@ -227,6 +227,11 @@ task dependencies still apply. This authorization does not request remote
 pushes, merges, tags or settings changes. Current implementation progress:
 [IMPLEMENTATION-1.0.md](docs/roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md).
 
+Later the same day, the owner directed implementation to proceed without
+repeating full test runs at each step. Use focused checks during changes
+and verify the assembled version at the end. Preserve the existing tests
+and gate definitions; report the verification actually performed.
+
 The shipped factory and its history live in the [CHANGELOG](CHANGELOG.md)
 and [docs/README.md](docs/README.md). The current work is the simplification
 program ([ADR-0035](docs/adr/0035-simplification-program.md)):

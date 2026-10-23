@@ -79,8 +79,8 @@ compatibility rule working as designed). The two members are pinned in
 the DOCUMENT (and its digest), not in the rendered template-variable
 set: the templates consume the same small pinned set as before.
 
-Registered ownership: ``execution_delivery_spec`` in
-:mod:`forge.adaptive.boundary_registry` (the registry's seventh entry).
+Import ownership is enforced by the execution-delivery contract
+in ``pyproject.toml``.
 """
 
 from __future__ import annotations

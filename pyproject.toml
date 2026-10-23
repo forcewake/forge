@@ -131,3 +131,122 @@ source_modules = ["forge.harnesses"]
 # The whole package: forge/runs/__init__.py loads RunService, which imports
 # forge.harnesses, so any runs import from here would create a cycle.
 forbidden_modules = ["forge.runs"]
+
+[[tool.importlinter.contracts]]
+id = "authority-repository_identity_checkpoint_lifecycle"
+name = "repository_identity_checkpoint_lifecycle: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.checkpoint_repository", "forge.api_checkpoint_channel"]
+allowed_importers = ["forge.adaptive.checkpoint_migration", "forge.adaptive.checkpoint_repository", "forge.adaptive.compat_fixtures", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-continuation_authorization"
+name = "continuation_authorization: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.continuation"]
+allowed_importers = ["forge.adaptive.compat_fixtures", "forge.adaptive.continuation", "forge.runs.github_service", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-native_occupancy"
+name = "native_occupancy: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.admission", "forge.runs.admission"]
+allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.adaptive.ops_drills", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-candidate_publication"
+name = "candidate_publication: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.publication_saga", "forge.adaptive.saga_durable"]
+allowed_importers = ["forge.adaptive.publication_saga", "forge.adaptive.reference.native_shaped_remote", "forge.adaptive.saga_durable", "forge.adaptive.saga_native", "forge.adaptive.two_writer_qualification"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-verification_applicability"
+name = "verification_applicability: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
+allowed_importers = ["forge.adaptive.independent_checks", "forge.adaptive.reference.system_twin", "forge.adaptive.system_verification", "forge.adaptive.two_writer_qualification", "forge.adaptive.verification_binding", "forge.adaptive.verification_executor", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.azure_service", "forge.runs.github_service", "forge.runs.usecases"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-operator_projection"
+name = "operator_projection: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.operator_view", "forge.adaptive.operator_snapshot"]
+allowed_importers = ["forge.adaptive.credential_broker", "forge.adaptive.credential_preflight", "forge.adaptive.operator_snapshot", "forge.adaptive.operator_view", "forge.adaptive.ops_limits", "forge.adaptive.project_credentials", "forge.adaptive.support_bundle", "forge.api_operator", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-execution_delivery_spec"
+name = "execution_delivery_spec: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.adaptive.execution_spec"]
+allowed_importers = ["forge.adaptive.execution_spec"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-budget_amendment_application"
+name = "budget_amendment_application: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.durable.budgets"]
+allowed_importers = ["forge.adaptive.closing_budget", "forge.durable", "forge.durable.budgets", "forge.factory.llm", "forge.runs.revival", "forge.runs.round_admission", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-feedback_admission"
+name = "feedback_admission: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.gateway.feedback"]
+allowed_importers = ["forge.doctor", "forge.gateway.feedback", "forge.gateway.router", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-command_acceptance_dedup"
+name = "command_acceptance_dedup: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.gateway.durable_ingress"]
+allowed_importers = ["forge.gateway.azure_webhook", "forge.gateway.durable_ingress", "forge.gateway.github_webhook", "forge.gateway.router"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-review_round_admission"
+name = "review_round_admission: registered direct importers only"
+type = "protected"
+protected_modules = ["forge.runs.round_admission"]
+allowed_importers = ["forge.runs.round_admission", "forge.runs.service"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "usecases-provider-neutral"
+name = "usecases have no direct provider or gateway imports"
+type = "forbidden"
+source_modules = ["forge.runs.usecases"]
+forbidden_modules = ["forge.integrations", "forge.gateway"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "reference-importers"
+name = "reference package has only registered compatibility importers"
+type = "protected"
+protected_modules = ["forge.adaptive.reference"]
+allowed_importers = ["forge.adaptive.system_verification", "forge.adaptive.saga_durable", "forge.adaptive.steering_causality"]
+
+[[tool.importlinter.contracts]]
+id = "reference-direction"
+name = "reference package does not import production entry points"
+type = "forbidden"
+source_modules = ["forge.adaptive.reference"]
+forbidden_modules = ["forge.main", "forge.lane_driver", "forge.adaptive.wiring", "forge.runs.service", "forge.runs.github_service", "forge.runs.azure_service"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "fixture-isolation"
+name = "production modules do not import qualification fixtures"
+type = "protected"
+protected_modules = ["forge.adaptive.compat_fixtures"]
+allowed_importers = []
+as_packages = false
