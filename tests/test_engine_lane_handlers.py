@@ -60,6 +60,8 @@ async def case(env, settings, tmp_path):
         keys,
         env.clock,
         transport=httpx.MockTransport(native),
+        strict_policy=native.policy,
+        strict_artifact_digest=native.artifact,
     )
     effects = Effects(
         EffectStore(env.factory),

@@ -85,7 +85,7 @@ tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,bou
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
 tests/test_budget_amendment.py,25,853,true,false,,invariant evidence,,budget,keep,-,
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
-tests/test_budget_engine.py,22,637,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
+tests/test_budget_engine.py,22,689,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
 tests/test_candidate.py,49,678,true,false,,edge-case pin,,candidate,keep,-,
@@ -142,7 +142,7 @@ tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_approval.py,8,585,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
 tests/test_engine_lane.py,14,551,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
-tests/test_engine_lane_handlers.py,15,513,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
+tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_runner.py,17,426,false,true,,invariant evidence; edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
 tests/test_engine_store.py,14,430,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,
@@ -212,6 +212,7 @@ tests/test_main.py,1,21,true,false,,edge-case pin,,main,keep,-,
 tests/test_mcp_runs_tools.py,7,101,true,false,,edge-case pin,,mcp,keep,-,
 tests/test_mcp_server.py,7,89,true,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
+tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
 tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,

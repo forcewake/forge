@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import forge.store.models  # noqa: F401
 from forge.budget.credentials import CredentialUnavailable, CredentialVault, KeyScope
 from forge.budget.gateway import LiteLLMGateway
+from forge.budget.strict import ALLOWED_ROUTES, GUARD_DIGEST, TrustedPolicy
 from forge.budget.model_client import BudgetedModelClient
 from forge.budget.service import BudgetService, alias_for
 from forge.budget.settlement import Settlement
@@ -41,11 +42,59 @@ class NativeAdmin:
     def __init__(self, clock):
         self.clock, self.keys, self.writes = clock, {}, []
         self.drop_mint, self.unavailable, self.tamper = False, False, None
+        self.unavailable_write = False
+        self.policy = json.dumps(
+            {
+                "schema": "forge.strict-budget/1",
+                "litellm_version": "1.106.2",
+                "models": {
+                    "test-model": {
+                        "native_model": "anthropic/approved",
+                        "input_rate": "0.000002",
+                        "output_rate": "0.000005",
+                        "max_input_tokens": 200000,
+                        "max_output_tokens": 64000,
+                    }
+                },
+            }
+        ).encode()
+        self.artifact = "a" * 64
 
     def __call__(self, request):
-        if self.unavailable:
+        if self.unavailable or (self.unavailable_write and request.method == "POST"):
             raise httpx.ConnectError("synthetic unreachable", request=request)
         path = request.url.path
+        if path == "/forge/budget/readiness":
+            return httpx.Response(
+                200,
+                json={
+                    "schema": "forge.strict-budget-readiness/1",
+                    "nonce": request.url.params["nonce"],
+                    "guard_digest": GUARD_DIGEST,
+                    "policy_digest": TrustedPolicy.parse(self.policy).digest,
+                    "artifact_digest": self.artifact,
+                    "litellm_version": "1.106.2",
+                    "models": ["test-model"],
+                    "routes": list(ALLOWED_ROUTES),
+                    "durable_unknown_holds": True,
+                },
+            )
+        if path == "/forge/budget/usage":
+            row = self.keys[request.url.params["token"]]
+            assert row["blocked"] is True
+            return httpx.Response(
+                200,
+                json={
+                    "schema": "forge.strict-budget-usage/1",
+                    "token_digest": row["token"],
+                    "policy_digest": TrustedPolicy.parse(self.policy).digest,
+                    "settled_usd": str(row["spend"]),
+                    "held_usd": "0",
+                    "complete": True,
+                    "calls": None,
+                    "tokens": None,
+                },
+            )
         if path == "/key/list":
             assert request.url.params["return_full_object"] == "true"
             assert request.url.params["size"] == "2"
@@ -57,7 +106,7 @@ class NativeAdmin:
         data = json.loads(request.content)
         self.writes.append(path)
         if path == "/key/generate":
-            assert data["key_type"] == "llm_api" and data["budget_duration"] is None
+            assert data["key_type"] == "default" and data["budget_duration"] is None
             token = hashlib.sha256(data["key"].encode()).hexdigest()
             assert token not in self.keys
             self.keys[token] = {
@@ -69,7 +118,7 @@ class NativeAdmin:
                 "token": token,
                 "blocked": False,
                 "spend": 0,
-                "allowed_routes": ["llm_api_routes"],
+                "allowed_routes": list(ALLOWED_ROUTES),
                 "expires": (
                     self.clock.now() + timedelta(seconds=int(data["duration"][:-1]))
                 ).isoformat(),
@@ -113,6 +162,8 @@ async def case(tmp_path):
         keys,
         clock,
         transport=httpx.MockTransport(native),
+        strict_policy=native.policy,
+        strict_artifact_digest=native.artifact,
     )
     unused = ScriptedPorts(())
     effects = Effects(EffectStore(factory), unused, unused, unused, unused, unused, gateway, clock)
@@ -224,7 +275,7 @@ async def test_scope_drift_never_activates_or_delivers_key(case, tamper):
 
 
 async def test_unreachable_gateway_keeps_hold_without_remint(case):
-    case["native"].unavailable = True
+    case["native"].unavailable_write = True
     assert isinstance(await prepare(case), Unknown)
     assert isinstance(await prepare(case), Unknown)
     pool = await case["store"].load(case["run"].id, "implementation")
@@ -428,6 +479,7 @@ def test_vault_binds_every_identity_purpose_model_alias_expiry_and_authenticates
 
 
 async def test_real_adapter_refuses_strict_budget_before_any_pool_key_or_model_request(case):
+    case["gateway"].artifact_digest = None
     case["service"].admission = case["gateway"]
     result = await prepare(case)
     assert result.kind == "refused" and result.reason == "strict_budget_enforcement_unavailable"

@@ -1,0 +1,1 @@
+{"litellm_version":"1.106.2","models":{"claude-haiku-4-5":{"input_rate":"0.000002","max_input_tokens":200000,"max_output_tokens":64000,"native_model":"anthropic/claude-haiku-4-5-20251001","output_rate":"0.000005"}},"schema":"forge.strict-budget/1"}

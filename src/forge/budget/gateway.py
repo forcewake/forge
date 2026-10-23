@@ -1,11 +1,12 @@
 """Pinned LiteLLM admin contract; all gateway writes are called through Effects."""
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 import math
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 from pydantic import SecretStr
@@ -13,6 +14,7 @@ from pydantic import SecretStr
 from forge_protocol import RunIdentity
 
 from forge.budget.credentials import CredentialUnavailable
+from forge.budget.strict import ALLOWED_ROUTES, TrustedPolicy
 from forge.domain.budget import Observation, Resources
 from forge.domain.verdicts import Unknown
 from forge.port_values import (
@@ -28,7 +30,6 @@ from forge.port_values import (
 from forge.ports import Clock
 from forge.store.gateway_keys import GatewayKeyStore, KeyRecord
 
-LITELLM_VERSION = "1.106.2"
 MAX_RESPONSE_BYTES = 1048576
 
 
@@ -61,6 +62,8 @@ class LiteLLMGateway:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 10,
+        strict_policy: bytes | None = None,
+        strict_artifact_digest: str | None = None,
     ) -> None:
         url = urlsplit(base_url)
         if url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
@@ -72,6 +75,8 @@ class LiteLLMGateway:
         if not 0 < timeout <= 60:
             raise ValueError("gateway timeout must be bounded")
         self.keys, self.clock, self.timeout = keys, clock, timeout
+        self.policy = TrustedPolicy.parse(strict_policy) if strict_policy is not None else None
+        self.artifact_digest = strict_artifact_digest
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {admin_key.get_secret_value()}"},
@@ -81,12 +86,20 @@ class LiteLLMGateway:
             trust_env=False,
         )
 
-    async def readiness(self, model: str) -> Refused:
-        # Native reservations may disappear for an unpriced route. Until the
-        # fail-closed guard and deployed configuration are proven, issue no key.
+    async def readiness(self, model: str) -> Refused | None:
+        nonce = uuid4().hex
+        if self.policy is not None:
+            try:
+                status, body = await self._request(
+                    "GET", "/forge/budget/readiness", params={"nonce": nonce}
+                )
+                if status == 200 and self.policy.accepts(body, nonce, model, self.artifact_digest):
+                    return None
+            except GatewayUnavailable:
+                pass
         return Refused(
             reason="strict_budget_enforcement_unavailable",
-            evidence=_evidence("prospective_reservation_not_proven"),
+            evidence=_evidence("trusted_guard_or_pricing_not_verified"),
         )
 
     async def aclose(self) -> None:
@@ -129,14 +142,14 @@ class LiteLLMGateway:
             raise GatewayUnavailable("gateway alias resolves to different material")
         return row
 
-    @staticmethod
-    def _metadata(record: KeyRecord, allowance: Resources) -> dict[str, Any]:
+    def _metadata(self, record: KeyRecord, allowance: Resources) -> dict[str, Any]:
         return {
             "forge": {
                 **record.scope.identity.model_dump(mode="json"),
                 "purpose": record.scope.purpose,
                 "aad_digest": record.scope.aad_digest,
                 "allowance": allowance.model_dump(mode="json"),
+                "strict_policy_digest": self.policy.digest if self.policy else None,
             }
         }
 
@@ -157,7 +170,7 @@ class LiteLLMGateway:
             or row.get("models") != [record.scope.model]
             or Decimal(cap) != Decimal(str(_usd(allowance.usd)))
             or row.get("metadata") != self._metadata(record, allowance)
-            or row.get("allowed_routes") != ["llm_api_routes"]
+            or row.get("allowed_routes") != list(ALLOWED_ROUTES)
             or row.get("max_parallel_requests") != 1
             or row.get("config") not in (None, {})
             or row.get("aliases") not in (None, {})
@@ -241,6 +254,9 @@ class LiteLLMGateway:
         allowance: Resources,
         expires_at: datetime,
     ) -> GatewayOutcome:
+        readiness = await self.readiness(model)
+        if readiness is not None:
+            return readiness
         record = await self.keys.get(alias)
         if record is None or (
             record.scope.identity,
@@ -272,7 +288,8 @@ class LiteLLMGateway:
                 "models": [model],
                 "metadata": self._metadata(record, allowance),
                 "budget_duration": None,
-                "key_type": "llm_api",
+                "key_type": "default",
+                "allowed_routes": list(ALLOWED_ROUTES),
                 "max_parallel_requests": 1,
             },
             alias,
@@ -320,8 +337,29 @@ class LiteLLMGateway:
         if row is None:
             raise GatewayUnavailable("gateway key disappeared")
         self._verified(record, row, record.reference.allowance)
-        spend = row.get("spend")
-        if isinstance(spend, bool) or not isinstance(spend, (int, Decimal)):
-            raise GatewayUnavailable("gateway spend is unknown")
-        # Native key info reports USD only; missing count axes never become zero.
-        return Observation(usd=Decimal(spend), calls=None, tokens=None)
+        if self.policy is None or row.get("blocked") is not True:
+            raise GatewayUnavailable("strict native block is required before settlement")
+        status, usage = await self._request(
+            "GET", "/forge/budget/usage", params={"token": record.token_digest}
+        )
+        if (
+            status != 200
+            or not isinstance(usage, dict)
+            or usage.get("schema") != "forge.strict-budget-usage/1"
+            or usage.get("token_digest") != record.token_digest
+            or usage.get("policy_digest") != self.policy.digest
+        ):
+            raise GatewayUnavailable("durable gateway usage is unavailable")
+        settled, held = Decimal(usage["settled_usd"]), Decimal(usage["held_usd"])
+        if min(settled, held) < 0 or not settled.is_finite() or not held.is_finite():
+            raise GatewayUnavailable("durable gateway money is invalid")
+        with localcontext() as context:
+            context.prec = 80
+            total = settled + held
+        if usage.get("complete") is True and held != 0:
+            raise GatewayUnavailable("complete usage still has an unresolved hold")
+        return Observation(
+            usd=total,
+            calls=usage.get("calls") if usage.get("complete") is True else None,
+            tokens=usage.get("tokens") if usage.get("complete") is True else None,
+        )

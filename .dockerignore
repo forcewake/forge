@@ -10,10 +10,17 @@ data/
 .github
 docs/
 tests/
+!tests
+tests/*
+!tests/fixtures
+tests/fixtures/*
+!tests/fixtures/litellm
+!tests/fixtures/litellm/**
 **/__pycache__
 **/*.py[cod]
 .mypy_cache
 .ruff_cache
 .pytest_cache
+.forge/
 .DS_Store
 *.db

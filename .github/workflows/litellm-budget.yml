@@ -9,6 +9,7 @@ on:
       - "src/forge/store/gateway_keys.py"
       - "tests/fixtures/litellm/**"
       - "tools/verify_litellm_budget.py"
+      - "tools/litellm/**"
       - ".github/workflows/litellm-budget.yml"
       - "docker-compose.yml"
 
@@ -26,19 +27,38 @@ jobs:
       - name: Pull pinned provider-free fixtures
         run: |
           docker pull postgres:16-alpine
-          docker pull ghcr.io/berriai/litellm:v1.106.2
+          docker pull ghcr.io/berriai/litellm:v1.106.2@sha256:7294b90f868c5c38c99b83021c7ba46f9b439e95f8e32964c925c7d2563a03f7
+          docker pull python:3.13-alpine
+      - name: Build callback, policy and native configuration as one artifact
+        run: |
+          uv run python tools/litellm/build_manifest.py --policy tests/fixtures/litellm/forge-budget-policy.json --config tests/fixtures/litellm/budget-proxy.yaml --output /tmp/forge-native-artifact.json
+          docker build -f tools/litellm/Dockerfile --build-arg FORGE_GATEWAY_POLICY=tests/fixtures/litellm/forge-budget-policy.json --build-arg FORGE_GATEWAY_CONFIG=tests/fixtures/litellm/budget-proxy.yaml -t forge-native-budget-proof .
       - name: Start isolated native gateway
         run: |
           docker network create --internal forge-budget
           docker run -d --name forge-budget-db --network forge-budget -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=synthetic -e POSTGRES_DB=litellm postgres:16-alpine
-          docker run -d --name forge-budget-gateway --network forge-budget -p 127.0.0.1:4000:4000 -e LITELLM_MASTER_KEY=sk-synthetic-ci-admin-key -e DATABASE_URL=postgresql://litellm:synthetic@forge-budget-db:5432/litellm -e LITELLM_LOCAL_MODEL_COST_MAP=true -v "$PWD/tests/fixtures/litellm/budget-proxy.yaml:/app/config.yaml:ro" ghcr.io/berriai/litellm:v1.106.2 --config /app/config.yaml --port 4000
+          docker run -d --name forge-budget-upstream --network forge-budget -p 127.0.0.1:41882:41882 -v "$PWD/tests/fixtures/litellm/upstream.py:/stub.py:ro" python:3.13-alpine python -I /stub.py
+          docker run -d --name forge-budget-gateway --network forge-budget -p 127.0.0.1:4000:4000 -e LITELLM_MASTER_KEY=sk-synthetic-ci-admin-key -e ANTHROPIC_API_KEY=synthetic-no-provider-credential -e DATABASE_URL=postgresql://litellm:synthetic@forge-budget-db:5432/litellm forge-native-budget-proof
       - name: Verify native limits without provider access
         env:
           FORGE_LITELLM_TEST_URL: http://127.0.0.1:4000
+          FORGE_LITELLM_TEST_UPSTREAM: http://127.0.0.1:41882
           FORGE_LITELLM_TEST_MASTER_KEY: sk-synthetic-ci-admin-key
+          FORGE_LITELLM_RESTART_PROOF: /tmp/forge-native-unknown-token
+          FORGE_LITELLM_TEST_ARTIFACT: /tmp/forge-native-artifact.json
         run: uv run python tools/verify_litellm_budget.py
+      - name: Verify durable unknown liability after native process restart
+        env:
+          FORGE_LITELLM_TEST_URL: http://127.0.0.1:4000
+          FORGE_LITELLM_TEST_UPSTREAM: http://127.0.0.1:41882
+          FORGE_LITELLM_TEST_MASTER_KEY: sk-synthetic-ci-admin-key
+          FORGE_LITELLM_CHECK_RESTART: /tmp/forge-native-unknown-token
+          FORGE_LITELLM_TEST_ARTIFACT: /tmp/forge-native-artifact.json
+        run: |
+          docker restart forge-budget-gateway
+          uv run python tools/verify_litellm_budget.py
       - name: Remove isolated fixture
         if: always()
         run: |
-          docker rm -f forge-budget-gateway forge-budget-db || true
+          docker rm -f forge-budget-gateway forge-budget-upstream forge-budget-db || true
           docker network rm forge-budget || true

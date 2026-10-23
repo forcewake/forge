@@ -39,12 +39,12 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:v1.106.2
+    image: forge-litellm:1.106.2-strict-v1
+    build:
+      context: .
+      dockerfile: tools/litellm/Dockerfile
     ports:
       - "4000:4000"
-    volumes:
-      - ./litellm-config.example.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml"]
     env_file:
       - .env
     environment:
