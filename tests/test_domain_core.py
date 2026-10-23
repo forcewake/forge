@@ -211,3 +211,16 @@ def test_small_provider_costs_and_large_caps_settle_without_loss():
         assert pool.balance.available.usd == Decimal("12345678901234567890.123456789011111111")
         assert pool.balance.available.calls == 1 and pool.balance.available.tokens == 96
         assert pool.observe("a", known, final=True) is pool
+
+
+def test_count_axes_refuse_storage_overflow_instead_of_truncating():
+    from pydantic import ValidationError
+
+    largest = (1 << 63) - 1
+    for axis in ("calls", "tokens"):
+        bound = Resources(**{axis: largest})
+        assert getattr(bound, axis) == largest
+        with pytest.raises(ValidationError):
+            Resources(**{axis: largest + 1})
+        with pytest.raises(ValidationError):
+            bound + Resources(**{axis: 1})

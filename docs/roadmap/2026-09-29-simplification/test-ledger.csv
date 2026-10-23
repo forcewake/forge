@@ -130,7 +130,7 @@ tests/test_doctor_settings.py,4,48,true,false,,,,doctor,keep,-,
 tests/test_domain_approved_input.py,7,285,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_boundary.py,2,84,false,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_candidate.py,10,282,true,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
-tests/test_domain_core.py,11,213,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
+tests/test_domain_core.py,12,226,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_durable_controller.py,28,423,true,false,,,,durable,keep,-,
 tests/test_durable_gates.py,9,148,true,false,,invariant evidence,,durable,keep,-,
 tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,

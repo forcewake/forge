@@ -48,7 +48,7 @@ def _money_arithmetic(left: Decimal, right: Decimal, *, subtract: bool = False) 
 
 
 Money = Annotated[Decimal, Field(ge=0, allow_inf_nan=False), AfterValidator(_bounded_money)]
-Count = Annotated[int, Field(ge=0)]
+Count = Annotated[int, Field(ge=0, le=(1 << 63) - 1)]
 Positive = Annotated[int, Field(gt=0)]
 Identity = Annotated[str, Field(min_length=1)]
 

@@ -368,6 +368,8 @@ When a pin breaks:
 | EC-741 | Recovery flattens a conflict or failed read into absence or success | A found probe retains its complete typed outcome; definitely absent and inconclusive remain distinct, and failed reads raise an explicit exception | `src/forge/port_values.py` | `tests/test_ports.py::test_recovery_preserves_complete_outcome_and_uncertainty` |
 | EC-742 | A fake silently manufactures success or a write loses validated file modes | Require ordered scripted responses; commit receives the immutable validated manifest and gateway outcomes contain only nonsecret references | `tests/fakes/ports.py`, `src/forge/ports.py` | `tests/test_ports.py::test_every_protocol_has_a_deterministic_fake` |
 
+| EC-715 | An authorized call/token count overflows its durable 64-bit representation | Refuse values and arithmetic outside signed 64-bit counts before persistence; never truncate or wrap | `src/forge/domain/budget.py` | `tests/test_domain_core.py::test_count_axes_refuse_storage_overflow_instead_of_truncating` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |
