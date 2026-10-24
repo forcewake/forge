@@ -1,807 +1,405 @@
-"""GitHub client tests: JWT shape, token lifecycle, REST/GraphQL semantics.
+"""Retained GitHub lessons through native scoped HTTP and leased Git publication.
 
-Everything runs against pytest-httpx — no live GitHub. Endpoint/field ground
-truth: docs/research/2026-09-13-github-api.md.
+Historical names identify ledger evidence. GraphQL commits, heuristic branch
+fallbacks, provider artifact downloads and blind dispatch acceptance are retired;
+their authority, loss and confinement lessons pin the sole native contracts.
 """
 
-import base64
+from datetime import timedelta
 import json
-import time
-from datetime import datetime, timezone
-from functools import lru_cache
 
 import httpx
-import jwt as pyjwt
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from pytest_httpx import HTTPXMock
 
-from forge.integrations.github import (
-    GitHubAPIError,
-    GitHubAppCredentials,
-    GitHubClient,
-    GitHubRateLimited,
-    GitHubRepositoryReader,
-    GitHubStaleBranchError,
-)
-from tests.fixtures.fake_github import sample_installation_token
+from forge.domain.verdicts import Committed, Conflict, Unknown
+from forge.port_values import Applied, Found, Inconclusive, ReadUnavailable
+from forge.providers.github.transport import Transport, TransportFailure
+from tests import test_github_reads as reads
+from tests import test_github_rest as rest
+from tests import test_native_git_publication as git_proof
+from tests import native_clients_fixture as fixture
+from tests import test_github_native_commit as native_fixture
+from tests.native_clients_fixture import blob, jobs, resource_calls
 
-BASE = "https://api.github.test"
-MINT_URL = f"{BASE}/app/installations/777/access_tokens"
-TEST_HEAD = "a" * 40
+app_key, github = fixture.app_key, fixture.github
+connected, native = native_fixture.connected, native_fixture.native
 
 
-@lru_cache(maxsize=1)
-def _keypair() -> tuple[str, str]:
-    """One 2048-bit RSA keypair per test session (JWT signing only)."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    private_pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode("ascii")
-    public_pem = (
-        key.public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("ascii")
-    )
-    return private_pem, public_pem
+async def test_client_connection_hygiene_is_pinned(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.invalid:123")
+    seen = []
+
+    def wire(request):
+        seen.append(request)
+        return httpx.Response(302, headers={"location": "https://attacker.invalid/steal"})
+
+    transport = Transport(transport=httpx.MockTransport(wire))
+    try:
+        with pytest.raises(TransportFailure) as failure:
+            await transport.request("GET", "/bounded", "synthetic-private")
+        assert failure.value.status == 302 and len(seen) == 1
+        assert seen[0].url.host == "api.github.com"
+        assert seen[0].headers["authorization"] == "Bearer synthetic-private"
+        assert transport._http.timeout.connect == 30
+    finally:
+        await transport.close()
 
 
-def make_credentials(base_url: str = BASE) -> GitHubAppCredentials:
-    private_pem, _ = _keypair()
-    return GitHubAppCredentials(
-        app_id="123456",
-        private_key=private_pem,
-        installation_id="777",
-        base_url=base_url,
-    )
+async def test_app_jwt_is_rs256_with_required_claims(github, app_key):
+    await github.auth.token(github.repo)
+    key = serialization.load_pem_private_key(app_key.encode(), password=None)
+    token = github.wire.mints[0].headers["authorization"].removeprefix("Bearer ")
+    assert jwt.get_unverified_header(token)["alg"] == "RS256"
+    claims = jwt.decode(token, key.public_key(), algorithms=["RS256"])
+    assert claims == {
+        "iss": "app-9",
+        "iat": int(github.clock.now().timestamp()) - 60,
+        "exp": int(github.clock.now().timestamp()) + 540,
+    }
 
 
-def mint_requests(httpx_mock: HTTPXMock) -> list:
-    return [r for r in httpx_mock.get_requests() if str(r.url) == MINT_URL]
-
-
-@pytest.fixture()
-async def github(httpx_mock: HTTPXMock):
-    """A GitHubClient whose single token mint is pre-registered."""
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_test"))
-    client = GitHubClient(base_url=BASE, token_provider=make_credentials())
-    yield client
-    await client.aclose()
-
-
-@pytest.fixture()
-async def reader(github: GitHubClient) -> GitHubRepositoryReader:
-    return GitHubRepositoryReader(github, "acme", "widget")
-
-
-# ---------------------------------------------------------------------------
-# JWT shape (research §1.1) — no live call
-# ---------------------------------------------------------------------------
-
-
-async def test_client_connection_hygiene_is_pinned():
-    """Flaky host networks must not wedge the worker's long-lived pool
-    (LIVE-found: dead keepalive sockets failed with ConnectTimeout for
-    hours until a worker restart). Short keepalive expiry + connect-phase
-    retries; an injected transport (pytest-httpx) always wins."""
-    private_pem, _ = _keypair()
-    creds = GitHubAppCredentials(
-        app_id="1", private_key=private_pem, installation_id="2", base_url=BASE
-    )
-    assert creds._client._transport._pool._keepalive_expiry == 30.0
-    assert isinstance(creds._client._transport, httpx.AsyncHTTPTransport)
-    assert creds._client._transport._pool._retries == 2
-    assert creds._client._transport._pool._max_keepalive_connections == 10
-
-    client = GitHubClient(
-        base_url=BASE,
-        token_provider=creds,
-        transport=httpx.AsyncHTTPTransport(retries=5),
-    )
-    assert client._client._transport._pool._retries == 5  # injection respected
-    await client.aclose()
-    await creds.aclose()
-
-
-async def test_app_jwt_is_rs256_with_required_claims():
-    private_pem, public_pem = _keypair()
-    creds = GitHubAppCredentials(
-        app_id="123456", private_key=private_pem, installation_id="777", base_url=BASE
-    )
-    before = datetime.now(timezone.utc)
-    token = creds.app_jwt()
-
-    assert pyjwt.get_unverified_header(token)["alg"] == "RS256"
-    claims = pyjwt.decode(token, public_pem, algorithms=["RS256"])
-    assert claims["iss"] == "123456"
-    assert abs(claims["iat"] - (before.timestamp() - 60)) < 5  # clock-skew margin
-    assert claims["exp"] == claims["iat"] + 600  # 9 min ahead; 10 min is the cap
-
-
-async def test_mint_sends_bearer_jwt_with_github_headers(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token())
-    _, public_pem = _keypair()
-
-    await make_credentials().installation_token()
-
-    request = mint_requests(httpx_mock)[0]
+async def test_mint_sends_bearer_jwt_with_github_headers(github):
+    await github.auth.token(github.repo)
+    request = github.wire.mints[0]
     assert request.headers["x-github-api-version"] == "2022-11-28"
     assert request.headers["accept"] == "application/vnd.github+json"
-    auth = request.headers["authorization"]
-    assert auth.startswith("Bearer ")  # JWTs never use the `token` prefix
-    claims = pyjwt.decode(auth.removeprefix("Bearer "), public_pem, algorithms=["RS256"])
-    assert claims["iss"] == "123456"
+    assert request.headers["authorization"].startswith("Bearer ")
+    body = json.loads(request.content)
+    assert body["repository_ids"] == [123]
+    assert set(body["permissions"].values()) == {"read"}
 
 
-# ---------------------------------------------------------------------------
-# Installation token lifecycle (research §1.2/§1.6)
-# ---------------------------------------------------------------------------
+async def test_installation_token_is_cached(github):
+    first = await github.auth.token(github.repo)
+    second = await github.auth.token(github.repo)
+    assert first is second and len(github.wire.mints) == 1
+    assert "synthetic-token" not in repr(first)
 
 
-async def test_installation_token_is_cached(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_one"))
-
-    creds = make_credentials()
-    first = await creds.installation_token()
-    second = await creds.installation_token()
-
-    assert first.token == second.token == "ghs_one"
-    assert len(mint_requests(httpx_mock)) == 1  # cache until near expiry
+async def test_token_near_expiry_is_re_minted(github):
+    first = await github.auth.token(github.repo)
+    github.clock.value += timedelta(seconds=3400)
+    second = await github.auth.token(github.repo)
+    assert first.value != second.value and len(github.wire.mints) == 2
 
 
-async def test_token_near_expiry_is_re_minted(httpx_mock: HTTPXMock):
-    # 200 s left — under the 5-minute safety margin, so a fresh mint is due.
-    httpx_mock.add_response(
-        url=MINT_URL, method="POST", json=sample_installation_token("ghs_old", 200)
+async def test_invalidate_forces_re_mint(github):
+    first = await github.auth.token(github.repo)
+    write = await github.auth.token(github.repo, write=True)
+    github.auth.invalidate(github.repo)
+    assert (await github.auth.token(github.repo)).value != first.value
+    assert await github.auth.token(github.repo, write=True) is write
+    assert len(github.wire.mints) == 3
+
+
+async def test_client_re_mints_once_on_401(github):
+    attempts = []
+
+    def response(request):
+        attempts.append(request)
+        return httpx.Response(
+            401 if len(attempts) == 1 else 200,
+            json={"total_count": 1, "repositories": [github.wire.metadata]},
+        )
+
+    github.wire.metadata_response = response
+    assert (await github.api.metadata(github.repo)).document["id"] == 123
+    assert len(attempts) == len(github.wire.mints) == 2
+    assert attempts[0].headers["authorization"] != attempts[1].headers["authorization"]
+    github.wire.metadata_response = httpx.Response(401)
+    with pytest.raises(TransportFailure):
+        await github.api.metadata(github.repo)
+    assert len(resource_calls(github, "/installation/repositories")) == 4
+
+
+async def test_rate_limit_surfaces_retry_after_without_retries(github):
+    github.wire.metadata_response = httpx.Response(
+        403, headers={"Retry-After": "123", "x-ratelimit-remaining": "0"}
     )
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_new"))
-
-    creds = make_credentials()
-    assert (await creds.installation_token()).token == "ghs_old"
-    assert (await creds.installation_token()).token == "ghs_new"
-    assert len(mint_requests(httpx_mock)) == 2
+    with pytest.raises(TransportFailure) as failure:
+        await github.api.metadata(github.repo)
+    assert failure.value.reason == "rate_limited" and failure.value.retry_after == 123
+    assert len(resource_calls(github, "/installation/repositories")) == 1
 
 
-async def test_invalidate_forces_re_mint(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_a"))
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_b"))
-
-    creds = make_credentials()
-    await creds.installation_token()
-    await creds.invalidate()
-    assert (await creds.installation_token()).token == "ghs_b"
-
-
-async def test_client_re_mints_once_on_401(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_a"))
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget", status_code=401, json={"message": "Bad credentials"}
+async def test_primary_limit_without_retry_after_uses_reset(github):
+    # Scheduler owns retry timing. An untrusted reset header cannot authorize a hot retry.
+    github.wire.metadata_response = httpx.Response(
+        403, headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "999999999999999999"}
     )
-    httpx_mock.add_response(url=MINT_URL, method="POST", json=sample_installation_token("ghs_b"))
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget",
-        json={"id": 70010, "name": "widget", "full_name": "acme/widget", "private": True},
+    with pytest.raises(TransportFailure) as failure:
+        await github.api.metadata(github.repo)
+    assert failure.value.reason == "rate_limited" and failure.value.retry_after is None
+    assert len(resource_calls(github, "/installation/repositories")) == 1
+
+
+async def test_get_issue_maps_onto_neutral_dto(github):
+    task = await github.subjects.get_task(github.subject)
+    assert task.subject == github.subject and task.title == "Implement safely"
+    assert task.description == "Keep the approved input." and task.labels == ("forge",)
+    assert len(task.version) == 64
+
+
+async def test_get_issue_comments_follows_link_pagination(github):
+    def page(request):
+        number = int(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[reads.comment(i, "other") for i in range(1, 101)]
+            if number == 1
+            else [reads.comment(101)],
+        )
+
+    github.wire.routes["issues/7/comments"] = page
+    result = await github.subjects.probe_comment(github.subject, reads.MARKER)
+    assert isinstance(result, Found) and result.value.value.native_id == "101"
+    assert [r.url.params["page"] for r in resource_calls(github, "/comments")] == ["1", "2"]
+
+
+async def test_create_issue_comment_is_never_retried(github):
+    github.wire.mutations["issues/7/comments"] = httpx.Response(500)
+    assert isinstance(
+        await github.writes.post_comment(github.subject, "hello", reads.MARKER), Unknown
+    )
+    assert len(resource_calls(github, "/comments", "POST")) == 1
+
+
+async def test_idempotent_gets_retry_on_5xx(github):
+    # Retained recovery lesson: a later explicit attempt can recover, never a hidden loop.
+    github.wire.routes["issues/7"] = httpx.Response(503)
+    with pytest.raises(ReadUnavailable):
+        await github.subjects.get_task(github.subject)
+    assert len(resource_calls(github, "/issues/7")) == 1
+    github.wire.routes["issues/7"] = reads.Wire().routes["issues/7"]
+    assert (await github.subjects.get_task(github.subject)).subject == github.subject
+    assert len(resource_calls(github, "/issues/7")) == 2
+
+
+async def test_validation_422_surfaces_errors_list(github):
+    github.wire.mutations["pulls"] = httpx.Response(
+        422, json={"errors": [{"field": "head", "message": "synthetic-sensitive-body"}]}
+    )
+    result = await github.writes.ensure_draft(github.repo, github.dispatch.ref, "Title", "body")
+    assert isinstance(result, Unknown) and "422" in result.evidence
+    assert "synthetic-sensitive-body" not in result.evidence
+    assert len(resource_calls(github, "/pulls", "POST")) == 1
+
+
+async def test_get_branch_head_from_refs_endpoint(github):
+    assert await github.repositories.head(github.repo, "main") == github.sha
+    assert len(resource_calls(github, "/git/ref/heads/main")) == 1
+
+
+async def test_get_branch_head_falls_back_to_commits_endpoint(github):
+    # Native refs are authoritative. A missing ref cannot be replaced by unrelated history.
+    github.wire.routes["git/ref/heads/main"] = httpx.Response(404)
+    assert await github.repositories.head(github.repo, "main") is None
+    assert not resource_calls(github, "/commits/main")
+    assert isinstance(
+        await github.repositories.probe_branch(github.repo, "main", github.sha), Inconclusive
     )
 
-    client = GitHubClient(base_url=BASE, token_provider=make_credentials())
-    try:
-        repo = await client.get_repository("acme", "widget")
-    finally:
-        await client.aclose()
 
-    assert repo["full_name"] == "acme/widget"
-    assert len(mint_requests(httpx_mock)) == 2  # exactly one re-mint
-    api_requests = [
-        r for r in httpx_mock.get_requests() if str(r.url) == f"{BASE}/repos/acme/widget"
-    ]
-    assert len(api_requests) == 2
-    assert api_requests[0].headers["authorization"] == "Bearer ghs_a"
-    assert api_requests[1].headers["authorization"] == "Bearer ghs_b"
-
-
-# ---------------------------------------------------------------------------
-# Rate limits (research §8.4) — surfaced, never hot-looped
-# ---------------------------------------------------------------------------
-
-
-async def test_rate_limit_surfaces_retry_after_without_retries(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget",
-        status_code=403,
-        headers={"Retry-After": "123", "x-ratelimit-remaining": "0"},
-        json={"message": "API rate limit exceeded"},
-    )
-
-    with pytest.raises(GitHubRateLimited) as exc_info:
-        await github.get_repository("acme", "widget")
-
-    assert exc_info.value.retry_after == 123  # Retry-After respected verbatim
+async def test_create_commit_on_branch_sends_cas_and_base64_contents(connected):
+    writer, _, wire, server, _, base, calls = connected
+    result = await writer.commit(reads.REPO, git_proof.candidate(base), base, "exact-cas")
+    assert isinstance(result, Committed) and result.sha == wire.head()
+    assert git_proof.git(server, "show", result.sha + ":src/file.txt", raw=True) == b"approved\n"
+    assert git_proof.git(server, "rev-parse", result.sha + "^").decode() == base
+    pushes = [call for call in calls if call[0] == "push"]
     assert (
-        len([r for r in httpx_mock.get_requests() if str(r.url) == f"{BASE}/repos/acme/widget"])
-        == 1
+        len(pushes) == 1 and f"--force-with-lease=refs/heads/{git_proof.BRANCH}:{base}" in pushes[0]
+    )
+    assert not any(
+        request.method != "GET" and "/access_tokens" not in request.url.path
+        for request in wire.calls
     )
 
 
-async def test_primary_limit_without_retry_after_uses_reset(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    reset_at = int(time.time()) + 1800
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget",
-        status_code=403,
-        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(reset_at)},
-        json={"message": "API rate limit exceeded"},
+async def test_stale_data_mismatch_surfaces_as_drift(connected):
+    writer, _, wire, server, seed, base, calls = connected
+    human = git_proof.human_commit(seed, server, base)
+    git_proof.git(server, "update-ref", "refs/heads/" + git_proof.BRANCH, human, base)
+    result = await writer.commit(reads.REPO, git_proof.candidate(base), base, "stale")
+    assert isinstance(result, Conflict) and result.actual_head == human
+    assert wire.head() == human and not calls
+
+
+async def test_graphql_non_stale_errors_surface_as_api_error(connected):
+    # GraphQL is retired; actual native receiver refusal is unknown, never committed.
+    writer, _, wire, server, _, base, calls = connected
+    hook = server / "hooks/pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o700)
+    result = await writer.commit(reads.REPO, git_proof.candidate(base), base, "refused")
+    assert isinstance(result, Unknown) and wire.head() == base
+    assert len([call for call in calls if call[0] == "push"]) == 1
+
+
+async def test_create_draft_pr_sends_draft_true(github):
+    github.wire.mutations["pulls"] = httpx.Response(201, json=rest.pr())
+    assert isinstance(
+        await github.writes.ensure_draft(github.repo, github.dispatch.ref, "Title", "body"), Applied
     )
-
-    with pytest.raises(GitHubRateLimited) as exc_info:
-        await github.get_repository("acme", "widget")
-
-    assert 1 <= exc_info.value.retry_after <= 1800
+    body = json.loads(resource_calls(github, "/pulls", "POST")[0].content)
+    assert body["draft"] is True and body["maintainer_can_modify"] is False
+    assert body["head"] == github.dispatch.ref and body["base"] == "main"
 
 
-# ---------------------------------------------------------------------------
-# REST semantics
-# ---------------------------------------------------------------------------
+async def test_get_pr_by_head_filters_owner_branch(github):
+    github.wire.routes["pulls"] = [rest.pr()]
+    assert await github.reviews.find_draft(github.repo, github.dispatch.ref) == github.review
+    request = resource_calls(github, "/pulls")[0]
+    assert request.url.params["head"] == "new:" + github.dispatch.ref
+    assert request.url.params["state"] == "all"
+    github.wire.routes["pulls"][0]["head"]["repo"]["id"] = 999
+    with pytest.raises(ReadUnavailable):
+        await github.reviews.find_draft(github.repo, github.dispatch.ref)
 
 
-async def test_get_issue_maps_onto_neutral_dto(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/issues/42",
-        json={
-            "id": 1010,
-            "number": 42,
-            "title": "Add password reset",
-            "body": "Users are locked out.",
-            "state": "open",
-            "html_url": "https://github.test/acme/widget/issues/42",
-            "labels": [{"name": "bug"}],
-            "user": {"id": 501, "login": "alice", "name": "Alice"},
-        },
-    )
-
-    issue = await github.get_issue("acme", "widget", 42)
-
-    assert issue.iid == 42
-    assert issue.title == "Add password reset"
-    assert issue.description == "Users are locked out."
-    assert issue.author is not None and issue.author.username == "alice"
+async def test_get_pr_by_head_returns_none_when_absent(github):
+    assert await github.reviews.find_draft(github.repo, "forge/missing") is None
+    assert isinstance(await github.reviews.probe_draft(github.repo, "forge/missing"), Inconclusive)
 
 
-async def test_get_issue_comments_follows_link_pagination(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/issues/42/comments?per_page=100",
-        json=[{"id": 1}, {"id": 2}],
-        headers={
-            "link": (
-                f'<{BASE}/repos/acme/widget/issues/42/comments?per_page=100&page=2>; rel="next"'
-            )
-        },
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/issues/42/comments?per_page=100&page=2",
-        json=[{"id": 3}],
-    )
-
-    comments = await github.get_issue_comments("acme", "widget", 42)
-
-    assert [c["id"] for c in comments] == [1, 2, 3]
-
-
-async def test_create_issue_comment_is_never_retried(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/issues/42/comments", method="POST", status_code=500
-    )
-
-    with pytest.raises(GitHubAPIError):
-        await github.create_issue_comment("acme", "widget", 42, "Working on it.")
-
-    # Non-idempotent: the API call fired exactly once — no retry, ever.
-    comment_calls = [r for r in httpx_mock.get_requests() if str(r.url).endswith("/comments")]
-    assert len(comment_calls) == 1
-
-
-async def test_idempotent_gets_retry_on_5xx(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(url=f"{BASE}/repos/acme/widget", status_code=503)
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget",
-        json={"id": 70010, "name": "widget", "full_name": "acme/widget"},
-    )
-
-    repo = await github.get_repository("acme", "widget")
-
-    assert repo["name"] == "widget"
-    assert len([r for r in httpx_mock.get_requests() if "repos" in str(r.url)]) == 2
-
-
-async def test_validation_422_surfaces_errors_list(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/pulls",
-        method="POST",
-        status_code=422,
-        json={
-            "message": "Validation Failed",
-            "errors": [{"resource": "PullRequest", "field": "head", "code": "invalid"}],
-        },
-    )
-
-    with pytest.raises(GitHubAPIError) as exc_info:
-        await github.create_draft_pr("acme", "widget", head="forge/42/abc", base="main", title="t")
-
-    assert exc_info.value.status_code == 422
-    assert exc_info.value.errors[0]["code"] == "invalid"
-
-
-# ---------------------------------------------------------------------------
-# Branch head + createCommitOnBranch (research §3)
-# ---------------------------------------------------------------------------
-
-
-async def test_get_branch_head_from_refs_endpoint(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/git/refs/heads/main",
-        json={"ref": "refs/heads/main", "object": {"sha": TEST_HEAD, "type": "commit"}},
-    )
-
-    assert await github.get_branch_head("acme", "widget", "main") == TEST_HEAD
-
-
-async def test_get_branch_head_falls_back_to_commits_endpoint(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    httpx_mock.add_response(url=f"{BASE}/repos/acme/widget/git/refs/heads/main", status_code=404)
-    httpx_mock.add_response(url=f"{BASE}/repos/acme/widget/commits/main", json={"sha": TEST_HEAD})
-
-    assert await github.get_branch_head("acme", "widget", "main") == TEST_HEAD
-
-
-async def test_create_commit_on_branch_sends_cas_and_base64_contents(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/graphql",
-        json={
-            "data": {
-                "createCommitOnBranch": {
-                    "clientMutationId": "op-123",
-                    "commit": {"oid": "b" * 40, "url": "https://github.test/c/b"},
-                }
-            }
-        },
-    )
-
-    result = await github.create_commit_on_branch(
-        "acme",
-        "widget",
-        "forge/42/abcd1234",
-        headline="forge: implement 42",
-        additions=[("src/app.py", "print('hi')\n")],
-        deletions=["old.txt"],
-        expected_head_oid=TEST_HEAD,
-        client_mutation_id="op-123",
-    )
-
-    assert result["oid"] == "b" * 40
-    assert result["client_mutation_id"] == "op-123"
-    (request,) = [r for r in httpx_mock.get_requests() if str(r.url) == f"{BASE}/graphql"]
-    body = json.loads(request.content)
-    mutation_input = body["variables"]["input"]
-    assert mutation_input["expectedHeadOid"] == TEST_HEAD  # the CAS token
-    assert mutation_input["branch"] == {
-        "repositoryNameWithOwner": "acme/widget",
-        "branchName": "forge/42/abcd1234",
-    }
-    assert mutation_input["fileChanges"]["additions"] == [
-        {"path": "src/app.py", "contents": base64.b64encode(b"print('hi')\n").decode("ascii")}
+async def test_list_check_runs_for_sha(github):
+    jobs(github)
+    checks = await github.ci.checks_for(github.repo, github.sha)
+    assert [(check.tested_sha, check.status, check.attempt) for check in checks] == [
+        (github.sha, "passed", 1)
     ]
-    assert mutation_input["fileChanges"]["deletions"] == [{"path": "old.txt"}]
+    github.wire.routes["actions/runs/700/attempts/1/jobs"]["jobs"][0]["head_sha"] = "0" * 40
+    with pytest.raises(ReadUnavailable):
+        await github.ci.checks_for(github.repo, github.sha)
 
 
-async def test_stale_data_mismatch_surfaces_as_drift(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/graphql",
-        json={
-            "data": {"createCommitOnBranch": None},
-            "errors": [
-                {
-                    "type": "STALE_DATA",
-                    "path": ["createCommitOnBranch"],
-                    "message": f'Expected branch to point to "{TEST_HEAD}" but it did not.',
-                }
-            ],
-        },
-    )
-
-    with pytest.raises(GitHubStaleBranchError) as exc_info:
-        await github.create_commit_on_branch(
-            "acme",
-            "widget",
-            "forge/42/abcd1234",
-            headline="forge: implement 42",
-            additions=[("src/app.py", "x")],
-            expected_head_oid=TEST_HEAD,
-        )
-
-    assert exc_info.value.expected_head_oid == TEST_HEAD
-    assert exc_info.value.branch == "forge/42/abcd1234"
-
-
-async def test_graphql_non_stale_errors_surface_as_api_error(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/graphql",
-        json={
-            "data": {"createCommitOnBranch": None},
-            "errors": [{"type": "UNPROCESSABLE", "message": "Ref does not exist"}],
-        },
-    )
-
-    with pytest.raises(GitHubAPIError) as exc_info:
-        await github.create_commit_on_branch(
-            "acme",
-            "widget",
-            "ghost",
-            headline="m",
-            expected_head_oid=TEST_HEAD,
-        )
-
-    assert "Ref does not exist" in exc_info.value.message
-
-
-# ---------------------------------------------------------------------------
-# Pull requests (research §4)
-# ---------------------------------------------------------------------------
-
-
-async def test_create_draft_pr_sends_draft_true(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/pulls",
-        method="POST",
-        json={"number": 7, "draft": True, "html_url": "https://github.test/pull/7"},
-    )
-
-    pr = await github.create_draft_pr(
-        "acme", "widget", head="forge/42/abcd1234", base="main", title="Draft: x"
-    )
-
-    assert pr["number"] == 7
-    (request,) = [r for r in httpx_mock.get_requests() if str(r.url).endswith("/pulls")]
-    body = json.loads(request.content)
-    assert body["draft"] is True
-    assert body["head"] == "forge/42/abcd1234"
-    assert body["base"] == "main"
-
-
-async def test_get_pr_by_head_filters_owner_branch(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=(
-            f"{BASE}/repos/acme/widget/pulls?state=open&head=acme%3Aforge%2F42%2Fabcd1234&base=main"
-        ),
-        json=[
-            {
-                "number": 7,
-                "state": "open",
-                "draft": True,
-                "head": {"ref": "forge/42/abcd1234", "sha": "b" * 40},
-            }
-        ],
-    )
-
-    pr = await github.get_pr_by_head("acme", "widget", "forge/42/abcd1234", base="main")
-
-    assert pr is not None and pr["number"] == 7
-
-
-async def test_get_pr_by_head_returns_none_when_absent(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/pulls?state=open&head=acme%3Aghost&base=main",
-        json=[],
-    )
-
-    assert await github.get_pr_by_head("acme", "widget", "ghost", base="main") is None
-
-
-# ---------------------------------------------------------------------------
-# Verification reads (research §5)
-# ---------------------------------------------------------------------------
-
-
-async def test_list_check_runs_for_sha(httpx_mock: HTTPXMock, github: GitHubClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/commits/{TEST_HEAD}/check-runs",
-        json={
-            "total_count": 1,
-            "check_runs": [
-                {
-                    "name": "ci",
-                    "status": "completed",
-                    "conclusion": "success",
-                    "head_sha": TEST_HEAD,
-                }
-            ],
-        },
-    )
-
-    runs = await github.list_check_runs_for_sha("acme", "widget", TEST_HEAD)
-
-    assert runs[0]["conclusion"] == "success"
-
-
-async def test_list_workflow_runs_for_sha_filters_by_name(
-    httpx_mock: HTTPXMock, github: GitHubClient
-):
-    runs_response = {
-        "total_count": 2,
-        "workflow_runs": [
-            {"id": 1, "name": "CI", "head_sha": TEST_HEAD},
-            {"id": 2, "name": "Docs", "head_sha": TEST_HEAD},
-        ],
-    }
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/actions/runs?head_sha={TEST_HEAD}&per_page=100",
-        json=runs_response,
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/actions/runs?head_sha={TEST_HEAD}&per_page=100",
-        json=runs_response,
-    )
-
-    all_runs = await github.list_workflow_runs_for_sha("acme", "widget", TEST_HEAD)
-    ci_runs = await github.list_workflow_runs_for_sha(
-        "acme", "widget", TEST_HEAD, workflow_name="CI"
-    )
-
-    assert len(all_runs) == 2
-    assert [run["id"] for run in ci_runs] == [1]
-
-
-# ---------------------------------------------------------------------------
-# Actions endpoints (E3b, ADR-0020) — docs/research/2026-09-14-github-actions-executor.md
-# ---------------------------------------------------------------------------
+async def test_list_workflow_runs_for_sha_filters_by_name(github):
+    # Native workflow paths, never mutable display names, choose independent verification.
+    jobs(github)
+    github.wire.routes["actions/runs"]["workflow_runs"] += [
+        rest.run(id=701, path=".github/workflows/docs.yml")
+    ]
+    github.wire.routes["actions/runs"]["total_count"] = 2
+    checks = await github.ci.checks_for(github.repo, github.sha)
+    assert len(checks) == 1 and checks[0].role == "verification"
+    assert resource_calls(github, "/actions/runs")[0].url.params["head_sha"] == github.sha
 
 
 class TestActionsEndpoints:
-    async def test_dispatch_parses_the_2026_run_id_response(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/workflows/forge-harness.github.yml/dispatches",
-            method="POST",
-            status_code=202,
-            json={"run_id": 501},
+    async def test_dispatch_parses_the_2026_run_id_response(self, github):
+        github.wire.mutations["actions/workflows/71/dispatches"] = httpx.Response(
+            202, json={"run_id": 999}
+        )
+        result = await github.writes.dispatch_lane(github.repo, github.dispatch)
+        assert isinstance(result, Applied) and result.value.native_id == "700"
+        sent = json.loads(resource_calls(github, "/dispatches", "POST")[0].content)
+        assert sent["ref"] == github.dispatch.ref
+        assert json.loads(sent["inputs"]["dispatch"]) == json.loads(
+            github.dispatch.model_dump_json()
         )
 
-        response = await github.dispatch_workflow(
-            "acme",
-            "widget",
-            "forge-harness.github.yml",
-            "forge/42/abcd1234",
-            {"run_id": "abc", "attempt_base_oid": TEST_HEAD, "driver": "claude-code"},
-        )
-
-        assert response == {"run_id": 501}
-        (request,) = [
-            r
-            for r in httpx_mock.get_requests()
-            if r.method == "POST" and "dispatches" in str(r.url)
-        ]
-        body = json.loads(request.content)
-        assert body == {
-            "ref": "forge/42/abcd1234",
-            "inputs": {"run_id": "abc", "attempt_base_oid": TEST_HEAD, "driver": "claude-code"},
+    async def test_dispatch_legacy_empty_body_returns_empty_dict(self, github):
+        github.wire.mutations["actions/workflows/71/dispatches"] = httpx.Response(204)
+        github.wire.routes["actions/workflows/71/runs"] = {"total_count": 0, "workflow_runs": []}
+        assert isinstance(await github.writes.dispatch_lane(github.repo, github.dispatch), Unknown)
+        github.wire.routes["actions/workflows/71/runs"] = {
+            "total_count": 1,
+            "workflow_runs": [rest.run()],
         }
+        assert (await github.ci.find_lane(github.repo, github.dispatch.nonce)).native_id == "700"
+        assert len(resource_calls(github, "/dispatches", "POST")) == 1
 
-    async def test_dispatch_legacy_empty_body_returns_empty_dict(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/workflows/harness.yml/dispatches",
-            method="POST",
-            status_code=202,
-        )  # no body
+    async def test_dispatch_is_never_retried(self, github):
+        github.wire.mutations["actions/workflows/71/dispatches"] = httpx.Response(500)
+        assert isinstance(await github.writes.dispatch_lane(github.repo, github.dispatch), Unknown)
+        assert len(resource_calls(github, "/dispatches", "POST")) == 1
 
-        response = await github.dispatch_workflow("acme", "widget", "harness.yml", "main")
-
-        assert response == {}  # discovery is the caller's job
-
-    async def test_dispatch_is_never_retried(self, httpx_mock: HTTPXMock, github: GitHubClient):
-        url = f"{BASE}/repos/acme/widget/actions/workflows/harness.yml/dispatches"
-        httpx_mock.add_response(url=url, method="POST", status_code=500)
-
-        with pytest.raises(GitHubAPIError):
-            await github.dispatch_workflow("acme", "widget", "harness.yml", "main")
-
-        # Non-idempotent: a replay would start a SECOND harness run.
-        assert len([r for r in httpx_mock.get_requests() if str(r.url) == url]) == 1
-
-    async def test_list_workflow_dispatch_runs_filters_and_windows(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        url = (
-            f"{BASE}/repos/acme/widget/actions/workflows/forge-harness.github.yml/runs"
-            f"?event=workflow_dispatch&per_page=100&head_sha={TEST_HEAD}&branch=forge%2F42%2Fabcd1234"
-        )
-        httpx_mock.add_response(
-            url=url,
-            json={
-                "workflow_runs": [
-                    {"id": 2, "created_at": "2026-09-14T12:00:00Z", "head_sha": TEST_HEAD},
-                    {"id": 1, "created_at": "2026-09-14T11:00:00Z", "head_sha": TEST_HEAD},
-                ]
-            },
+    async def test_list_workflow_dispatch_runs_filters_and_windows(self, github):
+        handle = await github.ci.find_lane(github.repo, github.dispatch.nonce)
+        assert handle.correlation_id == github.dispatch.nonce and handle.native_id == "700"
+        request = resource_calls(github, "/actions/workflows/71/runs")[0]
+        assert dict(request.url.params) == {
+            "event": "workflow_dispatch",
+            "branch": github.dispatch.ref,
+            "head_sha": github.sha,
+            "per_page": "100",
+            "page": "1",
+        }
+        github.wire.routes["actions/workflows/71/runs"]["workflow_runs"][0]["head_repository"][
+            "id"
+        ] = 999
+        assert isinstance(
+            await github.ci.probe_dispatch(github.repo, github.dispatch.nonce), Inconclusive
         )
 
-        runs = await github.list_workflow_dispatch_runs(
-            "acme",
-            "widget",
-            "forge-harness.github.yml",
-            head_branch="forge/42/abcd1234",
-            head_sha=TEST_HEAD,
-            created_after=datetime(2026, 9, 14, 11, 30, tzinfo=timezone.utc),
+    async def test_download_artifact_zip_follows_the_302(self, github):
+        # Candidate bytes now arrive through the authenticated lane; native reads never follow redirects.
+        github.wire.routes["git/blobs/" + reads.BLOB] = httpx.Response(
+            302, headers={"location": "https://attacker.invalid/zip"}
         )
+        with pytest.raises(ReadUnavailable):
+            await github.repositories.read_blob(github.repo, github.sha, github.path)
+        assert all(request.url.host == "api.github.com" for request in github.wire.calls)
 
-        assert [run["id"] for run in runs] == [2]  # window filtered, newest first
+    async def test_get_workflow_run_and_jobs_and_artifacts(self, github):
+        jobs(github)
+        handle = await github.ci.find_lane(github.repo, github.dispatch.nonce)
+        assert (await github.ci.lane_status(handle)).status == "succeeded"
+        checks = await github.ci.checks_for(github.repo, github.sha)
+        assert checks[0].native_id == "901" and checks[0].attempt == 1
+        assert resource_calls(github, "/actions/runs/700/attempts/1/jobs")
 
-    async def test_download_artifact_zip_follows_the_302(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        signed = "https://objects.github.test/artifact.zip?sig=abc"
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/artifacts/900/zip",
-            status_code=302,
-            headers={"location": signed},
+    async def test_cancel_workflow_run_posts_once(self, github):
+        # Cancellation authority is local lease/session/key revocation; this adapter exposes no CI cancel write.
+        # Preserve the non-replay lesson on a concrete native mutation with unknown remote outcome.
+        github.wire.mutations["issues/7/comments"] = httpx.Response(503)
+        assert isinstance(
+            await github.writes.post_comment(github.subject, "cancelled", reads.MARKER), Unknown
         )
-        httpx_mock.add_response(url=signed, content=b"PK-zip-bytes")
+        assert len(resource_calls(github, "/comments", "POST")) == 1
 
-        payload = await github.download_artifact_zip("acme", "widget", 900)
-
-        assert payload == b"PK-zip-bytes"
-
-    async def test_get_workflow_run_and_jobs_and_artifacts(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/runs/501",
-            json={"id": 501, "status": "completed", "conclusion": "success"},
+    async def test_get_job_log_follows_the_302(self, github):
+        github.wire.routes["git/blobs/" + reads.BLOB] = httpx.Response(
+            307, headers={"location": "https://logs.attacker.invalid/path"}
         )
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/runs/501/jobs?per_page=100",
-            json={"jobs": [{"id": 9, "name": "harness", "conclusion": "success"}]},
-        )
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/runs/501/artifacts?per_page=100",
-            json={"artifacts": [{"id": 900, "name": "forge-candidate-abc"}]},
-        )
-
-        run = await github.get_workflow_run("acme", "widget", 501)
-        jobs = await github.get_workflow_run_jobs("acme", "widget", 501)
-        artifacts = await github.list_workflow_run_artifacts("acme", "widget", 501)
-
-        assert run["conclusion"] == "success"
-        assert jobs[0]["id"] == 9
-        assert artifacts[0]["name"] == "forge-candidate-abc"
-
-    async def test_cancel_workflow_run_posts_once(
-        self, httpx_mock: HTTPXMock, github: GitHubClient
-    ):
-        url = f"{BASE}/repos/acme/widget/actions/runs/501/cancel"
-        httpx_mock.add_response(url=url, method="POST", status_code=202)
-
-        await github.cancel_workflow_run("acme", "widget", 501)
-
-        assert len([r for r in httpx_mock.get_requests() if str(r.url) == url]) == 1
-
-    async def test_get_job_log_follows_the_302(self, httpx_mock: HTTPXMock, github: GitHubClient):
-        signed = "https://productionresultssa.github.test/logs/9"
-        httpx_mock.add_response(
-            url=f"{BASE}/repos/acme/widget/actions/jobs/9/logs",
-            status_code=302,
-            headers={"location": signed},
-        )
-        httpx_mock.add_response(url=signed, text="2026-09-14T12:00:00Z claude: done\n")
-
-        log = await github.get_job_log("acme", "widget", 9)
-
-        assert "claude: done" in log
+        with pytest.raises(ReadUnavailable):
+            await github.repositories.read_blob(github.repo, github.sha, github.path)
+        assert len(resource_calls(github, "/git/blobs/" + reads.BLOB)) == 1
+        assert all(request.url.host == "api.github.com" for request in github.wire.calls)
 
 
-# ---------------------------------------------------------------------------
-# Repository reader: AuthoritativeReader semantics
-# ---------------------------------------------------------------------------
+async def test_reader_get_file_returns_full_base64_blob(github):
+    body = b"hello world\r\n"
+    blob(github, body)
+    assert await github.repositories.read_blob(github.repo, github.sha, github.path) == body
 
 
-async def test_reader_get_file_returns_full_base64_blob(
-    httpx_mock: HTTPXMock, reader: GitHubRepositoryReader
-):
-    content = base64.b64encode("hello world\n".encode()).decode()
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/contents/src/app.py?ref={TEST_HEAD}",
-        json={
-            "name": "app.py",
-            "path": "src/app.py",
-            "sha": "c" * 40,
-            "size": 12,
-            "type": "file",
-            "content": content,
-            "encoding": "base64",
-        },
-    )
-
-    repo_file = await reader.get_file(0, "src/app.py", ref=TEST_HEAD)
-
-    assert repo_file.encoding == "base64"
-    assert repo_file.file_path == "src/app.py"
+async def test_reader_oversized_file_resolves_through_blob_api(github):
+    body = b"large" * 250000
+    blob(github, body)
+    assert await github.repositories.read_blob(github.repo, github.sha, github.path) == body
+    assert not any("/contents/" in request.url.path for request in github.wire.calls)
 
 
-async def test_reader_oversized_file_resolves_through_blob_api(
-    httpx_mock: HTTPXMock, reader: GitHubRepositoryReader
-):
-    # >1 MB files arrive with empty inline content; the reader must fetch the
-    # complete blob instead of silently truncating (ADR-0016 §2).
-    payload = "x" * 64
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/contents/big.txt?ref=main",
-        json={
-            "name": "big.txt",
-            "path": "big.txt",
-            "sha": "d" * 40,
-            "size": 2_000_000,
-            "type": "file",
-            "content": "",
-            "encoding": None,
-        },
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/git/blobs/{'d' * 40}",
-        json={
-            "sha": "d" * 40,
-            "content": base64.b64encode(payload.encode()).decode("ascii"),
-            "encoding": "base64",
-        },
-    )
-
-    assert await reader.read_text("big.txt", ref="main") == payload
+async def test_reader_rejects_truncated_tree(github):
+    github.wire.routes["git/trees/" + github.tree]["truncated"] = True
+    with pytest.raises(ReadUnavailable):
+        await github.repositories.read_tree(github.repo, github.sha)
 
 
-async def test_reader_rejects_truncated_tree(httpx_mock: HTTPXMock, reader: GitHubRepositoryReader):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/git/trees/{TEST_HEAD}?recursive=1",
-        json={"sha": TEST_HEAD, "tree": [{"path": "a", "type": "blob"}], "truncated": True},
-    )
-
-    with pytest.raises(GitHubAPIError, match="truncated"):
-        await reader.get_tree(0, ref=TEST_HEAD, recursive=True)
+async def test_reader_rejects_non_regular_files(github):
+    # Raw symlink bytes are representable; a submodule cannot masquerade as a blob.
+    with pytest.raises(ReadUnavailable):
+        await github.repositories.read_blob(github.repo, github.sha, "vendor/lib")
+    assert not any("/git/blobs/" in request.url.path for request in github.wire.calls)
 
 
-async def test_reader_rejects_non_regular_files(
-    httpx_mock: HTTPXMock, reader: GitHubRepositoryReader
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/contents/link?ref=main",
-        json={"name": "link", "path": "link", "type": "symlink", "size": 5, "sha": "e" * 40},
-    )
-
-    with pytest.raises(GitHubAPIError, match="symlink"):
-        await reader.get_file(0, "link", ref="main")
-
-
-async def test_reader_maps_issue_from_client(httpx_mock: HTTPXMock, reader: GitHubRepositoryReader):
-    httpx_mock.add_response(
-        url=f"{BASE}/repos/acme/widget/issues/42",
-        json={"id": 1010, "number": 42, "title": "T", "body": None, "state": "open"},
-    )
-
-    issue = await reader.get_issue(0, 42)
-
-    assert issue.iid == 42
-    assert issue.description is None
+async def test_reader_maps_issue_from_client(github):
+    github.wire.routes["issues/7"]["body"] = None
+    task = await github.subjects.get_task(github.subject)
+    assert task.subject.number == 7 and task.description == ""
+    github.wire.routes["issues/7"]["number"] = 8
+    with pytest.raises(ReadUnavailable):
+        await github.subjects.get_task(github.subject)

@@ -1,646 +1,324 @@
+"""Retained CE client lessons on selected native project adapters.
+
+Historical discovery, issue creation, arbitrary commit comments and artifact
+helpers are retired. Their applicable identity, confinement, complete-evidence
+and one-write lessons exercise the actual narrow native ports instead.
+"""
+
+import json
+
+import httpx
 import pytest
-from pytest_httpx import HTTPXMock
 
-from forge.gitlab.client import GitLabClient, GitLabAPIError
+from forge.domain.blob import BlobContent
+from forge.port_values import Applied, Found, Inconclusive, ReadUnavailable
+from forge.domain.verdicts import Unknown
+from tests import gitlab_engine_fixture as gl
+from tests import native_clients_fixture as fixture
+from tests.native_clients_fixture import blob, resource_calls
 
-BASE = "https://gitlab.test/api/v4"
+gitlab = fixture.gitlab
 
 
-@pytest.fixture()
-def gitlab_client():
-    return GitLabClient(
-        base_url="https://gitlab.test",
-        token="test-token",
-        timeout=5.0,
+async def test_get_merge_request(gitlab):
+    row = await gitlab.reviews.document(gitlab.review)
+    assert row["iid"] == gitlab.review.number and row["source_branch"] == gitlab.dispatch.ref
+    assert row["project_id"] == 123 and row["source_project_id"] == row["target_project_id"]
+
+
+async def test_get_merge_request_diffs(gitlab):
+    # Exact immutable native tree replaces provider diff fragments and their truncation flags.
+    tree = await gitlab.repositories.read_tree(gitlab.repo, gitlab.sha)
+    assert tree.sha == gitlab.sha and tree.entries[0].path == "old.txt"
+    gitlab.wire.routes["repository/tree"][0]["path"] = "../escape"
+    with pytest.raises(ReadUnavailable):
+        await gitlab.repositories.read_tree(gitlab.repo, gitlab.sha)
+
+
+async def test_pagination_two_pages(gitlab):
+    def page(request):
+        number = int(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[gl.note(1)] if number == 1 else [gl.note(2)],
+            headers={"x-next-page": "2"} if number == 1 else {},
+        )
+
+    gitlab.wire.routes["issues/7/notes"] = page
+    rows = await gitlab.subjects.notes(gitlab.subject)
+    assert [row["id"] for row in rows] == [1, 2]
+    assert [r.url.params["page"] for r in resource_calls(gitlab, "/notes")] == ["1", "2"]
+
+
+async def test_create_mr_note(gitlab):
+    def accepted(request):
+        return httpx.Response(
+            201, json=gl.note(body=json.loads(request.content)["body"], review=True)
+        )
+
+    gitlab.wire.mutations["POST", "merge_requests/8/notes"] = accepted
+    result = await gitlab.writes.post_comment(gitlab.review, "Review evidence", gl.MARKER)
+    assert isinstance(result, Applied) and result.value.subject == gitlab.review
+    assert result.value.native_id == "10"
+    assert json.loads(resource_calls(gitlab, "/notes", "POST")[0].content)["body"].endswith(
+        gl.MARKER
     )
 
 
-async def test_get_merge_request(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7",
-        json={
-            "id": 100,
-            "iid": 7,
-            "title": "Add auth",
-            "state": "opened",
-            "source_branch": "feature/auth",
-            "target_branch": "main",
-            "web_url": "https://gitlab.test/g/p/-/merge_requests/7",
-        },
+async def test_create_mr_discussion_with_position(gitlab):
+    # New writes reply to exact persisted native feedback; no guessed fresh diff position.
+    note = gl.note(review=True, bot=False, position={"new_path": "old.txt", "new_line": 1})
+    gitlab.wire.routes["merge_requests/8/discussions"] = [{"id": gl.DISCUSSION, "notes": [note]}]
+    feedback = (await gitlab.reviews.list_feedback(gitlab.review, None))[0]
+    endpoint = "merge_requests/8/discussions/" + gl.DISCUSSION + "/notes"
+    gitlab.wire.mutations["POST", endpoint] = lambda request: httpx.Response(
+        201, json=gl.note(11, json.loads(request.content)["body"], review=True)
     )
-
-    async with gitlab_client as client:
-        mr = await client.get_merge_request(42, 7)
-
-    assert mr.iid == 7
-    assert mr.title == "Add auth"
-    assert mr.state == "opened"
-    assert mr.source_branch == "feature/auth"
+    result = await gitlab.writes.reply(feedback, "Addressed", gl.MARKER)
+    assert isinstance(result, Applied) and result.value.kind == "review_comment"
+    assert resource_calls(gitlab, "/" + endpoint, "POST")
+    assert len([r for r in gitlab.wire.calls if r.method == "POST"]) == 1
 
 
-async def test_get_merge_request_diffs(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/diffs?per_page=100",
-        json=[
-            {
-                "old_path": "src/auth.py",
-                "new_path": "src/auth.py",
-                "diff": "@@ -0,0 +1,10 @@\n+def login():\n+    pass",
-                "new_file": True,
-                "renamed_file": False,
-                "deleted_file": False,
-            }
-        ],
+async def test_retry_on_429(gitlab):
+    gitlab.wire.routes["merge_requests/8"] = httpx.Response(429, headers={"Retry-After": "0"})
+    with pytest.raises(ReadUnavailable):
+        await gitlab.reviews.document(gitlab.review)
+    assert len(resource_calls(gitlab, "/merge_requests/8")) == 1
+    gitlab.wire.routes["merge_requests/8"] = gl.mr()
+    assert (await gitlab.reviews.document(gitlab.review))["iid"] == 8
+
+
+async def test_retry_on_500(gitlab):
+    gitlab.wire.routes["merge_requests/8"] = httpx.Response(500)
+    with pytest.raises(ReadUnavailable):
+        await gitlab.reviews.document(gitlab.review)
+    assert len(resource_calls(gitlab, "/merge_requests/8")) == 1
+    gitlab.wire.routes["merge_requests/8"] = gl.mr()
+    assert await gitlab.reviews.review_head(gitlab.review) == gitlab.sha
+    assert len(resource_calls(gitlab, "/merge_requests/8")) == 2
+
+
+async def test_no_retry_on_404(gitlab):
+    gitlab.wire.routes["merge_requests/8"] = httpx.Response(404)
+    with pytest.raises(ReadUnavailable) as failure:
+        await gitlab.reviews.document(gitlab.review)
+    assert failure.value.evidence and len(resource_calls(gitlab, "/merge_requests/8")) == 1
+
+
+async def test_non_idempotent_posts_disable_retry(gitlab):
+    gitlab.wire.mutations["POST", "pipeline"] = httpx.Response(503)
+    gitlab.wire.mutations["POST", "merge_requests"] = httpx.Response(503)
+    gitlab.wire.mutations["POST", "issues/7/notes"] = httpx.Response(503)
+    assert isinstance(await gitlab.writes.dispatch_lane(gitlab.repo, gitlab.dispatch), Unknown)
+    assert isinstance(
+        await gitlab.writes.ensure_draft(gitlab.repo, gitlab.dispatch.ref, "T", "body"), Unknown
     )
+    assert isinstance(await gitlab.writes.post_comment(gitlab.subject, "hello", gl.MARKER), Unknown)
+    assert [r.url.path.rsplit("/", 1)[-1] for r in gitlab.wire.calls if r.method == "POST"] == [
+        "pipeline",
+        "merge_requests",
+        "notes",
+    ]
 
-    async with gitlab_client as client:
-        diffs = await client.get_merge_request_diffs(42, 7)
 
-    assert len(diffs) == 1
-    assert diffs[0].new_path == "src/auth.py"
-    assert diffs[0].new_file is True
+async def test_non_idempotent_posts_single_attempt_on_503(gitlab):
+    def lost(request):
+        gitlab.wire.routes["issues/7/notes"] = [gl.note(body=json.loads(request.content)["body"])]
+        return httpx.Response(503)
+
+    gitlab.wire.mutations["POST", "issues/7/notes"] = lost
+    assert isinstance(await gitlab.writes.post_comment(gitlab.subject, "hello", gl.MARKER), Unknown)
+    recovered = await gitlab.subjects.probe_comment(gitlab.subject, gl.MARKER)
+    assert isinstance(recovered, Found) and recovered.value.value.native_id == "10"
+    assert len(resource_calls(gitlab, "/notes", "POST")) == 1
 
 
-async def test_pagination_two_pages(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/diffs?per_page=100",
-        json=[{"old_path": "a.py", "new_path": "a.py", "diff": ""}],
-        headers={"x-next-page": "2"},
+async def test_get_file_url_encoding(gitlab):
+    gitlab.wire.routes["repository/tree"] = []
+    assert (
+        await gitlab.repositories.read_blob(gitlab.repo, gitlab.sha, "src/auth/middleware.py")
+        is None
     )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/diffs?per_page=100&page=2",
-        json=[{"old_path": "b.py", "new_path": "b.py", "diff": ""}],
+    request = resource_calls(gitlab, "/repository/files/src/auth/middleware.py")[0]
+    assert b"src%2Fauth%2Fmiddleware.py" in request.url.raw_path
+    assert request.url.params["ref"] == gitlab.sha
+
+
+async def test_client_context_manager(gitlab):
+    assert (await gitlab.subjects.get_task(gitlab.subject)).subject == gitlab.subject
+    await gitlab.transport.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await gitlab.api.metadata(gitlab.repo)
+
+
+async def test_ensure_label_exists_conflict(gitlab):
+    # Existing state is a native idempotent observation, not a swallowed create conflict.
+    assert isinstance(await gitlab.writes.set_label(gitlab.subject, "forge", True), Applied)
+    assert not [r for r in gitlab.wire.calls if r.method != "GET"]
+    gitlab.wire.mutations["PUT", "issues/7"] = httpx.Response(409)
+    assert isinstance(await gitlab.writes.set_label(gitlab.subject, "new", True), Unknown)
+    assert len(resource_calls(gitlab, "/issues/7", "PUT")) == 1
+
+
+async def test_get_job_artifacts_file(gitlab):
+    # Candidate transport is authenticated lane upload; exact binary read contract stays lossless.
+    body = b'\x00{"vulnerabilities": []}\xff'
+    blob(gitlab, body)
+    result = await gitlab.repositories.read_blob(gitlab.repo, gitlab.sha, gitlab.path)
+    assert BlobContent.model_validate_json(BlobContent(raw=result).model_dump_json()).raw == body
+
+
+async def test_get_job_artifacts_file_url_encodes_path(gitlab):
+    gitlab.wire.routes["repository/tree"] = []
+    assert (
+        await gitlab.repositories.read_blob(gitlab.repo, gitlab.sha, "reports/report.json") is None
     )
-
-    async with gitlab_client as client:
-        diffs = await client.get_merge_request_diffs(42, 7)
-
-    assert len(diffs) == 2
-    assert diffs[0].new_path == "a.py"
-    assert diffs[1].new_path == "b.py"
+    request = resource_calls(gitlab, "/repository/files/reports/report.json")[0]
+    assert b"reports%2Freport.json" in request.url.raw_path
+    with pytest.raises(ReadUnavailable):
+        await gitlab.repositories.read_blob(gitlab.repo, gitlab.sha, "../report.json")
 
 
-async def test_create_mr_note(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/notes",
-        method="POST",
-        json={
-            "id": 500,
-            "body": "LGTM!",
-            "author": {"id": 99, "name": "Bot", "username": "forge-bot"},
-            "created_at": "2026-03-21T10:00:00Z",
-        },
+async def test_create_commit_comment(gitlab):
+    # Native review conversation replaces unowned arbitrary commit comments.
+    gitlab.wire.mutations["POST", "merge_requests/8/notes"] = lambda request: httpx.Response(
+        201, json=gl.note(body=json.loads(request.content)["body"], review=True)
     )
-
-    async with gitlab_client as client:
-        note = await client.create_mr_note(42, 7, "LGTM!")
-
-    assert note.id == 500
-    assert note.body == "LGTM!"
-    assert note.author.username == "forge-bot"
+    result = await gitlab.writes.post_comment(gitlab.review, "Pipeline evidence", gl.MARKER)
+    assert isinstance(result, Applied) and result.value.subject == gitlab.review
+    assert resource_calls(gitlab, "/merge_requests/8/notes", "POST")
 
 
-async def test_create_mr_discussion_with_position(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/discussions",
-        method="POST",
-        json={
-            "id": "abc123",
-            "individual_note": False,
-            "notes": [
-                {
-                    "id": 501,
-                    "body": "Potential null dereference here",
-                    "created_at": "2026-03-21T10:00:00Z",
-                }
-            ],
-        },
+async def test_get_project_by_path(gitlab):
+    # Display paths may rename; native configured ID is the only lookup authority.
+    row = (await gitlab.api.metadata(gitlab.repo)).document
+    assert row["path_with_namespace"] == "new/repository" and gitlab.repo.full_name == "old/name"
+    assert gitlab.wire.calls[-1].url.path == "/api/v4/projects/123"
+    foreign = gitlab.repo.model_copy(
+        update={"identity": gitlab.repo.identity.model_copy(update={"repository_id": "999"})}
     )
-
-    position = {
-        "base_sha": "aaa",
-        "head_sha": "bbb",
-        "start_sha": "ccc",
-        "new_path": "src/auth.py",
-        "old_path": "src/auth.py",
-        "position_type": "text",
-        "new_line": 5,
-    }
-
-    async with gitlab_client as client:
-        disc = await client.create_mr_discussion(42, 7, "Potential null dereference here", position)
-
-    assert disc.id == "abc123"
-    assert len(disc.notes) == 1
-
-
-async def test_retry_on_429(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7",
-        status_code=429,
-        headers={"Retry-After": "0"},
-        text="rate limited",
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7",
-        json={
-            "id": 100,
-            "iid": 7,
-            "title": "Retry success",
-            "state": "opened",
-            "source_branch": "main",
-            "target_branch": "main",
-        },
-    )
-
-    async with gitlab_client as client:
-        mr = await client.get_merge_request(42, 7)
-
-    assert mr.title == "Retry success"
-
-
-async def test_retry_on_500(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7",
-        status_code=500,
-        text="internal error",
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7",
-        json={
-            "id": 100,
-            "iid": 7,
-            "title": "Recovered",
-            "state": "opened",
-            "source_branch": "main",
-            "target_branch": "main",
-        },
-    )
-
-    async with gitlab_client as client:
-        mr = await client.get_merge_request(42, 7)
-
-    assert mr.title == "Recovered"
-
-
-async def test_no_retry_on_404(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/999",
-        status_code=404,
-        text="Not Found",
-    )
-
-    async with gitlab_client as client:
-        with pytest.raises(GitLabAPIError) as exc_info:
-            await client.get_merge_request(42, 999)
-
-    assert exc_info.value.status_code == 404
-
-
-async def test_non_idempotent_posts_disable_retry(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    """F06: create_pipeline / create_merge_request / create_issue_note must
-    pass retry=False to _request — a lost response must be reconciled, not
-    replayed (each can duplicate its resource on a retry)."""
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/pipeline",
-        method="POST",
-        json={"id": 77, "status": "pending"},
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests",
-        method="POST",
-        json={
-            "id": 101,
-            "iid": 8,
-            "title": "t",
-            "state": "opened",
-            "source_branch": "feat",
-            "target_branch": "main",
-        },
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/issues/7/notes",
-        method="POST",
-        json={"id": 5, "body": "hi"},
-    )
-
-    original = gitlab_client._request
-    retries: list[bool | None] = []
-
-    async def spying(method: str, path: str, **kwargs):
-        retries.append(kwargs.get("retry"))
-        return await original(method, path, **kwargs)
-
-    gitlab_client._request = spying  # type: ignore[method-assign]
-    async with gitlab_client as client:
-        await client.create_pipeline(42, "factory/7/x")
-        await client.create_merge_request(42, "feat", "main", "t")
-        await client.create_issue_note(42, 7, "hi")
-
-    assert retries == [False, False, False]
-
-
-async def test_non_idempotent_posts_single_attempt_on_503(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    """F06: with retry disabled, a 503 fails fast — exactly one POST each."""
-    for url in (
-        f"{BASE}/projects/42/pipeline",
-        f"{BASE}/projects/42/merge_requests",
-        f"{BASE}/projects/42/issues/7/notes",
-    ):
-        httpx_mock.add_response(url=url, method="POST", status_code=503, text="unavailable")
-
-    async with gitlab_client as client:
-        with pytest.raises(GitLabAPIError):
-            await client.create_pipeline(42, "factory/7/x")
-        with pytest.raises(GitLabAPIError):
-            await client.create_merge_request(42, "feat", "main", "t")
-        with pytest.raises(GitLabAPIError):
-            await client.create_issue_note(42, 7, "hi")
-
-    assert len(httpx_mock.get_requests()) == 3
-
-
-async def test_get_file_url_encoding(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/files/src%2Fauth%2Fmiddleware.py?ref=HEAD",
-        json={
-            "file_name": "middleware.py",
-            "file_path": "src/auth/middleware.py",
-            "content": "ZGVmIGF1dGgoKTogcGFzcw==",
-            "encoding": "base64",
-        },
-    )
-
-    async with gitlab_client as client:
-        f = await client.get_file(42, "src/auth/middleware.py")
-
-    assert f.file_name == "middleware.py"
-    assert f.file_path == "src/auth/middleware.py"
-
-
-async def test_client_context_manager(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/1/merge_requests/1",
-        json={
-            "id": 1,
-            "iid": 1,
-            "title": "Test",
-            "state": "opened",
-            "source_branch": "a",
-            "target_branch": "b",
-        },
-    )
-
-    async with GitLabClient("https://gitlab.test", "tok") as client:
-        mr = await client.get_merge_request(1, 1)
-        assert mr.iid == 1
-
-
-async def test_ensure_label_exists_conflict(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/labels",
-        method="POST",
-        status_code=409,
-        text="Label already exists",
-    )
-
-    async with gitlab_client as client:
-        result = await client.ensure_label_exists(42, "ai-reviewed", "#00ff00")
-
-    assert result["exists"] is True
-
-
-async def test_get_job_artifacts_file(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/jobs/101/artifacts/gl-sast-report.json",
-        content=b'{"vulnerabilities": []}',
-    )
-
-    async with gitlab_client as client:
-        data = await client.get_job_artifacts_file(42, 101, "gl-sast-report.json")
-
-    assert data == b'{"vulnerabilities": []}'
-
-
-async def test_get_job_artifacts_file_url_encodes_path(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/jobs/101/artifacts/reports%2Fgl-sast-report.json",
-        content=b"{}",
-    )
-
-    async with gitlab_client as client:
-        data = await client.get_job_artifacts_file(42, 101, "reports/gl-sast-report.json")
-
-    assert data == b"{}"
-
-
-async def test_create_commit_comment(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits/abc123/comments",
-        method="POST",
-        json={
-            "note": "Pipeline failed: test error",
-            "author": {"id": 99, "name": "Bot", "username": "forge-bot"},
-        },
-    )
-
-    async with gitlab_client as client:
-        result = await client.create_commit_comment(42, "abc123", "Pipeline failed: test error")
-
-    assert result["note"] == "Pipeline failed: test error"
-
-
-async def test_get_project_by_path(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/mygroup%2Fmyproject",
-        json={
-            "id": 42,
-            "name": "myproject",
-            "path_with_namespace": "mygroup/myproject",
-            "web_url": "https://gitlab.test/mygroup/myproject",
-            "default_branch": "main",
-        },
-    )
-
-    async with gitlab_client as client:
-        project = await client.get_project("mygroup/myproject")
-
-    assert project.id == 42
-    assert project.path_with_namespace == "mygroup/myproject"
-    assert project.default_branch == "main"
-
-
-async def test_get_project_by_numeric_id(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42",
-        json={
-            "id": 42,
-            "name": "myproject",
-            "path_with_namespace": "mygroup/myproject",
-        },
-    )
-
-    async with gitlab_client as client:
-        project = await client.get_project(42)
-
-    assert project.id == 42
-
-
-async def test_list_merge_requests(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests?state=opened&per_page=20",
-        json=[
-            {
-                "id": 100,
-                "iid": 1,
-                "title": "First MR",
-                "state": "opened",
-                "source_branch": "feat-1",
-                "target_branch": "main",
-            },
-            {
-                "id": 101,
-                "iid": 2,
-                "title": "Second MR",
-                "state": "opened",
-                "source_branch": "feat-2",
-                "target_branch": "main",
-            },
-        ],
-    )
-
-    async with gitlab_client as client:
-        mrs = await client.list_merge_requests(42)
-
-    assert len(mrs) == 2
-    assert mrs[0].iid == 1
-    assert mrs[1].title == "Second MR"
-
-
-async def test_get_issue(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/issues/5",
-        json={
-            "id": 200,
-            "iid": 5,
-            "title": "Bug report",
-            "state": "opened",
-            "labels": ["bug"],
-            "web_url": "https://gitlab.test/g/p/-/issues/5",
-        },
-    )
-
-    async with gitlab_client as client:
-        issue = await client.get_issue(42, 5)
-
-    assert issue.iid == 5
-    assert issue.title == "Bug report"
-    assert "bug" in issue.labels
-
-
-async def test_list_issues(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/issues?state=opened&per_page=20",
-        json=[
-            {
-                "id": 200,
-                "iid": 1,
-                "title": "Issue one",
-                "state": "opened",
-            },
-        ],
-    )
-
-    async with gitlab_client as client:
-        issues = await client.list_issues(42)
-
-    assert len(issues) == 1
-    assert issues[0].title == "Issue one"
-
-
-async def test_list_issues_with_labels(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/issues?state=opened&per_page=20&labels=bug%2Cp1",
-        json=[],
-    )
-
-    async with gitlab_client as client:
-        issues = await client.list_issues(42, labels="bug,p1")
-
-    assert issues == []
-
-
-async def test_create_issue(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/issues",
-        method="POST",
-        json={
-            "id": 300,
-            "iid": 10,
-            "title": "New issue",
-            "state": "opened",
-            "web_url": "https://gitlab.test/g/p/-/issues/10",
-        },
-    )
-
-    async with gitlab_client as client:
-        issue = await client.create_issue(42, "New issue", description="Details here")
-
-    assert issue.iid == 10
-    assert issue.title == "New issue"
-
-
-async def test_search_code(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/search?scope=blobs&search=def+login&per_page=100",
-        json=[
-            {
-                "basename": "auth",
-                "data": "def login():\n    pass",
-                "filename": "src/auth.py",
-                "ref": "main",
-            },
-        ],
-    )
-
-    async with gitlab_client as client:
-        results = await client.search_code(42, "def login")
-
-    assert len(results) == 1
-    assert results[0]["filename"] == "src/auth.py"
-
-
-async def test_list_project_labels(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/labels?per_page=100",
-        json=[
-            {"id": 1, "name": "bug", "color": "#ff0000"},
-            {"id": 2, "name": "feature", "color": "#00ff00", "description": "New features"},
-        ],
-    )
-
-    async with gitlab_client as client:
-        labels = await client.list_project_labels(42)
-
-    assert len(labels) == 2
-    assert labels[0].name == "bug"
-    assert labels[1].description == "New features"
-
-
-async def test_list_pipelines(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/pipelines?per_page=20&order_by=id&sort=desc&ref=main",
-        json=[
-            {
-                "id": 500,
-                "status": "success",
-                "ref": "main",
-                "web_url": "https://gitlab.test/g/p/-/pipelines/500",
-            },
-        ],
-    )
-
-    async with gitlab_client as client:
-        pipelines = await client.list_pipelines(42, ref="main")
-
-    assert len(pipelines) == 1
-    assert pipelines[0].id == 500
-    assert pipelines[0].status == "success"
-
-
-async def test_get_branch_head_returns_head_commit(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    """F28: get_branch_head reads the branch object, not commit history."""
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/branches/main",
-        json={"name": "main", "commit": {"id": "abc123def", "short_id": "abc123d"}},
-    )
-
-    async with gitlab_client as client:
-        head = await client.get_branch_head(42, "main")
-
-    assert head == "abc123def"
-    request = httpx_mock.get_requests()[0]
-    assert str(request.url) == f"{BASE}/projects/42/repository/branches/main"
-
-
-async def test_get_branch_head_missing_branch_raises_404(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/branches/feature%2Fgone",
-        status_code=404,
-        text="404 Branch Not Found",
-    )
-
-    async with gitlab_client as client:
-        with pytest.raises(GitLabAPIError) as exc_info:
-            await client.get_branch_head(42, "feature/gone")
-
-    assert exc_info.value.status_code == 404
-    assert len(httpx_mock.get_requests()) == 1  # one GET, never a history scan
-
-
-async def test_pagination_warns_when_page_cap_reached(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient, monkeypatch: pytest.MonkeyPatch, caplog
-):
-    """F27 honesty fix: when the last fetched page still advertises
-    X-Next-Page, the truncation is logged — evidence must not silently end
-    at the 50-page cap. _MAX_PAGES is lowered here to keep the test small."""
-    import logging
-
-    import forge.gitlab.client as client_module
-
-    monkeypatch.setattr(client_module, "_MAX_PAGES", 2)
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main",
-        json=[{"id": "a", "short_id": "a", "message": "1"}],
-        headers={"x-next-page": "2", "x-total-count": "300"},
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main&page=2",
-        json=[{"id": "b", "short_id": "b", "message": "2"}],
-        headers={"x-next-page": "3"},
-    )
-
-    with caplog.at_level(logging.WARNING, logger="forge.gitlab.client"):
-        async with gitlab_client as client:
-            commits = await client.list_commits(42, "main")
-
-    assert [c["sha"] for c in commits] == ["a", "b"]  # partial list returned as-is
-    assert any(
-        "pagination limit reached" in r.message and "evidence may be incomplete" in r.message
-        for r in caplog.records
+    before = len(gitlab.wire.calls)
+    with pytest.raises(ReadUnavailable):
+        await gitlab.api.metadata(foreign)
+    assert len(gitlab.wire.calls) == before
+
+
+async def test_get_project_by_numeric_id(gitlab):
+    assert (await gitlab.api.metadata(gitlab.repo)).document["id"] == 123
+    gitlab.wire.metadata["id"] = 999
+    with pytest.raises(ReadUnavailable):
+        await gitlab.api.metadata(gitlab.repo)
+    assert not any("/projects/999" in r.url.path for r in gitlab.wire.calls)
+
+
+async def test_list_merge_requests(gitlab):
+    gitlab.wire.routes["merge_requests"] = [gl.mr()]
+    assert await gitlab.reviews.find_draft(gitlab.repo, gitlab.dispatch.ref) == gitlab.review
+    request = resource_calls(gitlab, "/merge_requests")[0]
+    assert request.url.params["source_branch"] == gitlab.dispatch.ref
+    gitlab.wire.routes["merge_requests"].append(gl.mr(iid=9, id=81))
+    with pytest.raises(ReadUnavailable):
+        await gitlab.reviews.find_draft(gitlab.repo, gitlab.dispatch.ref)
+
+
+async def test_get_issue(gitlab):
+    task = await gitlab.subjects.get_task(gitlab.subject)
+    assert task.title == "Task" and task.description == "Exact body" and task.labels == ("forge",)
+    assert task.subject.number == 7
+
+
+async def test_list_issues(gitlab):
+    # Admission fetches only the explicitly authorized native issue, never ambient discovery.
+    task = await gitlab.subjects.get_task(gitlab.subject)
+    assert task.subject == gitlab.subject
+    assert [r.url.path for r in gitlab.wire.calls] == [
+        "/api/v4/projects/123",
+        "/api/v4/projects/123/issues/7",
+    ]
+
+
+async def test_list_issues_with_labels(gitlab):
+    gitlab.wire.routes["issues/7"]["labels"] = ["p1", "bug"]
+    task = await gitlab.subjects.get_task(gitlab.subject)
+    assert task.labels == ("bug", "p1")
+    gitlab.wire.routes["issues/7"]["labels"] = ["bug", "bug"]
+    with pytest.raises(ReadUnavailable):
+        await gitlab.subjects.get_task(gitlab.subject)
+
+
+async def test_create_issue(gitlab):
+    # Factory consumes native tasks and cannot silently create a replacement for a missing issue.
+    gitlab.wire.routes["issues/7"] = httpx.Response(404)
+    with pytest.raises(ReadUnavailable):
+        await gitlab.subjects.get_task(gitlab.subject)
+    assert all(r.method == "GET" for r in gitlab.wire.calls)
+
+
+async def test_search_code(gitlab):
+    # Frozen commit bytes replace mutable search excerpts as implementation evidence.
+    tree = await gitlab.repositories.read_tree(gitlab.repo, gitlab.sha)
+    raw = await gitlab.repositories.read_blob(gitlab.repo, gitlab.sha, tree.entries[0].path)
+    assert raw == gl.BODY and tree.sha == gitlab.sha
+    assert all(r.url.params.get("ref", gitlab.sha) == gitlab.sha for r in gitlab.wire.calls)
+    assert not resource_calls(gitlab, "/search")
+
+
+async def test_list_project_labels(gitlab):
+    gitlab.wire.routes["issues/7"]["labels"] = ["feature", "bug"]
+    result = await gitlab.subjects.get_task(gitlab.subject)
+    assert result.labels == ("bug", "feature")
+    assert isinstance(await gitlab.subjects.probe_label(gitlab.subject, "bug", True), Found)
+    assert isinstance(
+        await gitlab.subjects.probe_label(gitlab.subject, "missing", True), Inconclusive
     )
 
 
-async def test_pagination_no_warning_when_last_page_reached(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient, caplog
-):
-    import logging
-
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main",
-        json=[{"id": "a", "short_id": "a", "message": "1"}],
-        headers={"x-next-page": "2"},
-    )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main&page=2",
-        json=[{"id": "b", "short_id": "b", "message": "2"}],
+async def test_list_pipelines(gitlab):
+    handle = await gitlab.ci.find_lane(gitlab.repo, gitlab.dispatch.nonce)
+    assert handle.native_id == "700" and (await gitlab.ci.lane_status(handle)).status == "succeeded"
+    request = resource_calls(gitlab, "/pipelines")[0]
+    assert (
+        request.url.params["ref"] == gitlab.dispatch.ref and request.url.params["source"] == "api"
     )
 
-    with caplog.at_level(logging.WARNING, logger="forge.gitlab.client"):
-        async with gitlab_client as client:
-            commits = await client.list_commits(42, "main")
 
-    assert [c["sha"] for c in commits] == ["a", "b"]
-    assert not any("pagination limit reached" in r.message for r in caplog.records)
+async def test_get_branch_head_returns_head_commit(gitlab):
+    assert await gitlab.repositories.head(gitlab.repo, "main") == gitlab.sha
+    assert resource_calls(gitlab, "/repository/branches/main")
+    assert not resource_calls(gitlab, "/repository/commits")
+
+
+async def test_get_branch_head_missing_branch_raises_404(gitlab):
+    assert await gitlab.repositories.head(gitlab.repo, "feature/gone") is None
+    assert len(resource_calls(gitlab, "/repository/branches/feature/gone")) == 1
+    assert isinstance(
+        await gitlab.repositories.probe_branch(gitlab.repo, "feature/gone", gitlab.sha),
+        Inconclusive,
+    )
+    assert not resource_calls(gitlab, "/repository/commits")
+
+
+async def test_pagination_warns_when_page_cap_reached(gitlab):
+    # Partial evidence now refuses instead of returning a merely logged truncated result.
+    gitlab.wire.routes["issues/7/notes"] = lambda request: httpx.Response(
+        200,
+        json=[gl.note(int(request.url.params["page"]))],
+        headers={"x-next-page": str(int(request.url.params["page"]) + 1)},
+    )
+    with pytest.raises(ReadUnavailable) as failure:
+        await gitlab.api.pages(gitlab.repo, "issues/7/notes", max_pages=2)
+    assert "scan_truncated" in failure.value.evidence
+    assert len(resource_calls(gitlab, "/notes")) == 2
+
+
+async def test_pagination_no_warning_when_last_page_reached(gitlab):
+    gitlab.wire.routes["issues/7/notes"] = lambda request: httpx.Response(
+        200,
+        json=[gl.note(int(request.url.params["page"]))],
+        headers={"x-next-page": "2"} if request.url.params["page"] == "1" else {},
+    )
+    assert [
+        row["id"] for row in await gitlab.api.pages(gitlab.repo, "issues/7/notes", max_pages=2)
+    ] == [1, 2]
+    assert len(resource_calls(gitlab, "/notes")) == 2

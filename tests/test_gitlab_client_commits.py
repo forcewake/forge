@@ -1,150 +1,100 @@
-"""Tests for the Commits API additions on GitLabClient (M1 write path).
+"""Retained publication/CI lessons using native Git CAS and exact pipeline binding.
 
-Covers the ADR-0005 rule that create_commit is never auto-retried and turns
-timeouts into CommitOutcomeUnknown, plus list_commits / create_pipeline /
-list_pipelines(sha=...).
+REST commit actions/start_branch are retired. Real receiver failure and response
+loss preserve one push and reconcile exact parent, marker and complete tree.
 """
 
+import json
+
 import httpx
-import pytest
-from pytest_httpx import HTTPXMock
 
-from forge.gitlab.client import CommitOutcomeUnknown, GitLabAPIError, GitLabClient
+from forge.domain.verdicts import Committed, Unknown
+from forge.port_values import Applied, Found
+from forge.providers.git_process import GitFailure
+from tests import gitlab_engine_fixture as gl
+from tests import test_native_git_publication as proof
+from tests import native_clients_fixture as fixture
+from tests.native_clients_fixture import resource_calls
 
-BASE = "https://gitlab.test/api/v4"
-
-
-@pytest.fixture()
-def gitlab_client():
-    return GitLabClient(base_url="https://gitlab.test", token="test-token", timeout=5.0)
-
-
-async def test_create_commit_posts_actions(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
-    responses = []
-
-    def _respond(request: httpx.Request) -> httpx.Response:
-        responses.append(request)
-        return httpx.Response(201, json={"id": "abc123", "message": "forge: implement 7"})
-
-    httpx_mock.add_callback(_respond, url=f"{BASE}/projects/42/repository/commits")
-
-    async with gitlab_client as client:
-        commit = await client.create_commit(
-            42,
-            "factory/7/deadbeef",
-            [{"action": "create", "file_path": "forge-demo/x.md", "content": "hi"}],
-            "forge: implement 7",
-            start_branch="main",
-        )
-
-    assert commit["id"] == "abc123"
-    body = responses[0].read().decode()
-    assert '"start_branch"' in body.replace(" ", "")
-    assert "factory/7/deadbeef" in body
+gitlab, gitlab_native = fixture.gitlab, fixture.gitlab_native
+native = proof.native
 
 
-async def test_create_commit_single_post_on_503_no_generic_retry(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    """create_commit bypasses the generic retry: exactly one POST on 503."""
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits",
-        method="POST",
-        status_code=503,
-        text="unavailable",
+async def test_create_commit_posts_actions(gitlab_native):
+    env = gitlab_native
+    result = await env.writer.commit(env.repo, env.candidate, env.base, "exact-native")
+    assert isinstance(result, Committed)
+    assert proof.git(env.server, "show", result.sha + ":src/file.txt", raw=True) == b"approved\n"
+    assert proof.git(env.server, "rev-parse", result.sha + "^").decode() == env.base
+    pushes = [call for call in env.calls if call[0] == "push"]
+    assert len(pushes) == 1
+    assert f"--force-with-lease=refs/heads/{proof.BRANCH}:{env.base}" in pushes[0]
+    assert all(request.method == "GET" for request in env.wire.calls)
+
+
+async def test_create_commit_single_post_on_503_no_generic_retry(gitlab_native):
+    env = gitlab_native
+    hook = env.server / "hooks/pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o700)
+    result = await env.writer.commit(env.repo, env.candidate, env.base, "refused")
+    assert isinstance(result, Unknown)
+    assert proof.git(env.server, "rev-parse", "refs/heads/" + proof.BRANCH).decode() == env.base
+    assert len([call for call in env.calls if call[0] == "push"]) == 1
+    assert all(request.method == "GET" for request in env.wire.calls)
+
+
+async def test_create_commit_timeout_raises_commit_outcome_unknown(gitlab_native, monkeypatch):
+    from forge.providers.gitlab import commit as module
+
+    env = gitlab_native
+    publish = module.publish
+
+    async def lost(*args, **kwargs):
+        await publish(*args, **kwargs)
+        raise GitFailure("git_operation_unavailable")
+
+    monkeypatch.setattr(module, "publish", lost)
+    result = await env.writer.commit(env.repo, env.candidate, env.base, "lost-response")
+    assert isinstance(result, Unknown)
+    accepted = proof.git(env.server, "rev-parse", "refs/heads/" + proof.BRANCH).decode()
+    assert accepted != env.base
+    recovered = await env.repositories.probe_commit(
+        env.repo, proof.BRANCH, "lost-response", env.base, env.candidate
     )
-
-    async with gitlab_client as client:
-        with pytest.raises(GitLabAPIError) as exc_info:
-            await client.create_commit(
-                42,
-                "factory/7/deadbeef",
-                [{"action": "create", "file_path": "a", "content": "b"}],
-                "forge: implement 7",
-            )
-
-    assert exc_info.value.status_code == 503
-    assert len(httpx_mock.get_requests()) == 1
+    assert isinstance(recovered, Found) and isinstance(recovered.value, Committed)
+    assert recovered.value.sha == accepted
+    assert len([call for call in env.calls if call[0] == "push"]) == 1
 
 
-async def test_create_commit_timeout_raises_commit_outcome_unknown(
-    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
-):
-    httpx_mock.add_exception(
-        httpx.TimeoutException("timed out"), url=f"{BASE}/projects/42/repository/commits"
+async def test_list_commits_returns_sha_message_and_parents(gitlab_native):
+    env = gitlab_native
+    result = await env.writer.commit(env.repo, env.candidate, env.base, "parent-bound")
+    assert isinstance(result, Committed)
+    rows = await env.api.pages(env.repo, "repository/commits", params={"ref_name": result.sha})
+    assert rows[0]["id"] == result.sha and rows[0]["parent_ids"] == [env.base]
+    assert rows[0]["message"].endswith("parent-bound") and rows[1]["parent_ids"] == []
+    assert proof.git(env.server, "show", result.sha + ":src/link") == b"file.txt"
+
+
+async def test_create_pipeline_posts_ref(gitlab):
+    gitlab.wire.mutations["POST", "pipeline"] = httpx.Response(201, json=gl.pipeline())
+    result = await gitlab.writes.dispatch_lane(gitlab.repo, gitlab.dispatch)
+    assert isinstance(result, Applied) and result.value.native_id == "700"
+    body = json.loads(resource_calls(gitlab, "/pipeline", "POST")[0].content)
+    assert body["ref"] == gitlab.dispatch.ref
+    variables = {row["key"]: row["value"] for row in body["variables"]}
+    assert variables["FORGE_LANE_NONCE"] == gitlab.dispatch.nonce
+    assert json.loads(variables["FORGE_LANE_DISPATCH"]) == json.loads(
+        gitlab.dispatch.model_dump_json()
     )
-
-    async with gitlab_client as client:
-        with pytest.raises(CommitOutcomeUnknown):
-            await client.create_commit(
-                42,
-                "factory/7/deadbeef",
-                [{"action": "create", "file_path": "a", "content": "b"}],
-                "forge: implement 7",
-            )
-
-    # No retry was attempted for the non-idempotent write.
-    assert len(httpx_mock.get_requests()) == 1
+    assert len(resource_calls(gitlab, "/pipeline", "POST")) == 1
 
 
-async def test_list_commits_returns_sha_message_and_parents(httpx_mock: HTTPXMock):
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/repository/commits?ref_name=factory%2F7%2Fdeadbeef&per_page=100",
-        json=[
-            {"id": "sha2", "short_id": "sha2", "message": "second", "parent_ids": ["sha1"]},
-            {"id": "sha1", "short_id": "sha1", "message": "first"},
-        ],
-    )
-    async with GitLabClient("https://gitlab.test", "t") as client:
-        commits = await client.list_commits(42, "factory/7/deadbeef")
-
-    # parent_ids feeds the F07 parent check in the writer's reconciliation.
-    assert commits[0] == {
-        "sha": "sha2",
-        "short_id": "sha2",
-        "message": "second",
-        "parent_ids": ["sha1"],
-    }
-    assert commits[1] == {
-        "sha": "sha1",
-        "short_id": "sha1",
-        "message": "first",
-        "parent_ids": [],
-    }
-
-
-async def test_create_pipeline_posts_ref(httpx_mock: HTTPXMock):
-    bodies = []
-
-    def _respond(request: httpx.Request) -> httpx.Response:
-        bodies.append(request.read().decode())
-        return httpx.Response(
-            201, json={"id": 77, "ref": "factory/7/deadbeef", "status": "pending"}
-        )
-
-    httpx_mock.add_callback(_respond, url=f"{BASE}/projects/42/pipeline")
-
-    async with GitLabClient("https://gitlab.test", "t") as client:
-        pipeline = await client.create_pipeline(42, "factory/7/deadbeef")
-
-    assert pipeline["id"] == 77
-    assert "factory/7/deadbeef" in bodies[0]
-
-
-async def test_list_pipelines_filters_by_sha(httpx_mock: HTTPXMock):
-    urls = []
-
-    def _respond(request: httpx.Request) -> httpx.Response:
-        urls.append(str(request.url))
-        return httpx.Response(200, json=[{"id": 9, "status": "success", "sha": "abc"}])
-
-    httpx_mock.add_callback(
-        _respond,
-        url=f"{BASE}/projects/42/pipelines?per_page=20&order_by=id&sort=desc&sha=abc",
-    )
-
-    async with GitLabClient("https://gitlab.test", "t") as client:
-        pipelines = await client.list_pipelines(42, sha="abc")
-
-    assert pipelines[0].id == 9
-    assert pipelines[0].sha == "abc"
+async def test_list_pipelines_filters_by_sha(gitlab):
+    checks = await gitlab.ci.checks_for(gitlab.repo, gitlab.sha)
+    assert len(checks) == 1 and checks[0].tested_sha == gitlab.sha
+    assert checks[0].native_id == "701" and checks[0].attempt == 701
+    assert resource_calls(gitlab, "/pipelines")[0].url.params["sha"] == gitlab.sha
+    jobs = resource_calls(gitlab, "/pipelines/700/jobs")[0]
+    assert jobs.url.params["include_retried"] == "false"

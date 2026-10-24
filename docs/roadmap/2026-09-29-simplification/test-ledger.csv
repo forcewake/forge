@@ -79,7 +79,7 @@ tests/test_azure_integration_joins.py,2,59,true,false,,,,azure,keep,-,
 tests/test_azure_reactive.py,2,50,true,false,,edge-case pin,,azure,keep,-,
 tests/test_azure_runs.py,3,55,true,false,,edge-case pin,,azure,port-engine,P3,
 tests/test_azure_webhook.py,3,43,true,false,,,,azure,keep,-,
-tests/test_blob_reads.py,26,417,true,false,,edge-case pin,,blob,port-adapter,P3,
+tests/test_blob_reads.py,26,212,true,false,,edge-case pin,,blob,port-adapter,P3,
 tests/test_bot_loop.py,9,177,true,true,,invariant evidence; edge-case pin,,bot,keep,-,
 tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,boundary,keep,-,
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
@@ -168,7 +168,7 @@ tests/test_gate_public_artifacts.py,13,259,false,false,,edge-case pin,,gate,keep
 tests/test_gateway_issue_lifecycle.py,24,538,true,false,,,,gateway,keep,-,
 tests/test_github_actions_executor.py,51,1029,true,false,,edge-case pin,,github,keep,-,
 tests/test_github_actions_template.py,42,1036,false,false,,,,github,keep,-,
-tests/test_github_client.py,37,807,true,false,,edge-case pin,,github,port-adapter,P3,
+tests/test_github_client.py,37,405,false,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_engine_auth.py,6,199,false,true,,edge-case pin,,github,keep,P3-16,Repository-scoped App authority and bounded transport
 tests/test_github_engine_client.py,8,190,false,true,,edge-case pin,,github,keep,P3-16,Native repository routing and explicit HTTP uncertainty
 tests/test_github_engine_ingress.py,8,154,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
@@ -181,8 +181,8 @@ tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
 tests/test_github_rest.py,16,509,true,true,,edge-case pin,,github,keep,P3-16,"Native GitHub REST write, recovery and SHA-bound Actions fixtures"
 tests/test_github_runs.py,128,4762,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_webhook.py,46,429,true,true,,invariant evidence; edge-case pin,,github,keep,-,
-tests/test_gitlab_client.py,30,646,true,false,,,,gitlab,port-adapter,P3,
-tests/test_gitlab_client_commits.py,6,150,true,false,,,,gitlab,port-adapter,P3,
+tests/test_gitlab_client.py,30,324,true,false,,,,gitlab,port-adapter,P3,
+tests/test_gitlab_client_commits.py,6,100,false,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_dispatch_parity.py,13,533,true,false,,,,gitlab,port-engine,P3,
 tests/test_gitlab_engine_boundaries.py,6,116,false,true,,edge-case pin,,gitlab,keep,P3-19,Explicit GitLab read/write authority and confined project paths
 tests/test_gitlab_engine_ingress.py,9,176,false,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,Signed scoped GitLab events and bot command loop refusal
