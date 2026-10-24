@@ -17,6 +17,7 @@ from forge.ports import Clock
 from forge.store.approval_values import ApprovalCommit
 from forge.store.records import Lease, StepRecord, StepRequest, StaleLease
 from forge.store.steps import StepStore
+from forge.store.pause import PublicationPaused
 from forge.store.transactions import canonical_json
 
 E = TypeVar("E")
@@ -211,6 +212,11 @@ class StepRunner(Generic[E]):
             ):
                 return "lost"
             raise
+        except PublicationPaused:
+            await self._stop(renewal)
+            return await self._park(
+                holder.current, "publication_paused", execution_seconds=monotonic() - began
+            )
         except Exception as error:
             await self._stop(renewal)
             return await self._park(
@@ -252,6 +258,10 @@ class StepRunner(Generic[E]):
                 execution_seconds=execution_seconds,
             )
             return "parked" if result.park or completed.state == "failed" else "completed"
+        except PublicationPaused:
+            return await self._park(
+                holder.current, "publication_paused", execution_seconds=execution_seconds
+            )
         except StaleLease:
             return "lost"
 

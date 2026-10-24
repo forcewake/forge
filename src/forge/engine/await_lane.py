@@ -94,6 +94,7 @@ class AwaitLaneHandler:
             and receipt.report.candidate_diff_sha256 != candidate.diff_sha256
         ):
             raise StoreConflict("completed lane requires its accepted candidate receipt")
+        await self.store.publication_open(context.lease, now=self.clock.now())
         settlement = await self.finish(context, work)
         successor = StepRequest(
             context.lease.run_id,

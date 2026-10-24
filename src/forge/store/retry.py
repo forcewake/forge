@@ -13,6 +13,7 @@ from forge.engine.lane_values import DispatchInput
 from forge.store.commands import command_fence, resolve_in
 from forge.store.command_runs import target_runs
 from forge.store.models_execution import EngineCandidate, EngineStep
+from forge.store.pause import PublicationPaused, require_unpaused
 from forge.store.models_runs import EngineApprovedInput, EngineRun, EngineRunSpec
 from forge.store.records import StepRequest, StoreConflict
 from forge.store.steps import enqueue_in
@@ -85,6 +86,10 @@ class RetryStore:
             if run.id not in {row.id for row in await target_runs(session, envelope)}:
                 raise StoreConflict("run_scope_mismatch")
             reason = await retry_reason(session, run)
+            try:
+                await require_unpaused(session, run)
+            except PublicationPaused:
+                reason = "resume_required"
             if reason is not None:
                 result = CommandResult(status="refused", reason=reason, run_id=run.id)
             else:

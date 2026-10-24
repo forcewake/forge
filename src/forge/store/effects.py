@@ -16,6 +16,7 @@ from forge.store.native_review_effects import authorize_native_review_effect
 from forge.store.dispatch_intents import derive_nonce, nonce_digest, read_dispatch
 
 from forge.store.models_execution import EngineEffect
+from forge.store.pause import require_unpaused
 from forge.store.models_runs import EngineRun
 from forge.store.records import (
     EFFECT_STATES,
@@ -187,6 +188,8 @@ class EffectStore:
         async with transaction(self.factory) as session:
             await fence(session, lease, datetime.now(timezone.utc))
             row = await self._locked(session, effect_id)
+            if row.kind in {"ensure_branch", "commit", "ensure_draft", "post_review"}:
+                await require_unpaused(session, lease)
             if row.command_id is not None:
                 raise StoreConflict("run step cannot dispatch a command-owned effect")
             if row.version != expected_version or row.state != "requested":

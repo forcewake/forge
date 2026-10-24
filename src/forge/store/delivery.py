@@ -16,6 +16,7 @@ from forge.port_values import ReviewRef, ReviewVerdict
 from forge.store.models_execution import EngineCandidate, EngineEffect, EngineStep
 from forge.store.models_runs import EngineRunSpec
 from forge.store.records import Lease, StoreConflict
+from forge.store.pause import require_unpaused
 from forge.store.transactions import SessionFactory, fence, locked_run, transaction
 
 _VALIDATED = TypeAdapter(ValidatedCandidate)
@@ -43,6 +44,7 @@ class DeliveryStore:
     async def begin_publication(self, lease: Lease, *, now: datetime) -> None:
         async with transaction(self.factory) as session:
             await fence(session, lease, now)
+            await require_unpaused(session, lease)
             run = await locked_run(session, lease.run_id)
             if lease.handler != Handler.PUBLISH or run.state not in (
                 State.RUNNING.value,

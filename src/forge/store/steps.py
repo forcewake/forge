@@ -17,6 +17,7 @@ from forge.store.records import RestartLane
 from forge.store.approval import apply_approval_commit
 from forge.store.approval_values import ApprovalCommit, ConsumeGate, OpenGate
 from forge.store.models_execution import EngineStep
+from forge.store.pause import require_unpaused
 from forge.store.models_runs import EngineRun
 from forge.store.records import Lease, StepRecord, StepRequest, StepState, StoreConflict
 from forge.store.transactions import (
@@ -340,6 +341,8 @@ class StepStore:
                     transition_to = State.BLOCKED if decision.block else None
                     reason = decision.reason if decision.block else None
                     outcome = "failed" if decision.block else "succeeded"
+            if transition_to == State.PUBLISHING:
+                await require_unpaused(session, lease)
             apply_lane_restart(run, lease, restart_lane, successors, transition_to, approval)
             for request in successors:
                 await enqueue_in(session, run, request)

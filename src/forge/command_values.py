@@ -99,6 +99,7 @@ REFUSALS = {
     "run_scope_mismatch": "The run belongs to another subject or connection.",
     "malformed_command": "The command argument is invalid.",
     "another_run_active": "Another run is active on this subject.",
+    "resume_required": "This run is paused; resume its exact retained checkpoint before publication.",
     "not_retryable": "Only blocked or failed work can be retried.",
     "cancelled": "An operator revoked this run; start new work with /implement.",
     "no_committed_candidate": "There is no committed work to continue; use /implement.",

@@ -15,6 +15,7 @@ from forge.store.lane_v1 import EngineLaneV1Store
 from forge.store.models_execution import EngineStep
 from forge.store.models_lane import EngineLaneSession
 from forge.store.records import Lease, StoreConflict
+from forge.store.pause import require_unpaused
 from forge.store.transactions import SessionFactory, fence, locked_run, transaction
 
 
@@ -81,6 +82,11 @@ class LaneWorkStore:
                 )
             )
         return await self.auth.load(identity) if found is not None else None
+
+    async def publication_open(self, lease: Lease, *, now: datetime) -> None:
+        async with transaction(self.factory) as session:
+            await fence(session, lease, now)
+            await require_unpaused(session, lease)
 
     async def receipt(self, identity: RunIdentity) -> LaneReceipt:
         return await self.api.access(

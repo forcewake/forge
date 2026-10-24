@@ -12,7 +12,7 @@ from forge.domain.states import Handler, State
 from forge.engine.lane_values import DispatchInput
 from forge.store.command_runs import target_runs
 from forge.store.commands import command_fence, resolve_in
-from forge.store.lane_auth import approved_brief
+from forge.store.lane_auth import approved_brief, encoded
 from forge.store.models_execution import EngineStep
 from forge.store.models_lane import EngineCheckpoint, EngineLaneSession
 from forge.store.models_runs import EngineRun
@@ -89,7 +89,19 @@ class ResumeStore:
                     now,
                 ),
             )
-            result = CommandResult(status="accepted", reason="resume_scheduled", run_id=run.id)
+            result = CommandResult(
+                status="accepted",
+                reason="resume_scheduled",
+                run_id=run.id,
+                data_json=encoded(
+                    {
+                        "checkpoint_id": manifest.checkpoint_id,
+                        "attempt": run.attempt,
+                        "from_generation": manifest.generation,
+                        "generation": run.generation,
+                    }
+                ),
+            )
             resolve_in(command, result)
             return result
 
