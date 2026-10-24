@@ -7,6 +7,9 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from forge.domain.states import TERMINAL, Handler
+from forge.command_values import CommandLease, CommandResult
+from forge.store.initial_commands import admission_command
+from forge.store.commands import resolve_in
 from forge.store.models_execution import EngineStep
 from forge.store.models_runs import EngineRun
 from forge.store.records import RunRecord, RunRequest, StepRequest, StoreConflict
@@ -20,7 +23,13 @@ class AdmissionStore:
         self.factory = factory
 
     async def admit(
-        self, request: RunRequest, payload_json: str, *, max_active: int, now: datetime
+        self,
+        request: RunRequest,
+        payload_json: str,
+        *,
+        max_active: int,
+        now: datetime,
+        command_lease: CommandLease | None = None,
     ) -> RunRecord:
         key = subject_key(request)
         canonical_json(payload_json)
@@ -31,6 +40,11 @@ class AdmissionStore:
             raise ValueError("connection capacity must be bounded")
         try:
             async with transaction(self.factory) as session:
+                command = (
+                    await admission_command(session, command_lease, request, payload_json, now)
+                    if command_lease is not None
+                    else None
+                )
                 if session.get_bind().dialect.name == "postgresql":
                     connection = request.provider + "\x00" + request.connection_id
                     lock = int.from_bytes(
@@ -75,6 +89,13 @@ class AdmissionStore:
                     row,
                     StepRequest(row.id, Handler.PLAN, f"{row.id}:plan", payload_json, now),
                 )
+                if command is not None:
+                    resolve_in(
+                        command,
+                        CommandResult(
+                            status="accepted", reason="implementation_queued", run_id=row.id
+                        ),
+                    )
                 return run_record(row)
         except IntegrityError as exc:
             raise StoreConflict("subject already has an active run") from exc

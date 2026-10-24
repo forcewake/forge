@@ -1,6 +1,7 @@
 """Authorize current actors and delegate consume-once approval to the step transaction."""
 
 from forge.domain.states import Handler, State
+from forge.command_values import CommandLease
 from forge.engine.effects import Effects
 from forge.engine.plan import result_json, run_binding, subject_binding
 from forge.engine.plan_values import PlanIntent
@@ -18,7 +19,14 @@ class Approve:
     def __init__(self, steps: StepStore, clock: Clock) -> None:
         self.steps, self.clock = steps, clock
 
-    async def __call__(self, run_id: str, claim: ApprovalClaim, *, command_key: str) -> StepRecord:
+    async def __call__(
+        self,
+        run_id: str,
+        claim: ApprovalClaim,
+        *,
+        command_key: str,
+        command_lease: CommandLease | None = None,
+    ) -> StepRecord:
         key = f"{run_id}:approve:{command_key}"
         payload = claim.canonical_bytes.decode()
         previous = await self.steps.get(key)
@@ -28,7 +36,9 @@ class Approve:
             return previous
         try:
             return await self.steps.enqueue(
-                StepRequest(run_id, Handler.APPROVE, key, payload, self.clock.now())
+                StepRequest(run_id, Handler.APPROVE, key, payload, self.clock.now()),
+                command_lease=command_lease,
+                now=self.clock.now(),
             )
         except StoreConflict:
             previous = await self.steps.get(key)

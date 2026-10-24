@@ -9,6 +9,9 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.states import TERMINAL, Handler, State, transition
+from forge.command_values import CommandLease, CommandResult
+from forge.store.commands import resolve_in
+from forge.store.initial_commands import approval_command
 from forge.store.records import RestartLane
 from forge.store.approval import apply_approval_commit
 from forge.store.approval_values import ApprovalCommit, ConsumeGate, OpenGate
@@ -192,11 +195,30 @@ class StepStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
 
-    async def enqueue(self, request: StepRequest) -> StepRecord:
+    async def enqueue(
+        self,
+        request: StepRequest,
+        *,
+        command_lease: CommandLease | None = None,
+        now: datetime | None = None,
+    ) -> StepRecord:
         validate_request(request)
         async with transaction(self.factory) as session:
+            command = (
+                await approval_command(
+                    session, command_lease, request, now or datetime.now(timezone.utc)
+                )
+                if command_lease is not None
+                else None
+            )
             run = await locked_run(session, request.run_id)
-            return step_record(await enqueue_in(session, run, request))
+            step = step_record(await enqueue_in(session, run, request))
+            if command is not None:
+                resolve_in(
+                    command,
+                    CommandResult(status="accepted", reason="approval_queued", run_id=run.id),
+                )
+            return step
 
     async def get(self, key: str) -> StepRecord | None:
         async with self.factory() as session:

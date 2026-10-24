@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 
 from forge.domain.states import Handler, State
+from forge.command_values import CommandLease
 from forge.domain.run_spec import RunPolicy
 from forge.engine.effects import Effects
 from forge.engine.plan_values import PlanIntent
@@ -42,7 +43,9 @@ class Implement:
     def __init__(self, admission: AdmissionStore, actors: ActorPort, clock: Clock) -> None:
         self.admission, self.actors, self.clock = admission, actors, clock
 
-    async def __call__(self, request: RunRequest, intent: PlanIntent) -> RunRecord:
+    async def __call__(
+        self, request: RunRequest, intent: PlanIntent, *, command_lease: CommandLease | None = None
+    ) -> RunRecord:
         subject = intent.task.subject
         if run_binding(request) != subject_binding(subject):
             raise StoreConflict("admission subject scope mismatch")
@@ -53,6 +56,7 @@ class Implement:
             intent.canonical_bytes.decode(),
             max_active=intent.max_active,
             now=self.clock.now(),
+            command_lease=command_lease,
         )
 
 
