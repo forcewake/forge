@@ -1,189 +1,34 @@
-"""Actual JWT cryptography and durable lane identity authorization."""
-
-from __future__ import annotations
+"""Actual JWT cryptography and native durable lane identity authorization."""
 
 import asyncio
-import json
-import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import jwt
 import pytest
-import pytest_asyncio
-from cryptography.hazmat.primitives.asymmetric import rsa
-from forge_protocol import Brief, LaneDispatch, SessionRequest, approved_input_digest
-from jwt.algorithms import RSAAlgorithm
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from forge.api.lane_auth import LaneAuthService
-from forge.api.lane_auth_store import (
-    AUTH_NAMESPACE,
-    LaneAuthError,
-    SqlLaneAuthStore,
-    check_current,
-    current_conditions,
-    identity_of,
-)
+from forge.api.lane_auth_values import LaneAuthError
+from forge.api.lane_settings import LaneAuthSettings
 from forge.api.lane_jwks import JwksCache
-from forge.config import Settings
-from forge.durable.models import EventInbox, FlowRun
-from forge.models.base import Base
-
-PUBLIC = "https://forge.example"
-GH_ISSUER = "https://token.actions.githubusercontent.com"
-GH_KEYS = GH_ISSUER + "/.well-known/jwks"
-GL_ISSUER = "https://gitlab.example"
-GL_KEYS = GL_ISSUER + "/oauth/discovery/keys"
-WORKFLOW = "owner/repo/.github/workflows/lane.yml@refs/heads/main"
-
-
-@pytest.fixture(scope="module")
-def signing_key():
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-
-@pytest.fixture
-def settings():
-    return Settings(
-        _env_file=None,
-        FORGE_GITLAB_ENABLED=False,
-        FORGE_SECRET_KEY=SecretStr("test-session-signing-key-32-bytes-long"),
-        FORGE_PUBLIC_URL=PUBLIC,
-        GITLAB_URL=GL_ISSUER,
-        FORGE_GITLAB_OIDC_ISSUER=GL_ISSUER,
-    )
-
-
-@pytest_asyncio.fixture
-async def auth(tmp_path, signing_key, settings):
-    engine = create_async_engine(
-        os.environ.get("FORGE_TEST_LANE_AUTH_DB", f"sqlite+aiosqlite:///{tmp_path}/auth.db")
-    )
-    tables = [FlowRun.__table__, EventInbox.__table__]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    public_key = json.loads(RSAAlgorithm.to_jwk(signing_key.public_key()))
-    requests = []
-
-    def jwks(request):
-        requests.append(str(request.url))
-        return httpx.Response(200, json={"keys": [{**public_key, "kid": "key-1", "alg": "RS256"}]})
-
-    cache = JwksCache(
-        {"github": (GH_ISSUER, GH_KEYS), "gitlab": (GL_ISSUER, GL_KEYS)},
-        transport=httpx.MockTransport(jwks),
-    )
-    service = LaneAuthService(SqlLaneAuthStore(factory), settings, jwks_cache=cache)
-
-    async def register(provider="github", run_id="a" * 32, **kwargs):
-        data = dict(
-            forge_run_id=run_id,
-            attempt=2,
-            generation=7,
-            brief_text="Implement the approved input.",
-            plan_digest="1" * 64,
-            spec_digest="2" * 64,
-            base_sha="3" * 40,
-            revision=1,
-        )
-        approved = approved_input_digest(
-            **{
-                k: data[k]
-                for k in (
-                    "brief_text",
-                    "plan_digest",
-                    "spec_digest",
-                    "base_sha",
-                    "revision",
-                )
-            }
-        )
-        brief = Brief(**data, approved_digest=approved)
-        dispatch = LaneDispatch(
-            **identity_of(brief).model_dump(),
-            server_url=PUBLIC,
-            provider=provider,
-            repository="owner/repo",
-            ref="main",
-            base_sha=brief.base_sha,
-            approved_digest=approved,
-            driver="claude-sdk",
-            model="model",
-            timeout_seconds=600,
-            nonce=service.new_nonce() if provider == "github" else None,
-        )
-        async with factory() as session, session.begin():
-            session.add(
-                FlowRun(
-                    id=run_id,
-                    provider=provider,
-                    project_id=1,
-                    issue_iid=None,
-                    cancellation_generation=3,
-                    evidence={"preserve": "other-owner"},
-                )
-            )
-        pending = await service.register_pending(
-            dispatch,
-            brief,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
-            github_workflow_ref=WORKFLOW if provider == "github" else None,
-            gitlab_pipeline_id="42" if provider == "gitlab" else None,
-            **kwargs,
-        )
-        return pending
-
-    yield service, factory, register, requests
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda c: Base.metadata.drop_all(c, tables=tables))
-    await engine.dispose()
-
-
-def oidc(key, pending, *, changes=None, headers=None, algorithm="RS256"):
-    now = int(datetime.now(timezone.utc).timestamp())
-    is_gh = pending.dispatch.provider == "github"
-    claims = {
-        "iss": GH_ISSUER if is_gh else GL_ISSUER,
-        "aud": PUBLIC + "/lane/" + pending.dispatch.nonce if is_gh else PUBLIC,
-        "sub": "provider-signed-subject",
-        "jti": "jwt-1",
-        "iat": now - 2,
-        "nbf": now - 2,
-        "exp": now + 300,
-        **(
-            {
-                "repository": "owner/repo",
-                "ref": "refs/heads/main",
-                "job_workflow_ref": WORKFLOW,
-                "run_id": "100",
-                "run_attempt": "1",
-            }
-            if is_gh
-            else {"project_path": "owner/repo", "ref": "main", "pipeline_id": "42", "job_id": "123"}
-        ),
-    }
-    if pending.repository_id is not None:
-        claims["repository_id" if is_gh else "project_id"] = pending.repository_id
-    for name, value in (changes or {}).items():
-        if value is None:
-            claims.pop(name, None)
-        else:
-            claims[name] = value
-    return jwt.encode(claims, key, algorithm=algorithm, headers={"kid": "key-1", **(headers or {})})
-
-
-async def exchange(service, pending, token):
-    return await service.exchange(
-        SessionRequest(
-            **pending.identity.model_dump(),
-            provider=pending.dispatch.provider,
-            oidc_token=token,
-        )
-    )
+from forge.store.lane_auth import EngineLaneAuthStore
+from forge.store.lane_v1 import EngineLaneV1Store
+from forge.store.inbox_models import EventInbox
+from forge.store.models_runs import EngineRun
+from forge.store.models_lane import EngineLaneSession
+from tests.native_lane_fixture import (
+    PUBLIC,
+    GH_ISSUER,
+    GH_KEYS,
+    WORKFLOW,
+    oidc,
+    exchange,
+    auth as auth,
+    settings as settings,
+    signing_key as signing_key,
+)
 
 
 @pytest.mark.parametrize("provider", ["github", "gitlab"])
@@ -194,7 +39,7 @@ async def test_signed_exchange_reconnect_and_replay_survive_a_new_service(
     pending = await register(provider)
     first = await exchange(service, pending, oidc(signing_key, pending))
     assert await service.authenticate_bearer("Bearer " + first.access_token) == pending.identity
-    restarted = LaneAuthService(SqlLaneAuthStore(factory), settings, jwks_cache=service.jwks)
+    restarted = LaneAuthService(EngineLaneAuthStore(factory), settings, jwks_cache=service.jwks)
     with pytest.raises(LaneAuthError, match="already been used"):
         await exchange(restarted, pending, oidc(signing_key, pending))
     second = await exchange(
@@ -203,9 +48,10 @@ async def test_signed_exchange_reconnect_and_replay_survive_a_new_service(
     assert second.expires_at > datetime.now(timezone.utc)
     assert len(requests) == 1
     async with factory() as session:
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        assert row.evidence["preserve"] == "other-owner"
-        assert row.evidence[AUTH_NAMESPACE]["cancellation_generation"] == 3
+        row = await session.get(EngineRun, pending.identity.forge_run_id)
+        assert row.reason == "preserve-other-owner"
+        saved = await session.scalar(select(EngineLaneSession))
+        assert saved.cancellation_generation == 3 and saved.nonce_consumed
         receipts = (
             await session.scalars(
                 select(EventInbox).where(EventInbox.event_type == "lane.oidc.jti")
@@ -218,7 +64,7 @@ async def test_signed_exchange_reconnect_and_replay_survive_a_new_service(
             and r.status == "processed"
             for r in receipts
         )
-        assert "jwt-1" not in json.dumps(row.evidence)
+        assert "jwt-1" not in saved.first_job_json + saved.api_state_json
 
 
 @pytest.mark.parametrize(
@@ -328,7 +174,7 @@ async def test_direct_workflow_claim_is_explicit_without_missing_claim_fallback(
 
 @pytest.mark.parametrize(
     "mutation",
-    [{"cancel_requested": True}, {"cancellation_generation": 4}, {"status": "cancelled"}],
+    [{"cancel_requested": True}, {"cancellation_generation": 4}, {"state": "cancelled"}],
 )
 async def test_cancel_fences_existing_bearer_and_in_transaction_write(auth, signing_key, mutation):
     service, factory, register, _ = auth
@@ -336,20 +182,23 @@ async def test_cancel_fences_existing_bearer_and_in_transaction_write(auth, sign
     token = await exchange(service, pending, oidc(signing_key, pending))
     async with factory() as session, session.begin():
         await session.execute(
-            update(FlowRun).where(FlowRun.id == pending.identity.forge_run_id).values(**mutation)
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(**mutation)
         )
     with pytest.raises(LaneAuthError):
         await service.authenticate_bearer("Bearer " + token.access_token)
-    async with factory() as session, session.begin():
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        with pytest.raises(LaneAuthError):
-            check_current(row, pending.identity)
-        result = await session.execute(
-            update(FlowRun)
-            .where(*current_conditions(pending.identity, 3))
-            .values(status_reason="forbidden write")
+    with pytest.raises(LaneAuthError):
+        await service.store.load(pending.identity)
+    with pytest.raises(LaneAuthError):
+        await EngineLaneV1Store(factory).access(
+            pending.identity,
+            lambda p, state, namespace: state.update(forbidden=True),
+            write=True,
         )
-        assert result.rowcount == 0
+    async with factory() as session:
+        row = await session.scalar(select(EngineLaneSession))
+        assert "forbidden" not in row.api_state_json
 
 
 @pytest.mark.parametrize(
@@ -372,13 +221,13 @@ async def test_bearer_exact_identity_and_type_are_verified(auth, settings, signi
     token = await exchange(service, pending, oidc(signing_key, pending))
     claims = jwt.decode(
         token.access_token,
-        settings.FORGE_SECRET_KEY.get_secret_value(),
+        settings.secret_key.get_secret_value(),
         algorithms=["HS256"],
         audience=PUBLIC + "/lane/v1",
     )
     forged = jwt.encode(
         {**claims, **changes},
-        settings.FORGE_SECRET_KEY.get_secret_value(),
+        settings.secret_key.get_secret_value(),
         algorithm="HS256",
         headers={"typ": "forge-lane-session+jwt"},
     )
@@ -387,10 +236,13 @@ async def test_bearer_exact_identity_and_type_are_verified(auth, settings, signi
 
 
 def test_session_secret_never_falls_back_to_old_lane_control_secret(settings):
-    settings.FORGE_SECRET_KEY = None
-    settings.FORGE_LANE_CONTROL_SECRET = SecretStr("old-secret-that-is-also-long-enough")
-    with pytest.raises(ValueError, match="FORGE_SECRET_KEY"):
-        LaneAuthService(None, settings)
+    document = settings.model_dump()
+    del document["secret_key"]
+    document["FORGE_LANE_CONTROL_SECRET"] = SecretStr("old-secret-that-is-also-long-enough")
+    with pytest.raises(ValidationError):
+        LaneAuthSettings.model_validate(document)
+    with pytest.raises(ValidationError):
+        LaneAuthSettings.model_validate({**settings.model_dump(), "secret_key": SecretStr("short")})
 
 
 @pytest.mark.parametrize(
@@ -430,28 +282,25 @@ async def test_expired_pending_nonce_refuses_first_session_but_bound_reconnect_s
 ):
     service, factory, register, _ = auth
     pending = await register()
-    async with factory() as session, session.begin():
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        evidence = {**row.evidence}
-        evidence[AUTH_NAMESPACE] = {
-            **evidence[AUTH_NAMESPACE],
-            "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
-        }
-        row.evidence = evidence
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(EngineLaneSession).where(
+                EngineLaneSession.run_id == pending.identity.forge_run_id
+            )
+        )
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     with pytest.raises(LaneAuthError, match="expired"):
         await exchange(service, pending, oidc(signing_key, pending))
     # A different active dispatch can reconnect after its initial admission window.
     pending = await register(run_id="b" * 32)
     await exchange(service, pending, oidc(signing_key, pending))
-    async with factory() as session, session.begin():
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        row.evidence = {
-            **row.evidence,
-            AUTH_NAMESPACE: {
-                **row.evidence[AUTH_NAMESPACE],
-                "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
-            },
-        }
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(EngineLaneSession).where(
+                EngineLaneSession.run_id == pending.identity.forge_run_id
+            )
+        )
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     await exchange(service, pending, oidc(signing_key, pending, changes={"jti": "reconnect"}))
 
 
@@ -465,8 +314,8 @@ async def test_cancellation_after_signature_validation_rolls_back_replay_claim(
     async def cancelled_claim(identity, **kwargs):
         async with factory() as session, session.begin():
             await session.execute(
-                update(FlowRun)
-                .where(FlowRun.id == identity.forge_run_id)
+                update(EngineRun)
+                .where(EngineRun.id == identity.forge_run_id)
                 .values(cancel_requested=True, cancellation_generation=4)
             )
         return await original(identity, **kwargs)
@@ -516,26 +365,36 @@ async def test_registering_new_generation_fences_old_bearer_without_changing_can
     bearer = await exchange(service, pending, oidc(signing_key, pending))
     dispatch = pending.dispatch.model_copy(update={"generation": 8, "nonce": service.new_nonce()})
     brief = pending.brief.model_copy(update={"generation": 8})
+    async with factory.begin() as session:
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(generation=8)
+        )
     new = await service.register_pending(
-        dispatch, brief, expires_at=pending.expires_at, github_workflow_ref=WORKFLOW
+        dispatch,
+        brief,
+        expires_at=pending.expires_at,
+        connection_id=pending.connection_id,
+        github_workflow_ref=WORKFLOW,
     )
     assert new.cancellation_generation == 3
     with pytest.raises(LaneAuthError):
         await service.authenticate_bearer("Bearer " + bearer.access_token)
-    async with factory() as session, session.begin():
-        result = await session.execute(
-            update(FlowRun)
-            .where(*current_conditions(pending.identity, 3))
-            .values(status_reason="stale")
+    with pytest.raises(LaneAuthError):
+        await EngineLaneV1Store(factory).access(
+            pending.identity, lambda p, state, namespace: state.update(stale=True), write=True
         )
-        assert result.rowcount == 0
+    async with factory() as session:
+        row = await session.get(EngineRun, pending.identity.forge_run_id)
+        assert row.generation == 8 and row.cancellation_generation == 3
 
 
 async def test_concurrent_exchange_has_one_durable_winner(auth, settings, signing_key):
     service, factory, register, _ = auth
     pending = await register()
     # Independent services and sessions share only the production database arbiter.
-    other = LaneAuthService(SqlLaneAuthStore(factory), settings, jwks_cache=service.jwks)
+    other = LaneAuthService(EngineLaneAuthStore(factory), settings, jwks_cache=service.jwks)
     token = oidc(signing_key, pending)
     outcomes = await asyncio.gather(
         exchange(service, pending, token),
@@ -566,7 +425,12 @@ async def test_reusable_workflow_pin_does_not_authorize_another_caller_ref(auth,
 
 
 def test_disabled_legacy_gitlab_url_cannot_break_github_only_authentication(settings):
-    settings.FORGE_GITLAB_OIDC_ISSUER = ""
-    settings.GITLAB_URL = "http://old-disabled-gitlab.invalid"
-    service = LaneAuthService(None, settings)
-    assert set(service.jwks.authorities) == {"github"}
+    github_only = LaneAuthSettings(
+        **{**settings.model_dump(), "authorities": (settings.authorities[0],)}
+    )
+    service = LaneAuthService(None, github_only)
+    assert set(service.jwks.authorities) == {"connection-github"}
+    with pytest.raises(ValidationError):
+        LaneAuthSettings.model_validate(
+            {**github_only.model_dump(), "GITLAB_URL": "http://old-disabled-gitlab.invalid"}
+        )

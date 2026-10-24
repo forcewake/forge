@@ -144,7 +144,7 @@ tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin
 tests/test_engine_delivery.py,15,451,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_dispatch_intents.py,3,64,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Indexed dispatch recovery bound to immutable effect and native repository.
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
-tests/test_engine_lane.py,14,548,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
+tests/test_engine_lane.py,14,440,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
 tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_operator.py,9,350,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Original-handler retry, atomic controls and exact checkpoint resume."
 tests/test_engine_rounds.py,11,378,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Native feedback correction rounds with fresh child approval and one root Draft.
@@ -200,7 +200,7 @@ tests/test_hygiene.py,6,67,false,false,,,,hygiene,keep,-,
 tests/test_implementer.py,7,105,true,false,,edge-case pin,,implementer,port-adapter,P3,
 tests/test_import_contract_debt.py,1,17,false,false,,,,import,keep,-,
 tests/test_inventory_lab.py,24,605,false,false,,,,inventory,keep,-,
-tests/test_lane_auth.py,18,572,true,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_auth.py,18,436,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_checkpoint_v1.py,5,198,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_claude_code.py,12,352,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,
@@ -212,7 +212,7 @@ tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-en
 tests/test_lane_runner_v1.py,14,560,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_templates_v1.py,2,31,false,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_trace.py,6,117,true,false,,edge-case pin,,lane,keep,-,
-tests/test_lane_v1.py,16,510,true,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_v1.py,16,480,true,true,,edge-case pin,,lane,keep,-,
 tests/test_legacy_credential_deadline.py,24,479,true,false,,,,legacy,keep,-,
 tests/test_legacy_retirement.py,2,33,true,false,,edge-case pin,,legacy,keep,-,
 tests/test_lineage_view.py,37,1184,true,false,,,,lineage,keep,-,

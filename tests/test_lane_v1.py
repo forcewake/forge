@@ -1,88 +1,42 @@
-"""Server routes use real JWT authorization, SQL receipts and filesystem blobs."""
+"""Server routes use real JWT authorization, native SQL receipts and filesystem blobs."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
-import pytest_asyncio
-from fastapi import FastAPI
 from forge_protocol import (
-    CandidateBundle,
-    CheckpointEntry,
-    CheckpointManifest,
     ControlAck,
     ControlCommand,
     Heartbeat,
     LaneReport,
     ModelKeyGrant,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
 
-from forge.api.lane_v1 import configure_lane_v1, router
 from forge.api.lane_model_key_vault import VaultError
-from forge.api.lane_v1_blobs import LaneBlobStore
 from forge.api.lane_v1_service import LaneV1Service
-from forge.api.lane_v1_store import API_NAMESPACE, SqlLaneV1Store
-from forge.durable.models import FlowRun
-from forge.main import create_app
-from tests.test_lane_auth import WORKFLOW, exchange, oidc
-from tests.test_lane_auth import auth as auth
-from tests.test_lane_auth import settings as settings
-from tests.test_lane_auth import signing_key as signing_key
-
-
-@pytest_asyncio.fixture
-async def api(auth, signing_key, tmp_path):
-    authentication, factory, register, _ = auth
-    pending = await register()
-    token = await exchange(authentication, pending, oidc(signing_key, pending))
-    lane = LaneV1Service(authentication, SqlLaneV1Store(factory), LaneBlobStore(tmp_path / "blobs"))
-    app = FastAPI()
-    app.state.lane_v1_service = lane
-    app.include_router(router)
-    headers = {"Authorization": "Bearer " + token.access_token}
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="https://forge.example", headers=headers
-    ) as client:
-        yield lane, factory, pending, client
-
-
-async def upload(client, body=b"approved bytes"):
-    digest = hashlib.sha256(body).hexdigest()
-    response = await client.put("/lane/v1/blobs/" + digest, content=body)
-    assert response.status_code == 204, response.text
-    return digest
-
-
-def bundle(pending, digest, size=14):
-    return CandidateBundle(
-        **pending.identity.model_dump(),
-        diff_sha256=digest,
-        diff_size_bytes=size,
-        base_sha=pending.dispatch.base_sha,
-        approved_digest=pending.dispatch.approved_digest,
-        driver=pending.dispatch.driver,
-        model=pending.dispatch.model,
-        terminal_reason="completed",
-    )
-
-
-def checkpoint(pending, digest, size=14, sequence=1):
-    return CheckpointManifest(
-        **pending.identity.model_dump(),
-        base_sha=pending.dispatch.base_sha,
-        approved_digest=pending.dispatch.approved_digest,
-        driver=pending.dispatch.driver,
-        sequence=sequence,
-        entries=(
-            CheckpointEntry(
-                path="src/file.txt", mode="100644", sha256=digest, state="modified", size_bytes=size
-            ),
-        ),
-    )
+from forge.store.lane_v1 import EngineLaneV1Store
+from forge.store.models_runs import EngineRun
+from forge.store.models_lane import EngineLaneSession
+from forge.runtime.app import create_app
+from tests.runtime_fixture import configuration
+from tests.native_lane_fixture import (
+    WORKFLOW,
+    exchange,
+    oidc,
+    upload,
+    bundle,
+    checkpoint,
+    auth as auth,
+    api as api,
+    settings as settings,
+    signing_key as signing_key,
+)
 
 
 async def test_session_brief_and_control_ack_use_exact_frozen_models(api, signing_key):
@@ -164,7 +118,7 @@ async def test_blob_checkpoint_candidate_and_terminal_report_are_durable_idempot
             json={**terminal.model_dump(mode="json"), "terminal_reason": "changed"},
         )
     ).status_code == 409
-    restarted = SqlLaneV1Store(factory)
+    restarted = EngineLaneV1Store(factory)
     state = await restarted.access(pending.identity, lambda p, s, n: s)
     assert state["candidate"]["diff_sha256"] == digest
     assert state["report"]["status"] == "completed"
@@ -243,7 +197,7 @@ async def test_known_blob_hash_does_not_grant_another_dispatch_read_access(api, 
 
 
 async def test_checkpoint_exact_digest_sizes_sequence_and_resume_generation(api, signing_key):
-    lane, _, pending, client = api
+    lane, factory, pending, client = api
     digest = await upload(client)
     manifest = checkpoint(pending, digest)
     assert (
@@ -269,6 +223,12 @@ async def test_checkpoint_exact_digest_sizes_sequence_and_resume_generation(api,
             json=conflicting.model_dump(mode="json"),
         )
     ).status_code == 409
+    async with factory.begin() as session:
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(generation=8)
+        )
     new = await lane.auth.register_pending(
         pending.dispatch.model_copy(
             update={
@@ -279,6 +239,7 @@ async def test_checkpoint_exact_digest_sizes_sequence_and_resume_generation(api,
         ),
         pending.brief.model_copy(update={"generation": 8}),
         expires_at=pending.expires_at,
+        connection_id=pending.connection_id,
         github_workflow_ref=WORKFLOW,
     )
     bearer = await exchange(
@@ -341,8 +302,8 @@ async def test_cancel_between_upload_and_reference_commit_fences_all_api_writes(
     async def cancelled(identity, digest, size):
         async with factory() as session, session.begin():
             await session.execute(
-                update(FlowRun)
-                .where(FlowRun.id == identity.forge_run_id)
+                update(EngineRun)
+                .where(EngineRun.id == identity.forge_run_id)
                 .values(cancel_requested=True, cancellation_generation=4)
             )
         return await original(identity, digest, size)
@@ -353,8 +314,8 @@ async def test_cancel_between_upload_and_reference_commit_fences_all_api_writes(
         await client.put("/lane/v1/blobs/" + hashlib.sha256(body).hexdigest(), content=body)
     ).status_code == 401
     async with factory() as session:
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        assert API_NAMESPACE not in row.evidence
+        row = await session.scalar(select(EngineLaneSession))
+        assert json.loads(row.api_state_json) == {}
     assert (await client.get("/lane/v1/brief")).status_code == 401
 
 
@@ -378,14 +339,14 @@ async def test_model_key_is_unavailable_without_injection_and_fake_redeems_once(
     assert response.status_code == 200 and response.json()["key"] == "explicit-test-fake"
     duplicate = await client.post("/lane/v1/model-key")
     assert duplicate.status_code == 200 and duplicate.json() == response.json()
-    restarted = LaneV1Service(lane.auth, SqlLaneV1Store(factory), lane.blobs)
+    restarted = LaneV1Service(lane.auth, EngineLaneV1Store(factory), lane.blobs)
     replay = await restarted.model_key(pending.identity)
     assert replay.model_dump(mode="json") == response.json()
     assert calls == [pending.identity]
     async with factory() as session:
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        assert "explicit-test-fake" not in json.dumps(row.evidence)
-        encrypted = row.evidence[API_NAMESPACE]["current"]["model_key_grant"]
+        row = await session.scalar(select(EngineLaneSession))
+        assert "explicit-test-fake" not in row.api_state_json
+        encrypted = json.loads(row.api_state_json)["model_key_grant"]
         assert set(encrypted) == {"version", "nonce", "ciphertext"}
 
 
@@ -398,8 +359,7 @@ async def test_api_configuration_is_explicit_and_invalid_bodies_do_not_echo_oidc
     assert response.status_code == 422 and secret not in response.text
     response = await client.post("/lane/v1/session", content=b"x" * (1024 * 1024 + 1))
     assert response.status_code == 413
-    settings.FORGE_SECRET_KEY = None
-    app = create_app(settings)
+    app = create_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://forge.example"
     ) as disabled:
@@ -457,22 +417,32 @@ async def test_gitlab_lane_uses_the_same_typed_server_receipts(api, auth, signin
 async def test_configured_application_composes_database_auth_and_clears_service_when_disabled(
     api, settings, tmp_path
 ):
-    _, factory, pending, client = api
-    settings.FORGE_LANE_BLOB_DIR = str(tmp_path / "configured-blobs")
-    app = create_app(settings)
-    app.state.session_factory = factory
-    configure_lane_v1(app)
+    lane, _, pending, client = api
+    config, _ = configuration(tmp_path)
+
+    @asynccontextmanager
+    async def opener(settings):
+        assert settings == config
+        yield SimpleNamespace(lane=lane)
+
+    app = create_app(config, opener=opener)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://forge.example",
+            headers=client.headers,
+        ) as configured:
+            assert (await configured.get("/lane/v1/brief")).json() == pending.brief.model_dump(
+                mode="json"
+            )
+            assert app.state.lane_v1_service is lane
+    assert app.state.lane_v1_service is None and app.state.runtime is None
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="https://forge.example",
         headers=client.headers,
-    ) as configured:
-        assert (await configured.get("/lane/v1/brief")).json() == pending.brief.model_dump(
-            mode="json"
-        )
-        settings.FORGE_SECRET_KEY = None
-        configure_lane_v1(app)
-        assert (await configured.get("/lane/v1/brief")).status_code == 503
+    ) as disabled:
+        assert (await disabled.get("/lane/v1/brief")).status_code == 503
 
 
 async def test_encrypted_model_grant_is_identity_bound_and_expired_cache_never_remints(
@@ -494,9 +464,9 @@ async def test_encrypted_model_grant_is_identity_bound_and_expired_cache_never_r
     lane.model_key_provider = fake
     assert (await client.post("/lane/v1/model-key")).status_code == 200
     async with factory() as session:
-        row = await session.get(FlowRun, pending.identity.forge_run_id)
-        encrypted = row.evidence[API_NAMESPACE]["current"]["model_key_grant"]
-        assert "vault-expiry-sentinel" not in json.dumps(row.evidence)
+        row = await session.scalar(select(EngineLaneSession))
+        encrypted = json.loads(row.api_state_json)["model_key_grant"]
+        assert "vault-expiry-sentinel" not in row.api_state_json
     with pytest.raises(VaultError):
         lane.vault.open(pending.identity.model_copy(update={"generation": 8}), encrypted)
 
