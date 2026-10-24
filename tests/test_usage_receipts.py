@@ -1,508 +1,317 @@
-"""Usage receipt identity, normalization honesty and idempotent ingest (R23).
+"""Retained receipt lessons on immutable lane telemetry and authoritative accounting."""
 
-Covers the R23 contract end to end:
-
-- identity: ``receipt_id`` is sha256 over (run, attempt, normalized usage
-  JSON) — deterministic across re-reads of the same artifact, distinct per
-  attempt, and recomputed identically by the control plane when the meta
-  carries no lane-computed id;
-- normalization honesty (docs/research/2026-09-17-actions-artifacts-usage.md § Usage
-  normalization table): Anthropic-shaped counters are DISJOINT and get the
-  total formula ``input + cache_read + cache_write + output``;
-  OpenAI-shaped counters are INCLUSIVE and the cache is never added on
-  top; unknown stays unknown — never zero;
-- ingestion: ``ingest_usage_receipt`` inserts the identity with
-  ``ON CONFLICT DO NOTHING`` against UNIQUE (run_id, attempt_id,
-  receipt_id), so a duplicated artifact ingestion produces ONE receipt
-  ledger entry, ONE ``llm_calls`` row and ONE budget move — while a new
-  attempt (repair re-dispatch) legitimately costs again; a missing/invalid
-  receipt records the unknown bucket, never a fabricated zero;
-- migration 015 creates/drops the ``usage_receipts`` table exactly as the
-  ORM declares it.
-"""
-
-import importlib.util
+from decimal import Decimal
 import json
-from pathlib import Path
-from types import ModuleType
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import inspect, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
-from forge.durable import FlowRun, LLMCall, RunBudget, UsageReceipt
-from forge.durable.budgets import budget_for_run, close_budget, ingest_usage_receipt, open_budget
-from forge.models.base import Base
-from forge.runs.candidate import (
-    HarnessUsage,
-    usage_document,
-    usage_receipt_id,
+from forge.api.lane_v1_values import LaneConflict
+from forge.domain.budget import BudgetExhausted, Observation, Resources
+from forge.store.budget_calls import ModelCallStore
+from forge.store.models_budget import EngineUsage
+from forge.store.models_lane import EngineLaneSession
+from forge.store.records import StoreConflict
+from forge.store.runs import RunStore
+from forge_protocol import LaneReport, Usage, canonical_json, digest
+from tests.lane_settings_fixture import settings as settings
+from tests.native_budget_lesson_fixture import (
+    claude_usage,
+    cold_schema,
+    observation,
+    resources,
+    usage_rows,
+    operator_commands,
 )
+from tests.test_budget_engine import case as case, prepare
+from tests.test_engine_commands import envelope
+from tests.test_engine_approval import env as env
+from tests import test_engine_lane_handlers as lane_handlers
+from tests.test_engine_lane_handlers import started
+from tests.test_server_models import server, wire
 
-RUN_ID = "r" * 32
+
+lane_case = lane_handlers.case
 
 
-@pytest.fixture()
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def report(pending, usage=None):
+    return LaneReport(
+        **pending.identity.model_dump(),
+        approved_digest=pending.dispatch.approved_digest,
+        status="failed",
+        classification="infrastructure",
+        driver=pending.dispatch.driver,
+        model=pending.dispatch.model,
+        terminal_reason="synthetic worker stopped",
+        usage=usage,
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        session.add(FlowRun(id=RUN_ID, project_id=1))
-        await session.commit()
-    yield factory
-    await engine.dispose()
 
 
-def anthropic_usage(**overrides) -> HarnessUsage:
-    """A claude-code receipt: DISJOINT counters (input excludes the cache)."""
-    values = dict(
-        driver="claude-code",
-        model="glm-5.3-flash[1m]",
-        input_tokens=100,
-        cached_input_tokens=40,
-        cache_write_tokens=25,
-        output_tokens=50,
-        reasoning_tokens=10,
-        completeness="aggregate",
-        source="stream-json",
-        attempt_id="501:1",
+def anthropic_document():
+    return {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 40,
+        "cache_creation_input_tokens": 25,
+        "output_tokens": 50,
+    }
+
+
+def inclusive_wire():
+    return wire(
+        {
+            "choices": [
+                {"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}
+            ],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        }
     )
-    values.update(overrides)
-    return HarnessUsage(**values)
-
-
-def openai_usage(**overrides) -> HarnessUsage:
-    """A grok-build receipt: INCLUSIVE counters (cache inside the input)."""
-    values = dict(
-        driver="grok-build",
-        input_tokens=100,
-        cached_input_tokens=40,
-        output_tokens=50,
-        completeness="aggregate",
-        source="stream-json",
-        attempt_id="501:1",
-    )
-    values.update(overrides)
-    return HarnessUsage(**values)
-
-
-async def receipt_rows(db) -> list[UsageReceipt]:
-    async with db() as session:
-        rows = (
-            (await session.execute(select(UsageReceipt).order_by(UsageReceipt.id))).scalars().all()
-        )
-        for row in rows:
-            session.expunge(row)
-        return rows
-
-
-async def ledger_rows(db) -> list[LLMCall]:
-    async with db() as session:
-        rows = (await session.execute(select(LLMCall).order_by(LLMCall.id))).scalars().all()
-        for row in rows:
-            session.expunge(row)
-        return rows
-
-
-# ----------------------------------------------------------------------
-# Identity
-# ----------------------------------------------------------------------
 
 
 class TestReceiptIdentity:
-    def test_identity_is_deterministic_across_re_reads(self):
-        """The exact double-count scenario: re-downloading the same
-        artifact replays byte-identical identity."""
-        first = usage_receipt_id(RUN_ID, "501:1", anthropic_usage())
-        again = usage_receipt_id(RUN_ID, "501:1", anthropic_usage())
-        assert first == again
-        assert len(first) == 64  # sha256 hex
+    async def test_identity_is_deterministic_across_re_reads(self, lane_case):
+        _, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=165, output_tokens=50))
+        assert await lane_case["api"].report(pending.identity, value) is True
+        reloaded = (await lane_case["store"].receipt(pending.identity)).report
+        assert digest(reloaded) == digest(value) and len(digest(value)) == 64
+        assert canonical_json(reloaded) == canonical_json(value)
 
-    def test_identity_separates_run_attempt_and_content(self):
-        base = usage_receipt_id(RUN_ID, "501:1", anthropic_usage())
-        assert base != usage_receipt_id("f" * 32, "501:1", anthropic_usage())
-        assert base != usage_receipt_id(RUN_ID, "501:2", anthropic_usage())  # repair attempt
-        assert base != usage_receipt_id(RUN_ID, "501:1", anthropic_usage(input_tokens=101))
+    async def test_identity_separates_run_attempt_and_content(self, lane_case):
+        _, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=165, output_tokens=50))
+        assert digest(value) != digest(value.model_copy(update={"attempt": value.attempt + 1}))
+        assert digest(value) != digest(value.model_copy(update={"forge_run_id": "foreign-run"}))
+        assert digest(value) != digest(
+            value.model_copy(update={"usage": Usage(input_tokens=166, output_tokens=50)})
+        )
+        with pytest.raises(LaneConflict, match="identity"):
+            await lane_case["api"].report(
+                pending.identity, value.model_copy(update={"attempt": value.attempt + 1})
+            )
+        assert (await lane_case["store"].receipt(pending.identity)).report is None
 
     def test_normalized_document_excludes_the_raw_block(self):
-        usage = anthropic_usage(raw_json=json.dumps({"input_tokens": 100, "extra": "verbatim"}))
-        document = usage_document(usage)
-        assert "raw" not in document
-        assert document["input_tokens"] == 100
-        assert document["cache_write_tokens"] == 25
+        usage = Usage(input_tokens=165, output_tokens=50)
+        assert set(usage.model_dump()) == {"protocol", "input_tokens", "output_tokens", "cost_usd"}
+        with pytest.raises(ValidationError):
+            Usage.model_validate({**usage.model_dump(), "raw": {"untrusted": "opaque"}})
+        assert usage.cost_usd is None
 
     def test_lane_provided_receipt_id_is_accepted_by_from_meta(self):
-        """The lane may embed its emit-time id as usage.receipt_id — the
-        parser carries it so ingest never needs to recompute."""
-        usage = HarnessUsage.from_meta(
-            {
-                "input_tokens": 10,
-                "receipt_id": "a" * 64,
-                "attempt_id": "501:2",
-                "cache_write_tokens": 5,
-                "reasoning_tokens": 3,
-            },
-            driver="claude-code",
-            attempt_id="501:1",
-        )
-        assert usage.receipt_id == "a" * 64
-        assert usage.attempt_id == "501:2"  # in-block identity wins
-        assert usage.cache_write_tokens == 5
-        assert usage.reasoning_tokens == 3
-        assert usage.raw_document() == {
-            "input_tokens": 10,
-            "receipt_id": "a" * 64,
-            "attempt_id": "501:2",
-            "cache_write_tokens": 5,
-            "reasoning_tokens": 3,
-        }
-
-
-# ----------------------------------------------------------------------
-# Normalization honesty (the research table)
-# ----------------------------------------------------------------------
+        """The current typed wire refuses caller IDs; identity is the bound dispatch."""
+        with pytest.raises(ValidationError):
+            Usage.model_validate({"input_tokens": 10, "output_tokens": 5, "receipt_id": "a" * 64})
+        value = Usage(input_tokens=10, output_tokens=5)
+        assert digest(value) == digest(Usage.model_validate_json(value.model_dump_json()))
 
 
 class TestNormalization:
-    def test_anthropic_disjoint_counters_get_the_total_formula(self):
-        """input_tokens EXCLUDES the cache on Anthropic-compatible shapes:
-        the spend total is input + cache_read + cache_write + output."""
-        usage = anthropic_usage()
-        assert usage.anthropic_shaped is True
-        assert usage.total_known_tokens == 100 + 40 + 25 + 50
+    async def test_anthropic_disjoint_counters_get_the_total_formula(self, tmp_path):
+        usage = await claude_usage(tmp_path, anthropic_document())
+        assert usage.input_tokens == 100 + 40 + 25
+        assert usage.input_tokens + usage.output_tokens == 215
 
-    def test_openai_inclusive_cache_is_never_added_on_top(self):
-        """cached ⊂ prompt on OpenAI-compatible shapes: input + output,
-        the cache breakdown stays informational."""
-        usage = openai_usage()
-        assert usage.anthropic_shaped is False
-        assert usage.total_known_tokens == 150
+    async def test_openai_inclusive_cache_is_never_added_on_top(self, case):
+        async with server(case, lambda request: inclusive_wire()) as (_, client, args):
+            assert (await client.complete(**args)).usage.tokens == 150
+        assert (await usage_rows(case))[0].tokens == 150
 
-    def test_unknown_parts_contribute_nothing_and_are_never_zeroed(self):
-        usage = anthropic_usage(cache_write_tokens=None, reasoning_tokens=None)
-        assert usage.total_known_tokens == 100 + 40 + 50
+    async def test_unknown_parts_contribute_nothing_and_are_never_zeroed(self, case):
+        async with server(
+            case, lambda request: wire(headers={"x-litellm-response-cost": "unknown"})
+        ) as (_, client, args):
+            reply = await client.complete(**args)
+        assert reply.usage == Observation(usd=None, calls=1, tokens=14)
+        (row,) = await usage_rows(case)
+        assert row.usd is None and not row.final and row.tokens == 14
 
-    def test_nothing_known_is_none_not_zero(self):
-        assert HarnessUsage(completeness="unknown").total_known_tokens is None
+    async def test_nothing_known_is_none_not_zero(self, tmp_path):
+        assert await claude_usage(tmp_path, None, cost=None) is None
 
-    def test_cache_write_presence_alone_signals_the_anthropic_shape(self):
-        """Field presence decides the shape — an unknown driver carrying the
-        Anthropic-only write counter is still disjoint."""
-        usage = HarnessUsage(input_tokens=10, cache_write_tokens=5)
-        assert usage.anthropic_shaped is True
-        assert usage.total_known_tokens == 15
-
-    def test_from_meta_degrades_a_missing_receipt_to_unknown(self):
-        usage = HarnessUsage.from_meta(None, driver="claude-code", attempt_id="501:1")
-        assert usage.completeness == "unknown"
-        assert usage.total_known_tokens is None
-        assert usage.attempt_id == "501:1"
-        assert usage.raw_document() is None
-
-    def test_from_meta_keeps_negative_junk_counters_unknown(self):
-        usage = HarnessUsage.from_meta(
-            {"input_tokens": -5, "output_tokens": "12", "cached_input_tokens": True},
-            driver="grok-build",
+    async def test_cache_write_presence_alone_signals_the_anthropic_shape(self, tmp_path):
+        usage = await claude_usage(
+            tmp_path, {"input_tokens": 10, "cache_creation_input_tokens": 5, "output_tokens": 0}
         )
-        assert usage.completeness == "unknown"
-        assert usage.input_tokens is None
-        assert usage.output_tokens is None
-        assert usage.cached_input_tokens is None
+        assert usage.input_tokens == 15 and usage.output_tokens == 0
 
+    async def test_from_meta_degrades_a_missing_receipt_to_unknown(self, lane_case):
+        _, _, pending = await started(lane_case)
+        assert await lane_case["api"].report(pending.identity, report(pending))
+        assert (await lane_case["store"].receipt(pending.identity)).report.usage is None
+        value = await lane_case["budgets"].load(pending.identity.forge_run_id, "implementation")
+        assert value.balance.held.tokens == 2000 and value.balance.settled == Resources()
 
-# ----------------------------------------------------------------------
-# Idempotent ingestion
-# ----------------------------------------------------------------------
+    @pytest.mark.parametrize("counter", [-5, "12", True])
+    def test_from_meta_keeps_negative_junk_counters_unknown(self, counter):
+        with pytest.raises(ValidationError):
+            Usage(input_tokens=counter, output_tokens=1)
+        assert Observation(usd=None, calls=1, tokens=None).tokens is None
 
 
 class TestIngestReceipt:
-    async def test_first_ingest_records_ledger_and_moves_the_budget(self, db):
-        await openb(db, max_calls=5, max_tokens=10000)
-        async with db() as session:
-            budget, created = await ingest_usage_receipt(
-                session, run_id=RUN_ID, usage=anthropic_usage()
-            )
-            await session.commit()
-        assert created is True
-        assert budget is not None
-        # Disjoint Anthropic counters: the FULL formula reaches the budget.
-        assert budget.consumed_calls == 1
-        assert budget.consumed_tokens == 215
+    async def test_first_ingest_records_ledger_and_moves_the_budget(self, lane_case):
+        """Lane data is a source fact; independent stable gateway reads settle."""
+        env = lane_case["env"]
+        run, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=165, output_tokens=50, cost_usd=Decimal("0.1")))
+        assert await lane_case["api"].report(pending.identity, value)
+        assert (await lane_case["store"].receipt(pending.identity)).report == value
+        before = await lane_case["budgets"].load(run.id, "implementation")
+        assert before.balance.held.tokens == 2000 and before.balance.settled == Resources()
+        reads = []
 
-        receipts = await receipt_rows(db)
-        assert len(receipts) == 1
-        assert receipts[0].run_id == RUN_ID
-        assert receipts[0].attempt_id == "501:1"
-        assert receipts[0].receipt_id == usage_receipt_id(RUN_ID, "501:1", anthropic_usage())
-        assert receipts[0].input_tokens == 100
-        assert receipts[0].cached_input_tokens == 40
-        assert receipts[0].cache_write_tokens == 25
-        assert receipts[0].output_tokens == 50
-        assert receipts[0].completeness == "aggregate"
+        async def native(alias):
+            reads.append(alias)
+            return observation(tokens=215)
 
-        (call,) = await ledger_rows(db)
-        assert call.flow_run_id == RUN_ID
-        assert call.provider == "ci_harness"
-        assert call.input_tokens == 100
-        assert call.cached_tokens == 40
-        assert call.output_tokens == 50
-        assert call.completeness == "aggregate"
-
-    async def test_duplicate_artifact_ingestion_is_one_ledger_entry(self, db):
-        """The R23 double-count scenario: the same artifact re-read by a
-        repeated poll / crash-retry moves NOTHING the second time."""
-        await openb(db, max_calls=5)
-        usage = anthropic_usage()
-        for round_no in range(3):
-            async with db() as session:
-                _, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=usage)
-                await session.commit()
-            assert created is (round_no == 0)
-
-        budget = await get_budget(db)
-        assert budget.consumed_calls == 1  # the attempt, once
-        assert budget.consumed_tokens == 215
-        assert len(await receipt_rows(db)) == 1  # ONE receipt ledger entry
-        assert len(await ledger_rows(db)) == 1  # ONE llm_calls row
-
-    async def test_a_new_attempt_costs_again(self, db):
-        """A repair re-dispatch is a new attempt_id — a distinct receipt."""
-        await openb(db, max_calls=5)
-        async with db() as session:
-            await ingest_usage_receipt(session, run_id=RUN_ID, usage=anthropic_usage())
-            await session.commit()
-        repair = anthropic_usage(
-            input_tokens=10,
-            cached_input_tokens=None,
-            cache_write_tokens=None,
-            output_tokens=5,
-            attempt_id="501:2",
+        lane_case["budget"].settlement.gateway.read_spend = native
+        (lease,) = await env.steps.claim_due("observer", env.clock.now(), 600)
+        assert await lane_case["budget"].finish(lease, "implementation") == "settled"
+        after = await lane_case["budgets"].load(run.id, "implementation")
+        assert (
+            after.balance.settled == resources(1, 215, "0.1") and after.balance.held == Resources()
         )
-        async with db() as session:
-            budget, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=repair)
-            await session.commit()
-        assert created is True
-        assert budget is not None
-        assert budget.consumed_calls == 2
-        assert budget.consumed_tokens == 215 + 15
-        assert len(await receipt_rows(db)) == 2
+        assert len(reads) == 2 and lane_case["native"].writes[-1] == "/key/block"
 
-    async def test_unknown_receipt_records_the_unknown_bucket_never_zero(self, db):
-        """A missing/invalid receipt is recorded with completeness unknown
-        and NULL counters — visibly unknown, never fabricated as 0 — and
-        stops a hard token-limited budget instead of reading as headroom."""
-        await openb(db, max_calls=5, max_tokens=10000)
-        unknown = HarnessUsage(completeness="unknown", attempt_id="501:3")
-        async with db() as session:
-            budget, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=unknown)
-            await session.commit()
-        assert created is True
-        assert budget is not None
-        assert budget.status == "exhausted"  # unknown ≠ spendable headroom
-        assert budget.consumed_tokens == 0  # nothing KNOWN was counted
+    async def test_duplicate_artifact_ingestion_is_one_ledger_entry(self, lane_case):
+        _, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=165, output_tokens=50))
+        for index in range(3):
+            assert await lane_case["api"].report(pending.identity, value) is (index == 0)
+        async with lane_case["env"].factory() as session:
+            rows = list((await session.scalars(select(EngineLaneSession))).all())
+        assert (
+            len(rows) == 1
+            and json.loads(rows[0].api_state_json)["report"]["usage"]["input_tokens"] == 165
+        )
+        value = await lane_case["budgets"].load(pending.identity.forge_run_id, "implementation")
+        assert len(value.reservations) == 1 and value.balance.held.tokens == 2000
 
-        (receipt,) = await receipt_rows(db)
-        assert receipt.completeness == "unknown"
-        assert receipt.input_tokens is None
-        assert receipt.output_tokens is None
-        assert receipt.cached_input_tokens is None
-        assert receipt.cache_write_tokens is None
+    async def test_a_new_attempt_costs_again(self, lane_case):
+        env = lane_case["env"]
+        run, _, pending = await started(lane_case)
+        await lane_case["api"].report(pending.identity, report(pending))
+        assert (await env.runner.tick()).parked == 1
+        first = await lane_case["budgets"].load(run.id, "implementation")
+        assert first.balance.held == resources(4, 2000, "2")
+        service = operator_commands(lane_case)
+        assert (await service.submit(envelope(lane_case, "retry"))).reason == "retry_scheduled"
+        assert (await env.runner.tick()).completed == 1
+        assert (await env.runner.tick()).completed == 1
+        renewed = await env.runs.load(run.id)
+        assert (renewed.attempt, renewed.generation) == (2, 2)
+        after = await lane_case["budgets"].load(run.id, "implementation")
+        assert len(after.reservations) == 2 and after.balance.held == resources(8, 4000, "4")
+        async with env.factory() as session:
+            rows = list((await session.scalars(select(EngineLaneSession))).all())
+        assert {(row.attempt, row.generation) for row in rows} == {(1, 1), (2, 2)}
+        assert lane_case["native"].writes.count("/key/generate") == 2
+        assert lane_case["native"].writes.count("/key/block") == 1
 
-        (call,) = await ledger_rows(db)
-        assert call.completeness == "unknown"
-        assert call.input_tokens is None
-
-    async def test_ingest_without_a_budget_still_records_the_receipt(self, db):
-        async with db() as session:
-            budget, created = await ingest_usage_receipt(
-                session, run_id=RUN_ID, usage=anthropic_usage()
+    async def test_unknown_receipt_records_the_unknown_bucket_never_zero(self, case):
+        prepared = await prepare(case, "planning")
+        calls = ModelCallStore(case["factory"])
+        source = await calls.admit(
+            case["lease"], prepared.value.alias, "test-model", 1000, now=case["clock"].now()
+        )
+        await calls.observe(source, None)
+        (row,) = await usage_rows(case)
+        assert not row.final and row.completeness == "unknown"
+        assert row.calls is row.tokens is row.usd is None
+        with pytest.raises(BudgetExhausted, match="cumulative allowance"):
+            await calls.admit(
+                case["lease"], prepared.value.alias, "test-model", 1500, now=case["clock"].now()
             )
-            await session.commit()
-        assert budget is None
-        assert created is True
-        assert len(await receipt_rows(db)) == 1
-        assert len(await ledger_rows(db)) == 1
 
-    async def test_ingest_on_a_closed_budget_keeps_the_ledger_honest(self, db):
-        budget = await openb(db, max_calls=5)
-        async with db() as session:
-            await session.get(RunBudget, budget.id)
-            await close_budget(session, await budget_for_run(session, RUN_ID))
-            _, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=anthropic_usage())
-            await session.commit()
-        assert created is True  # the receipt itself is recorded
-        after = await get_budget(db)
-        assert after.consumed_calls == 0  # …but a closed budget moves nothing
+    async def test_ingest_without_a_budget_still_records_the_receipt(self, lane_case):
+        """Telemetry has its own immutable native receipt; it creates no model-call row."""
+        _, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=10, output_tokens=5))
+        assert await lane_case["api"].report(pending.identity, value)
+        assert (await lane_case["store"].receipt(pending.identity)).report.usage == value.usage
+        async with lane_case["env"].factory() as session:
+            assert list((await session.scalars(select(EngineUsage))).all()) == []
 
-    async def test_openai_inclusive_receipt_never_double_counts_cache(self, db):
-        await openb(db, max_calls=5, max_tokens=10000)
-        async with db() as session:
-            budget, _ = await ingest_usage_receipt(session, run_id=RUN_ID, usage=openai_usage())
-            await session.commit()
-        assert budget is not None
-        assert budget.consumed_tokens == 150  # the cache rides inside the input
-
-    async def test_caller_supplied_attempt_id_fills_the_identity(self, db):
-        """A v1 meta without attempt identity: the caller's episode key
-        becomes the attempt component of the identity."""
-        await openb(db, max_calls=5)
-        usage = openai_usage(attempt_id="")
-        async with db() as session:
-            await ingest_usage_receipt(
-                session, run_id=RUN_ID, usage=usage, attempt_id="pipeline:77"
+    async def test_ingest_on_a_closed_budget_keeps_the_ledger_honest(self, case):
+        prepared = await prepare(case, "planning")
+        calls = ModelCallStore(case["factory"])
+        source = await calls.admit(
+            case["lease"], prepared.value.alias, "test-model", 100, now=case["clock"].now()
+        )
+        await RunStore(case["factory"]).request_cancel(case["run"].id, expected_version=1)
+        await calls.observe(source, observation())
+        (row,) = await usage_rows(case)
+        assert row.final and row.tokens == 100
+        with pytest.raises(StoreConflict):
+            await calls.admit(
+                case["lease"], prepared.value.alias, "test-model", 100, now=case["clock"].now()
             )
-            await session.commit()
-        async with db() as session:
-            _, created = await ingest_usage_receipt(
-                session, run_id=RUN_ID, usage=usage, attempt_id="pipeline:77"
+        assert (await RunStore(case["factory"]).load(case["run"].id)).cancel_requested
+
+    async def test_openai_inclusive_receipt_never_double_counts_cache(self, case):
+        async with server(case, lambda request: inclusive_wire()) as (_, client, args):
+            assert (await client.complete(**args)).usage.tokens == 150
+        (row,) = await usage_rows(case)
+        calls = ModelCallStore(case["factory"])
+        await calls.observe(row.source_key, observation(tokens=150, usd="0.00003"))
+        assert (await usage_rows(case))[0].tokens == 150
+
+    async def test_caller_supplied_attempt_id_fills_the_identity(self, lane_case):
+        _, _, pending = await started(lane_case)
+        value = report(pending, Usage(input_tokens=10, output_tokens=5))
+        assert await lane_case["api"].report(pending.identity, value)
+        with pytest.raises(LaneConflict):
+            await lane_case["api"].report(
+                pending.identity, value.model_copy(update={"generation": value.generation + 1})
             )
-            await session.commit()
-        assert created is False  # same episode → no-op
-        (receipt,) = await receipt_rows(db)
-        assert receipt.attempt_id == "pipeline:77"
-
-
-async def openb(db, **limits) -> RunBudget:
-    async with db() as session:
-        budget = await open_budget(session, run_id=RUN_ID, **limits)
-        await session.commit()
-        session.expunge(budget)
-        return budget
-
-
-async def get_budget(db) -> RunBudget:
-    async with db() as session:
-        budget = await budget_for_run(session, RUN_ID)
-        assert budget is not None
-        session.expunge(budget)
-        return budget
-
-
-# ----------------------------------------------------------------------
-# Migration 015
-# ----------------------------------------------------------------------
+        assert (await lane_case["store"].receipt(pending.identity)).report == value
 
 
 class TestMigration015:
-    def _load_migration(self, module_name: str, filename: str) -> ModuleType:
-        path = Path(__file__).resolve().parent.parent / "alembic" / "versions" / filename
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
     def test_upgrade_creates_the_receipt_table_and_downgrade_drops_it(self):
-        from alembic.migration import MigrationContext
-        from alembic.operations import Operations
-        from sqlalchemy import create_engine
-
-        base = self._load_migration("migration_014", "014_publication_intents.py")
-        head = self._load_migration("migration_015", "015_usage_receipts.py")
-        engine = create_engine("sqlite:///:memory:")
-        try:
-            with engine.connect() as conn:
-                ctx = MigrationContext.configure(conn)
-                with Operations.context(ctx):
-                    base.upgrade()
-                    head.upgrade()
-
-                inspector = inspect(conn)
-                assert "usage_receipts" in inspector.get_table_names()
-                columns = {c["name"] for c in inspector.get_columns("usage_receipts")}
-                assert {
-                    "id",
-                    "run_id",
-                    "attempt_id",
-                    "receipt_id",
-                    "driver",
-                    "model",
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "cache_write_tokens",
-                    "output_tokens",
-                    "completeness",
-                    "source",
-                    "raw",
-                    "created_at",
-                } <= columns
-                indexes = {ix["name"]: ix for ix in inspector.get_indexes("usage_receipts")}
-                identity = indexes["uq_usage_receipt_identity"]
-                assert identity["unique"]  # SQLite's inspector reports 1
-                assert set(identity["column_names"]) == {
-                    "run_id",
-                    "attempt_id",
-                    "receipt_id",
-                }
-
-                with Operations.context(ctx):
-                    head.downgrade()
-                # A fresh inspector: table names are cached per instance.
-                after = inspect(conn)
-                assert "usage_receipts" not in after.get_table_names()
-        finally:
-            engine.dispose()
+        with cold_schema() as installed:
+            inspector = inspect(installed.connection)
+            assert inspector.has_table("usage") and inspector.has_table("lane_sessions")
+            unique = inspector.get_unique_constraints("usage")
+            assert any(item["column_names"] == ["source_key"] for item in unique)
+            unique = inspector.get_unique_constraints("lane_sessions")
+            assert any(
+                set(item["column_names"]) == {"run_id", "attempt", "generation"} for item in unique
+            )
+            with pytest.raises(RuntimeError, match="destructive downgrade"):
+                installed.module.downgrade()
+            assert inspect(installed.connection).has_table("usage")
 
     def test_models_match_the_migrated_columns(self):
-        """015's shape plus the Q39-05 (#324) additions — the canonical
-        four-column identity (``source_namespace`` + ``identity_digest``),
-        the streamed ``final`` marker and the economics projection columns
-        (migration 028)."""
-        assert {c.name for c in UsageReceipt.__table__.columns} == {
-            "id",
-            "run_id",
-            "attempt_id",
-            "receipt_id",
-            # Q39-05 (#324): the canonical durable identity + its stable digest
-            "source_namespace",
-            "identity_digest",
-            "driver",
-            "model",
-            "input_tokens",
-            "cached_input_tokens",
-            "cache_write_tokens",
-            "output_tokens",
-            "completeness",
-            "source",
-            # Q39-05 (#324): streamed finality + the economics projection
-            "final",
-            "cost_usd",
-            "cost_basis",
-            "rate_card_id",
-            "route_version",
-            "segment",
-            "artifact_digest",
-            "raw",
-            "created_at",
-        }
+        with cold_schema() as installed:
+            inspector = inspect(installed.connection)
+            for model in (EngineUsage, EngineLaneSession):
+                assert {item["name"] for item in inspector.get_columns(model.__tablename__)} == {
+                    item.name for item in model.__table__.columns
+                }
+            columns = {item["name"]: item for item in inspector.get_columns("usage")}
+            assert all(columns[name]["nullable"] for name in ("usd", "calls", "tokens"))
 
 
-async def test_persistence_uses_the_frozen_raw_usage_snapshot(db):
-    raw = {
-        "input_tokens": 10,
-        "cost_usd": 0.5,
-        "final": False,
-        "cost_basis": "provider-reported",
-        "unknown": {"nested": ["keep"]},
-    }
-    usage = HarnessUsage.from_meta(raw, attempt_id="immutable-1")
-    raw["cost_usd"] = 999
-    raw["unknown"]["nested"].clear()
-    decoded = usage.raw_document()
-    decoded["cost_usd"] = 0
-    decoded["unknown"]["nested"].clear()
-    async with db() as session:
-        _, created = await ingest_usage_receipt(session, run_id=RUN_ID, usage=usage)
-        await session.commit()
-    assert created is True
-    (row,) = await receipt_rows(db)
-    assert row.cost_usd == pytest.approx(0.5) and row.final is False
-    assert row.raw["unknown"]["nested"] == ["keep"]
-    assert row.receipt_id == usage_receipt_id(RUN_ID, "immutable-1", usage)
+async def test_persistence_uses_the_frozen_raw_usage_snapshot(lane_case):
+    _, _, pending = await started(lane_case)
+    raw = {"input_tokens": 10, "output_tokens": 5, "cost_usd": "0.5"}
+    usage = Usage.model_validate_json(json.dumps(raw))
+    value = report(pending, usage)
+    raw["input_tokens"], raw["cost_usd"] = 999, "999"
+    decoded = usage.model_dump()
+    decoded["input_tokens"] = 999
+    assert await lane_case["api"].report(pending.identity, value)
+    saved = (await lane_case["store"].receipt(pending.identity)).report
+    assert saved.usage == Usage(input_tokens=10, output_tokens=5, cost_usd=Decimal("0.5"))
+    with pytest.raises(LaneConflict):
+        await lane_case["api"].report(
+            pending.identity, report(pending, Usage(input_tokens=999, output_tokens=5))
+        )
+    assert (await lane_case["store"].receipt(pending.identity)).report == saved

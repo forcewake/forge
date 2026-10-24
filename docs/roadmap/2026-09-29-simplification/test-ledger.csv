@@ -87,7 +87,7 @@ tests/test_budget_amendment.py,25,853,true,false,,invariant evidence,,budget,kee
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
 tests/test_budget_engine.py,22,681,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
-tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
+tests/test_budgets.py,53,593,true,true,,invariant evidence,,budgets,keep,-,
 tests/test_candidate.py,49,678,true,false,,edge-case pin,,candidate,keep,-,
 tests/test_candidate_collector.py,35,871,true,false,,,,candidate,keep,-,
 tests/test_capability_manifest.py,4,53,true,false,,edge-case pin,,capability,keep,-,
@@ -306,7 +306,7 @@ tests/test_task_queue.py,12,209,true,false,,,,task,keep,-,
 tests/test_templates.py,63,755,true,false,,,,templates,keep,-,
 tests/test_text_reviewer.py,6,155,true,true,,invariant evidence; edge-case pin,,text,keep,P3-13,Bounded structured review tied to exact approved candidate bytes.
 tests/test_usage_ingestion.py,44,1687,true,false,,edge-case pin,,usage,keep,-,
-tests/test_usage_receipts.py,22,508,true,false,,invariant evidence,,usage,keep,-,
+tests/test_usage_receipts.py,22,317,true,true,,invariant evidence; edge-case pin,,usage,keep,-,
 tests/test_usecases.py,19,640,true,false,,edge-case pin,,usecases,keep,-,
 tests/test_useful_wip_resume.py,3,57,true,false,,edge-case pin,,useful,keep,-,
 tests/test_verification_binding.py,48,1083,true,false,P1-15,invariant evidence,partly deleted,verification,port-adapter,P3,
