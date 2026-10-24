@@ -1,198 +1,102 @@
-"""Webhook payload contract tests for ``forge.gateway.parser.parse_webhook``.
+"""Historical CE captures through authenticated native ingress, never raw authority.
 
-Fixtures under ``fixtures/gitlab/*_webhook.json`` mirror real GitLab
-webhook payload shapes. The push and merge-request fixtures were captured
-from a live GitLab CE 18.9.1 instance (values sanitized to placeholders);
-note and pipeline fixtures mirror the documented shapes:
-
-https://docs.gitlab.com/user/project/integrations/webhook_events/
-- Push events         → X-Gitlab-Event: Push Hook
-- Merge request events → X-Gitlab-Event: Merge Request Hook
-- Note events         → X-Gitlab-Event: Note Hook
-- Pipeline events     → X-Gitlab-Event: Pipeline Hook
-
-These payloads are the raw data the gateway consumes; the tests assert that
-key documented fields survive parsing intact. This includes the pipeline
-webhook authored by the bot itself (``user.username == "forge-bot"``),
-which grounds the M1 fix: the gateway must stop blanket-dropping
-bot-authored pipeline events, so the parser must round-trip
-``user.username`` faithfully (forge.gateway.validator.is_bot_event is the
-current drop mechanism, forge/gateway/router.py:124).
+The narrow typed event retains routing facts. Native reads supply the current
+full task/feedback/CI evidence before mutable execution; raw push and unknown
+hooks cannot degrade into executable generic events.
 """
 
-from __future__ import annotations
+import pytest
 
-from typing import Any
-
-from forge.gateway.parser import EVENT_KIND_MAP, parse_webhook
-from forge.gitlab.events import GitLabEvent
-
-from .conftest import load_fixture
-
-# Documented values of the X-Gitlab-Event header per webhook type.
-HEADER_BY_FIXTURE: dict[str, str] = {
-    "mr_webhook": "Merge Request Hook",
-    "note_webhook": "Note Hook",
-    "pipeline_webhook": "Pipeline Hook",
-    "push_webhook": "Push Hook",
-}
+from forge.port_values import ReadUnavailable, ReviewRef
+from tests.contract.conftest import HEADERS, complete_note, load_fixture, signed
 
 
-async def test_merge_request_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """Merge Request Hook payload parses into MergeRequestEvent.
-
-    Documented key fields: object_kind, user, project, object_attributes
-    (iid, source_branch, target_branch, state, action), labels, changes.
-    """
-    payload: dict[str, Any] = load_fixture("mr_webhook")
-
-    event = parse_webhook(HEADER_BY_FIXTURE["mr_webhook"], payload)
-
-    assert isinstance(event, GitLabEvent)
-    assert event.object_kind == "merge_request"
-    assert event.user is not None and event.user.username == "forge-user"
-    assert event.project is not None
-    assert event.project.path_with_namespace == "group/project"
-
-    mr = event.object_attributes
-    assert mr.iid == 7
-    assert mr.state == "opened"
-    assert mr.action == "open"
-    assert mr.source_branch == "feature/token-rotation"
-    assert mr.target_branch == "main"
-    assert mr.last_commit is not None
-    assert mr.last_commit.id == "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1"
-    assert event.labels[0].title == "backend"
-    # Real payloads arrive with an attribute-change batch; merge_status
-    # transitions (preparing → checking) are part of the observed shape.
-    assert event.changes is not None
-    assert "merge_status" in event.changes
+async def test_merge_request_webhook_parses(ingress):
+    payload = load_fixture("mr_webhook")
+    event = ingress.parse(*signed(payload, HEADERS["mr_webhook"]))
+    assert event.repo.identity.repository_id == "42"
+    assert event.repo.full_name == "group/project" and event.actor.native_id == "11"
+    assert event.actor.login == "forge-user" and isinstance(event.target, ReviewRef)
+    assert event.target.number == 7 and event.event == "merge_request" and event.action == "open"
+    assert event.commands == ()
+    payload["object_attributes"]["action"] = "update"
+    event = ingress.parse(*signed(payload, HEADERS["mr_webhook"]))
+    assert event.head_sha == payload["object_attributes"]["last_commit"]["id"]
 
 
-async def test_note_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """Note Hook payload parses into NoteEvent with discussion context.
-
-    Documented key fields: object_attributes.note, noteable_type,
-    discussion_id, and the embedded merge_request object.
-    """
-    payload: dict[str, Any] = load_fixture("note_webhook")
-
-    event = parse_webhook(HEADER_BY_FIXTURE["note_webhook"], payload)
-
-    assert event.object_kind == "note"
-    attrs = event.object_attributes
-    assert attrs.note == "forge review"
-    assert attrs.noteable_type == "MergeRequest"
-    # discussion_id must survive: it is the reply anchor for discussions.
-    assert attrs.discussion_id == "abc123def456abc123def456abc123de"
-    assert event.merge_request is not None
-    assert event.merge_request.iid == 7
-    assert event.merge_request.source_branch == "feature/token-rotation"
+async def test_note_webhook_parses(ingress):
+    # The archived note capture omits action/native project target bindings; refuse it.
+    with pytest.raises((ValueError, ReadUnavailable)):
+        ingress.parse(*signed(load_fixture("note_webhook"), HEADERS["note_webhook"]))
+    payload = complete_note()
+    event = ingress.parse(*signed(payload, HEADERS["note_webhook"]))
+    assert event.native_id == "501" and event.actor.native_id == "11"
+    assert event.target.number == 7 and isinstance(event.target, ReviewRef)
+    assert event.commands == ()  # historical natural-language review request is not a command
+    payload["object_attributes"]["note"] = "/ask Explain the finding"
+    event = ingress.parse(*signed(payload, HEADERS["note_webhook"]))
+    assert [(command.kind, command.argument) for command in event.commands] == [
+        ("ask", "Explain the finding")
+    ]
+    payload["object_attributes"]["author_id"] = 99
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(payload, HEADERS["note_webhook"]))
 
 
-async def test_push_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """Push Hook payload parses into PushEvent (top-level fields, no
-    object_attributes).
-
-    Real captured shape (GitLab CE 18.9.1): flat user_* fields and NO
-    top-level ``user`` object; ``event_name`` instead of ``event_type``;
-    plus ``push_options``/``ref_protected``/``message``.
-    """
-    payload: dict[str, Any] = load_fixture("push_webhook")
-
-    # Ground the fixture in the real shape: pushes carry no embedded user
-    # object and identify the event via event_name.
-    assert "user" not in payload
-    assert payload["event_name"] == "push"
-
-    event = parse_webhook(HEADER_BY_FIXTURE["push_webhook"], payload)
-
-    assert event.object_kind == "push"
-    assert event.ref == "refs/heads/main"
-    assert event.after == "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1"
-    assert event.user_username == "forge-user"
-    assert event.project_id == 42
-    assert event.total_commits_count == 1
-    assert event.commits is not None and len(event.commits) == 1
-    assert event.commits[0].added == ["docs/example.md"]
-    assert event.commits[0].modified == []
+async def test_push_webhook_parses(ingress):
+    payload = load_fixture("push_webhook")
+    assert "user" not in payload and payload["user_username"] == "forge-user"
+    # Captured pushes carry no native command/target identity. No generic-event fallback.
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(payload, HEADERS["push_webhook"]))
 
 
-async def test_pipeline_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """Pipeline Hook payload parses into PipelineEvent.
-
-    Documented key fields: object_attributes (id, ref, status, stages,
-    source, sha), merge_request, builds array.
-    """
-    payload: dict[str, Any] = load_fixture("pipeline_webhook")
-
-    event = parse_webhook(HEADER_BY_FIXTURE["pipeline_webhook"], payload)
-
-    assert event.object_kind == "pipeline"
-    attrs = event.object_attributes
-    assert attrs.id == 200
-    assert attrs.status == "failed"
-    assert attrs.ref == "feature/token-rotation"
-    assert attrs.stages == ["build", "test"]
-    assert attrs.source == "push"
-    assert event.merge_request is not None and event.merge_request.iid == 7
-    assert len(event.builds) == 2
-    failed = event.builds[1]
-    assert failed.name == "unit-tests"
-    assert failed.status == "failed"
-    assert failed.failure_reason == "script_failure"
+async def test_pipeline_webhook_parses(ingress):
+    payload = load_fixture("pipeline_webhook")
+    event = ingress.parse(*signed(payload, HEADERS["pipeline_webhook"]))
+    assert event.event == "pipeline" and event.action == "failed"
+    assert event.native_id == "200" and event.native_attempt == 200
+    assert event.repo.identity.repository_id == "42" and event.commands == ()
+    assert event.target is None
+    # A signed webhook remains a wake fact; native CI adapters verify SHA, jobs and failures.
+    payload["object_attributes"]["project_id"] = 999
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(payload, HEADERS["pipeline_webhook"]))
 
 
-async def test_pipeline_webhook_preserves_bot_username(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """A pipeline webhook authored by the bot parses and keeps user.username.
-
-    The M1 fix requires the gateway to stop dropping the bot's OWN pipeline
-    events (forge/gateway/router.py routes them through
-    forge.gateway.validator.is_bot_event, which drops anything whose
-    event.user.username equals FORGE_BOT_USERNAME). Grounding for that fix:
-    the documented pipeline payload carries the trigger user, and the
-    parser must round-trip "forge-bot" so downstream code can tell a
-    bot-triggered pipeline from any other.
-    """
-    payload: dict[str, Any] = load_fixture("pipeline_webhook")
-    assert payload["user"]["username"] == "forge-bot"
-
-    event = parse_webhook(HEADER_BY_FIXTURE["pipeline_webhook"], payload)
-
-    assert event.user is not None
-    assert event.user.id == 99
-    assert event.user.name == "Forge Bot"
-    assert event.user.username == "forge-bot"
+async def test_pipeline_webhook_preserves_bot_username(ingress):
+    payload = load_fixture("pipeline_webhook")
+    event = ingress.parse(*signed(payload, HEADERS["pipeline_webhook"]))
+    assert event.actor.native_id == "99" and event.actor.login == "forge-bot"
+    assert event.commands == () and event.native_id == "200"
+    payload["user"]["bot"] = True
+    assert ingress.parse(*signed(payload, HEADERS["pipeline_webhook"])).actor.is_bot
+    # The identical bot identity cannot self-trigger a note command.
+    note = complete_note()
+    note["user"] = payload["user"]
+    note["object_attributes"].update(author_id=99, note="/implement")
+    assert ingress.parse(*signed(note, HEADERS["note_webhook"])) is None
 
 
-async def test_event_kind_map_agrees_with_parse_webhook(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """EVENT_KIND_MAP must map each fixture's object_kind to the same model
-    that parse_webhook picks for the documented X-Gitlab-Event header.
-
-    The worker re-hydrates queued payloads through EVENT_KIND_MAP, so both
-    entry points must stay in sync.
-    """
-    for fixture_name, header in HEADER_BY_FIXTURE.items():
-        payload: dict[str, Any] = load_fixture(fixture_name)
-
-        via_header = parse_webhook(header, payload)
-        via_kind_map = EVENT_KIND_MAP[payload["object_kind"]].model_validate(payload)
-
-        assert type(via_header) is type(via_kind_map), fixture_name
-        assert via_header.object_kind == payload["object_kind"]
+async def test_event_kind_map_agrees_with_parse_webhook(ingress):
+    for fixture_name in ("mr_webhook", "pipeline_webhook"):
+        payload = load_fixture(fixture_name)
+        headers, body = signed(payload, HEADERS[fixture_name])
+        event = ingress.parse(headers, body)
+        assert event.event == payload["object_kind"]
+        wrong, _ = signed(payload, "Issue Hook")
+        with pytest.raises(ValueError):
+            ingress.parse(wrong, body)
+        headers["X-Gitlab-Token"] = "synthetic-wrong-secret"
+        with pytest.raises(ValueError):
+            ingress.parse(headers, body)
 
 
-async def test_unknown_event_header_falls_back_to_base_event(fixtures) -> None:  # type: ignore[no-untyped-def]
-    """An undocumented X-Gitlab-Event header parses via the base GitLabEvent
-    model instead of failing (documented parser behavior).
-
-    New GitLab webhook types must not crash the gateway; they degrade to
-    the common object_kind/user/project subset.
-    """
-    payload: dict[str, Any] = load_fixture("mr_webhook")
-
-    event = parse_webhook("Wiki Page Hook", payload)
-
-    assert type(event) is GitLabEvent
-    assert event.object_kind == "merge_request"
-    assert event.user is not None and event.user.username == "forge-user"
+async def test_unknown_event_header_falls_back_to_base_event(ingress):
+    # Historical generic fallback is retired. Even authentic unknown hooks cannot create commands.
+    payload = load_fixture("mr_webhook")
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(payload, "Wiki Page Hook"))
+    payload["object_kind"] = "wiki_page"
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(payload, "Merge Request Hook"))

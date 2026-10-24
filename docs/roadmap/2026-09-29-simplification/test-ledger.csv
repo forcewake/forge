@@ -1,8 +1,8 @@
 file,tests,loc,imports_runtime,imports_tests_only,deleted_by,protected,review,area,disposition,phase,note
-tests/contract/test_client_endpoints.py,30,1013,true,false,,,,contract,port-adapter,P3,
-tests/contract/test_known_deviations.py,4,165,true,false,,,,contract,port-adapter,P3,
+tests/contract/test_client_endpoints.py,30,385,false,false,,,,contract,port-adapter,P3,
+tests/contract/test_known_deviations.py,4,47,false,false,,,,contract,port-adapter,P3,
 tests/contract/test_provider_contract.py,8,426,true,true,,edge-case pin,,contract,keep,P3-05,Reusable native provider contracts and explicit faults
-tests/contract/test_webhook_payloads.py,7,198,true,false,,,,contract,keep,-,
+tests/contract/test_webhook_payloads.py,7,102,false,false,,,,contract,keep,-,
 tests/invariants/test_i1_no_merge.py,7,216,false,false,,invariant suite; invariant evidence; edge-case pin,,invariants,keep,-,
 tests/invariants/test_registry_integrity.py,6,66,false,false,,invariant suite,,invariants,keep,-,
 tests/production_entry/test_causal_steering.py,2,61,true,false,,edge-case pin,,production_entry,port-engine,P3,

@@ -1,41 +1,66 @@
-"""Shared fixtures for the GitLab API contract tests.
-
-These tests pin ``forge.gitlab.client.GitLabClient`` and
-``forge.gateway.parser.parse_webhook`` to the DOCUMENTED GitLab REST API v4
-and documented webhook payload shapes. All HTTP traffic is mocked with
-pytest-httpx; nothing here touches a real GitLab instance.
-"""
-
-from __future__ import annotations
+"""Native adapter contract fixtures: no live provider and no retiring client import."""
 
 import json
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from uuid import uuid4
 
 import pytest
 
-from forge.gitlab.client import GitLabClient
-
-BASE_URL = "https://gitlab.example.com"
-BASE = f"{BASE_URL}/api/v4"
+from forge.port_values import Actor
+from forge.providers.gitlab.ingress import GitLabIngress
+from tests import native_clients_fixture as native_fixture
+from tests import test_native_git_publication as git_proof
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "gitlab"
+SECRET = b"synthetic-contract-secret-32-bytes!"
+HEADERS = {
+    "mr_webhook": "Merge Request Hook",
+    "note_webhook": "Note Hook",
+    "pipeline_webhook": "Pipeline Hook",
+    "push_webhook": "Push Hook",
+}
+gitlab, gitlab_native, native = (
+    native_fixture.gitlab,
+    native_fixture.gitlab_native,
+    git_proof.native,
+)
 
 
-def load_fixture(name: str) -> Any:
-    """Load a JSON fixture from tests/contract/fixtures/gitlab/<name>.json."""
-    with (FIXTURES_DIR / f"{name}.json").open(encoding="utf-8") as fh:
-        return json.load(fh)
+def load_fixture(name):
+    return json.loads((FIXTURES_DIR / f"{name}.json").read_text())
 
 
-@pytest.fixture()
-def gitlab_client() -> GitLabClient:
-    """Client pointing at a fake GitLab host intercepted by pytest-httpx."""
-    return GitLabClient(base_url=BASE_URL, token="forge-test-token", timeout=5.0)
-
-
-@pytest.fixture()
-def fixtures() -> Callable[[str], Any]:
-    """Return the fixture loader function."""
+@pytest.fixture
+def fixtures():
     return load_fixture
+
+
+@pytest.fixture
+def ingress():
+    bot = Actor(
+        provider="gitlab",
+        connection_id="contract-ce",
+        native_id="99",
+        login="forge-bot",
+        is_bot=True,
+    )
+    return GitLabIngress("contract-ce", SECRET, bots={"42": bot})
+
+
+def signed(payload, event):
+    return (
+        {
+            "X-Gitlab-Event": event,
+            "X-Gitlab-Event-UUID": str(uuid4()),
+            "X-Gitlab-Token": SECRET.decode(),
+        },
+        json.dumps(payload).encode(),
+    )
+
+
+def complete_note():
+    """Explicit complete native target variant of the historical partial note capture."""
+    payload = load_fixture("note_webhook")
+    payload["object_attributes"]["action"] = "create"
+    payload["merge_request"].update(source_project_id=42, target_project_id=42)
+    return payload
