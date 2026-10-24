@@ -495,7 +495,7 @@ dev = [
     { name = "deptry" },
     { name = "diff-cover" },
     { name = "fakeredis" },
-    { name = "forge-lane" },
+    { name = "forge-lane", extra = ["claude"] },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -533,7 +533,7 @@ dev = [
     { name = "deptry", specifier = "==0.25.1" },
     { name = "diff-cover", specifier = "==10.6.0" },
     { name = "fakeredis", specifier = ">=2.26" },
-    { name = "forge-lane", editable = "packages/forge-lane" },
+    { name = "forge-lane", extras = ["claude"], editable = "packages/forge-lane" },
     { name = "import-linter", specifier = "==2.15" },
     { name = "mypy", specifier = "==1.19.1" },
     { name = "pytest", specifier = "==9.0.2" },
@@ -566,7 +566,7 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "pydantic", specifier = ">=2.13.5,<3" },
 ]
-provides-extras = ["claude", "contrib"]
+provides-extras = ["claude"]
 
 [[package]]
 name = "forge-protocol"
