@@ -156,7 +156,7 @@ tests/test_exact_composition_guard.py,6,76,false,false,,edge-case pin,,exact,kee
 tests/test_execution_profile.py,93,1348,true,false,,,,execution,keep,-,
 tests/test_execution_spec.py,50,613,true,true,,,,execution,keep,-,
 tests/test_factory_llm.py,21,278,true,false,,edge-case pin,,factory,keep,-,
-tests/test_failure_injection.py,8,1003,true,false,,invariant evidence,,failure,port-engine,P3,
+tests/test_failure_injection.py,8,256,true,true,,invariant evidence; edge-case pin,,failure,port-engine,P3,
 tests/test_failure_injection_os.py,10,1011,true,false,,,,failure,keep,-,
 tests/test_fallback.py,7,196,true,false,,,,fallback,keep,-,
 tests/test_findings.py,5,166,true,false,,edge-case pin,,findings,port-adapter,P3,
