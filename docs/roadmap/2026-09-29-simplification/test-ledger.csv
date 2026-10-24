@@ -203,7 +203,7 @@ tests/test_inventory_lab.py,24,605,false,false,,,,inventory,keep,-,
 tests/test_lane_auth.py,18,436,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_checkpoint_v1.py,5,198,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_claude_code.py,12,352,true,true,,edge-case pin,,lane,keep,-,
-tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,
+tests/test_lane_contrib.py,15,312,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_copilot_cli.py,12,360,false,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_driver.py,120,2359,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_frozen_policy.py,9,284,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts

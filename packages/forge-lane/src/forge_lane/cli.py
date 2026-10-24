@@ -21,17 +21,10 @@ from .workspace import Workspace
 DRIVERS = {
     "claude_code": "forge_lane.drivers.claude_code",
     "copilot_cli": "forge_lane.drivers.copilot_cli",
-    "codex": "forge_lane.contrib.codex",
-    "opencode": "forge_lane.contrib.opencode",
-    "grok": "forge_lane.contrib.grok",
 }
 
 
 def load_driver(name: str) -> Driver:
-    if name in {"codex", "opencode", "grok"}:
-        from .contrib import require_enabled
-
-        require_enabled()
     try:
         module = importlib.import_module(DRIVERS[name])
         return module.create_driver()

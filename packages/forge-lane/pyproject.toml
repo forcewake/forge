@@ -8,7 +8,6 @@ dependencies = ["forge-protocol>=0.1.0,<0.2.0", "httpx==0.28.1", "pydantic>=2.13
 
 [project.optional-dependencies]
 claude = ["claude-agent-sdk==0.2.157"]
-contrib = []
 
 [project.scripts]
 forge-lane = "forge_lane.cli:main"
