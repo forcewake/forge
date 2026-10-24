@@ -129,7 +129,7 @@ tests/test_discovery_authority.py,3,55,true,false,,edge-case pin,,discovery,keep
 tests/test_docs_links.py,4,131,false,false,,edge-case pin,,docs,keep,-,
 tests/test_doctor.py,24,597,true,false,,,,doctor,keep,-,
 tests/test_doctor_settings.py,4,48,true,false,,,,doctor,keep,-,
-tests/test_domain_approved_input.py,7,285,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
+tests/test_domain_approved_input.py,7,290,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_binary_candidate.py,5,246,true,true,,edge-case pin,,domain,keep,P3-09,"Native Git binary, mode and symlink validation with durable byte-exact recovery"
 tests/test_domain_boundary.py,2,84,false,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_candidate.py,10,282,true,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
@@ -206,10 +206,10 @@ tests/test_lane_claude_code.py,12,352,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_copilot_cli.py,12,360,false,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_driver.py,120,2359,true,false,,edge-case pin,,lane,keep,-,
-tests/test_lane_frozen_policy.py,9,280,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
+tests/test_lane_frozen_policy.py,9,284,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_mcp.py,7,264,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-engine,P3,
-tests/test_lane_runner_v1.py,14,539,true,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_runner_v1.py,14,560,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_templates_v1.py,2,31,false,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_trace.py,6,117,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_v1.py,16,510,true,false,,edge-case pin,,lane,keep,-,

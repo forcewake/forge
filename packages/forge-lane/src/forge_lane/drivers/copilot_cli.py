@@ -59,7 +59,7 @@ class CopilotCLIDriver:
         config = tempfile.TemporaryDirectory(prefix="forge-copilot-")
         session = CopilotSession(workspace, token, config)
         spec = brief.frozen_spec
-        session.policy = FilePolicy(workspace, None, scope=spec.write_policy if spec else None)
+        session.policy = FilePolicy(workspace, None, scope=spec.write_policy)
         try:
             session.transport = await self.factory(
                 self.binary,

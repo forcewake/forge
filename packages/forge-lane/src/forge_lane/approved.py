@@ -17,7 +17,7 @@ async def prepare_policy(
             ExitCode.APPROVAL, "repair_mismatch", "Repair context differs from dispatch"
         )
     spec = brief.frozen_spec
-    if spec is not None and (
+    if (
         spec.driver != dispatch.driver
         or spec.model != dispatch.model
         or spec.limits.wallclock_seconds != dispatch.timeout_seconds
@@ -38,14 +38,14 @@ async def prepare_policy(
                 "wall_clock_exceeded",
                 "Policy preflight exceeded wall-clock budget",
             ) from None
-    elif spec is not None or brief.execution_policy.mcp_servers:
+    else:
         raise LaneFailure(
             ExitCode.DRIVER,
             "policy_capability_unavailable",
             "Driver cannot enforce this frozen policy",
         )
 
-    if spec is not None and (spec.metering == "metered") != driver.requires_model_key:
+    if (spec.metering == "metered") != driver.requires_model_key:
         raise LaneFailure(
             ExitCode.DRIVER,
             "unsupported_metering_policy",

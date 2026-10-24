@@ -141,17 +141,10 @@
       "type": "string"
     },
     "spec_json": {
-      "anyOf": [
-        {
-          "maxLength": 1048576,
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Spec Json"
+      "maxLength": 1048576,
+      "minLength": 1,
+      "title": "Spec Json",
+      "type": "string"
     }
   },
   "required": [
@@ -163,7 +156,8 @@
     "plan_digest",
     "spec_digest",
     "base_sha",
-    "revision"
+    "revision",
+    "spec_json"
   ],
   "title": "Brief",
   "type": "object"

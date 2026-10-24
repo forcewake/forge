@@ -181,8 +181,13 @@ def test_brief_transports_the_exact_frozen_spec_and_six_field_approval():
     assert Brief.model_validate_json(canonical_json(brief)) == brief
     with pytest.raises(ValueError, match="does not match"):
         approved.to_brief(IDENTITY, spec(model="changed-model"))
-    legacy = Brief.model_validate({**IDENTITY.model_dump(), **approved.model_dump()})
-    assert legacy.execution_policy == ExecutionPolicy() and "spec_json" not in legacy.model_dump()
+    for missing in (None, "", False):
+        with pytest.raises(ValidationError):
+            Brief.model_validate(
+                {**IDENTITY.model_dump(), **approved.model_dump(), "spec_json": missing}
+            )
+    with pytest.raises(ValidationError):
+        Brief.model_validate({**IDENTITY.model_dump(), **approved.model_dump()})
 
 
 @pytest.mark.parametrize(

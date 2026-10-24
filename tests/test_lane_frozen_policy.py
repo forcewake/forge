@@ -55,7 +55,11 @@ async def test_driver_without_a_policy_consumer_and_slow_preflight_refuse_before
     workspace = tmp_path / "work"
     dispatch, brief = frozen_inputs(checkout(workspace))
     server = WireServer(dispatch, brief)
-    result = await execute(dispatch, server, FakeDriver(), workspace)
+
+    class WithoutPolicy(FakeDriver):
+        prepare = None
+
+    result = await execute(dispatch, server, WithoutPolicy(), workspace)
     assert result.classification == "policy_capability_unavailable" and server.model_keys == 0
 
     class Slow(PolicyDriver):

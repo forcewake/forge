@@ -5,6 +5,7 @@ import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -17,7 +18,6 @@ from forge_lane.errors import ExitCode
 from forge_lane.runner import Runner
 from forge_lane.supervisor import Timings
 from forge_protocol import (
-    Brief,
     CandidateBundle,
     CheckpointManifest,
     ControlCommand,
@@ -25,10 +25,15 @@ from forge_protocol import (
     LaneReport,
     SessionRequest,
     SessionToken,
+    RunIdentity,
     approved_input_digest,
     canonical_json,
     digest,
 )
+
+from forge.domain.approved_input import ApprovedInput
+from forge.domain.budget import BudgetLimits
+from tests.test_domain_approved_input import spec
 
 
 def git(path, *args):
@@ -49,14 +54,21 @@ def checkout(path):
 
 def inputs(base, **overrides):
     identity = dict(forge_run_id="run-1", attempt=0, generation=0)
-    content = dict(
-        brief_text="Implement the approved change",
-        plan_digest="a" * 64,
-        spec_digest="b" * 64,
+    frozen = spec(
         base_sha=base,
-        revision=1,
+        driver=overrides.get("driver", "fake"),
+        metering="copilot-scoped-unmetered"
+        if overrides.get("driver") == "copilot_cli"
+        else "metered",
+        model=overrides.get("model", "test-model"),
+        limits=BudgetLimits(
+            usd=Decimal("10"),
+            calls=20,
+            tokens=10000,
+            wallclock_seconds=overrides.get("timeout_seconds", 10),
+        ),
     )
-    approval = approved_input_digest(**content)
+    approved = ApprovedInput.from_spec(frozen)
     dispatch = LaneDispatch(
         **{
             **identity,
@@ -65,15 +77,15 @@ def inputs(base, **overrides):
             "repository": "team/repo",
             "ref": "main",
             "base_sha": base,
-            "approved_digest": approval,
-            "driver": "fake",
-            "model": "test-model",
-            "timeout_seconds": 10,
+            "approved_digest": approved.approved_digest,
+            "driver": frozen.driver,
+            "model": frozen.model,
+            "timeout_seconds": frozen.limits.wallclock_seconds,
             **overrides,
         }
     )
-    brief = Brief(
-        **{**identity, "generation": dispatch.generation}, **content, approved_digest=approval
+    brief = approved.to_brief(
+        RunIdentity(**{**identity, "generation": dispatch.generation}), frozen
     )
     return dispatch, brief
 
@@ -198,12 +210,15 @@ class FakeSession:
 class FakeDriver:
     name = "fake"
     capabilities = frozenset({"interrupt", "steer", "resume_session"})
-    requires_model_key = False
+    requires_model_key = True
 
     def __init__(self, edit=None, *, wait=False, failure=False):
         self.edit, self.wait, self.failure = edit, wait, failure
         self.starts, self.interrupted = [], 0
         self.session = FakeSession(self)
+
+    async def prepare(self, brief, workspace):
+        assert brief.frozen_spec.driver == self.name
 
     async def start(self, brief, workspace, env):
         assert isinstance(env, DriverEnv)
@@ -250,7 +265,7 @@ async def test_success_collects_untracked_binary_and_ignores_real_index(tmp_path
     assert b"GIT binary patch" in diff and b"base.txt" in diff
     assert b".forge" not in diff and b"must stay private" not in diff
     assert (workspace / ".git" / "index").read_bytes() == original_index
-    assert server.heartbeats and server.model_keys == 0
+    assert server.heartbeats and server.model_keys == 1
     fresh = tmp_path / "fresh"
     git(tmp_path, "clone", "-q", str(workspace), str(fresh))
     subprocess.run(["git", "-C", str(fresh), "apply", "--binary", "-"], input=diff, check=True)
@@ -311,7 +326,9 @@ async def test_deadline_interrupts_before_reporting_and_never_publishes(tmp_path
     assert not server.candidates
 
 
-@pytest.mark.parametrize("tamper", ["brief_text", "dispatch_digest", "generation"])
+@pytest.mark.parametrize(
+    "tamper", ["brief_text", "dispatch_digest", "generation", "missing_spec", "null_spec"]
+)
 async def test_unapproved_or_cross_generation_brief_never_starts_driver(tmp_path, tamper):
     workspace = tmp_path / "work"
     base = checkout(workspace)
@@ -321,6 +338,10 @@ async def test_unapproved_or_cross_generation_brief_never_starts_driver(tmp_path
         dispatch = dispatch.model_copy(update={"approved_digest": "c" * 64})
     elif tamper == "brief_text":
         server.brief["brief_text"] = "tampered"
+    elif tamper == "missing_spec":
+        del server.brief["spec_json"]
+    elif tamper == "null_spec":
+        server.brief["spec_json"] = None
     else:
         server.brief["generation"] += 1
     result = await execute(dispatch, server, driver, workspace)

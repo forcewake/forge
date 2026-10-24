@@ -93,7 +93,7 @@ class ClaudeSession:
         self.policy = FilePolicy(
             workspace,
             sdk,
-            scope=spec.write_policy if spec else None,
+            scope=spec.write_policy,
             execution=brief.execution_policy,
         )
         self.ready, self.done, self.stopping = asyncio.Event(), asyncio.Event(), asyncio.Event()

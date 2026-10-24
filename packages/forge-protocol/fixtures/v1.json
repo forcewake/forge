@@ -1,15 +1,16 @@
 {
   "Brief": {
-    "approved_digest": "5e63ad8681adb5db2070ad88ce19b22709ccdb21309a9d0fd81924d343be31b5",
+    "approved_digest": "6d3ba4d63ba06d0de63b6e86efb77886987728d90b28f1936a69865663bc5d97",
     "attempt": 0,
     "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "brief_text": "Change one file.",
+    "brief_text": "# Keep the full implementation plan\n\nUse the approved source snapshot.\n\nUpdate the parser and its regression.\n\n## parse: Correct parsing\n\nRetain the complete input and reject trailing garbage.\n\nFiles: src/example.py\n\nSource: github:installation-9:123@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:src/example.py#L2-L7\n\n## verify: Verify\n\nRun parser tests.",
     "forge_run_id": "run-1",
     "generation": 0,
-    "plan_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "plan_digest": "6f24c5824f30be6033affc3c0178436f06d6526b318c33b21a9c3849cd010498",
     "protocol": "forge.lane/1",
     "revision": 1,
-    "spec_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "spec_digest": "d87ad529b9f413493f7fb0183fc83e4e12cbc23d24d0de19b81d955c32edffa3",
+    "spec_json": "{\"base_sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"closing_reserve\":{\"calls\":2,\"tokens\":1000,\"usd\":\"2\"},\"driver\":\"claude_code\",\"execution_policy\":{\"mcp_servers\":[],\"profile\":\"workspace-files-v1\",\"schema\":\"forge.execution-policy/1\"},\"limits\":{\"calls\":20,\"tokens\":10000,\"usd\":\"1E+1\",\"wallclock_seconds\":600},\"metering\":\"metered\",\"model\":\"test-model\",\"plan\":{\"steps\":[{\"citations\":[{\"end_line\":7,\"path\":\"src/example.py\",\"repository\":{\"connection_id\":\"installation-9\",\"provider\":\"github\",\"repository_id\":\"123\"},\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"start_line\":2}],\"files\":[\"src/example.py\"],\"instructions\":\"Retain the complete input and reject trailing garbage.\",\"step_id\":\"parse\",\"title\":\"Correct parsing\"},{\"citations\":[],\"files\":[],\"instructions\":\"Run parser tests.\",\"step_id\":\"verify\",\"title\":\"Verify\"}],\"summary\":\"Update the parser and its regression.\"},\"planning_allowance\":{\"calls\":3,\"tokens\":2000,\"usd\":\"1\"},\"revision\":1,\"schema\":\"forge.run-spec/2\",\"target_branch\":\"main\",\"task_description\":\"Use the approved source snapshot.\",\"task_title\":\"Keep the full implementation plan\",\"verification\":{\"required_checks\":[\"unit\",\"lint\"]},\"write_policy\":{\"allowed_globs\":[],\"denied_globs\":[],\"denied_paths\":[\".forge.yml\",\".gitlab-ci.yml\"],\"denied_prefixes\":[\".github/\"],\"deny_lockfiles\":true,\"name\":\"no_dependencies\",\"permitted_globs\":[],\"require_special_approval\":false,\"sensitive_paths\":[]}}"
   },
   "CandidateBundle": {
     "approved_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

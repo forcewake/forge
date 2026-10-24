@@ -88,7 +88,7 @@ class Runner:
             timeout=max(0, self.dispatch.timeout_seconds - (monotonic() - self.started)),
         )
         spec = brief.frozen_spec
-        policy = FilePolicy(self.workspace.path, None, scope=spec.write_policy if spec else None)
+        policy = FilePolicy(self.workspace.path, None, scope=spec.write_policy)
         self.workspace.write_allowed = lambda path: policy.permitted("Write", {"file_path": path})
         await self.workspace.validate()
         if self.driver.name != self.dispatch.driver or "interrupt" not in self.driver.capabilities:

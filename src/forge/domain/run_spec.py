@@ -1,4 +1,4 @@
-"""The new frozen run specification; legacy numeric-schema bytes stay separate."""
+"""The complete frozen run specification executed by the lane."""
 
 from __future__ import annotations
 

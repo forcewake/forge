@@ -144,9 +144,7 @@ class Brief(RunIdentity):
     base_sha: CommitSha
     revision: Positive
     repair: RepairContext | None = Field(default=None, exclude_if=lambda value: value is None)
-    spec_json: Annotated[str, Field(strict=True, max_length=1024 * 1024)] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
+    spec_json: Annotated[Text, Field(max_length=1024 * 1024)]
 
     @model_validator(mode="after")
     def verify_approved_input(self) -> Self:
@@ -160,8 +158,7 @@ class Brief(RunIdentity):
         )
         if expected != self.approved_digest:
             raise ValueError("approved input digest mismatch")
-        if self.spec_json is not None:
-            self.frozen_spec
+        self.frozen_spec
         return self
 
     @property
@@ -183,13 +180,10 @@ class Brief(RunIdentity):
 
     @property
     def execution_policy(self) -> ExecutionPolicy:
-        spec = self.frozen_spec
-        return spec.execution_policy if spec is not None else ExecutionPolicy()
+        return self.frozen_spec.execution_policy
 
     @property
-    def frozen_spec(self) -> FrozenRunSpec | None:
-        if self.spec_json is None:
-            return None
+    def frozen_spec(self) -> FrozenRunSpec:
         return frozen_specification(
             self.spec_json,
             spec_digest=self.spec_digest,
