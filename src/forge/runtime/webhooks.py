@@ -10,6 +10,9 @@ router = APIRouter(tags=["native-hooks"])
 
 
 def command_id(event: IngressEvent) -> str:
+    if event.issue_action is not None or (event.event == "issues" and event.action == "labeled"):
+        assert event.native_id is not None
+        return event.native_id
     if event.native_id is None:
         return event.delivery_key
     kinds = {
@@ -61,7 +64,8 @@ async def hook(connection: str, request: Request, service: RuntimeDep) -> dict[s
                 actor=event.actor,
                 target=event.target,
                 command=action,
-                native_reply=True,
+                native_reply=event.issue_action is None,
+                issue_action=event.issue_action,
             )
             results.append((await service.commands.submit(envelope)).model_dump(mode="json"))
     review = (

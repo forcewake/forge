@@ -6,9 +6,10 @@ from uuid import UUID, uuid5
 from forge.command_values import CommandEnvelope, CommandLease, CommandResult
 from forge.engine.commands import Action, refusal
 from forge.engine.approve import Approve
-from forge.engine.plan import Implement
+from forge.engine.plan import Implement, task_binding
 from forge.engine.plan_values import PlanIntent
 from forge.port_values import NeighborSnapshot, PlanningSnapshot
+from forge.domain.states import State
 from forge.ports import Clock
 from forge.runtime.routing import Registry
 from forge.runtime.settings import RuntimeSettings
@@ -50,11 +51,31 @@ class InitialActions:
         if prior is not None:
             return CommandResult(status="accepted", reason="implementation_queued", run_id=prior.id)
         task = await self.ports.get_task(envelope.target)
-        head = await self.ports.head(entry.ref, repository.policy.target_branch)
+        original = None
+        if envelope.issue_action == "edited":
+            if run is None or not (
+                run.state == State.AWAITING_APPROVAL
+                or (run.state == State.BLOCKED and run.reason == "approval_task_changed")
+            ):
+                return CommandResult(
+                    status="observed",
+                    reason="issue_no_longer_pending",
+                    run_id=run.id if run else None,
+                )
+            initial = await StepStore(self.factory).get(f"{run.id}:plan")
+            if initial is None:
+                raise StoreConflict("original admission is missing")
+            original = PlanIntent.model_validate_json(initial.payload_json)
+            if task_binding(original.task) == task_binding(task):
+                return CommandResult(
+                    status="observed", reason="issue_text_unchanged", run_id=run.id
+                )
+        policy = repository.policy if original is None else original.policy
+        head = await self.ports.head(entry.ref, policy.target_branch)
         if head is None:
             return refusal("base_not_found")
         neighbors = []
-        for allowed in repository.neighbors:
+        for allowed in () if original is not None else repository.neighbors:
             other_connection, other = self.config.repositories()[allowed.repository]
             ref = self.ports.named(allowed.repository).ref
             sha = await self.ports.head(ref, other.policy.target_branch)
@@ -67,10 +88,12 @@ class InitialActions:
             actor=envelope.actor,
             task=task,
             snapshot=PlanningSnapshot(
-                primary=NeighborSnapshot(repo=entry.ref, sha=head), neighbors=tuple(neighbors)
+                primary=NeighborSnapshot(repo=entry.ref, sha=head),
+                neighbors=original.snapshot.neighbors if original is not None else tuple(neighbors),
             ),
-            policy=repository.policy,
-            max_active=self.config.max_active,
+            policy=policy,
+            max_active=self.config.max_active if original is None else original.max_active,
+            gate_ttl_seconds=3600 if original is None else original.gate_ttl_seconds,
         )
         request = RunRequest(
             run_id,
@@ -82,7 +105,10 @@ class InitialActions:
         )
         try:
             created = await Implement(AdmissionStore(self.factory), entry.actor, self.clock)(
-                request, intent, command_lease=lease
+                request,
+                intent,
+                command_lease=lease,
+                supersede_run_id=run.id if envelope.issue_action == "edited" and run else None,
             )
         except StaleLease:
             raise

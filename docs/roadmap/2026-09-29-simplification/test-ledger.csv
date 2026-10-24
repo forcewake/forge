@@ -180,7 +180,7 @@ tests/test_github_reads.py,13,438,true,true,,edge-case pin,,github,keep,P3-16,"F
 tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
 tests/test_github_rest.py,16,509,true,true,,edge-case pin,,github,keep,P3-16,"Native GitHub REST write, recovery and SHA-bound Actions fixtures"
 tests/test_github_runs.py,128,4762,true,false,,edge-case pin,,github,port-engine,P3,
-tests/test_github_webhook.py,45,974,true,false,,invariant evidence; edge-case pin,,github,keep,-,
+tests/test_github_webhook.py,46,429,true,true,,invariant evidence; edge-case pin,,github,keep,-,
 tests/test_gitlab_client.py,30,646,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_client_commits.py,6,150,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_dispatch_parity.py,13,533,true,false,,,,gitlab,port-engine,P3,
@@ -224,6 +224,7 @@ tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
 tests/test_native_git_ca.py,2,108,false,true,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
 tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
+tests/test_native_issue_lifecycle.py,9,192,true,true,,invariant evidence; edge-case pin,,native,keep,P3-10,"Exact native task drift, authenticated gate-only issue refresh and label withdrawal with immutable history and atomic fresh admission."
 tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_native_model_services.py,6,273,true,true,,invariant evidence,,native,keep,P3-13,"Lease-bound native review model grants and exact persisted diff, policy and closing-call authority."
 tests/test_native_review.py,17,557,true,true,,invariant evidence; edge-case pin,,native,keep,P3-13,"Incremental human-push review on exact native heads, separate read-only authority, bounded budget and immutable comment recovery."

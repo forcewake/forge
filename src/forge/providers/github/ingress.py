@@ -8,9 +8,11 @@ import re
 from typing import cast
 from uuid import UUID
 
+from forge_protocol import digest
+
 from forge.domain.plan import RepositoryIdentity
 from forge.ingress_values import Command, CommandKind, IngressEvent
-from forge.port_values import Actor, RepoRef, ReviewRef, SubjectRef
+from forge.port_values import Actor, RepoRef, ReviewRef, SubjectRef, ReadUnavailable
 from forge.providers.github.repo import native_id, object_doc, text
 
 MAX_WEBHOOK = 2 * 1024 * 1024
@@ -111,7 +113,7 @@ class GitHubIngress:
                 )
             )
             return self._event(document, event, delivery.lower())
-        except (UnicodeError, json.JSONDecodeError, TypeError, KeyError) as error:
+        except (UnicodeError, json.JSONDecodeError, TypeError, KeyError, ReadUnavailable) as error:
             raise ValueError("malformed webhook") from error
 
     def _event(self, doc: dict[str, object], event: str, delivery: str) -> IngressEvent | None:
@@ -198,9 +200,41 @@ class GitHubIngress:
         elif (
             event == "issues"
             and action == "labeled"
-            and object_doc(doc.get("label")).get("name") == self.implement_label
+            and text(object_doc(doc.get("label")).get("name")).casefold()
+            == self.implement_label.casefold()
         ):
             values["commands"] = (Command(kind="implement"),)
+            target = values["target"]
+            assert isinstance(target, (SubjectRef, ReviewRef))
+            values["native_id"] = "issue-label:" + digest(
+                {
+                    "number": target.number,
+                    "updated_at": object_doc(doc.get("issue")).get("updated_at"),
+                }
+            )
+        elif event == "issues" and action in ("edited", "unlabeled"):
+            target = values["target"]
+            if not isinstance(target, SubjectRef):
+                return
+            if (
+                action == "unlabeled"
+                and text(object_doc(doc.get("label")).get("name")).casefold()
+                != self.implement_label.casefold()
+            ):
+                return
+            issue = object_doc(doc.get("issue"))
+            version = text(issue.get("updated_at"))
+            values["native_id"] = "issue:" + digest(
+                {
+                    "number": target.number,
+                    "action": action,
+                    "version": version,
+                    "title": text(issue.get("title")),
+                    "body": issue.get("body"),
+                }
+            )
+            values["issue_action"] = action
+            values["commands"] = (Command(kind="implement" if action == "edited" else "cancel"),)
 
     @staticmethod
     def _author(row: dict[str, object], values: dict[str, object]) -> None:

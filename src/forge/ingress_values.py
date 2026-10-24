@@ -36,6 +36,7 @@ class IngressEvent(Value):
     actor: Actor
     target: SubjectRef | ReviewRef | None = None
     commands: tuple[Command, ...] = ()
+    issue_action: Literal["edited", "unlabeled"] | None = None
     native_id: str | None = None
     native_attempt: int | None = None
     correlation_id: str | None = None

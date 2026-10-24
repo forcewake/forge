@@ -9,7 +9,7 @@ from forge.domain.run_spec import RunPolicy
 from forge.engine.effects import Effects
 from forge.engine.plan_values import PlanIntent
 from forge.engine.runner import Park, Retryable, StepContext, StepResult
-from forge.port_values import Applied, SubjectRef
+from forge.port_values import Applied, SubjectRef, TaskSnapshot
 from forge.domain.verdicts import Unknown
 from forge.ports import ActorPort, Clock, Planner
 from forge.planning.limits import PlanningRefused
@@ -35,6 +35,10 @@ def subject_binding(subject: SubjectRef) -> tuple[str, str, str, str, str]:
     )
 
 
+def task_binding(task: TaskSnapshot) -> tuple[object, ...]:
+    return subject_binding(task.subject), task.title, task.description
+
+
 def run_binding(run: RunRequest | RunRecord) -> tuple[str, str, str, str, str]:
     return run.provider, run.connection_id, run.repository_id, run.subject_kind, run.subject_id
 
@@ -44,7 +48,12 @@ class Implement:
         self.admission, self.actors, self.clock = admission, actors, clock
 
     async def __call__(
-        self, request: RunRequest, intent: PlanIntent, *, command_lease: CommandLease | None = None
+        self,
+        request: RunRequest,
+        intent: PlanIntent,
+        *,
+        command_lease: CommandLease | None = None,
+        supersede_run_id: str | None = None,
     ) -> RunRecord:
         subject = intent.task.subject
         if run_binding(request) != subject_binding(subject):
@@ -57,6 +66,7 @@ class Implement:
             max_active=intent.max_active,
             now=self.clock.now(),
             command_lease=command_lease,
+            supersede_run_id=supersede_run_id,
         )
 
 

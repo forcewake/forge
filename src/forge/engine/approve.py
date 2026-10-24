@@ -3,16 +3,21 @@
 from forge.domain.states import Handler, State
 from forge.command_values import CommandLease
 from forge.engine.effects import Effects
-from forge.engine.plan import result_json, run_binding, subject_binding
+from forge.engine.plan import result_json, run_binding, subject_binding, task_binding
 from forge.engine.plan_values import PlanIntent
-from forge.engine.runner import Retryable, StepContext, StepResult
+from forge.engine.runner import Park, Retryable, StepContext, StepResult
 from forge.port_values import ReadUnavailable
-from forge.ports import ActorPort, Clock, RepoPort
+from forge.ports import ActorPort, Clock, RepoPort, SubjectPort
+from typing import Protocol
 from forge.store.approval import ApprovalStore
 from forge.store.approval_values import ApprovalClaim, ConsumeGate
 from forge.store.records import StepRecord, StepRequest, StoreConflict
 from forge.store.runs import RunStore
 from forge.store.steps import StepStore
+
+
+class ApprovalSources(RepoPort, SubjectPort, Protocol):
+    pass
 
 
 class Approve:
@@ -58,7 +63,7 @@ class ApproveHandler:
         steps: StepStore,
         approvals: ApprovalStore,
         actors: ActorPort,
-        repositories: RepoPort,
+        repositories: ApprovalSources,
         clock: Clock,
     ) -> None:
         self.runs, self.steps, self.approvals = runs, steps, approvals
@@ -80,6 +85,15 @@ class ApproveHandler:
             return StepResult(result_json(refused="actor_not_authorized"))
         if run.state != State.AWAITING_APPROVAL:
             return StepResult(result_json(refused="gate_not_open"))
+        try:
+            task = await self.repositories.get_task(intent.task.subject)
+        except ReadUnavailable:
+            raise Retryable("approval_task_unavailable") from None
+        if task_binding(task) != task_binding(intent.task):
+            return StepResult(
+                result_json(refused="task_changed"),
+                park=Park("approval_task_changed"),
+            )
         try:
             head = await self.repositories.head(intent.task.subject.repo, frozen.spec.target_branch)
         except ReadUnavailable:

@@ -5,10 +5,12 @@ import hashlib
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.states import TERMINAL, Handler
 from forge.command_values import CommandLease, CommandResult
 from forge.store.initial_commands import admission_command
+from forge.store.issue_lifecycle import supersede_pending
 from forge.store.commands import resolve_in
 from forge.store.models_execution import EngineStep
 from forge.store.models_runs import EngineRun
@@ -16,6 +18,13 @@ from forge.store.records import RunRecord, RunRequest, StepRequest, StoreConflic
 from forge.store.runs import run_record, subject_key
 from forge.store.steps import enqueue_in
 from forge.store.transactions import SessionFactory, aware, canonical_json, transaction
+
+
+async def connection_lock(session: AsyncSession, request: RunRequest) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        connection = request.provider + "\x00" + request.connection_id
+        lock = int.from_bytes(hashlib.sha256(connection.encode()).digest()[:8], signed=True)
+        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock})
 
 
 class AdmissionStore:
@@ -30,6 +39,7 @@ class AdmissionStore:
         max_active: int,
         now: datetime,
         command_lease: CommandLease | None = None,
+        supersede_run_id: str | None = None,
     ) -> RunRecord:
         key = subject_key(request)
         canonical_json(payload_json)
@@ -45,12 +55,7 @@ class AdmissionStore:
                     if command_lease is not None
                     else None
                 )
-                if session.get_bind().dialect.name == "postgresql":
-                    connection = request.provider + "\x00" + request.connection_id
-                    lock = int.from_bytes(
-                        hashlib.sha256(connection.encode()).digest()[:8], signed=True
-                    )
-                    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock})
+                await connection_lock(session, request)
                 existing = await session.get(EngineRun, request.id)
                 if existing is not None:
                     if existing.subject_key != key:
@@ -61,6 +66,10 @@ class AdmissionStore:
                     if initial is None or initial.payload_json != payload_json:
                         raise StoreConflict("admission input changed")
                     return run_record(existing)
+                if supersede_run_id is not None:
+                    await supersede_pending(
+                        session, command, supersede_run_id, key, payload_json, max_active, now
+                    )
                 occupied = await session.scalar(
                     select(func.count())
                     .select_from(EngineRun)

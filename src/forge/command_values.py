@@ -21,6 +21,9 @@ class CommandEnvelope(Value):
     target: SubjectRef | ReviewRef
     command: Command
     native_reply: bool = False
+    issue_action: Literal["edited", "unlabeled"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def bounded_authority(self) -> "CommandEnvelope":
@@ -31,6 +34,14 @@ class CommandEnvelope(Value):
             raise ValueError("actor and target connection differ")
         if len(self.command.argument) > 32768:
             raise ValueError("command argument exceeds its bound")
+        if self.issue_action is not None and (
+            self.source != "webhook"
+            or self.target.kind != "issue"
+            or self.command.argument
+            or self.command.kind
+            != {"edited": "implement", "unlabeled": "cancel"}[self.issue_action]
+        ):
+            raise ValueError("issue lifecycle authority requires a signed native issue fact")
         return self
 
     @property
