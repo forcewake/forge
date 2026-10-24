@@ -1,26 +1,28 @@
-"""The retired execution engine cannot return through imports or app wiring."""
+"""Retired execution code cannot return through application construction."""
 
-import importlib.util
+from importlib.util import find_spec
 from pathlib import Path
+
 import pytest
-from forge.config import Settings
-from forge.main import create_app
+
+from forge.runtime.app import create_app
+from tests.runtime_fixture import configuration
 
 
 @pytest.mark.parametrize(
     "name", ["orchestrator", "flows", "agents", "llm", "mcp_client", "context", "stores"]
 )
 def test_legacy_package_is_absent(name):
-    assert importlib.util.find_spec("forge." + name) is None
+    assert find_spec("forge." + name) is None
 
 
-def test_application_does_not_construct_the_legacy_execution_engine():
+def test_application_does_not_construct_the_legacy_execution_engine(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    for path in ("src/forge/main.py", "src/forge/worker/app.py", "src/forge/gateway/router.py"):
-        text = (root / path).read_text()
+    for name in ("app.py", "assembly.py", "handlers.py", "worker.py"):
+        text = (root / "src/forge/runtime" / name).read_text()
         assert all(
-            name not in text
-            for name in (
+            symbol not in text
+            for symbol in (
                 "AgentRegistry",
                 "FlowLoader",
                 "FlowRunner",
@@ -28,6 +30,8 @@ def test_application_does_not_construct_the_legacy_execution_engine():
                 "MCPConnectionManager",
             )
         )
-    app = create_app(Settings(_env_file=None, FORGE_GITLAB_ENABLED=False))
-    assert not any(getattr(route, "path", "") == "/mcp-tools" for route in app.routes)
+    config, _ = configuration(tmp_path)
+    assert not any(
+        getattr(route, "path", "") == "/mcp-tools" for route in create_app(config).routes
+    )
     assert not (root / "agents").exists()

@@ -6,8 +6,11 @@ import re
 
 import pytest
 
-from forge.config import Settings
-from forge.main import create_app
+from forge.runtime.settings import RuntimeSettings
+from tests.runtime_fixture import configuration
+from pydantic import ValidationError
+import json
+from forge.runtime.app import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,30 +39,30 @@ def test_runtime_source_has_no_retired_provider():
     ],
 )
 def test_retired_adapter_module_is_absent(module):
-    assert importlib.util.find_spec(module) is None
+    try:
+        found = importlib.util.find_spec(module)
+    except ModuleNotFoundError:
+        found = None
+    assert found is None
 
 
-def test_retired_provider_has_no_settings():
-    assert not any(name.startswith("FORGE_AZDO_") for name in Settings.model_fields)
+def test_retired_provider_has_no_settings(tmp_path):
+    config, _ = configuration(tmp_path)
+    assert not any(name.startswith("FORGE_AZDO_") for name in RuntimeSettings.model_fields)
+    value = config.model_dump(mode="json", by_alias=True)
+    value["connections"][0]["provider"] = "azure_devops"
+    with pytest.raises(ValidationError):
+        RuntimeSettings.model_validate_json(json.dumps(value))
 
 
-def test_retired_provider_has_no_ingress():
-    routes = {
-        getattr(route, "path", "")
-        for route in create_app(
-            settings=Settings(_env_file=None, FORGE_GITLAB_ENABLED=False)
-        ).routes
-    }
+def test_retired_provider_has_no_ingress(tmp_path):
+    config, _ = configuration(tmp_path)
+    routes = {getattr(route, "path", "") for route in create_app(config).routes}
     assert not any("azure" in route for route in routes)
 
 
-def test_supported_authorization_settings_are_not_retired_with_the_provider():
-    from forge.config import Settings
-
-    settings = Settings(
-        _env_file=None,
-        FORGE_GITHUB_APPROVERS="release-owner",
-        FORGE_LANE_CONTROL_SECRET="fixture-control-secret",
-    )
-    assert settings.FORGE_GITHUB_APPROVERS == "release-owner"
-    assert settings.FORGE_LANE_CONTROL_SECRET.get_secret_value() == "fixture-control-secret"
+def test_supported_authorization_settings_are_not_retired_with_the_provider(tmp_path):
+    config, _ = configuration(tmp_path)
+    connection = config.connections[0]
+    assert connection.repositories[0].approver_ids == ("42",)
+    assert config.secret_key_env == "SYNTHETIC_SECRET"

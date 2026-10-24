@@ -214,12 +214,12 @@ tests/test_lane_templates_v1.py,2,31,false,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_trace.py,6,117,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_v1.py,16,480,true,true,,edge-case pin,,lane,keep,-,
 tests/test_legacy_credential_deadline.py,24,479,true,false,,,,legacy,keep,-,
-tests/test_legacy_retirement.py,2,33,true,false,,edge-case pin,,legacy,keep,-,
+tests/test_legacy_retirement.py,2,37,false,false,,edge-case pin,,legacy,keep,-,
 tests/test_lineage_view.py,37,1184,true,false,,,,lineage,keep,-,
 tests/test_liveness.py,12,629,true,false,,,,liveness,port-engine,P3,
-tests/test_main.py,1,21,true,false,,edge-case pin,,main,keep,-,
+tests/test_main.py,1,31,false,false,,edge-case pin,,main,keep,-,
 tests/test_mcp_runs_tools.py,7,101,true,false,,edge-case pin,,mcp,keep,-,
-tests/test_mcp_server.py,7,89,true,false,,edge-case pin,,mcp,port-adapter,P3,
+tests/test_mcp_server.py,7,100,true,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
 tests/test_native_git_ca.py,2,108,false,true,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
@@ -245,7 +245,7 @@ tests/test_project_config.py,23,369,true,false,,edge-case pin,,project,port-adap
 tests/test_project_config_location.py,5,64,true,false,,edge-case pin,,project,keep,-,
 tests/test_protocol_v1.py,5,64,true,true,,,,protocol,keep,-,Protocol v1 wire contract for the separate shipped distribution
 tests/test_provider_namespaces.py,22,829,true,false,,,,provider,port-engine,P3,
-tests/test_provider_retirement.py,5,65,true,false,,,,provider,keep,-,
+tests/test_provider_retirement.py,5,68,false,false,,,,provider,keep,-,
 tests/test_publication_boundary.py,9,193,true,true,,invariant evidence; edge-case pin,,publication,port-adapter,P3,
 tests/test_publication_intents.py,40,508,true,true,,invariant evidence; edge-case pin,,publication,port-engine,P3,
 tests/test_publication_manifest.py,2,69,true,true,,,,publication,keep,P3-04,Complete native tree recovery against immutable candidate post-images
@@ -260,7 +260,7 @@ tests/test_repository_writer.py,15,336,true,false,,edge-case pin,,repository,por
 tests/test_research_cohort_live.py,4,67,true,false,,edge-case pin,,research,keep,-,
 tests/test_resource_lifecycle.py,8,355,true,false,,,,resource,keep,-,
 tests/test_retired_adaptive_cluster.py,1,9,false,false,,,,retired,keep,-,
-tests/test_retired_deferred_features.py,3,48,true,false,,,,retired,keep,-,
+tests/test_retired_deferred_features.py,3,78,false,false,,,,retired,keep,-,
 tests/test_retired_verification_modules.py,1,18,false,false,,,,retired,keep,-,
 tests/test_retryable_observations.py,13,692,true,false,,,,retryable,port-engine,P3,
 tests/test_review_feedback.py,56,1562,true,false,,,,review,port-engine,P3,
