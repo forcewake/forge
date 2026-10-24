@@ -10,12 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.candidate import ValidatedCandidate
 from forge.domain.run_spec import RunSpec2
+from forge.domain.states import Handler, State, transition
 from forge.domain.verdicts import CheckVerdict, Committed
 from forge.port_values import ReviewVerdict
 from forge.store.models_execution import EngineCandidate, EngineEffect
 from forge.store.models_runs import EngineRunSpec
 from forge.store.records import Lease, StoreConflict
-from forge.store.transactions import SessionFactory, fence, transaction
+from forge.store.transactions import SessionFactory, fence, locked_run, transaction
 
 _VALIDATED = TypeAdapter(ValidatedCandidate)
 
@@ -38,6 +39,19 @@ async def candidate_row(session: AsyncSession, lease: Lease) -> EngineCandidate:
 class DeliveryStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
+
+    async def begin_publication(self, lease: Lease, *, now: datetime) -> None:
+        async with transaction(self.factory) as session:
+            await fence(session, lease, now)
+            run = await locked_run(session, lease.run_id)
+            if lease.handler != Handler.PUBLISH or run.state not in (
+                State.RUNNING.value,
+                State.PUBLISHING.value,
+            ):
+                raise StoreConflict("publication needs its original handler in the owning state")
+            if run.state == State.RUNNING.value:
+                run.state = transition(State(run.state), State.PUBLISHING).value
+                run.version += 1
 
     async def candidate(self, lease: Lease, *, now: datetime) -> CandidateBundle:
         async with transaction(self.factory) as session:

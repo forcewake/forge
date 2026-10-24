@@ -57,9 +57,14 @@ class EngineStep(RunBound, Timestamps, Base):
     result_json: Mapped[str | None] = mapped_column(Text)
 
 
-class EngineEffect(RunBound, Timestamps, Base):
+class EngineEffect(Timestamps, Base):
     __tablename__ = "eng_effects"
     __table_args__ = (
+        CheckConstraint(
+            "(step_id IS NOT NULL AND run_id IS NOT NULL AND command_id IS NULL) OR "
+            "(step_id IS NULL AND command_id IS NOT NULL)",
+            name="ck_eng_effect_owner",
+        ),
         CheckConstraint(
             "state IN ('requested','dispatched','committed','adopted','conflict','failed','unknown')",
             name="ck_eng_effect_state",
@@ -69,6 +74,12 @@ class EngineEffect(RunBound, Timestamps, Base):
             "kind <> 'ensure_draft' OR (repo_key IS NOT NULL AND head_branch IS NOT NULL)",
             name="ck_eng_effect_draft_identity",
         ),
+        CheckConstraint(
+            "(kind = 'dispatch_lane' AND dispatch_nonce_digest IS NOT NULL) OR "
+            "(kind <> 'dispatch_lane' AND dispatch_nonce_digest IS NULL)",
+            name="ck_eng_effect_dispatch_nonce",
+        ),
+        Index("uq_eng_effect_dispatch_nonce", "dispatch_nonce_digest", unique=True),
         Index(
             "uq_eng_effect_draft",
             "repo_key",
@@ -82,10 +93,15 @@ class EngineEffect(RunBound, Timestamps, Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     key: Mapped[str] = mapped_column(String(300), unique=True)
     kind: Mapped[str] = mapped_column(String(100))
-    step_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_steps.id"))
+    run_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("eng_runs.id"), index=True)
+    step_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("eng_steps.id"))
+    command_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("eng_commands.id"), index=True
+    )
     lease_epoch: Mapped[int] = mapped_column(Integer)
     payload_digest: Mapped[str] = mapped_column(String(64))
     payload_json: Mapped[str] = mapped_column(Text)
+    dispatch_nonce_digest: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(20), default="requested", server_default="requested")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     outcome_json: Mapped[str | None] = mapped_column(Text)

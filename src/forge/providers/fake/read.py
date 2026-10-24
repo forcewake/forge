@@ -43,7 +43,7 @@ class FakeReads(FakeState):
             raise ReadUnavailable("subject unavailable", "fake:missing_subject")
         return self.tasks[ref_key(subject)]
 
-    async def find_comment(self, subject: SubjectRef, marker: str) -> CommentRef | None:
+    async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
         result = await self.probe_comment(subject, marker)
         if result.kind == "definitely_absent":
             return None
@@ -78,7 +78,9 @@ class FakeReads(FakeState):
             )
         return result
 
-    async def probe_comment(self, subject: SubjectRef, marker: str) -> ProbeResult[CommentOutcome]:
+    async def probe_comment(
+        self, subject: SubjectRef | ReviewRef, marker: str
+    ) -> ProbeResult[CommentOutcome]:
         return self.comment_probe(
             "probe_comment", f"comment:{ref_key(subject)}:{marker}", subject, marker
         )

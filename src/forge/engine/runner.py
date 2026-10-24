@@ -181,6 +181,8 @@ class StepRunner(Generic[E]):
             result = await task
             if not isinstance(result, StepResult):
                 raise TypeError("handler returned an invalid step result")
+        except StaleLease:
+            return "lost"
         except Retryable as error:
             await self._stop(renewal)
             try:

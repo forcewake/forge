@@ -53,11 +53,13 @@ class FakeWrites(FakeState):
             )
         return None
 
-    async def post_comment(self, subject: SubjectRef, body: str, marker: str) -> CommentOutcome:
+    async def post_comment(
+        self, subject: SubjectRef | ReviewRef, body: str, marker: str
+    ) -> CommentOutcome:
         fault = self.start("post_comment", subject, body, marker)
         if refused := self.refused_scope(subject.repo):
             return refused
-        if ref_key(subject) not in self.tasks:
+        if ref_key(subject) not in (self.tasks if isinstance(subject, SubjectRef) else self.drafts):
             return Refused(reason="missing_subject", evidence="fake:missing_subject")
         if fault.http_5xx:
             return Unknown(evidence="fake:http_503")

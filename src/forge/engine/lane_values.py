@@ -48,6 +48,7 @@ class DispatchInput(Value):
     revision: Annotated[int, Field(gt=0)]
     revivals: Annotated[int, Field(ge=0)] = 0
     repair: RepairContext | None = None
+    checkpoint_id: Digest | None = None
 
 
 class LaneWork(DispatchInput):

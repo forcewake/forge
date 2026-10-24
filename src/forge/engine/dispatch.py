@@ -44,7 +44,11 @@ class DispatchHandler:
         approved = await self.store.approved(context.lease)
         raw = json.loads(context.payload_json)
         supplied = DispatchInput.model_validate(
-            {k: raw[k] for k in ("approved_digest", "revision", "revivals", "repair") if k in raw}
+            {
+                k: raw[k]
+                for k in ("approved_digest", "revision", "revivals", "repair", "checkpoint_id")
+                if k in raw
+            }
         )
         if (supplied.approved_digest, supplied.revision) != (
             approved.brief.approved_digest,
@@ -63,15 +67,21 @@ class DispatchHandler:
             return StepResult(result_json(reason="dispatch_expired"), park=Park("dispatch_expired"))
         if (
             approved.brief.repair is not None
-            and await self.repo.head(approved.repo, f"forge/{approved.root_run_id}")
-            != approved.brief.execution_base_sha
-        ):
+            or supplied.checkpoint_id is not None
+            or approved.root_run_id != identity.forge_run_id
+        ) and await self.repo.head(
+            approved.repo, f"forge/{approved.root_run_id}"
+        ) != approved.brief.execution_base_sha:
             return StepResult(result_json(reason="branch_drift"), park=Park("branch_drift"))
         outcome = await self.reserve(context, work, approved)
         if outcome is not None:
             return outcome
         dispatch = await self.dispatch_value(context, work, approved, identity)
-        if dispatch.repair is None:
+        if (
+            dispatch.repair is None
+            and dispatch.checkpoint_id is None
+            and approved.root_run_id == identity.forge_run_id
+        ):
             branch = await context.effects.ensure_branch(
                 context.lease,
                 f"{approved.root_run_id}:lane_branch",
@@ -187,12 +197,14 @@ class DispatchHandler:
         identity: RunIdentity,
     ) -> LaneDispatch:
         pending = await self.store.pending(identity)
-        if pending is not None:
-            return pending.dispatch
-        prior = await context.effects.store.get(lane_key(identity) + ":dispatch")
-        if prior is not None:
-            return LaneDispatch.model_validate_json(json.loads(prior.payload_json)["dispatch_json"])
-        return LaneDispatch(
+        original = pending.dispatch if pending is not None else None
+        if original is None:
+            prior = await context.effects.store.get(lane_key(identity) + ":dispatch")
+            if prior is not None:
+                original = LaneDispatch.model_validate_json(
+                    json.loads(prior.payload_json)["dispatch_json"]
+                )
+        expected = LaneDispatch(
             **identity.model_dump(),
             server_url=work.settings.server_url,
             provider=approved.repo.identity.provider,
@@ -203,9 +215,13 @@ class DispatchHandler:
             driver=approved.spec.driver,
             model=approved.spec.model,
             timeout_seconds=approved.spec.limits.wallclock_seconds,
-            nonce=self.auth.new_nonce(),
+            nonce=original.nonce if original is not None else self.auth.new_nonce(),
             repair=approved.brief.repair,
+            checkpoint_id=work.checkpoint_id,
         )
+        if original is not None and original != expected:
+            raise StoreConflict("recovered dispatch differs from exact frozen lane work")
+        return expected
 
     async def register(
         self,

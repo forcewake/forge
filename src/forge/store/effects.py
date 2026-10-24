@@ -9,6 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge_protocol import LaneDispatch
+from forge.port_values import RepoRef
+from forge.store.dispatch_intents import derive_nonce, nonce_digest, read_dispatch
+
 from forge.store.models_execution import EngineEffect
 from forge.store.models_runs import EngineRun
 from forge.store.records import (
@@ -51,6 +55,7 @@ def effect_record(row: EngineEffect) -> EffectRecord:
         row.head_branch,
         stored_time(row.dispatched_at) if row.dispatched_at is not None else None,
         stored_time(row.dispatch_deadline_at) if row.dispatch_deadline_at is not None else None,
+        row.command_id,
     )
 
 
@@ -102,26 +107,27 @@ class EffectStore:
         try:
             async with transaction(self.factory) as session:
                 await fence(session, lease, datetime.now(timezone.utc))
+                nonce = (
+                    await derive_nonce(session, lease, payload_json)
+                    if kind == "dispatch_lane"
+                    else None
+                )
                 row = await session.scalar(
                     select(EngineEffect).where(EngineEffect.key == key).with_for_update()
                 )
                 if row is not None:
-                    same_root = False
-                    if kind == "ensure_draft":
-                        original = await session.get(EngineRun, row.run_id)
-                        current = await session.get(EngineRun, lease.run_id)
-                        same_root = (
-                            original is not None
-                            and current is not None
-                            and original.root_run_id == current.root_run_id
-                        )
+                    require_run_owner(row)
+                    same_root = kind == "ensure_draft" and await same_lineage(
+                        session, row.run_id, lease.run_id
+                    )
                     if (
                         row.kind,
                         row.payload_digest,
                         row.payload_json,
                         row.repo_key,
                         row.head_branch,
-                    ) != (kind, payload_digest, payload_json, repo_key, head_branch) or (
+                        row.dispatch_nonce_digest,
+                    ) != (kind, payload_digest, payload_json, repo_key, head_branch, nonce) or (
                         row.run_id != lease.run_id and not same_root
                     ):
                         raise StoreConflict("effect key reused with different frozen inputs")
@@ -137,6 +143,7 @@ class EffectStore:
                     payload_json=payload_json,
                     repo_key=repo_key,
                     head_branch=head_branch,
+                    dispatch_nonce_digest=nonce,
                 )
                 session.add(row)
                 await session.flush()
@@ -163,17 +170,13 @@ class EffectStore:
         async with transaction(self.factory) as session:
             await fence(session, lease, datetime.now(timezone.utc))
             row = await self._locked(session, effect_id)
+            if row.command_id is not None:
+                raise StoreConflict("run step cannot dispatch a command-owned effect")
             if row.version != expected_version or row.state != "requested":
                 raise StoreConflict("effect dispatch version or state changed")
             same_owner = row.run_id == lease.run_id and row.step_id == lease.step_id
             if not same_owner and row.kind == "ensure_draft":
-                original = await session.get(EngineRun, row.run_id)
-                current = await session.get(EngineRun, lease.run_id)
-                same_owner = (
-                    original is not None
-                    and current is not None
-                    and original.root_run_id == current.root_run_id
-                )
+                same_owner = await same_lineage(session, row.run_id, lease.run_id)
             if not same_owner:
                 raise StoreConflict("effect belongs to a different logical step or lineage")
             row.step_id, row.run_id = lease.step_id, lease.run_id
@@ -239,6 +242,15 @@ class EffectStore:
             row = await session.scalar(select(EngineEffect).where(EngineEffect.key == key))
             return effect_record(row) if row is not None else None
 
+    async def dispatch_for_nonce(self, repo: RepoRef, nonce: str) -> LaneDispatch | None:
+        async with self.factory() as session:
+            row = await session.scalar(
+                select(EngineEffect).where(
+                    EngineEffect.dispatch_nonce_digest == nonce_digest(nonce)
+                )
+            )
+            return await read_dispatch(session, row, repo, nonce) if row is not None else None
+
     async def unresolved(self, limit: int = 100) -> tuple[EffectRecord, ...]:
         if not 1 <= limit <= 1000:
             raise ValueError("unresolved scan limit out of bounds")
@@ -261,3 +273,16 @@ class EffectStore:
         if row is None:
             raise StoreConflict("effect does not exist")
         return row
+
+
+def require_run_owner(row: EngineEffect) -> None:
+    if row.command_id is not None:
+        raise StoreConflict("run step cannot acquire command-owned effect authority")
+
+
+async def same_lineage(session: AsyncSession, original_id: str | None, current_id: str) -> bool:
+    original = await session.get(EngineRun, original_id) if original_id is not None else None
+    current = await session.get(EngineRun, current_id)
+    return (
+        original is not None and current is not None and original.root_run_id == current.root_run_id
+    )

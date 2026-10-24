@@ -164,10 +164,15 @@ class GitHubWrites:
             return Refused(reason=error.reason, evidence=error.evidence)
         return cls._unknown(error)
 
-    async def post_comment(self, subject: SubjectRef, body: str, marker: str) -> CommentOutcome:
+    async def post_comment(
+        self, subject: SubjectRef | ReviewRef, body: str, marker: str
+    ) -> CommentOutcome:
         try:
             content = marked(body, marker)
-            await self.subjects.get_task(subject)
+            if isinstance(subject, SubjectRef):
+                await self.subjects.get_task(subject)
+            else:
+                await self.reviews.document(subject)
             reply = await self._mutate(
                 subject.repo, "POST", f"issues/{subject.number}/comments", {"body": content}
             )

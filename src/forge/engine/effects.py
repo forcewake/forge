@@ -37,6 +37,8 @@ from forge.port_values import (
     SubjectRef,
 )
 from forge.ports import BudgetGateway, CIPort, Clock, RepoPort, ReviewPort, SubjectPort, WritePort
+from forge.command_values import CommandLease
+from forge.store.command_effects import CommandEffectStore
 from forge.store.effects import EffectStore
 from forge.store.records import KNOWN_OUTCOMES, EffectRecord, Lease, ObservationState, StoreConflict
 
@@ -237,7 +239,7 @@ class Effects:
             return await self.review.probe_draft(repo, data["head_branch"])
         if kind == EffectKind.POST_COMMENT:
             return await self.subject.probe_comment(
-                SubjectRef.model_validate(data["subject"]), data["marker"]
+                TypeAdapter(SubjectRef | ReviewRef).validate_python(data["subject"]), data["marker"]
             )
         if kind == EffectKind.UPDATE_COMMENT:
             return await self.subject.probe_comment_update(
@@ -330,7 +332,7 @@ class Effects:
         )
 
     async def post_comment(
-        self, lease: Lease, key: str, subject: SubjectRef, body: str, marker: str
+        self, lease: Lease, key: str, subject: SubjectRef | ReviewRef, body: str, marker: str
     ) -> CommentOutcome:
         payload = {"subject": subject.model_dump(mode="json"), "body": body, "marker": marker}
         return TypeAdapter(CommentOutcome).validate_python(
@@ -478,3 +480,41 @@ class Effects:
                 lambda: self._gateway.block(alias),
             )
         )
+
+    async def command_effect(
+        self,
+        authority: CommandEffectStore,
+        lease: CommandLease,
+        kind: EffectKind,
+        key: str,
+        payload_json: str,
+    ) -> Outcome:
+        if kind not in (EffectKind.POST_COMMENT, EffectKind.GW_BLOCK):
+            raise EffectProtocolError("command effect kind is not permitted")
+        row = await authority.request_once(
+            lease, key=key, kind=kind.value, payload_json=payload_json
+        )
+        self._point("after_t1", row)
+        if row.state == "dispatched":
+            row = await self.recover(row)
+        if row.state in KNOWN_OUTCOMES or row.state == "unknown":
+            return self._receipt(row)
+        row = await authority.mark_dispatched(lease, row)
+        self._point("after_t2", row)
+        payload = json.loads(payload_json)
+
+        async def call() -> Outcome:
+            if kind == EffectKind.GW_BLOCK:
+                return await self._gateway.block(payload["alias"])
+            target: SubjectRef | ReviewRef = TypeAdapter(SubjectRef | ReviewRef).validate_python(
+                payload["subject"]
+            )
+            return await self._writer.post_comment(target, payload["body"], payload["marker"])
+
+        outcome = await self._call(row, call)
+        self._point("after_call", row)
+        saved = await self.store.record_observation(
+            row.id, state=_observed_state(outcome), outcome_json=_encoded(outcome)
+        )
+        self._point("after_t3", saved)
+        return self._receipt(saved)

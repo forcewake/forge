@@ -128,6 +128,25 @@ async def test_cancellation_between_handler_and_result_creates_no_successor(stor
     assert await StepStore(store).get("forbidden") is None
 
 
+async def test_handler_stale_lease_cannot_park_with_a_renewed_lease(store):
+    from forge.store.records import StaleLease
+
+    clock = RealClock()
+    run, step = await seeded(store, clock)
+    observed = []
+
+    async def handler(ctx):
+        original = ctx.lease.expires_at
+        await asyncio.sleep(0.07)
+        observed.append(ctx.lease.expires_at > original)
+        raise StaleLease("captured effect lease expired")
+
+    tick = await runner(store, clock, handler, lease_seconds=0.12, renew_seconds=0.02).tick()
+    assert observed == [True] and tick.lost == 1 and tick.parked == 0
+    assert (await RunStore(store).load(run.id)).state == State.QUEUED
+    assert (await StepStore(store).load(step.id)).result_json is None
+
+
 async def test_retryable_has_bounded_due_backoff_and_atomic_exhaustion(store):
     clock = ManualClock(datetime.now(timezone.utc))
     run, step = await seeded(store, clock)

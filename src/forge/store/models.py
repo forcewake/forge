@@ -8,6 +8,7 @@ from forge.store.models_budget import (
     EngineGatewayKey,
     EngineUsage,
 )
+from forge.store.models_commands import EngineCommand
 from forge.store.models_execution import EngineCandidate, EngineEffect, EngineStep
 from forge.store.models_lane import (
     EngineBlob,
@@ -28,6 +29,7 @@ __all__ = [
     "EngineCandidate",
     "EngineCheckpoint",
     "EngineControlCommand",
+    "EngineCommand",
     "EngineEffect",
     "EngineGate",
     "EngineGatewayKey",

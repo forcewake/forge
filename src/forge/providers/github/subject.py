@@ -16,6 +16,7 @@ from forge.port_values import (
     LabelState,
     ProbeResult,
     ReadUnavailable,
+    ReviewRef,
     SubjectRef,
     TaskSnapshot,
 )
@@ -49,7 +50,7 @@ class GitHubSubject:
             raise ValueError("an explicit native GitHub bot identity is required")
         self.api, self.bot = api, bot
 
-    def _scope(self, subject: SubjectRef) -> None:
+    def _scope(self, subject: SubjectRef | ReviewRef) -> None:
         if (
             subject.repo.identity.provider != "github"
             or subject.repo.identity.connection_id != self.bot.connection_id
@@ -96,7 +97,7 @@ class GitHubSubject:
         except (ValidationError, ValueError):
             raise malformed("invalid_issue_snapshot") from None
 
-    async def _comments(self, subject: SubjectRef) -> list[dict[str, object]]:
+    async def _comments(self, subject: SubjectRef | ReviewRef) -> list[dict[str, object]]:
         self._scope(subject)
         comments: list[dict[str, object]] = []
         seen: set[str] = set()
@@ -115,6 +116,8 @@ class GitHubSubject:
                 identifier = native_id(row.get("id"))
                 if identifier in seen:
                     raise malformed("duplicate_comment_page")
+                if not comment_bound(CommentRef(subject=subject, native_id=identifier), row):
+                    raise malformed("comment_target_mismatch")
                 seen.add(identifier)
                 comments.append(row)
             if len(rows) < 100:
@@ -129,7 +132,9 @@ class GitHubSubject:
             and actor.get("type") == "Bot"
         )
 
-    async def probe_comment(self, subject: SubjectRef, marker: str) -> ProbeResult[CommentOutcome]:
+    async def probe_comment(
+        self, subject: SubjectRef | ReviewRef, marker: str
+    ) -> ProbeResult[CommentOutcome]:
         try:
             matches = [
                 row
@@ -149,7 +154,7 @@ class GitHubSubject:
         except ReadUnavailable as error:
             return Inconclusive(reason="comment read unavailable", evidence=error.evidence)
 
-    async def find_comment(self, subject: SubjectRef, marker: str) -> CommentRef | None:
+    async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
         result = await self.probe_comment(subject, marker)
         if isinstance(result, Found) and isinstance(result.value, Applied):
             return result.value.value

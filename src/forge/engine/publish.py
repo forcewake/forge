@@ -50,6 +50,7 @@ class PublishHandler:
         self.clock, self.settings = clock, settings
 
     async def __call__(self, context: StepContext[Effects]) -> StepResult:
+        await self.store.begin_publication(context.lease, now=self.clock.now())
         approved = await self.lanes.approved(context.lease)
         candidate = await self.store.candidate(context.lease, now=self.clock.now())
         supplied = CandidateBundle.model_validate(json.loads(context.payload_json)["candidate"])

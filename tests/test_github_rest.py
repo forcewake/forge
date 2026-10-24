@@ -246,6 +246,26 @@ async def test_comment_lost_response_is_unknown_and_recovers_unique_bot_marker(p
     )
 
 
+async def test_review_command_reply_uses_native_conversation_and_exact_target(provider):
+    writer, _, _, wire, subject = provider
+
+    def accepted(req):
+        row = comment(body=json.loads(req.content)["body"])
+        wire.routes["issues/8/comments"] = [row]
+        return httpx.Response(201, json=row)
+
+    wire.mutations["issues/8/comments"] = accepted
+    result = await writer.post_comment(REVIEW, "Status: ready", MARKER)
+    assert isinstance(result, Applied) and result.value.subject == REVIEW
+    assert result.value.kind == "issue_comment"
+    recovered = await subject.probe_comment(REVIEW, MARKER)
+    assert isinstance(recovered, Found) and recovered.value.value == result.value
+    wire.routes["issues/8/comments"][0]["issue_url"] = (
+        "https://api.github.com/repos/new/repository/issues/7"
+    )
+    assert isinstance(await subject.probe_comment(REVIEW, MARKER), Inconclusive)
+
+
 @pytest.mark.parametrize(
     "policy",
     [

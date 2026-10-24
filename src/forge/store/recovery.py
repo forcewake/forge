@@ -28,6 +28,8 @@ class RecoveryStore:
         dispatch identity, or grants a new logical step an old effect's authority.
         The effect-layer adapter owns DefinitelyAbsent proof and its call window.
         """
+        if effect.command_id is not None or effect.run_id is None or effect.step_id is None:
+            return False
         now = aware(now)
         async with transaction(self.factory) as session:
             run = await locked_run(session, effect.run_id)

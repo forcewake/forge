@@ -68,10 +68,12 @@ class ScriptedPorts:
     async def get_task(self, subject: SubjectRef) -> TaskSnapshot:
         return cast(TaskSnapshot, self.take("get_task", subject))
 
-    async def find_comment(self, subject: SubjectRef, marker: str) -> CommentRef | None:
+    async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
         return cast(CommentRef | None, self.take("find_comment", subject, marker))
 
-    async def probe_comment(self, subject: SubjectRef, marker: str) -> ProbeResult[CommentOutcome]:
+    async def probe_comment(
+        self, subject: SubjectRef | ReviewRef, marker: str
+    ) -> ProbeResult[CommentOutcome]:
         return cast(ProbeResult[CommentOutcome], self.take("probe_comment", subject, marker))
 
     async def probe_comment_update(
@@ -156,7 +158,9 @@ class ScriptedPorts:
     def bot_identity(self) -> Actor:
         return cast(Actor, self.take("bot_identity"))
 
-    async def post_comment(self, subject: SubjectRef, body: str, marker: str) -> CommentOutcome:
+    async def post_comment(
+        self, subject: SubjectRef | ReviewRef, body: str, marker: str
+    ) -> CommentOutcome:
         return cast(CommentOutcome, self.take("post_comment", subject, body, marker))
 
     async def update_comment(self, comment: CommentRef, body: str) -> CommentOutcome:

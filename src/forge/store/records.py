@@ -103,8 +103,8 @@ class EffectRecord:
     id: str
     key: str
     kind: str
-    run_id: str
-    step_id: str
+    run_id: str | None
+    step_id: str | None
     lease_epoch: int
     payload_digest: str
     payload_json: str
@@ -116,6 +116,7 @@ class EffectRecord:
     head_branch: str | None
     dispatched_at: datetime | None
     dispatch_deadline_at: datetime | None
+    command_id: str | None = None
 
 
 @dataclass(frozen=True)
