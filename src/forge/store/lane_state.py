@@ -80,6 +80,11 @@ async def load_namespace(
         "current": state,
         "checkpoints": {item.id: json.loads(item.manifest_json) for item in checkpoints},
         "control_next_sequence": next_sequence,
+        "pending_controls": [
+            json.loads(item.payload_json)
+            for item in controls
+            if item.state == "pending" and item.acknowledgement_json is None
+        ],
     }
 
 

@@ -61,7 +61,7 @@ class LaneV1Service:
             identity,
             lambda p, s, n: [
                 ControlCommand.model_validate(raw)
-                for raw in s.get("controls", [])
+                for raw in n["pending_controls"]
                 if raw["sequence"] > after
             ],
         )
