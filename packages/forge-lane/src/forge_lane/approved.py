@@ -12,6 +12,10 @@ from .errors import ExitCode, LaneFailure
 async def prepare_policy(
     brief: Brief, dispatch: LaneDispatch, driver: Driver, workspace: Path, *, timeout: float
 ) -> None:
+    if brief.repair != dispatch.repair:
+        raise LaneFailure(
+            ExitCode.APPROVAL, "repair_mismatch", "Repair context differs from dispatch"
+        )
     spec = brief.frozen_spec
     if spec is not None and (
         spec.driver != dispatch.driver

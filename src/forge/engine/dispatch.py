@@ -16,7 +16,7 @@ from forge.engine.lane_values import AwaitLane, DispatchInput, LaneSettings, Lan
 from forge.engine.plan import result_json
 from forge.engine.runner import Park, StepContext, StepResult
 from forge.port_values import Applied, Refused
-from forge.ports import Clock
+from forge.ports import Clock, RepoPort
 from forge.store.lane_work import ApprovedLane, LaneWorkStore
 from forge.store.records import StepRequest, StoreConflict
 
@@ -33,17 +33,18 @@ class DispatchHandler:
         budget: BudgetService,
         clock: Clock,
         settings: LaneSettings,
+        repo: RepoPort,
     ) -> None:
         if str(settings.server_url).rstrip("/") != auth.public_url:
             raise ValueError("dispatch server URL differs from its authentication authority")
         self.store, self.auth, self.budget = store, auth, budget
-        self.clock, self.settings = clock, settings
+        self.clock, self.settings, self.repo = clock, settings, repo
 
     async def __call__(self, context: StepContext[Effects]) -> StepResult:
         approved = await self.store.approved(context.lease)
         raw = json.loads(context.payload_json)
         supplied = DispatchInput.model_validate(
-            {k: raw[k] for k in ("approved_digest", "revision", "revivals") if k in raw}
+            {k: raw[k] for k in ("approved_digest", "revision", "revivals", "repair") if k in raw}
         )
         if (supplied.approved_digest, supplied.revision) != (
             approved.brief.approved_digest,
@@ -53,25 +54,36 @@ class DispatchHandler:
         identity = RunIdentity(
             **approved.brief.model_dump(include={"forge_run_id", "attempt", "generation"})
         )
+        if supplied.repair != approved.brief.repair:
+            raise StoreConflict("dispatch repair differs from durable execution authority")
         if "settings" not in raw:
             return self.bootstrap(context, supplied, approved, identity)
         work = LaneWork.model_validate_json(context.payload_json)
         if self.clock.now() >= work.expires_at:
             return StepResult(result_json(reason="dispatch_expired"), park=Park("dispatch_expired"))
+        if (
+            approved.brief.repair is not None
+            and await self.repo.head(approved.repo, f"forge/{approved.root_run_id}")
+            != approved.brief.execution_base_sha
+        ):
+            return StepResult(result_json(reason="branch_drift"), park=Park("branch_drift"))
         outcome = await self.reserve(context, work, approved)
         if outcome is not None:
             return outcome
         dispatch = await self.dispatch_value(context, work, approved, identity)
-        branch = await context.effects.ensure_branch(
-            context.lease,
-            f"{approved.root_run_id}:lane_branch",
-            approved.repo,
-            dispatch.ref,
-            approved.brief.base_sha,
-        )
-        if not isinstance(branch, Applied):
-            reason = "branch_drift" if isinstance(branch, Conflict) else "lane_branch_unavailable"
-            return await self.stop(context, approved, reason)
+        if dispatch.repair is None:
+            branch = await context.effects.ensure_branch(
+                context.lease,
+                f"{approved.root_run_id}:lane_branch",
+                approved.repo,
+                dispatch.ref,
+                approved.brief.base_sha,
+            )
+            if not isinstance(branch, Applied):
+                reason = (
+                    "branch_drift" if isinstance(branch, Conflict) else "lane_branch_unavailable"
+                )
+                return await self.stop(context, approved, reason)
         if dispatch.provider == "github":
             await self.register(dispatch, work, approved)
         return await self.launch(context, work, approved, identity, dispatch)
@@ -192,6 +204,7 @@ class DispatchHandler:
             model=approved.spec.model,
             timeout_seconds=approved.spec.limits.wallclock_seconds,
             nonce=self.auth.new_nonce(),
+            repair=approved.brief.repair,
         )
 
     async def register(

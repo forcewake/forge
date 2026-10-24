@@ -92,7 +92,7 @@ async def case(env, settings, tmp_path):
     env.effects = env.runner.effects = effects
     env.runner.handlers.update(
         {
-            Handler.DISPATCH: DispatchHandler(store, auth, budget, env.clock, policy),
+            Handler.DISPATCH: DispatchHandler(store, auth, budget, env.clock, policy, env.fake),
             Handler.AWAIT_LANE: AwaitLaneHandler(store, budget, env.fake, env.clock),
         }
     )

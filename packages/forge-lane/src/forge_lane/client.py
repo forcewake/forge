@@ -150,9 +150,10 @@ class LaneClient:
                     ExitCode.APPROVAL, "invalid_brief", "Brief digest or shape is invalid"
                 ) from None
             raise
-        if (brief.approved_digest, brief.base_sha) != (
+        if (brief.approved_digest, brief.base_sha, brief.repair) != (
             self.dispatch.approved_digest,
             self.dispatch.base_sha,
+            self.dispatch.repair,
         ):
             raise LaneFailure(ExitCode.APPROVAL, "approval_mismatch", "Brief differs from dispatch")
         return brief

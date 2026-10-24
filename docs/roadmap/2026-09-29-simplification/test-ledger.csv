@@ -140,6 +140,7 @@ tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,
 tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_approval.py,8,585,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
+tests/test_engine_delivery.py,15,451,true,true,,edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
 tests/test_engine_lane.py,14,551,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
 tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
@@ -197,7 +198,7 @@ tests/test_lane_claude_code.py,12,352,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_contrib.py,15,545,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_copilot_cli.py,12,360,false,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_driver.py,120,2359,true,false,,edge-case pin,,lane,keep,-,
-tests/test_lane_frozen_policy.py,7,219,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
+tests/test_lane_frozen_policy.py,9,280,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_mcp.py,7,264,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-engine,P3,
 tests/test_lane_runner_v1.py,14,539,true,false,,edge-case pin,,lane,keep,-,
@@ -290,6 +291,7 @@ tests/test_usage_receipts.py,22,508,true,false,,invariant evidence,,usage,keep,-
 tests/test_usecases.py,19,640,true,false,,edge-case pin,,usecases,keep,-,
 tests/test_useful_wip_resume.py,3,57,true,false,,edge-case pin,,useful,keep,-,
 tests/test_verification_binding.py,48,1083,true,false,P1-15,invariant evidence,partly deleted,verification,port-adapter,P3,
+tests/test_verification_checks.py,4,67,false,true,,,,verification,keep,P3-09,Exact native attempt and failure classification reduction
 tests/test_verification_executor.py,7,133,true,false,P1-15,edge-case pin,partly deleted,verification,keep,-,
 tests/test_webhook_auth.py,4,60,false,false,,,,webhook,keep,-,
 tests/test_webhook_capture.py,3,99,true,false,,,,webhook,keep,-,

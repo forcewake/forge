@@ -2,6 +2,8 @@
 
 from typing import Annotated, Literal
 
+from forge_protocol import RepairContext
+
 from pydantic import AwareDatetime, Field, HttpUrl, field_validator, model_validator
 
 from forge.domain.budget import Resources
@@ -45,6 +47,7 @@ class DispatchInput(Value):
     approved_digest: Digest
     revision: Annotated[int, Field(gt=0)]
     revivals: Annotated[int, Field(ge=0)] = 0
+    repair: RepairContext | None = None
 
 
 class LaneWork(DispatchInput):

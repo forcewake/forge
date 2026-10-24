@@ -16,6 +16,7 @@ from forge.api.lane_auth_values import LaneAuthError, LaneAuthPending, PendingDi
 from forge.domain.approved_input import ApprovedInput
 from forge.domain.run_spec import RunSpec2
 from forge.domain.states import TERMINAL, State
+from forge.store.repair import repair_brief
 from forge.store.inbox import ingest_event, mark_processed
 from forge.store.inbox_models import EventInbox
 from forge.store.models_lane import EngineLaneSession
@@ -153,7 +154,7 @@ async def approved_brief(session: AsyncSession, identity: RunIdentity) -> tuple[
             or approved.revision != approved_row.revision
         ):
             raise ValueError("frozen approval metadata disagrees")
-        return approved.to_brief(identity, spec), spec
+        return await repair_brief(session, identity, approved.to_brief(identity, spec)), spec
     except (ValueError, ValidationError):
         raise LaneAuthError("persisted approval or specification is invalid") from None
 
@@ -207,12 +208,17 @@ class EngineLaneAuthStore:
             ):
                 raise LaneAuthError("dispatch does not match the active engine identity")
             brief, spec = await approved_brief(session, pending.identity)
-            if pending.brief != brief or (
-                pending.dispatch.base_sha,
-                pending.dispatch.approved_digest,
-                pending.dispatch.driver,
-                pending.dispatch.model,
-            ) != (brief.base_sha, brief.approved_digest, spec.driver, spec.model):
+            if (
+                pending.brief != brief
+                or pending.dispatch.repair != brief.repair
+                or (
+                    pending.dispatch.base_sha,
+                    pending.dispatch.approved_digest,
+                    pending.dispatch.driver,
+                    pending.dispatch.model,
+                )
+                != (brief.base_sha, brief.approved_digest, spec.driver, spec.model)
+            ):
                 raise LaneAuthError("dispatch differs from the persisted approved specification")
             pending = pending.model_copy(
                 update={

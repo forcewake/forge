@@ -39,6 +39,8 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_publication_manifest.py",
             "tests/test_native_git_publication.py",
             "tests/test_github_native_commit.py",
+            "tests/test_domain_binary_candidate.py",
+            "tests/test_engine_delivery.py",
         ),
     ),
     Invariant(
@@ -49,6 +51,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_failure_injection.py",
             "tests/test_engine_effects.py",
             "tests/test_engine_lane_handlers.py",
+            "tests/test_engine_delivery.py",
         ),
     ),
     Invariant(
@@ -60,6 +63,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_revision_executor_proof.py",
             "tests/test_engine_lane.py",
             "tests/test_engine_approval.py",
+            "tests/test_engine_delivery.py",
         ),
     ),
     Invariant(
@@ -71,12 +75,16 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_budget_amendment.py",
             "tests/test_usage_receipts.py",
             "tests/test_budget_engine.py",
+            "tests/test_engine_delivery.py",
         ),
     ),
     Invariant(
         "I6",
         "Exactly one Draft PR/MR per run",
-        ("tests/production_entry/test_concurrent_publication.py",),
+        (
+            "tests/production_entry/test_concurrent_publication.py",
+            "tests/test_engine_delivery.py",
+        ),
     ),
     Invariant(
         "I7",
@@ -85,12 +93,17 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_failure_injection.py",
             "tests/test_engine_effects.py",
             "tests/test_engine_runner.py",
+            "tests/test_engine_delivery.py",
         ),
     ),
     Invariant(
         "I8",
         "Verification is bound to the exact candidate SHA",
-        ("tests/test_runs_verification.py", "tests/test_verification_binding.py"),
+        (
+            "tests/test_runs_verification.py",
+            "tests/test_verification_binding.py",
+            "tests/test_engine_delivery.py",
+        ),
     ),
     Invariant(
         "SELF-TRIGGER",

@@ -152,7 +152,7 @@ class CodexSession(EventQueue):
         if not isinstance(self.thread_id, str) or not self.thread_id:
             raise failure("driver_protocol_error", "Codex returned no thread identity")
         prompt = (
-            brief.brief_text
+            brief.execution_brief_text
             + "\n\n"
             + env.resume_note
             + "\n\nUse only read_file, write_file and edit_file. Files:\n"

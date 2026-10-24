@@ -138,7 +138,14 @@ class Workspace:
     async def diff(self) -> bytes:
         async with self.index() as index:
             data = await self.git(
-                "diff", "--cached", "--binary", "--no-ext-diff", self.base_sha, index=index
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--no-renames",
+                "--no-ext-diff",
+                self.base_sha,
+                index=index,
             )
         if len(data) > self.limits.diff_bytes:
             raise LaneFailure(

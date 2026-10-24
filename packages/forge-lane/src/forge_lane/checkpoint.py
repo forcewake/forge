@@ -36,7 +36,7 @@ class Checkpoints:
         entries, blobs = await self.workspace.capture()
         manifest = CheckpointManifest(
             **self.client.identity,
-            base_sha=self.dispatch.base_sha,
+            base_sha=self.dispatch.execution_base_sha,
             approved_digest=self.dispatch.approved_digest,
             sequence=self.sequence + 1,
             entries=entries,
@@ -64,7 +64,7 @@ class Checkpoints:
             or manifest.forge_run_id != self.dispatch.forge_run_id
             or manifest.attempt != self.dispatch.attempt
             or manifest.generation >= self.dispatch.generation
-            or manifest.base_sha != self.dispatch.base_sha
+            or manifest.base_sha != self.dispatch.execution_base_sha
             or manifest.approved_digest != self.dispatch.approved_digest
             or manifest.driver != self.dispatch.driver
         ):

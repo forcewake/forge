@@ -64,6 +64,41 @@ class RunIdentity(WireModel):
     generation: Counter
 
 
+class RepairContext(RunIdentity):
+    """Server-authorized execution on this run's prior published candidate."""
+
+    approved_digest: Digest
+    original_base_sha: CommitSha
+    candidate_sha: CommitSha
+    prior_attempt: Positive
+    prior_generation: Positive
+    failure_context: Annotated[Text, Field(max_length=32768)]
+
+    @model_validator(mode="after")
+    def advances_owned_execution(self) -> Self:
+        if self.prior_attempt >= self.attempt or self.prior_generation >= self.generation:
+            raise ValueError("repair must advance its prior candidate's attempt and generation")
+        return self
+
+
+def _repair_binding(value: "LaneDispatch | Brief") -> None:
+    repair = value.repair
+    if repair is not None and (
+        repair.forge_run_id,
+        repair.attempt,
+        repair.generation,
+        repair.approved_digest,
+        repair.original_base_sha,
+    ) != (
+        value.forge_run_id,
+        value.attempt,
+        value.generation,
+        value.approved_digest,
+        value.base_sha,
+    ):
+        raise ValueError("repair context differs from the original approval or dispatch identity")
+
+
 class LaneDispatch(RunIdentity):
     server_url: HttpUrl
     provider: Literal["github", "gitlab"]
@@ -76,9 +111,15 @@ class LaneDispatch(RunIdentity):
     timeout_seconds: Positive
     nonce: Identifier | None = None
     checkpoint_id: Digest | None = None
+    repair: RepairContext | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @property
+    def execution_base_sha(self) -> str:
+        return self.repair.candidate_sha if self.repair is not None else self.base_sha
 
     @model_validator(mode="after")
     def github_requires_nonce(self) -> Self:
+        _repair_binding(self)
         if self.provider == "github" and self.nonce is None:
             raise ValueError("GitHub dispatch requires an OIDC audience nonce")
         return self
@@ -102,12 +143,14 @@ class Brief(RunIdentity):
     spec_digest: Digest
     base_sha: CommitSha
     revision: Positive
+    repair: RepairContext | None = Field(default=None, exclude_if=lambda value: value is None)
     spec_json: Annotated[str, Field(strict=True, max_length=1024 * 1024)] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
     @model_validator(mode="after")
     def verify_approved_input(self) -> Self:
+        _repair_binding(self)
         expected = approved_input_digest(
             brief_text=self.brief_text,
             plan_digest=self.plan_digest,
@@ -120,6 +163,23 @@ class Brief(RunIdentity):
         if self.spec_json is not None:
             self.frozen_spec
         return self
+
+    @property
+    def execution_base_sha(self) -> str:
+        return self.repair.candidate_sha if self.repair is not None else self.base_sha
+
+    @property
+    def execution_brief_text(self) -> str:
+        if self.repair is None:
+            return self.brief_text
+        return (
+            self.brief_text
+            + "\n\n## Repair context\n"
+            + "Work from the exact previously published candidate "
+            + self.repair.candidate_sha
+            + ". Preserve the approved scope and correct these independent verification failures:\n"
+            + self.repair.failure_context
+        )
 
     @property
     def execution_policy(self) -> ExecutionPolicy:

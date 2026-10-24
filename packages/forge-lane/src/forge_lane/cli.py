@@ -81,7 +81,7 @@ async def run(args: argparse.Namespace) -> int:
         dispatch = LaneDispatch.model_validate_json(args.dispatch.read_bytes())
         workspace = args.workspace.resolve()
         if args.check:
-            await Workspace(workspace, dispatch.base_sha).validate()
+            await Workspace(workspace, dispatch.execution_base_sha).validate()
             print(
                 json.dumps(
                     {

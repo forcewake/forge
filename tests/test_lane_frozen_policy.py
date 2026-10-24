@@ -217,3 +217,64 @@ async def test_metered_driver_without_gateway_credential_capability_refuses_befo
     result = await execute(dispatch, server, driver, workspace)
     assert result.classification == "unsupported_metering_policy"
     assert server.model_keys == 0 and not driver.starts
+
+
+async def test_repair_lane_preserves_approval_and_uses_exact_execution_base(tmp_path):
+    from forge_protocol import Brief, RepairContext
+    from tests.test_lane_runner_v1 import git
+
+    workspace = tmp_path / "work"
+    original = checkout(workspace)
+    (workspace / "base.txt").write_text("previous candidate\n")
+    git(workspace, "commit", "-qam", "owned candidate")
+    candidate_sha = git(workspace, "rev-parse", "HEAD").decode().strip()
+    dispatch, brief = frozen_inputs(original, generation=2)
+    repair = RepairContext(
+        forge_run_id=dispatch.forge_run_id,
+        attempt=2,
+        generation=2,
+        approved_digest=dispatch.approved_digest,
+        original_base_sha=original,
+        candidate_sha=candidate_sha,
+        prior_attempt=1,
+        prior_generation=1,
+        failure_context="unit: expected corrected parser",
+    )
+    dispatch = dispatch.model_copy(update={"attempt": 2, "repair": repair})
+    brief = Brief.model_validate({**brief.model_dump(), "attempt": 2, "repair": repair})
+    server = WireServer(dispatch, brief)
+    driver = PolicyDriver(edit=lambda path, env: (path / "fixed.py").write_text("fixed\n"))
+    result = await execute(dispatch, server, driver, workspace)
+    assert result.exit_code == ExitCode.COMPLETED
+    served = driver.starts[0][0]
+    assert served.base_sha == original and served.spec_json == brief.spec_json
+    assert served.execution_base_sha == candidate_sha
+    assert repair.failure_context in served.execution_brief_text
+    assert served.brief_text == brief.brief_text
+    assert server.candidates[0].base_sha == candidate_sha
+    assert b"previous candidate" not in server.blobs[server.candidates[0].diff_sha256]
+
+
+async def test_repair_context_mismatch_refuses_before_grant_or_driver(tmp_path):
+    from forge_protocol import Brief, RepairContext
+
+    workspace = tmp_path / "work"
+    base = checkout(workspace)
+    dispatch, brief = frozen_inputs(base, generation=2)
+    dispatch = dispatch.model_copy(update={"attempt": 2})
+    repair = RepairContext(
+        forge_run_id=dispatch.forge_run_id,
+        attempt=2,
+        generation=2,
+        approved_digest=dispatch.approved_digest,
+        original_base_sha=base,
+        candidate_sha=base,
+        prior_attempt=1,
+        prior_generation=1,
+        failure_context="unit: failure",
+    )
+    brief = Brief.model_validate({**brief.model_dump(), "attempt": 2, "repair": repair})
+    server, driver = WireServer(dispatch, brief), PolicyDriver()
+    result = await execute(dispatch, server, driver, workspace)
+    assert result.exit_code == ExitCode.APPROVAL
+    assert not driver.starts and server.model_keys == 0

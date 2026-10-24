@@ -147,7 +147,7 @@ class ClaudeSession:
                 verify_native_status(
                     self.brief.execution_policy, await self.client.get_mcp_status()
                 )
-            prompt = "Approved implementation request:\n" + self.brief.brief_text
+            prompt = "Approved implementation request:\n" + self.brief.execution_brief_text
             prompt += (
                 "\n\n"
                 + self.env.resume_note

@@ -122,7 +122,19 @@ class AwaitLaneHandler:
                 park=Park(precise),
             )
         next_input = DispatchInput(
-            approved_digest=work.approved_digest, revision=work.revision, revivals=work.revivals + 1
+            approved_digest=work.approved_digest,
+            revision=work.revision,
+            revivals=work.revivals + 1,
+            repair=(
+                work.repair.model_copy(
+                    update={
+                        "attempt": context.lease.attempt + 1,
+                        "generation": context.lease.generation + 1,
+                    }
+                )
+                if work.repair is not None
+                else None
+            ),
         )
         due = self.clock.now() + timedelta(
             seconds=backoff_seconds(work.revivals, work.settings.revive_backoff_seconds)

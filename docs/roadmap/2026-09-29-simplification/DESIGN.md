@@ -416,6 +416,18 @@ mismatch. The dispatch record, the served brief and the lane's echoed
 digest must match. This is the three-way digest, kept as one contract. It
 replaces the GitLab revisions seam and the GitHub `AttemptStartSpec`.
 
+A repair keeps those six approved fields and the canonical frozen specification
+unchanged. A separate immutable `RepairContext` identifies the same run,
+new attempt and generation, original approval/base, the exact prior published
+candidate and its failed independent checks. The engine accepts it only from
+its durable dispatch step and that run's validated publication plus commit
+receipt; it rechecks that the current native branch still equals the owned
+candidate before dispatch. The lane verifies the same context on the served
+brief and dispatch, uses its candidate SHA as the execution base and echoes
+that base on candidate and checkpoint receipts. The failure context reaches
+the driver separately from the approved brief. No repair creates new write
+scope or rewrites the original approval.
+
 ### 6.7 Lane protocol v1
 
 All endpoints are under `/lane/v1`. JSON bodies are `forge_protocol` models

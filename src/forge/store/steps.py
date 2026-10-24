@@ -155,14 +155,32 @@ def apply_lane_restart(
     if restart is None:
         return
     if (
-        lease.handler != Handler.AWAIT_LANE
-        or run.state != State.RUNNING.value
+        (lease.handler, run.state)
+        not in {
+            (Handler.AWAIT_LANE, State.RUNNING.value),
+            (Handler.VERIFY, State.VERIFYING.value),
+        }
         or transition_to is not None
         or approval is not None
         or len(successors) != 1
         or successors[0].handler != Handler.DISPATCH
     ):
         raise StoreConflict("lane revival requires one atomic dispatch successor")
+    if lease.handler == Handler.VERIFY:
+        from forge_protocol import RepairContext
+
+        repair = RepairContext.model_validate_json(
+            json.dumps(json.loads(successors[0].payload_json)["repair"])
+        )
+        if (
+            repair.forge_run_id,
+            repair.attempt,
+            repair.generation,
+            repair.prior_attempt,
+            repair.prior_generation,
+        ) != (run.id, run.attempt + 1, run.generation + 1, run.attempt, run.generation):
+            raise StoreConflict("repair successor differs from its current candidate generation")
+        run.state = transition(State(run.state), State.RUNNING).value
     run.attempt += 1
     run.generation += 1
     run.version += 1

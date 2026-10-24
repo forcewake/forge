@@ -39,7 +39,7 @@ class Runner:
         trace_platform: Platform | None = None,
     ):
         self.dispatch, self.client, self.driver = dispatch, client, driver
-        self.workspace = Workspace(workspace, dispatch.base_sha, limits)
+        self.workspace = Workspace(workspace, dispatch.execution_base_sha, limits)
         self.timings = timings
         self.supervisor: Supervisor | None = None
         self.started = monotonic()
@@ -172,7 +172,7 @@ class Runner:
                             **self.client.identity,
                             diff_sha256=diff_id,
                             diff_size_bytes=len(diff),
-                            base_sha=self.dispatch.base_sha,
+                            base_sha=self.dispatch.execution_base_sha,
                             approved_digest=self.dispatch.approved_digest,
                             driver=self.dispatch.driver,
                             model=self.dispatch.model,

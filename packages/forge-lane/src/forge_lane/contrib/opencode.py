@@ -184,7 +184,7 @@ class OpenCodeSession(EventQueue):
             if isinstance(message.get("id"), str)
         }
         text = (
-            brief.brief_text
+            brief.execution_brief_text
             + "\n\n"
             + env.resume_note
             + "\nOnly confined file tools are permitted. No shell, MCP, repository APIs or authority files.\n"

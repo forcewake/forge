@@ -82,7 +82,7 @@ class GrokDriver:
         argv.extend(
             [
                 "-p",
-                brief.brief_text
+                brief.execution_brief_text
                 + "\n\n"
                 + env.resume_note
                 + "\nEdit only this workspace; leave changes uncommitted.",

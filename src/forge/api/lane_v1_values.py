@@ -44,7 +44,7 @@ def resume_checkpoint(
         or manifest.forge_run_id != pending.identity.forge_run_id
         or manifest.attempt != pending.identity.attempt
         or manifest.generation >= pending.identity.generation
-        or manifest.base_sha != pending.dispatch.base_sha
+        or manifest.base_sha != pending.dispatch.execution_base_sha
         or manifest.approved_digest != pending.dispatch.approved_digest
         or manifest.driver != pending.dispatch.driver
     ):
@@ -74,7 +74,8 @@ def bind_submission(pending: PendingDispatch, value: Any) -> None:
         or value.generation != pending.identity.generation
         or value.approved_digest != pending.dispatch.approved_digest
         or value.driver != pending.dispatch.driver
-        or getattr(value, "base_sha", pending.dispatch.base_sha) != pending.dispatch.base_sha
+        or getattr(value, "base_sha", pending.dispatch.execution_base_sha)
+        != pending.dispatch.execution_base_sha
         or getattr(value, "model", pending.dispatch.model) != pending.dispatch.model
     ):
         raise LaneConflict("submission does not match the authenticated dispatch")

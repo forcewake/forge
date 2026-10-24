@@ -72,7 +72,10 @@ class CopilotCLIDriver:
             session.reader = asyncio.create_task(session.read())
             await session.initialize()
             prompt = (
-                "Approved implementation request:\n" + brief.brief_text + "\n\n" + env.resume_note
+                "Approved implementation request:\n"
+                + brief.execution_brief_text
+                + "\n\n"
+                + env.resume_note
             )
             prompt += "\n\nAvailable workspace files:\n" + session.policy.inventory()
             prompt += (

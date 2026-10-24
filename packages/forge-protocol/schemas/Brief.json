@@ -1,4 +1,79 @@
 {
+  "$defs": {
+    "RepairContext": {
+      "additionalProperties": false,
+      "description": "Server-authorized execution on this run's prior published candidate.",
+      "properties": {
+        "approved_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Approved Digest",
+          "type": "string"
+        },
+        "attempt": {
+          "minimum": 0,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "candidate_sha": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Candidate Sha",
+          "type": "string"
+        },
+        "failure_context": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "title": "Failure Context",
+          "type": "string"
+        },
+        "forge_run_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[\\w.-]+$",
+          "title": "Forge Run Id",
+          "type": "string"
+        },
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "original_base_sha": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Original Base Sha",
+          "type": "string"
+        },
+        "prior_attempt": {
+          "minimum": 1,
+          "title": "Prior Attempt",
+          "type": "integer"
+        },
+        "prior_generation": {
+          "minimum": 1,
+          "title": "Prior Generation",
+          "type": "integer"
+        },
+        "protocol": {
+          "const": "forge.lane/1",
+          "default": "forge.lane/1",
+          "title": "Protocol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "forge_run_id",
+        "attempt",
+        "generation",
+        "approved_digest",
+        "original_base_sha",
+        "candidate_sha",
+        "prior_attempt",
+        "prior_generation",
+        "failure_context"
+      ],
+      "title": "RepairContext",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "approved_digest": {
@@ -43,6 +118,17 @@
       "default": "forge.lane/1",
       "title": "Protocol",
       "type": "string"
+    },
+    "repair": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RepairContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "revision": {
       "minimum": 1,
