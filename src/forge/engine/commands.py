@@ -5,6 +5,7 @@ import json
 import re
 
 from forge.command_values import CommandEnvelope, CommandLease, CommandResult, REFUSALS
+from forge.operator_values import safe_text
 from forge.domain.verdicts import Unknown
 from forge.engine.effects import Effects
 from forge.port_values import Applied, EffectKind, GatewayKeyRef, RepoRef
@@ -138,7 +139,7 @@ class Commands:
                 return refusal("run_not_found")
             return CommandResult(
                 status="observed",
-                reason=run.reason or run.state.value,
+                reason=safe_text(run.reason) or run.state.value,
                 run_id=run.id,
                 data_json=await self.runs.snapshot(run),
             )

@@ -2,7 +2,8 @@
 
 from sqlalchemy import select, tuple_
 
-from forge.runtime.authority import Principal, NotAuthorized
+from forge.runtime.authority import Principal
+from forge.operator_values import safe_text
 from forge.runtime.settings import RuntimeSettings
 from forge.store.command_runs import CommandRuns
 from forge.store.models_runs import EngineRun
@@ -27,7 +28,7 @@ def public_run(run: RunRecord) -> dict[str, object]:
         "cancel_requested": run.cancel_requested,
         "version": run.version,
         "failed_handler": run.failed_handler.value if run.failed_handler else None,
-        "reason": run.reason,
+        "reason": safe_text(run.reason),
     }
 
 
@@ -74,7 +75,7 @@ class Projection:
                 row.connection_id,
                 row.repository_id,
             ) not in self.scope(principal):
-                raise NotAuthorized("run access refused")
+                return None
             return run_record(row) if row is not None else None
 
     async def detail(self, principal: Principal, run_id: str) -> dict[str, object] | None:

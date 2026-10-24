@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.command_values import CommandEnvelope
+from forge.operator_values import redact
 from forge.domain.budget import Pool
 from forge.budget.projection import pool_projection
 from forge.store.budget_command_projection import amendment_snapshot
@@ -144,32 +145,35 @@ class CommandRuns:
                 }
             )
             return json.dumps(
-                {
-                    **native_data,
-                    "state": run.state.value,
-                    "reason": run.reason,
-                    "attempt": run.attempt,
-                    "generation": run.generation,
-                    "cancel_requested": run.cancel_requested,
-                    "failed_handler": run.failed_handler.value if run.failed_handler else None,
-                    "candidates": [
-                        {
-                            "sha": row.published_sha,
-                            "state": row.state,
-                            "attempt": row.attempt,
-                            "generation": row.generation,
-                        }
-                        for row in candidates
-                    ],
-                    "budgets": {
-                        row.purpose: pool_projection(Pool.model_validate_json(row.state_json))
-                        for row in pools
-                    },
-                    "budget_amendments": await amendment_snapshot(session, run.id),
-                    "effects": [
-                        {"kind": row.kind, "state": row.state, "key": row.key} for row in effects
-                    ],
-                },
+                redact(
+                    {
+                        **native_data,
+                        "state": run.state.value,
+                        "reason": run.reason,
+                        "attempt": run.attempt,
+                        "generation": run.generation,
+                        "cancel_requested": run.cancel_requested,
+                        "failed_handler": run.failed_handler.value if run.failed_handler else None,
+                        "candidates": [
+                            {
+                                "sha": row.published_sha,
+                                "state": row.state,
+                                "attempt": row.attempt,
+                                "generation": row.generation,
+                            }
+                            for row in candidates
+                        ],
+                        "budgets": {
+                            row.purpose: pool_projection(Pool.model_validate_json(row.state_json))
+                            for row in pools
+                        },
+                        "budget_amendments": await amendment_snapshot(session, run.id),
+                        "effects": [
+                            {"kind": row.kind, "state": row.state, "key": row.key}
+                            for row in effects
+                        ],
+                    }
+                ),
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,

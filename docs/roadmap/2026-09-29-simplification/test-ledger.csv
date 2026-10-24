@@ -234,7 +234,7 @@ tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_native_model_services.py,6,273,true,true,,invariant evidence,,native,keep,P3-13,"Lease-bound native review model grants and exact persisted diff, policy and closing-call authority."
 tests/test_native_review.py,17,557,true,true,,invariant evidence; edge-case pin,,native,keep,P3-13,"Incremental human-push review on exact native heads, separate read-only authority, bounded budget and immutable comment recovery."
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,
-tests/test_operator_canonical_subjects.py,24,637,true,false,,edge-case pin,,operator,keep,-,
+tests/test_operator_canonical_subjects.py,26,249,false,false,,edge-case pin,,operator,keep,-,
 tests/test_operator_experience.py,18,670,true,false,,,,operator,keep,-,
 tests/test_operator_recovery_surface.py,20,830,true,false,,,,operator,keep,-,
 tests/test_operator_snapshot.py,36,1145,true,false,,,,operator,keep,-,

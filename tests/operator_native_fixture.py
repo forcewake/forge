@@ -17,9 +17,8 @@ from tests.test_budget_engine import NativeAdmin
 from tests.test_runtime_app import auth
 
 
-@pytest.fixture
-async def operator_native(tmp_path):
-    config, values = configuration(tmp_path)
+@asynccontextmanager
+async def opened_operator(config, values):
     db = database(values["SYNTHETIC_DATABASE_URL"])
     await initialize(db)
     await db.dispose()
@@ -53,3 +52,10 @@ async def operator_native(tmp_path):
                 gateway=gateway,
             )
     assert app.state.runtime is None and app.state.lane_v1_service is None
+
+
+@pytest.fixture
+async def operator_native(tmp_path):
+    config, values = configuration(tmp_path)
+    async with opened_operator(config, values) as fixture:
+        yield fixture

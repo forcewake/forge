@@ -41,6 +41,13 @@ def principal(request: Request, service: RuntimeDep) -> Principal:
 PrincipalDep = Annotated[Principal, Depends(principal)]
 
 
+def query_shape(request: Request, allowed: frozenset[str]) -> None:
+    if set(request.query_params) - allowed or any(
+        len(request.query_params.getlist(key)) != 1 for key in request.query_params
+    ):
+        raise HTTPException(400, "operator query shape refused")
+
+
 class CommandRequest(Value):
     repository: Annotated[str, Field(min_length=1, max_length=64)]
     target_kind: Literal["issue", "review"] = "issue"
@@ -58,11 +65,13 @@ class CommandRequest(Value):
 
 @router.get("/runs")
 async def runs(
+    request: Request,
     service: RuntimeDep,
     who: PrincipalDep,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0, le=10000),
 ) -> dict[str, object]:
+    query_shape(request, frozenset(("limit", "offset")))
     return {
         "runs": await service.projection.list(who, limit=limit, offset=offset),
         "offset": offset,
@@ -71,7 +80,10 @@ async def runs(
 
 
 @router.get("/runs/{run_id}")
-async def run_detail(run_id: str, service: RuntimeDep, who: PrincipalDep) -> dict[str, object]:
+async def run_detail(
+    run_id: str, request: Request, service: RuntimeDep, who: PrincipalDep
+) -> dict[str, object]:
+    query_shape(request, frozenset())
     if len(run_id) != 32:
         raise HTTPException(404, "run not found")
     try:
