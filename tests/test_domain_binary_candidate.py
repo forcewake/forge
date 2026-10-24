@@ -140,7 +140,7 @@ async def test_effect_journal_preserves_binary_manifest_and_lost_commit(reposito
     from forge.domain.states import Handler
     from forge.domain.verdicts import Committed, Unknown
     from forge.engine.effects import Effects
-    from forge.models.base import Base
+    from forge.store.base import Base
     from forge.providers.fake import FakeProvider, Fault
     from forge.store.effects import EffectStore
     from forge.store.records import RunRequest, StepRequest
