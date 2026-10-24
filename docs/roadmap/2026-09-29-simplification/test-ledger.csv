@@ -183,7 +183,7 @@ tests/test_github_reactive_review.py,25,635,true,false,,edge-case pin,,github,po
 tests/test_github_reads.py,13,443,true,false,,edge-case pin,,github,keep,P3-16,"Frozen Git objects, native bot markers and approver authority"
 tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
 tests/test_github_rest.py,16,509,true,true,,edge-case pin,,github,keep,P3-16,"Native GitHub REST write, recovery and SHA-bound Actions fixtures"
-tests/test_github_runs.py,128,4762,true,false,,edge-case pin,,github,port-engine,P3,
+tests/test_github_runs.py,23,520,true,true,,invariant evidence; edge-case pin,,github,port-engine,P3,
 tests/test_github_webhook.py,46,429,true,true,,invariant evidence; edge-case pin,,github,keep,-,
 tests/test_gitlab_client.py,30,324,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_client_commits.py,6,100,false,false,,,,gitlab,port-adapter,P3,
