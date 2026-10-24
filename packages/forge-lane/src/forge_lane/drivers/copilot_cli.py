@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,7 @@ class CopilotCLIDriver:
 
 
 class CopilotSession:
-    def __init__(self, workspace: Path, token: str, config: tempfile.TemporaryDirectory):
+    def __init__(self, workspace: Path, token: str, config: tempfile.TemporaryDirectory[str]):
         self.workspace, self.token, self.config = workspace, token, config
         self.policy = FilePolicy(workspace, None)
         self.transport: Transport | None = None
@@ -97,8 +98,8 @@ class CopilotSession:
         self.sequence = 0
         self.session_id = ""
         self.queue: asyncio.Queue[DriverEvent | LaneFailure | None] = asyncio.Queue(maxsize=256)
-        self.reader: asyncio.Task | None = None
-        self.turn: asyncio.Task | None = None
+        self.reader: asyncio.Task[None] | None = None
+        self.turn: asyncio.Task[None] | None = None
         self.cancelled = False
         self.closed = False
         self.policy_refused = False
@@ -397,7 +398,7 @@ class CopilotSession:
                     await asyncio.gather(self.reader, return_exceptions=True)
                 self.config.cleanup()
 
-    async def events(self):
+    async def events(self) -> AsyncIterator[DriverEvent]:
         while (event := await self.queue.get()) is not None:
             if isinstance(event, LaneFailure):
                 raise event

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, MutableMapping
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from starlette.types import Message
 from forge_protocol import (
     Brief,
     CandidateBundle,
@@ -39,7 +38,7 @@ class LaneRoute(APIRoute):
         async def guarded(request: Request) -> Response:
             receive, count = request.receive, 0
 
-            async def bounded_receive() -> Message:
+            async def bounded_receive() -> MutableMapping[str, Any]:
                 nonlocal count
                 message = await receive()
                 count += len(message.get("body", b""))

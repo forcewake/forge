@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -27,7 +28,7 @@ DRIVERS = {
 def load_driver(name: str) -> Driver:
     try:
         module = importlib.import_module(DRIVERS[name])
-        return module.create_driver()
+        return cast(Driver, module.create_driver())
     except (KeyError, ImportError, AttributeError):
         raise LaneFailure(
             ExitCode.CONFIGURATION, "driver_unavailable", "Requested driver is not installed"
