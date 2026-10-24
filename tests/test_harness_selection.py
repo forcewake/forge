@@ -1,1051 +1,337 @@
-"""ADR-0023: the pure harness-selection compiler + dispatch fallback step.
+"""Retained selection lessons on explicit trusted two-driver frozen policies.
 
-Rules 1–6 of the v0.9 brief §2, each pinned by its own test, plus the
-shared ``advance_harness_fallback`` helper (§6): OFF by default,
-infrastructure-only, pre-candidate-only, chain-exhaustion fails visibly.
-No network, no DB — everything here is a pure function of its inputs.
+Planner suggestions, environment preferences, budget classes and fallback
+chains are retired authority. A model cannot choose or replace the driver,
+model, budget or credential mode carried by an approved RunSpec2.
 """
 
+import json
+
 import pytest
+from pydantic import ValidationError
 
-from forge.runs.harness_selection import (
-    BUDGET_CLASSES,
-    DEFAULT_DRIVER,
-    SHIPPED_DRIVERS,
-    advance_harness_fallback,
-    compile_harness_selection,
-    current_driver,
-    implementation_block,
-    parse_driver_entry,
-    parse_preference,
-    selection_from_spec_document,
-    validate_preference,
+from forge.domain.plan import Plan
+from forge.domain.run_spec import RunPolicy, RunSpec2
+from forge.runtime.settings import RuntimeSettings
+from forge_lane.cli import load_driver
+from forge_lane.errors import LaneFailure
+from tests.native_policy_fixture import (
+    intent,
+    planned,
+    policy,
+    policy_refuses,
+    runtime_document,
+    runtime_refuses,
+    switched_driver_refuses,
 )
+from tests.test_domain_approved_input import spec
 
-LANES = {"claude-code", "grok-build", "opencode", "copilot"}
+
+def unsupported(name):
+    with pytest.raises(LaneFailure) as failure:
+        load_driver(name)
+    assert failure.value.classification == "driver_unavailable"
+
+
+def no_planner_authority(**proposal):
+    with pytest.raises(ValidationError):
+        Plan.model_validate({**planned("Task").model_dump(), **proposal})
 
 
 class TestImplementationBlock:
-    """Brief §4: five fixed lines for the plan comment, gate-visible."""
-
     def test_five_fixed_lines_with_model_and_chain(self):
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build", "opencode"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "grok-build", "budget_class": "trivial", "reason": "docs one-liner"},
+        admission = intent()
+        frozen = admission.freeze(planned(summary="Approved implementation"))
+        assert frozen.driver == admission.policy.driver and frozen.model == admission.policy.model
+        assert (
+            frozen.limits == admission.policy.limits
+            and "Approved implementation" in frozen.brief_text
         )
-        block = implementation_block(selection, model="glm-5.3-flash[1m]", commit_cycles=3)
-        assert block == (
-            "## Implementation\n"
-            "- Harness: **grok-build** · model glm-5.3-flash[1m]\n"
-            "- Fallbacks: opencode\n"
-            "- Budget class: trivial\n"
-            "- Commit cycles: 3\n"
-            "- Selection reason: docs one-liner\n"
-        )
+        assert "fallbacks" not in frozen.model_dump()
 
     def test_empty_fallbacks_read_none(self):
-        selection = compile_harness_selection([], "ci_harness", LANES, None)
-        block = implementation_block(selection, model="m", commit_cycles=3)
-        assert "- Fallbacks: none\n" in block
-        assert "- Selection reason: default\n" in block
+        frozen = intent().freeze(planned(summary="Task"))
+        assert frozen.driver == "claude_code" and "fallbacks" not in frozen.model_dump()
 
     def test_block_starts_with_the_implementation_heading(self):
-        selection = compile_harness_selection([], "ci_harness", LANES, None)
-        assert implementation_block(selection, model="", commit_cycles=1).startswith(
-            "## Implementation\n"
-        )
+        admission = intent()
+        frozen = admission.freeze(planned(summary="Complete approved plan"))
+        assert frozen.brief_text.startswith("# Approved task\n\nExact original text")
+        assert "Complete approved plan" in frozen.brief_text
 
 
 class TestCompilerRules:
-    def test_rule_1_lanes_cap_the_result(self):
-        """A proposal can reorder, never extend: a lane the project did not
-        onboard can never be selected, whatever the planner asks for."""
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build"],
-            "ci_harness:claude-code",
-            available_lanes={"grok-build"},  # claude-code not onboarded
-            planner_proposal={"harness": "claude-code", "reason": "wants claude"},
+    def test_rule_1_lanes_cap_the_result(self, tmp_path):
+        runtime_refuses(
+            tmp_path,
+            lambda doc: doc["connections"][0]["repositories"][0]["policy"].update(driver="grok"),
         )
-        assert selection.harness == "grok-build"
-        assert selection.fallbacks == ()
 
     def test_rule_2_empty_preference_is_the_backend_one_element_list(self):
-        """Byte-compatible default: no preference ⇒ [current_backend], no
-        fallbacks — the pre-ADR-0023 behavior, verbatim."""
-        selection = compile_harness_selection([], "ci_harness:opencode", LANES, None)
-        assert selection.harness == "opencode"
-        assert selection.fallbacks == ()
-        assert selection.budget_class == "standard"
-        assert selection.reason == "default"
+        policy_refuses(driver="")
 
     def test_rule_2_bare_ci_harness_defaults_to_claude_code(self):
-        selection = compile_harness_selection([], "ci_harness", LANES, None)
-        assert selection.harness == DEFAULT_DRIVER
+        unsupported("ci_harness")
 
     def test_rule_3_non_onboarded_preference_entries_are_dropped(self):
-        selection = compile_harness_selection(
-            ["copilot", "claude-code", "grok-build"],
-            "ci_harness:claude-code",
-            available_lanes={"claude-code", "grok-build"},  # copilot not onboarded
-            planner_proposal=None,
-        )
-        assert selection.harness == "claude-code"
-        assert selection.fallbacks == ("grok-build",)  # the tail is ∩ available
+        policy_refuses(driver_preference=["claude_code", "grok"])
 
     def test_rule_4_planner_proposal_honored_within_preference_and_lanes(self):
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "grok-build", "budget_class": "trivial", "reason": "docs one-liner"},
-        )
-        assert selection.harness == "grok-build"
-        assert selection.fallbacks == ()
-        assert selection.budget_class == "trivial"
-        assert selection.reason == "docs one-liner"
+        no_planner_authority(driver="copilot_cli")
 
     def test_rule_4_proposal_outside_preference_is_ignored(self):
-        """The planner is never the authority: a harness outside the
-        preference (∩ lanes) degrades to the chain head."""
-        selection = compile_harness_selection(
-            ["claude-code"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "copilot", "reason": "overreach"},
-        )
-        assert selection.harness == "claude-code"
-        assert selection.reason == "default"  # not honored → planner reason too
+        no_planner_authority(harness="grok-build")
 
     def test_rule_4_invalid_budget_class_falls_back_to_default(self):
-        selection = compile_harness_selection(
-            ["claude-code"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "claude-code", "budget_class": "galactic"},
-        )
-        assert selection.budget_class == "standard"
+        no_planner_authority(budget_class="unbounded")
 
     def test_rule_4_missing_reason_defaults_to_planner_selection(self):
-        selection = compile_harness_selection(
-            ["claude-code", "opencode"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "opencode"},
+        admission = intent()
+        frozen = admission.freeze(planned(summary="No inferred driver choice"))
+        assert (
+            frozen.driver == admission.policy.driver
+            and frozen.planning_allowance == admission.policy.planning_allowance
         )
-        assert selection.harness == "opencode"
-        assert selection.reason == "planner selection"
 
     def test_rule_4_budget_class_applies_even_without_harness(self):
-        """The budget-class clause is independent of the harness clause."""
-        selection = compile_harness_selection(
-            ["claude-code"], "ci_harness:claude-code", LANES, {"budget_class": "heavy"}
-        )
-        assert selection.harness == "claude-code"
-        assert selection.budget_class == "heavy"
-        assert selection.reason == "default"
+        no_planner_authority(budget_class="trivial")
 
     def test_rule_5_fallback_tail_frozen_even_when_switch_is_off(self):
-        """The spec describes the chain; the runtime switch is a separate
-        policy — the tail is recorded either way."""
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build", "opencode"],
-            "ci_harness:claude-code",
-            LANES,
-            None,
-        )
-        assert selection.fallbacks == ("grok-build", "opencode")
+        policy_refuses(fallbacks=["copilot_cli"])
 
     def test_rule_5_proposal_selection_splits_the_tail(self):
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build", "opencode"],
-            "ci_harness:claude-code",
-            LANES,
-            {"harness": "grok-build"},
-        )
-        assert selection.harness == "grok-build"
-        assert selection.fallbacks == ("opencode",)
+        no_planner_authority(fallbacks=["grok"])
 
     def test_rule_6_deterministic_same_inputs_identical_output(self):
-        kwds = {
-            "preference": ["claude-code", "grok-build", "opencode"],
-            "current_backend": "ci_harness:claude-code",
-            "available_lanes": LANES,
-            "planner_proposal": {"harness": "grok-build", "budget_class": "heavy"},
-        }
-        first = compile_harness_selection(**kwds)
-        for _ in range(5):
-            assert compile_harness_selection(**kwds) == first
+        admission = intent()
+        plan = planned(summary="Exact deterministic plan")
+        assert admission.freeze(plan).canonical_bytes == admission.freeze(plan).canonical_bytes
+        assert admission.freeze(plan).digest == admission.freeze(plan).digest
 
     def test_malformed_planner_proposal_is_tolerated(self):
-        """Parsing stays lenient: a non-dict proposal is no proposal at all."""
-        selection = compile_harness_selection(
-            ["claude-code"],
-            "ci_harness:claude-code",
-            LANES,
-            "garbage",  # type: ignore[arg-type]
-        )
-        assert selection.harness == "claude-code"
-        assert selection.reason == "default"
+        # Malformed policy proposals are rejected, never silently normalized into authority.
+        with pytest.raises(ValidationError):
+            Plan.model_validate({**planned("Task").model_dump(), "driver": 42})
 
 
 class TestBudgetClasses:
     def test_budget_class_set_is_the_briefs_triple(self):
-        assert BUDGET_CLASSES == {"trivial", "standard", "heavy"}
+        frozen = intent().freeze(planned(summary="Finite exact budget"))
+        assert frozen.limits.usd == policy().limits.usd and frozen.limits.calls == 20
+        assert frozen.limits.tokens == 10000 and "budget_class" not in frozen.model_dump()
 
 
 class TestCurrentDriver:
-    @pytest.mark.parametrize(
-        ("backend", "driver"),
-        [
-            ("ci_harness:grok-build", "grok-build"),
-            ("ci_harness", DEFAULT_DRIVER),
-            ("builtin", DEFAULT_DRIVER),
-            ("", DEFAULT_DRIVER),
-            (None, DEFAULT_DRIVER),
-        ],
-    )
-    def test_driver_resolution(self, backend, driver):
-        assert current_driver(backend) == driver
+    @pytest.mark.parametrize("name", ["claude_code", "copilot_cli"])
+    def test_driver_resolution(self, name):
+        assert load_driver(name).name == name
 
 
 class TestParsePreference:
     def test_splits_strips_and_deduplicates(self):
-        assert parse_preference(" claude-code, grok-build ,claude-code,") == [
-            "claude-code",
-            "grok-build",
-        ]
+        policy_refuses(driver="claude_code, copilot_cli")
 
     def test_empty_is_empty(self):
-        assert parse_preference("") == []
-        assert parse_preference(None) == []
+        policy_refuses(driver=" ")
 
 
 class TestValidatePreference:
     def test_unknown_driver_is_refused(self):
-        with pytest.raises(ValueError, match="unknown harness driver"):
-            validate_preference(["claude-code", "warp"], "claude-code")
+        unsupported("warp")
 
     def test_list_must_include_the_configured_backend(self):
-        with pytest.raises(ValueError, match="tightens, never deselects"):
-            validate_preference(["claude-code"], "grok-build")
+        policy_refuses(driver_preference=["copilot_cli"])
 
     def test_valid_list_passes(self):
-        validate_preference(["claude-code", "grok-build"], "claude-code")
+        value = policy()
+        assert RunPolicy.model_validate_json(value.canonical_bytes) == value
 
     def test_empty_list_is_always_valid(self):
-        validate_preference([], "copilot")
+        policy_refuses(driver=[])
 
     def test_driver_check_is_skipped_for_the_builtin_backend(self):
-        """The builtin lane dispatches no harness — only the id set binds."""
-        validate_preference(["grok-build"], None)
+        unsupported("builtin")
 
     def test_shipped_driver_set_is_the_nine_lanes(self):
-        # The four scripted harness templates, the three EXE-02 interactive
-        # SDK lanes (claude/codex/opencode — same candidate contract; the
-        # agent is driven by forge.lane_driver), the R28-21 reproducible
-        # .NET recipe (the claude-code contract on a digest-pinned .NET 9
-        # SDK image — docs/harnesses/dotnet-lane.md), and the interactive
-        # copilot ACP twin of the scripted copilot lane.
-        assert SHIPPED_DRIVERS == {
-            "claude-code",
-            "grok-build",
-            "opencode",
-            "copilot",
-            "claude-sdk-lane",
-            "codex-sdk-lane",
-            "opencode-sdk-lane",
-            "dotnet-lane",
-            "copilot-sdk-lane",
-        }
+        for name in ("grok", "codex", "opencode", "dotnet-lane", "claude-code", "copilot"):
+            unsupported(name)
+        assert (
+            load_driver("claude_code").requires_model_key
+            and not load_driver("copilot_cli").requires_model_key
+        )
 
     def test_the_sdk_lane_shares_the_claude_code_credential_recipe(self):
-        # EXE-02: the interactive lane rides the SAME gateway credential
-        # set as the batch claude-code lane — doctor and the lane recipes
-        # cross-check both sides against this one registry.
-        from forge.runs.harness_selection import (
-            DRIVER_CREDENTIAL_VARS,
-            DRIVER_OPTIONAL_CREDENTIAL_VARS,
-        )
-
-        assert DRIVER_CREDENTIAL_VARS["claude-sdk-lane"] == DRIVER_CREDENTIAL_VARS["claude-code"]
-        # The optional surface extends the batch recipe with the NXT-10
-        # lane control pair (the work-scoped steering token — OPTIONAL:
-        # absent means the lane stays on its local mailbox).
-        assert (
-            DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"][0]
-            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"][0]
-            == "ANTHROPIC_API_KEY"
-        )
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"][1:] == (
-            "FORGE_LANE_CONTROL_URL",
-            "FORGE_LANE_CONTROL_TOKEN",
-        )
+        value = policy()
+        assert value.driver == "claude_code" and value.metering == "metered"
 
     def test_codex_and_opencode_sdk_lanes_have_their_own_recipes(self):
-        from forge.runs.harness_selection import (
-            DRIVER_CREDENTIAL_VARS,
-            DRIVER_OPTIONAL_CREDENTIAL_VARS,
-        )
-
-        # codex: ambient API-key auth; the ChatGPT-login blob is the
-        # optional surface the template lands as ~/.codex/auth.json
-        # (beside the shared sdk-lane control pair, NXT-10).
-        assert DRIVER_CREDENTIAL_VARS["codex-sdk-lane"] == ("OPENAI_API_KEY", "CODEX_API_KEY")
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["codex-sdk-lane"] == (
-            "FORGE_CODEX_AUTH",
-            "FORGE_LANE_CONTROL_URL",
-            "FORGE_LANE_CONTROL_TOKEN",
-        )
-        # opencode: the SAME ambient key the batch opencode lane consumes;
-        # the generic BYOK PUT surface is optional (beside the pair).
-        assert DRIVER_CREDENTIAL_VARS["opencode-sdk-lane"] == ("ZAI_API_KEY",)
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["opencode-sdk-lane"] == (
-            "OPENCODE_PROVIDER_API_KEY",
-            "FORGE_LANE_CONTROL_URL",
-            "FORGE_LANE_CONTROL_TOKEN",
-        )
+        unsupported("codex-sdk-lane")
+        unsupported("opencode-sdk-lane")
 
     def test_the_dotnet_lane_declares_no_driver_credentials(self):
-        # R28-21: the .NET lane rides the forge gateway — the shared
-        # ANTHROPIC_* surface the runner already provisions for
-        # claude-shaped lanes. The registry deliberately requires NOTHING
-        # per-driver: doctor has no new variable to check, and a missing
-        # gateway pair fails at the driver's own auth boundary (documented
-        # in docs/harnesses/dotnet-lane.md).
-        from forge.runs.harness_selection import (
-            DRIVER_CREDENTIAL_VARS,
-            DRIVER_OPTIONAL_CREDENTIAL_VARS,
-        )
-
-        assert DRIVER_CREDENTIAL_VARS["dotnet-lane"] == ()
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS.get("dotnet-lane", ()) == ()
+        unsupported("dotnet-lane")
 
     def test_the_copilot_sdk_lane_shares_the_batch_copilot_token(self):
-        # The ACP child reads the SAME fine-grained PAT ("Copilot
-        # Requests" permission) the scripted copilot lane consumes — one
-        # credential, both surfaces; the optional surface is the shared
-        # sdk-lane control pair only.
-        from forge.runs.harness_selection import (
-            DRIVER_CREDENTIAL_VARS,
-            DRIVER_OPTIONAL_CREDENTIAL_VARS,
-        )
-
-        assert DRIVER_CREDENTIAL_VARS["copilot-sdk-lane"] == DRIVER_CREDENTIAL_VARS["copilot"]
-        assert DRIVER_CREDENTIAL_VARS["copilot-sdk-lane"] == ("COPILOT_GITHUB_TOKEN",)
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["copilot-sdk-lane"] == (
-            "FORGE_LANE_CONTROL_URL",
-            "FORGE_LANE_CONTROL_TOKEN",
-        )
+        value = policy(driver="copilot_cli", metering="copilot-scoped-unmetered")
+        assert value.driver == "copilot_cli" and value.metering == "copilot-scoped-unmetered"
+        policy_refuses(driver="copilot_cli", metering="metered")
 
 
 class TestPinnedChainEntries:
-    """R15: a chain entry may pin its driver's CLI version
-    (``driver@version``) — accepted and validated; the frozen selection
-    stays bare-driver (the pin's enforcement point is the lane's
-    FORGE_DRIVER_VERSIONS variable, not the dispatch)."""
-
     def test_parse_splits_the_pin_from_the_driver(self):
-        assert parse_driver_entry("grok-build@1.0.30") == ("grok-build", "1.0.30")
-        assert parse_driver_entry(" claude-code ") == ("claude-code", None)
-        assert parse_driver_entry("") == ("", None)
+        policy_refuses(driver="claude_code@2.0.0")
 
     def test_parse_refuses_a_malformed_pin(self):
-        with pytest.raises(ValueError, match="malformed pinned harness entry"):
-            parse_driver_entry("grok-build@")
-        with pytest.raises(ValueError, match="malformed pinned harness entry"):
-            parse_driver_entry("@1.0.30")
-        with pytest.raises(ValueError, match="malformed pinned harness entry"):
-            parse_driver_entry("grok-build@1.0; rm -rf /")
+        policy_refuses(driver="claude_code@;touch escaped")
 
     def test_validate_accepts_the_pinned_form_by_its_driver_part(self):
-        validate_preference(["claude-code", "grok-build@1.0.30"], "claude-code")
-        validate_preference(["grok-build@1.0.30"], "grok-build")
+        unsupported("copilot_cli@1.0.86")
 
     def test_validate_still_refuses_unknown_drivers_under_a_pin(self):
-        with pytest.raises(ValueError, match="unknown harness driver"):
-            validate_preference(["warp@1.0"], None)
+        unsupported("warp@1.0")
 
     def test_compile_strips_the_pin_into_the_bare_frozen_selection(self):
-        selection = compile_harness_selection(
-            ["grok-build@1.0.30", "claude-code"], "ci_harness:grok-build", LANES, None
-        )
-
-        assert selection.harness == "grok-build"  # bare — the dispatch contract
-        assert selection.fallbacks == ("claude-code",)
-        assert selection.as_document()["harness"] == "grok-build"
+        value = policy()
+        assert value.driver == "claude_code"
+        policy_refuses(driver_versions={"claude_code": "latest"})
 
     def test_compile_collapses_duplicate_driver_entries_on_the_bare_id(self):
-        selection = compile_harness_selection(
-            ["grok-build", "grok-build@1.0.30"], "ci_harness:grok-build", LANES, None
-        )
-
-        assert selection.harness == "grok-build"
-        assert selection.fallbacks == ()
+        policy_refuses(driver_preference=["claude_code", "claude_code"])
 
 
 class TestSelectionFromSpecDocument:
     def test_round_trips_the_backend_config_fragment(self):
-        selection = compile_harness_selection(
-            ["claude-code", "grok-build"], "ci_harness:claude-code", LANES, None
-        )
-        document = {"backend_config": {"backend": "ci_harness", **selection.as_document()}}
-        assert selection_from_spec_document(document) == selection
+        frozen = intent().freeze(planned(summary="Frozen trusted policy"))
+        assert RunSpec2.model_validate_json(frozen.canonical_bytes) == frozen
+        assert frozen.execution_policy == policy().execution_policy
 
     def test_pre_v2_document_has_no_selection(self):
-        assert selection_from_spec_document({"backend_config": {"backend": "builtin"}}) is None
-        assert selection_from_spec_document(None) is None
-        assert selection_from_spec_document({}) is None
+        document = spec().model_dump(mode="json")
+        document["schema"] = "forge.run-spec/1"
+        with pytest.raises(ValidationError):
+            RunSpec2.model_validate_json(json.dumps(document))
 
 
 class TestAdvanceHarnessFallback:
-    """Brief §6: OFF by default, infrastructure-only, pre-candidate-only."""
+    async def test_off_by_default_never_advances(self, tmp_path):
+        await switched_driver_refuses(tmp_path)
 
-    def make_selection(self) -> object:
-        return compile_harness_selection(
-            ["claude-code", "grok-build", "opencode"], "ci_harness:claude-code", LANES, None
-        )
+    async def test_infrastructure_failure_advances_to_the_next_entry(self, tmp_path):
+        await switched_driver_refuses(tmp_path, other="grok")
 
-    def test_off_by_default_never_advances(self):
-        selection = self.make_selection()
-        assert (
-            advance_harness_fallback(
-                selection,  # type: ignore[arg-type]
-                failed_driver="claude-code",
-                failure_kind="infrastructure",
-                fallback_enabled=False,
-                candidate_exists=False,
-            )
-            is None
-        )
+    async def test_code_failure_never_switches(self, tmp_path):
+        await switched_driver_refuses(tmp_path, other="codex")
 
-    def test_infrastructure_failure_advances_to_the_next_entry(self):
-        selection = self.make_selection()
-        nxt = advance_harness_fallback(
-            selection,  # type: ignore[arg-type]
-            failed_driver="claude-code",
-            failure_kind="infrastructure",
-            fallback_enabled=True,
-            candidate_exists=False,
-        )
-        assert nxt is not None
-        assert nxt.harness == "grok-build"
-        assert nxt.fallbacks == ("opencode",)
-        assert nxt.budget_class == selection.budget_class  # type: ignore[attr-defined]
-        assert "claude-code" in nxt.reason and "infrastructure" in nxt.reason
+    async def test_config_failure_never_switches(self, tmp_path):
+        await switched_driver_refuses(tmp_path, other="opencode")
 
-    def test_code_failure_never_switches(self):
-        """A CI-code failure is a signal about the CHANGE (ADR-0008)."""
-        selection = self.make_selection()
-        assert (
-            advance_harness_fallback(
-                selection,  # type: ignore[arg-type]
-                failed_driver="claude-code",
-                failure_kind="code",
-                fallback_enabled=True,
-                candidate_exists=False,
-            )
-            is None
-        )
+    async def test_never_switches_once_a_candidate_exists(self, tmp_path):
+        await switched_driver_refuses(tmp_path, other="copilot_cli")
 
-    def test_config_failure_never_switches(self):
-        selection = self.make_selection()
-        assert (
-            advance_harness_fallback(
-                selection,  # type: ignore[arg-type]
-                failed_driver="claude-code",
-                failure_kind="config",
-                fallback_enabled=True,
-                candidate_exists=False,
-            )
-            is None
-        )
-
-    def test_never_switches_once_a_candidate_exists(self):
-        """One frozen attempt base → one candidate → one producer (ADR-0016)."""
-        selection = self.make_selection()
-        assert (
-            advance_harness_fallback(
-                selection,  # type: ignore[arg-type]
-                failed_driver="claude-code",
-                failure_kind="infrastructure",
-                fallback_enabled=True,
-                candidate_exists=True,
-            )
-            is None
-        )
-
-    def test_stale_event_for_a_different_driver_is_ignored(self):
-        selection = self.make_selection()
-        assert (
-            advance_harness_fallback(
-                selection,  # type: ignore[arg-type]
-                failed_driver="opencode",
-                failure_kind="infrastructure",
-                fallback_enabled=True,
-                candidate_exists=False,
-            )
-            is None
-        )
+    async def test_stale_event_for_a_different_driver_is_ignored(self, tmp_path):
+        await switched_driver_refuses(tmp_path, other="stale_driver")
 
     def test_chain_exhaustion_returns_none(self):
-        """The last entry failing means fail visibly — wait for a human."""
-        selection = compile_harness_selection(
-            ["claude-code"], "ci_harness:claude-code", LANES, None
-        )
-        assert selection.fallbacks == ()
-        assert (
-            advance_harness_fallback(
-                selection,
-                failed_driver="claude-code",
-                failure_kind="infrastructure",
-                fallback_enabled=True,
-                candidate_exists=False,
-            )
-            is None
-        )
+        policy_refuses(fallbacks=[])
 
     def test_chain_walks_to_exhaustion(self):
-        selection = self.make_selection()
-        second = advance_harness_fallback(
-            selection,  # type: ignore[arg-type]
-            failed_driver="claude-code",
-            failure_kind="infrastructure",
-            fallback_enabled=True,
-            candidate_exists=False,
-        )
-        assert second is not None and second.harness == "grok-build"
-        third = advance_harness_fallback(
-            second,
-            failed_driver="grok-build",
-            failure_kind="infrastructure",
-            fallback_enabled=True,
-            candidate_exists=False,
-        )
-        assert third is not None and third.harness == "opencode"
-        assert third.fallbacks == ()
-        assert (
-            advance_harness_fallback(
-                third,
-                failed_driver="opencode",
-                failure_kind="infrastructure",
-                fallback_enabled=True,
-                candidate_exists=False,
-            )
-            is None
-        )
+        policy_refuses(fallbacks=["copilot_cli", "grok"])
 
 
-# ----------------------------------------------------------------------
-# Dispatch-time fallback flows (brief §6) over the fake lanes — no network.
-# OFF by default; infrastructure-only; pre-candidate-only; journaled;
-# chain exhaustion fails visibly.
-# ----------------------------------------------------------------------
+class TestGitLabFallbackFlow:
+    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "gitlab")
 
-ISSUE_IID = 7
-PROJECT_ID = 42
-ISSUE_TITLE = "Add a widget"
-ISSUE_DESC = "Widgets make the app better."
-BASE_SHA = "base-sha-1"
+    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "gitlab", "grok")
 
+    async def test_chain_exhaustion_fails_visibly(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "gitlab", "exhausted")
 
-def fallback_settings(**overrides):
-    from forge.config import Settings
+    async def test_code_failure_never_switches_even_when_enabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FORGE_HARNESS_FALLBACK_ENABLED", "1")
+        await switched_driver_refuses(tmp_path, "gitlab", "copilot_cli")
 
-    values = dict(
-        GITLAB_URL="https://gitlab.test",
-        GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
-        GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
-        FORGE_APPROVERS="alice",
-        DATABASE_URL="sqlite+aiosqlite:///:memory:",
-        FORGE_IMPLEMENTER_BACKEND="ci_harness",
-        FORGE_HARNESS_PREFERENCE="claude-code,grok-build",
-        FORGE_HARNESS_FALLBACK=True,
-    )
-    values.update(overrides)
-    return Settings(**values)
+    async def test_never_switches_once_a_candidate_exists(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "gitlab", "codex")
 
 
-class _DbBase:
-    @pytest.fixture()
-    async def db(self):
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-        from sqlalchemy.pool import StaticPool
+class TestGitHubFallbackFlow:
+    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "github")
 
-        from forge.models.base import Base
+    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "github", "grok")
 
-        engine = create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        yield async_sessionmaker(engine, expire_on_commit=False)
-        await engine.dispose()
+    async def test_chain_exhaustion_fails_visibly(self, tmp_path):
+        await switched_driver_refuses(tmp_path, "github", "exhausted")
 
-    @pytest.fixture()
-    def fake_gitlab(self):
-        from tests.fixtures.fake_gitlab import FakeGitLab
-
-        fake = FakeGitLab()
-        fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
-        fake.seed_commit("main", BASE_SHA, "initial")
-        return fake
-
-    async def get_run(self, db, run_id):
-        from forge.durable import FlowRun
-
-        async with db() as session:
-            return await session.get(FlowRun, run_id)
-
-    async def fallback_actions(self, db, run_id):
-        from sqlalchemy import select
-
-        from forge.durable import ActionLog
-
-        async with db() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(ActionLog).where(
-                            ActionLog.flow_run_id == run_id,
-                            ActionLog.action_kind == "harness_fallback",
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for row in rows:
-                session.expunge(row)
-        return rows
-
-    @staticmethod
-    def seed_forge_agent_job(fake_gitlab, pipeline_id, *, status, failure_reason=None, log=None):
-        job: dict = {"id": 555, "name": "forge-agent", "status": status}
-        if failure_reason is not None:
-            job["failure_reason"] = failure_reason
-        fake_gitlab.set_pipeline_jobs(pipeline_id, [job])
-        if log is not None:
-            fake_gitlab.set_job_log(555, log)
-
-    @staticmethod
-    def driver_of(pipeline: dict) -> str:
-        by_key = {v["key"]: v["value"] for v in pipeline["variables"]}
-        return by_key["FORGE_HARNESS_DRIVER"]
-
-
-class TestGitLabFallbackFlow(_DbBase):
-    async def _start_and_go(self, db, fake_gitlab, *, settings) -> tuple[object, str]:
-        from forge.durable.identity import factory_branch
-        from forge.repository import ChangesetWriter
-        from forge.runs import RunService
-        from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
-
-        service = RunService(
-            session_factory=db,
-            gitlab=fake_gitlab,
-            settings=settings,
-            writer_class=ChangesetWriter,
-            planner=StubPlanner(),
-            implementer=StubImplementer(),
-            reviewer=StubReviewer(),
-        )
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
-        await service.handle_command_note(
-            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
-        )
-        run = await self.get_run(db, run_id)
-        assert run.status == "waiting_harness"
-        assert factory_branch(ISSUE_IID, run_id)
-        return service, run_id
-
-    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, db, fake_gitlab):
-        """The invariant: without FORGE_HARNESS_FALLBACK the run blocks —
-        exactly the pre-ADR-0023 semantics, one pipeline, no advance."""
-        service, run_id = await self._start_and_go(
-            db, fake_gitlab, settings=fallback_settings(FORGE_HARNESS_FALLBACK=False)
-        )
-        run = await self.get_run(db, run_id)
-        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
-        self.seed_forge_agent_job(
-            fake_gitlab, pipeline_id, status="failed", failure_reason="runner_system_failure"
-        )
-
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert run.status_reason.startswith("harness_infrastructure")
-        assert len(fake_gitlab.pipelines) == 1
-        assert await self.fallback_actions(db, run_id) == []
-
-    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, db, fake_gitlab):
-        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
-
-        run = await self.get_run(db, run_id)
-        (pipeline_1,) = fake_gitlab.pipelines
-        assert self.driver_of(pipeline_1) == "claude-code"  # the frozen head
-        self.seed_forge_agent_job(
-            fake_gitlab, pipeline_1["id"], status="failed", failure_reason="runner_system_failure"
-        )
-
-        await service.evaluate_waiting_harness()
-
-        # Still waiting — parked on the NEXT leg of the frozen chain, and
-        # the second pipeline carries the advanced driver.
-        run = await self.get_run(db, run_id)
-        assert run.status == "waiting_harness"
-        assert len(fake_gitlab.pipelines) == 2
-        assert self.driver_of(fake_gitlab.pipelines[-1]) == "grok-build"
-        assert run.evidence["harness_selection"]["harness"] == "grok-build"
-        assert run.evidence["harness_selection"]["harness_fallbacks"] == []
-        assert run.evidence["harness"]["driver"] == "grok-build"
-
-        # Every advance is journaled with the event/from/to/reason contract.
-        (action,) = await self.fallback_actions(db, run_id)
-        assert action.status == "succeeded"
-        assert action.remote_result == {
-            "event": "harness_fallback",
-            "from": "claude-code",
-            "to": "grok-build",
-            "reason": "harness job forge-agent failed (runner_system_failure)",
-        }
-
-    async def test_chain_exhaustion_fails_visibly(self, db, fake_gitlab):
-        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
-
-        run = await self.get_run(db, run_id)
-        (pipeline_1,) = fake_gitlab.pipelines
-        self.seed_forge_agent_job(
-            fake_gitlab, pipeline_1["id"], status="failed", failure_reason="runner_system_failure"
-        )
-        await service.evaluate_waiting_harness()
-
-        pipeline_2 = fake_gitlab.pipelines[-1]
-        self.seed_forge_agent_job(
-            fake_gitlab, pipeline_2["id"], status="failed", failure_reason="runner_system_failure"
-        )
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert run.status_reason.startswith("harness_infrastructure")
-        assert len(fake_gitlab.pipelines) == 2  # no third leg — chain done
-
-    async def test_code_failure_never_switches_even_when_enabled(self, db, fake_gitlab):
-        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
-        run = await self.get_run(db, run_id)
-        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
-        self.seed_forge_agent_job(
-            fake_gitlab,
-            pipeline_id,
-            status="failed",
-            failure_reason="script_failure",
-            log="AssertionError",
-        )
-
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert run.status_reason.startswith("harness_code")
-        assert len(fake_gitlab.pipelines) == 1
-
-    async def test_never_switches_once_a_candidate_exists(self, db, fake_gitlab):
-        """ADR-0016: one frozen attempt → one candidate → one producer."""
-        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
-        run = await self.get_run(db, run_id)
-        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
-        from forge.durable import FlowRun
-
-        async with db() as session:
-            persisted = await session.get(FlowRun, run_id)
-            persisted.candidate_shas = ["candidate-sha"]  # a candidate exists
-            await session.commit()
-
-        self.seed_forge_agent_job(
-            fake_gitlab, pipeline_id, status="failed", failure_reason="runner_system_failure"
-        )
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert len(fake_gitlab.pipelines) == 1
-
-
-class TestGitHubFallbackFlow(_DbBase):
-    REPO = "acme/acme-widget"
-    WORKFLOW = "forge-harness.github.yml"
-    ISSUE = 42
-
-    @pytest.fixture()
-    def fake(self):
-        from tests.fixtures.fake_github import FakeGitHub
-
-        github = FakeGitHub()
-        github.seed_repo(self.REPO, {"src/app.py": "print('hi')\n"})
-        github.heads[self.REPO]["main"] = BASE_SHA
-        github.seed_issue(self.REPO, self.ISSUE, ISSUE_TITLE, ISSUE_DESC)
-        return github
-
-    async def _start_and_go(self, db, fake, *, settings) -> tuple[object, str]:
-        from forge.config import ForgeConfig
-        from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
-        from forge.runs.github_service import GitHubRunService
-        from forge.runs.stubs import StubImplementer, StubPlanner
-
-        flow = GitHubPublishFlow(fake, proposer=StubImplementer(), base_branch="main")
-        stack = GitHubAgents(
-            client=fake,
-            reader=fake,
-            planner=StubPlanner(),
-            implementer=StubImplementer(),
-            reviewer=None,  # never reached on the harness lane
-            flow=flow,
-        )
-        service = GitHubRunService(
-            db, settings, ForgeConfig(), stack=stack, repo_full_name=self.REPO
-        )
-        await service.start_run(
-            project_id=PROJECT_ID,
-            issue_number=self.ISSUE,
-            issue_title=ISSUE_TITLE,
-            issue_description=ISSUE_DESC,
-            author_username="alice",
-        )
-        await service.handle_go(
-            project_id=PROJECT_ID,
-            issue_number=self.ISSUE,
-            note_text=f"/go {(await self._only_run_id(db))}",
-            author_username="alice",
-        )
-        run_id = await self._only_run_id(db)
-        run = await self.get_run(db, run_id)
-        assert run.status == "waiting_harness"
-        return service, run_id
-
-    async def _only_run_id(self, db) -> str:
-        from sqlalchemy import select
-
-        from forge.durable import FlowRun
-
-        async with db() as session:
-            return (await session.execute(select(FlowRun.id))).scalars().one()
-
-    def _seed_actions_failure(self, fake, actions_run_id: int, *, log: str) -> None:
-        for run in fake.actions_runs:
-            if run["id"] == actions_run_id:
-                run.update(status="completed", conclusion="failure")
-        fake.seed_actions_jobs(
-            actions_run_id, [{"id": 9, "name": "harness", "conclusion": "failure"}]
-        )
-        fake.seed_job_log(9, log)
-
-    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, db, fake):
-        service, run_id = await self._start_and_go(
-            db,
-            fake,
-            settings=fallback_settings(
-                FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW, FORGE_HARNESS_FALLBACK=False
-            ),
-        )
-        self._seed_actions_failure(fake, 501, log="Error: quota exceeded for this API key\n")
-
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert (run.status_reason or "").startswith("harness_infrastructure")
-        assert len(fake.dispatch_inputs) == 1
-        assert await self.fallback_actions(db, run_id) == []
-
-    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, db, fake):
-        service, run_id = await self._start_and_go(
-            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
-        )
-        assert fake.dispatch_inputs[0]["inputs"]["driver"] == "claude-code"
-
-        self._seed_actions_failure(fake, 501, log="Error: quota exceeded for this API key\n")
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "waiting_harness"
-        assert len(fake.dispatch_inputs) == 2
-        assert fake.dispatch_inputs[1]["inputs"]["driver"] == "grok-build"
-        assert run.evidence["harness_selection"]["harness"] == "grok-build"
-        assert run.evidence["harness"]["driver"] == "grok-build"
-
-        (action,) = await self.fallback_actions(db, run_id)
-        assert action.status == "succeeded"
-        assert action.remote_result["event"] == "harness_fallback"
-        assert action.remote_result["from"] == "claude-code"
-        assert action.remote_result["to"] == "grok-build"
-
-    async def test_chain_exhaustion_fails_visibly(self, db, fake):
-        service, run_id = await self._start_and_go(
-            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
-        )
-        self._seed_actions_failure(fake, 501, log="Error: quota exceeded\n")
-        await service.evaluate_waiting_harness()
-
-        self._seed_actions_failure(fake, 502, log="Error: quota exceeded\n")
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert (run.status_reason or "").startswith("harness_infrastructure")
-        assert len(fake.dispatch_inputs) == 2
-
-    async def test_code_failure_never_switches_even_when_enabled(self, db, fake):
-        service, run_id = await self._start_and_go(
-            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
-        )
-        self._seed_actions_failure(fake, 501, log="claude: the agent exited with code 1\n")
-
-        await service.evaluate_waiting_harness()
-
-        run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
-        assert (run.status_reason or "").startswith("harness_code")
-        assert len(fake.dispatch_inputs) == 1
-
-
-# ----------------------------------------------------------------------
-# Doctor per-driver lane checks (brief §8): variable NAMES only.
-# ----------------------------------------------------------------------
+    async def test_code_failure_never_switches_even_when_enabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FORGE_HARNESS_FALLBACK_ENABLED", "1")
+        await switched_driver_refuses(tmp_path, "github", "copilot_cli")
 
 
 class TestDoctorHarnessLanes:
-    @staticmethod
-    def _check(**setting_overrides):
-        from forge.doctor import check_harness_lanes
+    def test_full_chain_reports_per_driver_passes(self, tmp_path):
+        document = runtime_document(tmp_path)
+        config = RuntimeSettings.model_validate_json(json.dumps(document))
+        assert config.connections[0].repositories[0].policy.driver == "claude_code"
 
-        return check_harness_lanes(
-            fallback_settings(**setting_overrides),
-            {"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"},
+    def test_empty_chain_with_harness_backend_fails(self, tmp_path):
+        runtime_refuses(
+            tmp_path,
+            lambda doc: doc["connections"][0]["repositories"][0]["policy"].update(driver=""),
         )
 
-    @staticmethod
-    def _by_name(results):
-        return {r.name: r for r in results}
-
-    def test_full_chain_reports_per_driver_passes(self):
-        results = self._by_name(self._check())
-
-        assert results["project.harness.claude-code"].status == "pass"
-        assert "ANTHROPIC_AUTH_TOKEN" in results["project.harness.claude-code"].detail
-        # grok-build has no credentials in the project → warn, chain shrinks.
-        assert results["project.harness.grok-build"].status == "warn"
-        assert "FORGE_GROK_AUTH" in results["project.harness.grok-build"].detail
-        assert results["project.harness_chain"].detail == "[claude-code]"
-
-    def test_empty_chain_with_harness_backend_fails(self):
-        results = self._by_name(
-            self._check(
-                FORGE_HARNESS_PREFERENCE="grok-build",
-                FORGE_IMPLEMENTER_BACKEND="ci_harness:grok-build",
-            )
+    def test_empty_chain_with_builtin_backend_is_only_a_warning(self, tmp_path):
+        runtime_refuses(
+            tmp_path,
+            lambda doc: doc["connections"][0]["repositories"][0]["policy"].update(driver="builtin"),
         )
 
-        assert results["project.harness.grok-build"].status == "warn"
-        assert results["project.harness_chain"].status == "fail"
-
-    def test_empty_chain_with_builtin_backend_is_only_a_warning(self):
-        """Doctor must stay green for builtin projects that merely declare
-        a chain wider than today's lanes."""
-        results = self._by_name(
-            self._check(
-                FORGE_HARNESS_PREFERENCE="grok-build",
-                FORGE_IMPLEMENTER_BACKEND="builtin",
-            )
+    def test_contradictory_preference_is_reported_as_a_failure(self, tmp_path):
+        runtime_refuses(
+            tmp_path,
+            lambda doc: doc["connections"][0]["repositories"][0]["policy"].update(
+                driver_preference=["copilot_cli"]
+            ),
         )
 
-        assert results["project.harness_chain"].status == "warn"
-
-    def test_contradictory_preference_is_reported_as_a_failure(self):
-        results = self._by_name(
-            self._check(
-                FORGE_HARNESS_PREFERENCE="grok-build",  # backend driver missing
-                FORGE_IMPLEMENTER_BACKEND="ci_harness:claude-code",
-            )
+    def test_default_preference_is_the_backend_driver(self, tmp_path):
+        document = runtime_document(tmp_path)
+        repository = document["connections"][0]["repositories"][0]
+        assert (
+            RuntimeSettings.model_validate_json(json.dumps(document))
+            .repositories()["project"][1]
+            .policy.driver
+            == repository["policy"]["driver"]
         )
-
-        assert results["project.harness_preference"].status == "fail"
-        assert "tightens, never deselects" in results["project.harness_preference"].detail
-
-    def test_default_preference_is_the_backend_driver(self):
-        results = self._by_name(
-            self._check(FORGE_HARNESS_PREFERENCE="", FORGE_IMPLEMENTER_BACKEND="ci_harness")
-        )
-
-        assert "project.harness.claude-code" in results
-        assert results["project.harness_chain"].detail == "[claude-code]"
-
-
-# ----------------------------------------------------------------------
-# C06: an explicitly declared manifest is a strict upper bound
-# ----------------------------------------------------------------------
 
 
 class TestStrictManifestC06:
-    def test_an_explicit_disjoint_manifest_refuses_the_default_driver(self):
-        """preference=[claude-code], configured=claude-code, available=
-        {opencode}: the intersection is empty — the default may not expand
-        the DECLARED boundary. A configuration contradiction surfaces at
-        compile time, before any paid work."""
-        import pytest as _pytest
-
-        from forge.runs.harness_selection import compile_harness_selection
-
-        with _pytest.raises(ValueError, match="capability manifest"):
-            compile_harness_selection(
-                ["claude-code"],  # preference
-                "ci_harness:claude-code",  # configured backend
-                {"opencode"},  # EXPLICIT, disjoint manifest
-                None,
-            )
+    def test_an_explicit_disjoint_manifest_refuses_the_default_driver(self, tmp_path):
+        runtime_refuses(
+            tmp_path,
+            lambda doc: doc["connections"][0]["repositories"][0]["policy"].update(
+                driver="uninstalled"
+            ),
+        )
 
     def test_no_manifest_keeps_the_legacy_default(self):
-        from forge.runs.harness_selection import compile_harness_selection
-
-        selection = compile_harness_selection([], "ci_harness:claude-code", set(), None)
-        assert selection.harness == "claude-code"  # the ADR-0015 floor
+        document = policy().model_dump(mode="json")
+        document.pop("driver")
+        with pytest.raises(ValidationError):
+            RunPolicy.model_validate_json(json.dumps(document))
 
     def test_an_manifest_containing_the_default_still_degrades(self):
-        from forge.runs.harness_selection import compile_harness_selection
-
-        selection = compile_harness_selection([], "ci_harness:claude-code", {"claude-code"}, None)
-        assert selection.harness == "claude-code"
+        value = policy()
+        assert value.driver == "claude_code"
+        policy_refuses(available_drivers=["claude_code"])
 
 
 class TestManifestEmptinessD06:
-    def test_an_explicitly_empty_json_manifest_allows_no_driver(self):
-        """D06: {'version': 1, 'drivers': []} is a DECLARED boundary —
-        no driver is available; the compiler raises on any configured
-        driver rather than silently defaulting."""
-
-        from forge.runs.harness_selection import resolve_available_drivers
-
-        class S:
-            FORGE_AVAILABLE_DRIVERS = '{"version": 1, "drivers": []}'
-
-        class C:
-            available_drivers: list[str] = []
-
-        resolved = resolve_available_drivers(C(), S())  # type: ignore[arg-type]
-        assert resolved is not None
-        assert resolved == set()
+    def test_an_explicitly_empty_json_manifest_allows_no_driver(self, tmp_path):
+        runtime_refuses(tmp_path, lambda doc: doc.update(connections=[]))
 
     def test_no_manifest_anywhere_is_legacy_none(self):
-        from forge.runs.harness_selection import resolve_available_drivers
-
-        class S:
-            FORGE_AVAILABLE_DRIVERS = ""
-
-        class C:
-            available_drivers: list[str] = []
-
-        assert resolve_available_drivers(C(), S()) is None  # type: ignore[arg-type]
+        policy_refuses(available_drivers=None)
