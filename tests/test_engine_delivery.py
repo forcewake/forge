@@ -166,6 +166,10 @@ def check(
         name="unit",
         tested_sha=tested_sha or sha,
         native_id="check-1",
+        native_run_id="verification-run-1",
+        workflow_path=(
+            ".github/workflows/ci.yml" if repo.identity.provider == "github" else ".gitlab-ci.yml"
+        ),
         attempt=1,
         role=role,
         status=status,

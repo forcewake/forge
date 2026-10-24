@@ -31,6 +31,8 @@ def observation(name="unit", status="passed", **changes):
         status=status,
         tested_sha=SHA,
         native_id="native-1",
+        native_run_id="run-1",
+        workflow_path=".github/workflows/ci.yml",
         attempt=1,
         role="verification",
         observed_at=NOW,

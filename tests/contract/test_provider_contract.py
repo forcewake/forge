@@ -295,6 +295,8 @@ async def test_authority_and_independent_checks_do_not_gain_capabilities(
         name="lane",
         tested_sha=case.base,
         native_id="1",
+        native_run_id="lane-run-1",
+        workflow_path=".gitlab-ci.yml",
         attempt=1,
         role="lane",
         status="passed",

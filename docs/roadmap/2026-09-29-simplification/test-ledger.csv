@@ -1,7 +1,7 @@
 file,tests,loc,imports_runtime,imports_tests_only,deleted_by,protected,review,area,disposition,phase,note
 tests/contract/test_client_endpoints.py,30,385,false,false,,,,contract,port-adapter,P3,
 tests/contract/test_known_deviations.py,4,47,false,false,,,,contract,port-adapter,P3,
-tests/contract/test_provider_contract.py,8,426,true,true,,edge-case pin,,contract,keep,P3-05,Reusable native provider contracts and explicit faults
+tests/contract/test_provider_contract.py,8,428,true,true,,edge-case pin,,contract,keep,P3-05,Reusable native provider contracts and explicit faults
 tests/contract/test_webhook_payloads.py,7,102,false,false,,,,contract,keep,-,
 tests/invariants/test_i1_no_merge.py,7,216,false,false,,invariant suite; invariant evidence; edge-case pin,,invariants,keep,-,
 tests/invariants/test_registry_integrity.py,6,66,false,false,,invariant suite,,invariants,keep,-,
@@ -145,7 +145,7 @@ tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_approval.py,8,557,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Durable command ownership, native reply recovery and cancellation fencing."
-tests/test_engine_delivery.py,15,452,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
+tests/test_engine_delivery.py,15,456,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_dispatch_intents.py,3,64,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Indexed dispatch recovery bound to immutable effect and native repository.
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
 tests/test_engine_lane.py,14,440,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
@@ -227,6 +227,7 @@ tests/test_mcp_runs_tools.py,7,101,true,false,,edge-case pin,,mcp,keep,-,
 tests/test_mcp_server.py,7,100,true,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
+tests/test_native_check_identity.py,6,167,false,false,,invariant evidence; edge-case pin,,native,keep,P3-08,Required native checks bind workflow path and native run identity before selecting their retry attempt; another workflow cannot mask failure.
 tests/test_native_git_ca.py,2,108,false,true,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
 tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_issue_lifecycle.py,9,192,true,true,,invariant evidence; edge-case pin,,native,keep,P3-10,"Exact native task drift, authenticated gate-only issue refresh and label withdrawal with immutable history and atomic fresh admission."
@@ -284,7 +285,7 @@ tests/test_runs_repair.py,21,566,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_revival.py,36,860,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_service.py,63,1872,true,false,,,,runs,port-engine,P3,
 tests/test_runs_spec.py,31,352,true,true,,invariant evidence; edge-case pin,,runs,port-engine,P3,
-tests/test_runs_verification.py,10,166,true,false,,invariant evidence; edge-case pin,,runs,port-engine,P3,
+tests/test_runs_verification.py,10,168,true,false,,invariant evidence; edge-case pin,,runs,port-engine,P3,
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_runtime_app.py,7,349,true,false,,,,runtime,keep,P3-17,Production runtime composition against owned TLS native HTTP and scoped model fixtures.
 tests/test_runtime_lane_authority.py,4,167,true,true,,invariant evidence,,runtime,keep,P3-17,Explicit per-connection OIDC authority with no provider or token-selected fallback.
@@ -320,7 +321,7 @@ tests/test_usage_receipts.py,22,317,true,true,,invariant evidence; edge-case pin
 tests/test_usecases.py,19,640,true,false,,edge-case pin,,usecases,keep,-,
 tests/test_useful_wip_resume.py,3,57,true,false,,edge-case pin,,useful,keep,-,
 tests/test_verification_binding.py,12,455,true,true,,invariant evidence; edge-case pin,,verification,port-adapter,P3,
-tests/test_verification_checks.py,4,67,false,true,,,,verification,keep,P3-09,Exact native attempt and failure classification reduction
+tests/test_verification_checks.py,4,69,false,false,,,,verification,keep,P3-09,Exact native attempt and failure classification reduction
 tests/test_verification_deadline.py,1,65,true,false,,invariant evidence; edge-case pin,,verification,keep,P3-08,Native verification deadline is checked before and after reads; late successful evidence never authorizes readiness.
 tests/test_verification_executor.py,7,133,true,false,P1-15,edge-case pin,partly deleted,verification,keep,-,
 tests/test_webhook_auth.py,4,37,false,false,,edge-case pin,,webhook,keep,-,

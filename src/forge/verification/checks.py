@@ -24,8 +24,10 @@ def verdict(
         matches = [item for item in independent if item.name == name]
         if not matches:
             continue
-        newest = max((item.observed_at, item.attempt) for item in matches)
-        latest = [item for item in matches if (item.observed_at, item.attempt) == newest]
+        if len({(item.workflow_path, item.native_run_id) for item in matches}) != 1:
+            ambiguous = True
+        newest = max(item.attempt for item in matches)
+        latest = [item for item in matches if item.attempt == newest]
         if (
             len(
                 {

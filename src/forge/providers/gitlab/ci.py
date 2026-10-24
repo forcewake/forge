@@ -303,6 +303,7 @@ class GitLabCI:
                     name=name,
                     tested_sha=candidate_sha,
                     native_id=job_id,
+                    native_run_id=ident,
                     attempt=int(job_id),
                     role=role,
                     status=check_status(row.get("status")),

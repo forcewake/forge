@@ -277,6 +277,7 @@ class GitHubCI:
                         name=text(job.get("name")),
                         tested_sha=sha,
                         native_id=native_id(job.get("id")),
+                        native_run_id=run_id,
                         attempt=int(attempt),
                         role="lane" if path == self.lane_workflow_path else "verification",
                         status=job_status(job),

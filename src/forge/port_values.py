@@ -157,12 +157,13 @@ class CheckResult(Value):
     name: ShortText
     tested_sha: Sha
     native_id: ShortText
+    native_run_id: ShortText
     attempt: Positive
     role: Literal["verification", "lane"]
     status: Literal["pending", "passed", "failed", "cancelled", "skipped", "unknown"]
     observed_at: AwareDatetime
     evidence: Evidence
-    workflow_path: RepoPath | None = None
+    workflow_path: RepoPath
     failure_kind: Literal["code", "infrastructure", "configuration", "unknown"] = "unknown"
 
 
