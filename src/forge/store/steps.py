@@ -12,6 +12,7 @@ from forge.domain.states import TERMINAL, Handler, State, transition
 from forge.command_values import CommandLease, CommandResult
 from forge.store.commands import resolve_in
 from forge.store.initial_commands import approval_command
+from forge.store.timing import observe_timing
 from forge.store.records import RestartLane
 from forge.store.approval import apply_approval_commit
 from forge.store.approval_values import ApprovalCommit, ConsumeGate, OpenGate
@@ -295,6 +296,7 @@ class StepStore:
         outcome: Literal["succeeded", "failed"] = "succeeded",
         approval: ApprovalCommit | None = None,
         restart_lane: RestartLane | None = None,
+        execution_seconds: float | None = None,
     ) -> StepRecord:
         canonical_json(result_json)
         for request in successors:
@@ -348,6 +350,13 @@ class StepStore:
                 )
                 run.reason = reason
                 run.version += 1
+            await observe_timing(
+                session,
+                lease,
+                execution_seconds,
+                "parked" if transition_to in {State.BLOCKED, State.FAILED} else "completed",
+                now or datetime.now(timezone.utc),
+            )
             row.state, row.result_json = outcome, result_json
             row.lease_owner, row.lease_expires_at = None, None
             await session.flush()
@@ -361,6 +370,7 @@ class StepStore:
         now: datetime,
         reason: str = "retry_exhausted",
         observation_json: str | None = None,
+        execution_seconds: float | None = None,
     ) -> StepRecord:
         due_at = aware(due_at)
         if due_at < aware(now):
@@ -382,6 +392,9 @@ class StepStore:
                 run.state = transition(State(run.state), State.BLOCKED).value
                 run.failed_handler, run.reason = row.handler, reason
                 run.version += 1
+            await observe_timing(
+                session, lease, execution_seconds, "parked" if exhausted else "rescheduled", now
+            )
             row.due_at, row.lease_owner, row.lease_expires_at = due_at, None, None
             await session.flush()
             await notify_steps(session)

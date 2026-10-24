@@ -1,6 +1,6 @@
 """One bounded operator view, scoped before reading any run evidence."""
 
-from sqlalchemy import select, tuple_, func
+from sqlalchemy import select, tuple_
 
 from forge.runtime.authority import Principal, NotAuthorized
 from forge.runtime.settings import RuntimeSettings
@@ -88,20 +88,6 @@ class Projection:
         )
 
     async def metrics(self, principal: Principal) -> str:
-        async with self.factory() as session:
-            query = (
-                select(EngineRun.provider, EngineRun.connection_id, EngineRun.state, func.count())
-                .where(
-                    tuple_(
-                        EngineRun.provider, EngineRun.connection_id, EngineRun.repository_id
-                    ).in_(self.scope(principal))
-                )
-                .group_by(EngineRun.provider, EngineRun.connection_id, EngineRun.state)
-                .order_by(EngineRun.provider, EngineRun.connection_id, EngineRun.state)
-            )
-            rows = (await session.execute(query)).all()
-            # Labels are closed provider/state vocabularies and configured connection keys.
-            return "# TYPE forge_runs gauge\n" + "".join(
-                f'forge_runs{{provider="{provider}",connection="{connection}",state="{state}"}} {count}\n'
-                for provider, connection, state, count in rows
-            )
+        from forge.runtime.metrics import Metrics
+
+        return await Metrics(self.factory, self.scope(principal)).render()

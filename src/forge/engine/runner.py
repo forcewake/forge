@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timedelta
 import json
 import math
+from time import monotonic
 from typing import Generic, Protocol, TypeVar
 
 from forge.domain.states import Handler, State
@@ -175,6 +176,7 @@ class StepRunner(Generic[E]):
         handler = self.handlers.get(lease.handler)
         if handler is None:
             return await self._park(holder.current, "handler_unregistered")
+        began = monotonic()
         task = asyncio.create_task(handler(StepContext(holder, step, self.effects)))
         renewal = asyncio.create_task(self._renew(holder, task))
         try:
@@ -191,6 +193,7 @@ class StepRunner(Generic[E]):
                     due_at=self.clock.now() + timedelta(seconds=self.retry.delay(step.attempts)),
                     now=self.clock.now(),
                     reason=f"retry_exhausted:{error.reason}",
+                    execution_seconds=monotonic() - began,
                     observation_json=json.dumps(
                         {"reason": error.reason, "retryable": True},
                         sort_keys=True,
@@ -210,22 +213,29 @@ class StepRunner(Generic[E]):
             raise
         except Exception as error:
             await self._stop(renewal)
-            return await self._park(holder.current, f"handler_error:{type(error).__name__}")
+            return await self._park(
+                holder.current,
+                f"handler_error:{type(error).__name__}",
+                execution_seconds=monotonic() - began,
+            )
         finally:
             await self._stop(renewal)
             if not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
-        return await self._complete(holder, result)
+        return await self._complete(holder, result, execution_seconds=monotonic() - began)
 
-    async def _complete(self, holder: LeaseHolder, result: StepResult) -> str:
+    async def _complete(
+        self, holder: LeaseHolder, result: StepResult, *, execution_seconds: float
+    ) -> str:
         try:
             if result.defer_until is not None:
                 retried = await self.store.reschedule(
                     holder.current,
                     due_at=result.defer_until,
                     reason="awaiting_observation",
+                    execution_seconds=execution_seconds,
                     now=self.clock.now(),
                     observation_json=result.result_json,
                 )
@@ -239,6 +249,7 @@ class StepRunner(Generic[E]):
                 reason=result.park.reason if result.park else None,
                 approval=result.approval,
                 restart_lane=result.restart_lane,
+                execution_seconds=execution_seconds,
             )
             return "parked" if result.park or completed.state == "failed" else "completed"
         except StaleLease:
@@ -256,7 +267,9 @@ class StepRunner(Generic[E]):
             task.cancel()
             raise
 
-    async def _park(self, lease: Lease, reason: str) -> str:
+    async def _park(
+        self, lease: Lease, reason: str, *, execution_seconds: float | None = None
+    ) -> str:
         try:
             await self.store.complete_and_enqueue(
                 lease,
@@ -265,6 +278,7 @@ class StepRunner(Generic[E]):
                 transition_to=State.BLOCKED,
                 reason=reason,
                 outcome="failed",
+                execution_seconds=execution_seconds,
             )
             return "parked"
         except StaleLease:
