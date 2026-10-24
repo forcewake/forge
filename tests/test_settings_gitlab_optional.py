@@ -1,81 +1,72 @@
-"""GitLab settings are required only while GitLab is enabled."""
+"""Each native connection is explicit; no default provider or disabled-provider flag."""
 
-from __future__ import annotations
+import json
 
-import pytest
-from fastapi import HTTPException
-from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
+import pytest
 
-from forge.config import Settings
-from forge.database import reset_engine
-from forge.gateway.validator import validate_webhook_token
-from forge.main import create_app
+from forge.providers.gitlab.ingress import GitLabIngress
+from forge.runtime.settings import RuntimeSettings, load
+from tests.github_webhook_fixture import configured
+from tests import gitlab_engine_fixture as native
+from tests.native_hook_fixture import post
+from tests.operator_native_fixture import operator_native as operator_native
+from tests.runtime_fixture import configuration
+from tests.test_gitlab_engine_ingress import SECRET, payload, signed
 
-GITLAB_ENV = ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGE_GITLAB_ENABLED")
+
+def test_gitlab_is_enabled_by_default_and_requires_its_settings(tmp_path):
+    # Provider defaults are retired. An install must explicitly select connections.
+    config, _ = configuration(tmp_path)
+    document = config.model_dump(mode="json", by_alias=True)
+    del document["connections"]
+    with pytest.raises(ValidationError):
+        RuntimeSettings.model_validate_json(json.dumps(document))
 
 
-@pytest.fixture()
-def clean_env(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)  # no .env file is read
-    for name in GITLAB_ENV:
+def test_a_github_only_deployment_needs_no_gitlab_settings(tmp_path, monkeypatch):
+    for name in ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET"):
         monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
-def test_gitlab_is_enabled_by_default_and_requires_its_settings(clean_env):
-    with pytest.raises(ValidationError) as caught:
-        Settings()
-    assert "GITLAB_URL, GITLAB_TOKEN, GITLAB_WEBHOOK_SECRET must be set" in str(caught.value)
-
-
-def test_a_github_only_deployment_needs_no_gitlab_settings(clean_env):
-    clean_env.setenv("FORGE_GITLAB_ENABLED", "false")
-    settings = Settings()
-    assert settings.FORGE_GITLAB_ENABLED is False
-    assert settings.GITLAB_URL == ""
-
-
-def test_complete_gitlab_settings_validate(clean_env):
-    settings = Settings(
-        GITLAB_URL="https://gitlab.test", GITLAB_TOKEN="t", GITLAB_WEBHOOK_SECRET="w"
+    config = configured(tmp_path)
+    assert {connection.provider for connection in config.connections} == {"github"}
+    assert not any(
+        repository.read_token_env or repository.write_token_env
+        for connection in config.connections
+        for repository in connection.repositories
     )
-    assert settings.GITLAB_WEBHOOK_SECRET.get_secret_value() == "w"
+
+
+def test_complete_gitlab_settings_validate(tmp_path):
+    config, values = configuration(tmp_path)
+    connection, repository = config.repositories()["project"]
+    assert connection.provider == "gitlab" and repository.native_id == "123"
+    assert values[connection.webhook_secret_env].encode() == SECRET
 
 
 def test_unconfigured_gitlab_ingress_refuses_even_an_empty_token():
-    with pytest.raises(HTTPException) as caught:
-        validate_webhook_token("", "")
-    assert caught.value.status_code == 503
+    with pytest.raises(ValueError):
+        GitLabIngress("ce-1", b"", bots={"123": native.BOT})
 
 
 def test_configured_gitlab_ingress_still_checks_the_token():
-    assert validate_webhook_token("s3cret", "s3cret") == "s3cret"
-    with pytest.raises(HTTPException) as caught:
-        validate_webhook_token("s3cret", "wrong")
-    assert caught.value.status_code == 401
+    ingress = GitLabIngress("ce-1", SECRET, bots={"123": native.BOT})
+    headers, body = signed(payload())
+    assert ingress.parse(headers, body).target.number == 7
+    with pytest.raises(ValueError):
+        ingress.parse({**headers, "X-Gitlab-Token": "wrong"}, body)
 
 
-def test_settings_errors_never_echo_secret_values(clean_env):
-    with pytest.raises(ValidationError) as caught:
-        Settings(GITLAB_URL="https://gitlab.test", GITLAB_TOKEN="glpat-do-not-print")
-    assert "glpat-do-not-print" not in str(caught.value)
+def test_settings_errors_never_echo_secret_values(tmp_path):
+    path = tmp_path / "invalid.toml"
+    path.write_text('GITLAB_TOKEN="synthetic-secret-must-not-be-printed"\n')
+    with pytest.raises(ValueError) as caught:
+        load(path)
+    assert "synthetic-secret" not in str(caught.value)
 
 
-async def test_disabled_gitlab_ingress_refuses_even_a_matching_token(test_settings):
-    settings = test_settings.model_copy(update={"FORGE_GITLAB_ENABLED": False})
-    token = settings.GITLAB_WEBHOOK_SECRET.get_secret_value()
-    reset_engine()
-    app = create_app(settings=settings)
-    try:
-        async with app.router.lifespan_context(app):
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.post(
-                    "/webhook",
-                    headers={"X-Gitlab-Token": token, "X-Gitlab-Event": "Note Hook"},
-                    json={},
-                )
-    finally:
-        reset_engine()
-    assert response.status_code == 503
+async def test_disabled_gitlab_ingress_refuses_even_a_matching_token(operator_native):
+    env = operator_native
+    response = await post(env, connection="unconfigured")
+    assert response.status_code == 404
+    assert (await env.client.post("/webhook", json={})).status_code == 404
+    assert not env.peer.calls and not env.gateway.writes

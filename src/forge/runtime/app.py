@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from forge import __version__
 from forge.api.lane_v1 import router as lane_router
 from forge.runtime.assembly import Runtime, open_runtime
 from forge.runtime.authority import NotAuthorized
@@ -34,7 +35,9 @@ def create_app(config: RuntimeSettings | None = None, *, opener: Opener = open_r
                 app.state.runtime = None
                 app.state.lane_v1_service = None
 
-    app = FastAPI(title="Forge", version="1.0.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="Forge", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None
+    )
     app.include_router(lane_router)
     app.include_router(operator_router)
     app.include_router(hooks_router)

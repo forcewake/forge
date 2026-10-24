@@ -1,75 +1,56 @@
-from unittest.mock import AsyncMock, patch
+"""Liveness and readiness report different facts on the sole application."""
 
 import httpx
-import pytest
 
 import forge
-from httpx import AsyncClient
+from sqlalchemy import text
+from tests.operator_native_fixture import operator_native as operator_native
+from tests.test_budget_engine import NativeAdmin
 
 
-@pytest.mark.asyncio
-async def test_health_returns_ok_when_all_services_up(client: AsyncClient):
-    """Health returns ok when DB and LiteLLM are reachable."""
-    mock_response = httpx.Response(200, json={"status": "ok"})
-    with patch("forge.gateway.router.httpx.AsyncClient") as MockHTTP:
-        mock_hc = AsyncMock()
-        mock_hc.get.return_value = mock_response
-        mock_hc.__aenter__ = AsyncMock(return_value=mock_hc)
-        mock_hc.__aexit__ = AsyncMock(return_value=False)
-        MockHTTP.return_value = mock_hc
-
-        response = await client.get("/health")
-        data = response.json()
-        assert response.status_code == 200
-        assert data["status"] == "ok"
-        assert data["version"] == forge.__version__
-        assert data["database"] == "ok"
-        assert data["litellm"] == "ok"
+async def test_health_returns_ok_when_all_services_up(operator_native):
+    env = operator_native
+    response = await env.client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"service": "forge", "version": forge.__version__}
+    assert (await env.client.get("/readyz")).json() == {
+        "schema": "checked",
+        "native_budget": "verified",
+    }
+    assert not env.peer.calls and not env.gateway.writes
+    assert (await env.client.get("/health")).status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_health_includes_database_status(client: AsyncClient):
-    """Database status is always included."""
-    with patch("forge.gateway.router.httpx.AsyncClient") as MockHTTP:
-        mock_hc = AsyncMock()
-        mock_hc.get.side_effect = Exception("unreachable")
-        mock_hc.__aenter__ = AsyncMock(return_value=mock_hc)
-        mock_hc.__aexit__ = AsyncMock(return_value=False)
-        MockHTTP.return_value = mock_hc
-
-        response = await client.get("/health")
-        data = response.json()
-        assert data["database"] == "ok"
+async def test_health_includes_database_status(operator_native):
+    env = operator_native
+    assert (await env.client.get("/readyz")).status_code == 200
+    async with env.service.engine.begin() as connection:
+        await connection.execute(text("DROP TABLE schema_installation"))
+    response = await env.client.get("/readyz")
+    assert response.status_code == 503
+    assert "schema" in response.json()["detail"]
+    assert (await env.client.get("/healthz")).status_code == 200
+    assert not env.gateway.writes
 
 
-@pytest.mark.asyncio
-async def test_health_degraded_when_litellm_unreachable(client: AsyncClient):
-    """Status is degraded when LiteLLM cannot be reached."""
-    with patch("forge.gateway.router.httpx.AsyncClient") as MockHTTP:
-        mock_hc = AsyncMock()
-        mock_hc.get.side_effect = Exception("connection refused")
-        mock_hc.__aenter__ = AsyncMock(return_value=mock_hc)
-        mock_hc.__aexit__ = AsyncMock(return_value=False)
-        MockHTTP.return_value = mock_hc
-
-        response = await client.get("/health")
-        data = response.json()
-        assert data["status"] == "degraded"
-        assert data["litellm"] == "unreachable"
+async def test_health_degraded_when_litellm_unreachable(operator_native):
+    env = operator_native
+    env.gateway.unavailable = True
+    response = await env.client.get("/readyz")
+    assert response.status_code == 503
+    assert "native model guard unavailable" in response.json()["detail"]
+    assert (await env.client.get("/healthz")).status_code == 200
+    assert not env.gateway.writes
 
 
-@pytest.mark.asyncio
-async def test_health_degraded_when_litellm_returns_error(client: AsyncClient):
-    """Status is degraded when LiteLLM returns non-200."""
-    mock_response = httpx.Response(503, json={"status": "error"})
-    with patch("forge.gateway.router.httpx.AsyncClient") as MockHTTP:
-        mock_hc = AsyncMock()
-        mock_hc.get.return_value = mock_response
-        mock_hc.__aenter__ = AsyncMock(return_value=mock_hc)
-        mock_hc.__aexit__ = AsyncMock(return_value=False)
-        MockHTTP.return_value = mock_hc
+async def test_health_degraded_when_litellm_returns_error(operator_native, monkeypatch):
+    env = operator_native
 
-        response = await client.get("/health")
-        data = response.json()
-        assert data["status"] == "degraded"
-        assert data["litellm"] == "error"
+    def failure(self, request):
+        return httpx.Response(503, json={"secret": "synthetic-response-secret"})
+
+    monkeypatch.setattr(NativeAdmin, "__call__", failure)
+    response = await env.client.get("/readyz")
+    assert response.status_code == 503
+    assert "synthetic-response-secret" not in response.text
+    assert not env.peer.calls and not env.gateway.writes

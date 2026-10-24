@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
+from forge import __version__
 from forge.runtime.operator_api import RuntimeDep, PrincipalDep
 from fastapi.responses import PlainTextResponse
 from forge.store.schema import check_schema
@@ -11,7 +12,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/healthz")
 async def health(service: RuntimeDep) -> dict[str, str]:
-    return {"service": "forge", "version": "1.0.0"}
+    return {"service": "forge", "version": __version__}
 
 
 @router.get("/readyz")

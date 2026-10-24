@@ -199,7 +199,7 @@ tests/test_harness_entry.py,90,1626,true,false,,edge-case pin,,harness,keep,-,
 tests/test_harness_mcp.py,18,145,true,false,,,,harness,keep,-,
 tests/test_harness_prompt.py,19,205,true,false,,,,harness,keep,-,
 tests/test_harness_selection.py,65,1051,true,false,,,,harness,port-engine,P3,
-tests/test_health.py,4,75,false,false,,,,health,keep,-,
+tests/test_health.py,4,56,false,false,,edge-case pin,,health,keep,-,
 tests/test_hygiene.py,6,67,false,false,,,,hygiene,keep,-,
 tests/test_implementer.py,7,105,true,false,,edge-case pin,,implementer,port-adapter,P3,
 tests/test_import_contract_debt.py,1,17,false,false,,,,import,keep,-,
@@ -307,7 +307,7 @@ tests/test_script_ratchet.py,13,155,false,false,,,,script,keep,-,
 tests/test_script_rendering.py,4,156,true,false,,,,script,keep,-,
 tests/test_server_model_services.py,8,424,true,true,,invariant evidence; edge-case pin,,server,keep,P3-13,Lease-bound planner and reviewer grants over durable approved inputs.
 tests/test_server_models.py,7,202,true,true,,invariant evidence; edge-case pin,,server,keep,P3-13,"Exact scoped model routing, native observations and retained unknown liabilities."
-tests/test_settings_gitlab_optional.py,7,81,true,false,,,,settings,keep,-,
+tests/test_settings_gitlab_optional.py,7,72,false,false,,,,settings,keep,-,
 tests/test_setup_script.py,4,102,false,false,,,,setup,keep,-,
 tests/test_slash_routing.py,2,60,true,false,,edge-case pin,,slash,keep,-,
 tests/test_step_runtime.py,24,963,true,false,,,,step,port-engine,P3,
@@ -323,8 +323,8 @@ tests/test_verification_binding.py,12,455,true,true,,invariant evidence; edge-ca
 tests/test_verification_checks.py,4,67,false,true,,,,verification,keep,P3-09,Exact native attempt and failure classification reduction
 tests/test_verification_deadline.py,1,65,true,false,,invariant evidence; edge-case pin,,verification,keep,P3-08,Native verification deadline is checked before and after reads; late successful evidence never authorizes readiness.
 tests/test_verification_executor.py,7,133,true,false,P1-15,edge-case pin,partly deleted,verification,keep,-,
-tests/test_webhook_auth.py,4,60,false,false,,,,webhook,keep,-,
-tests/test_webhook_capture.py,3,99,true,false,,,,webhook,keep,-,
+tests/test_webhook_auth.py,4,37,false,false,,edge-case pin,,webhook,keep,-,
+tests/test_webhook_capture.py,3,43,true,false,,edge-case pin,,webhook,keep,-,
 tests/test_wheel_migrations.py,1,63,false,false,,edge-case pin,,wheel,keep,-,
 tests/test_worker.py,4,54,true,false,,edge-case pin,,worker,keep,-,
 tests/test_write_profiles.py,30,257,true,false,,,,write,keep,-,
