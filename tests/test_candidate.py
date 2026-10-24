@@ -21,10 +21,10 @@ from forge.domain.change_types import (
     ChangeSet,
     Operation,
 )
-from forge.runs.candidate import (
-    AttemptContext,
-    attempt_base_for,
-)
+from forge.domain.approved_input import ApprovedInput
+from forge_protocol import Brief, RepairContext, RunIdentity
+from pydantic import ValidationError
+from tests.test_domain_approved_input import spec
 from forge.domain.candidate import (
     CandidateBundle,
     FullReplacement,
@@ -617,43 +617,42 @@ class TestUsageReceipt:
 
 class TestHelpers:
     def test_attempt_base_cycle_one_is_source_base(self):
-        run = type("R", (), {"commit_cycle": 1, "candidate_shas": None, "base_sha": "src-1"})
-        assert attempt_base_for(run) == "src-1"
+        frozen = spec()
+        brief = ApprovedInput.from_spec(frozen).to_brief(
+            RunIdentity(forge_run_id="candidate", attempt=1, generation=1), frozen
+        )
+        assert brief.execution_base_sha == brief.base_sha == frozen.base_sha
 
     def test_attempt_base_repair_is_last_candidate(self):
-        run = type(
-            "R", (), {"commit_cycle": 2, "candidate_shas": ["c1", "c2"], "base_sha": "src-1"}
-        )
-        assert attempt_base_for(run) == "c2"
+        brief = repair_brief()
+        assert brief.execution_base_sha == brief.repair.candidate_sha == "b" * 40
+        assert brief.base_sha == spec().base_sha
 
     def test_attempt_context_cycle_one_is_the_source_base(self):
-        run = type("R", (), {"commit_cycle": 1, "candidate_shas": None, "base_sha": "src-1"})
-        ctx = AttemptContext.of(run)
-        assert ctx.cycle == 1
-        assert ctx.attempt_base == "src-1"
-        assert ctx.source_base == "src-1"
-        assert ctx.previous_candidate is None
+        frozen = spec()
+        brief = ApprovedInput.from_spec(frozen).to_brief(
+            RunIdentity(forge_run_id="candidate", attempt=1, generation=1), frozen
+        )
+        assert brief.repair is None and brief.attempt == brief.generation == 1
+        assert brief.spec_json == frozen.spec_json and brief.spec_digest == frozen.digest
+        assert brief.execution_base_sha == frozen.base_sha
 
     def test_attempt_context_repair_extends_the_last_candidate(self):
-        run = type(
-            "R", (), {"commit_cycle": 2, "candidate_shas": ["c1", "c2"], "base_sha": "src-1"}
-        )
-        ctx = AttemptContext.of(run)
-        assert ctx.attempt_base == "c2"
-        assert ctx.source_base == "src-1"  # frozen for cumulative review only
-        assert ctx.previous_candidate == "c2"
-        assert ctx.document() == {
-            "cycle": 2,
-            "attempt_base": "c2",
-            "source_base": "src-1",
-            "previous_candidate": "c2",
-        }
+        brief = repair_brief()
+        assert brief.repair.prior_attempt == brief.repair.prior_generation == 1
+        assert brief.attempt == brief.generation == 2
+        assert brief.repair.original_base_sha == brief.base_sha == spec().base_sha
+        assert Brief.model_validate_json(brief.model_dump_json()) == brief
+        assert brief.spec_json == spec().spec_json and brief.spec_digest == spec().digest
 
     def test_attempt_context_repair_without_a_candidate_falls_back_to_source(self):
-        run = type("R", (), {"commit_cycle": 3, "candidate_shas": None, "base_sha": None})
-        ctx = AttemptContext.of(run)
-        assert ctx.attempt_base == ""
-        assert ctx.previous_candidate is None
+        # The old empty-base fallback is retired. A repair must name its exact
+        # published candidate and remain bound to the original approval.
+        value = repair_brief().model_dump()
+        for candidate in (None, "", "not-a-native-sha"):
+            value["repair"]["candidate_sha"] = candidate
+            with pytest.raises(ValidationError):
+                Brief.model_validate(value)
 
     def test_materialize_enforces_cap(self, monkeypatch):
         diff = (
@@ -676,3 +675,20 @@ class TestHelpers:
         with pytest.raises(CandidateError) as excinfo:
             bundle.materialize({"mod.py": "old\n"})
         assert excinfo.value.reason == "file_too_large"
+
+
+def repair_brief():
+    frozen = spec()
+    brief = ApprovedInput.from_spec(frozen).to_brief(
+        RunIdentity(forge_run_id="candidate", attempt=2, generation=2), frozen
+    )
+    context = RepairContext(
+        **brief.model_dump(include={"forge_run_id", "attempt", "generation"}),
+        approved_digest=brief.approved_digest,
+        original_base_sha=brief.base_sha,
+        candidate_sha="b" * 40,
+        prior_attempt=1,
+        prior_generation=1,
+        failure_context="Exact independent job failed",
+    )
+    return Brief.model_validate({**brief.model_dump(), "repair": context})

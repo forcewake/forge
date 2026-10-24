@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from forge.domain.candidate import CandidateBundle, ValidatedCandidate, validate_candidate_bundle
-from forge.domain.candidate_parser import parse_unified_diff
 from forge.domain.change_types import Change, ChangeSet, Operation
 from forge.domain.patch import DiffHunk, HunkLine, apply_unified_hunks
 from forge.domain.paths import (
@@ -17,7 +16,7 @@ from forge.domain.paths import (
     resolve_write_policy,
     validate_changeset,
 )
-from forge.domain.revival import MAX_BACKOFF_SECONDS, backoff_seconds, classify_terminal_failure
+from forge.domain.revival import MAX_BACKOFF_SECONDS, backoff_seconds
 
 
 OWNERS = (
@@ -81,18 +80,16 @@ def test_path_policy_copies_mutable_constructor_inputs():
 
 
 def test_legacy_adapters_use_the_actual_domain_owners():
-    from forge.repository.changeset import ChangeSet as LegacyChanges
-    from forge.repository.changeset import WritePolicy as LegacyPolicy
-    from forge.runs.candidate import CandidateBundle as LegacyBundle
-    from forge.runs.candidate import parse_unified_diff as legacy_parse
-    from forge.runs.publisher import ValidatedCandidate as LegacyValidated
-    from forge.runs.publisher import validate_candidate_bundle as legacy_validate
-    from forge.runs.revival import classify_terminal_failure as legacy_classify
+    # Compatibility reexports are retired. Both concrete native committers and
+    # the write capability require the actual validated domain candidate.
+    from typing import get_type_hints
 
-    assert LegacyPolicy is PathPolicy and LegacyChanges is ChangeSet
-    assert LegacyBundle is CandidateBundle and LegacyValidated is ValidatedCandidate
-    assert legacy_parse is parse_unified_diff and legacy_validate is validate_candidate_bundle
-    assert legacy_classify is classify_terminal_failure
+    from forge.ports import WritePort
+    from forge.providers.github.commit import GitHubCommitter
+    from forge.providers.gitlab.commit import GitLabCommitter
+
+    for method in (WritePort.commit, GitHubCommitter.commit, GitLabCommitter.commit):
+        assert get_type_hints(method)["candidate"] is ValidatedCandidate
 
 
 def test_strict_apply_preserves_unmodified_bytes_across_generated_hunks():
