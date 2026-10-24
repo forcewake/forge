@@ -1,419 +1,166 @@
-"""Stage B2 (F19, ADR-0018 §5) + R02 honest labeling: the verification profile.
+"""Positive native proof, an immutable required inventory and honest non-success."""
 
-- The profile is built from FORGE_REQUIRED_JOBS (sorted tuple) with a
-  freshness window; ``evaluate`` keeps the quality contract's (ok, reason)
-  shape.
-- R02: an EMPTY profile never presents pipeline success as verified — the
-  run still reaches ready_for_human, but the evidence records
-  ``verification.status="unverified"`` (the unified
-  :class:`~forge.runs.verification.VerificationResult` shape), the ready
-  reason says unverified and the evidence comment carries the warning.
-  A non-empty profile records ``passed`` only when every required job
-  succeeded for the EXACT candidate sha.
-- Post-review freshness: if the branch head moved past the reviewed candidate
-  before the run went ready, the run is blocked ``candidate_drift_after_review``.
-"""
-
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from datetime import datetime, timedelta, timezone
+from itertools import permutations
+import json
 
 import pytest
+from pydantic import ValidationError
 
-from forge.config import Settings
-from forge.durable import FlowRun, FlowStatus
-from forge.gitlab.schemas import Job, Pipeline
-from forge.models.base import Base
-from forge.runs import RunService
-from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
-from forge.runs.verification import (
-    DEFAULT_FRESHNESS_WINDOW_SECONDS,
-    GITHUB_CODE_FAILURE_CONCLUSIONS,
-    GITHUB_INFRA_CONCLUSIONS,
-    GITHUB_SUCCESS_CONCLUSIONS,
-    PRODUCER_GITLAB_PIPELINE,
-    VERIFICATION_INFRA_REASON,
-    PositiveProof,
-    VerificationProfile,
-    VerificationResult,
-    evaluate,
-    evaluate_positive_proof,
-    waived_conclusions_from_settings,
+from forge.domain.run_spec import VerificationContract
+from forge.domain.verdicts import CheckVerdict
+from forge.port_values import CheckResult
+from forge.verification.checks import code_failure, verdict
+from tests.test_engine_delivery import (
+    advance,
+    case as case,
+    check,
+    delivery as delivery,
+    env as env,
+    published,
+    settings as settings,
 )
-from tests.fixtures.fake_gitlab import FakeGitLab
-from tests.test_runs_service import FakeWriter
 
-CUSTOM_SUCCESS_RESULTS = frozenset({"succeeded"})
-CUSTOM_CODE_FAILURE_RESULTS = frozenset({"failed", "partiallysucceeded"})
-CUSTOM_INFRA_RESULTS = frozenset({"canceled", "abandoned"})
-CUSTOM_PRODUCER = "custom-checks"
+SHA, OTHER = "a" * 40, "b" * 40
+NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
 
 
-PROJECT_ID = 42
-ISSUE_IID = 7
-ISSUE_TITLE = "Add a widget"
-ISSUE_DESC = "Widgets make the app better."
-
-
-def make_settings(**overrides) -> Settings:
+def observation(name="unit", status="passed", **changes):
     values = dict(
-        GITLAB_URL="https://gitlab.test",
-        GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
-        GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
-        FORGE_IMPLEMENTER_BACKEND="builtin",
-        FORGE_APPROVERS="alice",
-        DATABASE_URL="sqlite+aiosqlite:///:memory:",
+        name=name,
+        status=status,
+        tested_sha=SHA,
+        native_id="native-1",
+        attempt=1,
+        role="verification",
+        observed_at=NOW,
+        evidence="native:job",
     )
-    values.update(overrides)
-    return Settings(**values)
+    values.update(changes)
+    return CheckResult(**values)
 
 
-def make_service(db, fake_gitlab, *, reviewer=None, settings=None) -> RunService:
-    return RunService(
-        session_factory=db,
-        gitlab=fake_gitlab,
-        settings=settings or make_settings(),
-        writer_class=FakeWriter,
-        planner=StubPlanner(),
-        implementer=StubImplementer(),
-        reviewer=reviewer or StubReviewer(),
+def evaluate(checks, required=("unit",), *, final=False):
+    return verdict(
+        tuple(checks), SHA, required, now=NOW, max_age_seconds=60, missing_is_final=final
     )
 
 
-def pipeline(status: str) -> Pipeline:
-    return Pipeline.model_validate({"id": 9, "status": status})
+def test_required_contract_is_nonempty_unique_frozen_and_canonical():
+    contract = VerificationContract(required_checks=("unit", "lint"))
+    assert VerificationContract.model_validate_json(contract.canonical_bytes) == contract
+    assert contract.digest != VerificationContract(required_checks=("unit",)).digest
+    with pytest.raises(ValidationError):
+        contract.required_checks = ("other",)
+    for required in ((), ("unit", "unit"), ("",), (" ",)):
+        with pytest.raises(ValidationError):
+            VerificationContract(required_checks=required)
+    with pytest.raises(ValidationError):
+        evaluate((), ())
 
 
-def job(name: str, status: str) -> Job:
-    return Job.model_validate({"id": 1, "name": name, "status": status})
+def test_green_optional_job_cannot_substitute_for_the_named_required_check():
+    value = evaluate((observation("documentation"),))
+    assert value.status == "pending" and not value.successful
+    assert evaluate((observation("documentation"),), final=True).status == "not_configured"
+    assert not value.verified_for(SHA, ("unit",), now=NOW, max_age_seconds=60)
 
 
-class DriftingReviewer(StubReviewer):
-    """A reviewer during whose (in-flight) run a human push lands."""
-
-    def __init__(self, fake: FakeGitLab, branch: str) -> None:
-        super().__init__()
-        self._fake = fake
-        self._branch = branch
-
-    async def review(self, **kwargs):
-        self._fake.seed_commit(self._branch, "human-sha", "human push during review")
-        return await super().review(**kwargs)
-
-
-class TestVerificationResult:
-    """R02: the ONE evidence shape every provider records."""
-
-    def test_as_evidence_carries_the_unified_keys(self):
-        result = VerificationResult.passed(
-            "a" * 40,
-            PRODUCER_GITLAB_PIPELINE,
-            summary="quality contract satisfied",
-            surface=({"name": "test", "status": "success"},),
-        )
-        evidence = result.as_evidence()
-        assert set(evidence) >= {"status", "tested_oid", "observed_at", "producer"}
-        assert evidence["status"] == "passed"
-        assert evidence["tested_oid"] == "a" * 40
-        assert evidence["producer"] == PRODUCER_GITLAB_PIPELINE
-        assert evidence["surface"] == [{"name": "test", "status": "success"}]
-
-    def test_only_a_passed_verdict_is_verified(self):
-        assert VerificationResult.passed("a" * 40, "x").verified is True
-        for status in (
-            VerificationResult.pending,
-            VerificationResult.failed,
-            VerificationResult.unknown,
-            VerificationResult.not_configured,
-            VerificationResult.unverified,
-        ):
-            assert status("a" * 40, "x").verified is False
-
-
-class TestVerificationProfile:
-    def test_from_settings_sorts_required_jobs(self):
-        settings = make_settings(FORGE_REQUIRED_JOBS="pytest, lint ,sast")
-        profile = VerificationProfile.from_settings(settings)
-        assert profile.required_jobs == ("lint", "pytest", "sast")
-        assert profile.freshness_window == DEFAULT_FRESHNESS_WINDOW_SECONDS == 60
-
-    def test_from_settings_empty_profile(self):
-        profile = VerificationProfile.from_settings(make_settings())
-        assert profile.required_jobs == ()
-
-    def test_evaluate_empty_profile_is_ok_with_warning_reason(self):
-        ok, reason = evaluate(pipeline("success"), [], VerificationProfile(required_jobs=()))
-        assert ok is True
-        assert reason == "no verification profile configured (warning)"
-
-    def test_evaluate_nonempty_profile_enforces_jobs(self):
-        profile = VerificationProfile(required_jobs=("test",))
-        ok, reason = evaluate(pipeline("success"), [job("build", "success")], profile)
-        assert ok is False
-        assert "test" in reason
-
-        ok, _ = evaluate(pipeline("success"), [job("test", "success")], profile)
-        assert ok is True
-
-
-@pytest.fixture()
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+@pytest.mark.parametrize("status", ("pending", "skipped", "cancelled", "unknown", "failed"))
+def test_non_success_never_becomes_positive_proof_or_an_implicit_waiver(status):
+    value = evaluate((observation(status=status),))
+    assert value.status == (
+        "pending" if status == "pending" else "failed" if status == "failed" else "unknown"
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
+    assert not value.verified_for(SHA, ("unit",), now=NOW, max_age_seconds=60)
 
 
-@pytest.fixture()
-def fake_gitlab() -> FakeGitLab:
-    fake = FakeGitLab()
-    fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
-    fake.seed_commit("main", "base-sha-1", "initial")
-    return fake
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"tested_sha": OTHER},
+        {"observed_at": NOW - timedelta(seconds=61)},
+        {"observed_at": NOW + timedelta(seconds=1)},
+    ),
+)
+def test_wrong_candidate_stale_and_future_observations_remain_unverified(changes):
+    value = evaluate((observation(**changes),))
+    assert value.status == "stale"
+    assert not value.verified_for(SHA, ("unit",), now=NOW, max_age_seconds=60)
 
 
-async def get_run(db, run_id: str) -> FlowRun:
-    async with db() as session:
-        return await session.get(FlowRun, run_id)
-
-
-async def drive_to_green_pipeline(service, fake_gitlab: FakeGitLab, db) -> tuple[str, str]:
-    """start_run → /go → committed candidate with a green pipeline (no CI tick)."""
-    run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
-    await service.handle_command_note(
-        PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+def test_pass_names_exact_native_subject_inventory_and_full_observed_surface():
+    value = evaluate((observation(), observation("lint", native_id="native-2")), ("unit", "lint"))
+    assert value.status == "passed" and value.tested_sha == SHA and value.observed_at == NOW
+    assert value.verified_for(SHA, ("lint", "unit"), now=NOW, max_age_seconds=60)
+    assert not value.verified_for(OTHER, ("unit", "lint"), now=NOW, max_age_seconds=60)
+    assert not value.verified_for(SHA, ("unit",), now=NOW, max_age_seconds=60)
+    assert not value.verified_for(
+        SHA, ("unit", "lint"), now=NOW + timedelta(seconds=61), max_age_seconds=60
     )
-    branch = factory_branch(ISSUE_IID, run_id)
-    sha = (await get_run(db, run_id)).candidate_shas[-1]
-    fake_gitlab.seed_commit(branch, sha, "forge commit")
-    pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
-    fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)
-    return run_id, branch
+    recorded = json.loads(value.evidence)["checks"]
+    assert {row["native_id"] for row in recorded} == {"native-1", "native-2"}
+    assert all(row["tested_sha"] == SHA and row["role"] == "verification" for row in recorded)
+    assert CheckVerdict.model_validate_json(value.canonical_bytes) == value
 
 
-class TestEmptyProfileEvidence:
-    async def test_empty_profile_is_honestly_unverified(self, db, fake_gitlab):
-        """R02: an empty profile never presents pipeline success as verified —
-        the run still reaches the human, labeled unverified everywhere."""
-        service = make_service(db, fake_gitlab)  # FORGE_REQUIRED_JOBS="" by default
-        run_id, _branch = await drive_to_green_pipeline(service, fake_gitlab, db)
-
-        await service.evaluate_waiting_ci()
-
-        run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
-        # The ready reason says unverified (the honest form, R02).
-        assert "unverified" in (run.status_reason or "")
-        # The evidence records the unified VerificationResult shape.
-        verification = (run.evidence or {})["verification"]
-        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
-        assert verification["status"] == "unverified"
-        assert verification["tested_oid"] == run.candidate_shas[-1]
-        assert verification["producer"] == PRODUCER_GITLAB_PIPELINE
-        notes = [note["body"] for note in fake_gitlab.notes if "Forge run ready" in note["body"]]
-        assert notes, "evidence comment posted"
-        assert "⚠️ No verification profile configured — pipeline success only." in notes[0]
-        assert "**unverified**" in notes[0]
-
-    async def test_nonempty_profile_verifies_and_records_passed(self, db, fake_gitlab):
-        settings = make_settings(FORGE_REQUIRED_JOBS="test")
-        service = make_service(db, fake_gitlab, settings=settings)
-        run_id, _branch = await drive_to_green_pipeline(service, fake_gitlab, db)
-        # The pipeline must contain the required job, green.
-        async with db() as session:
-            sha = (await session.get(FlowRun, run_id)).candidate_shas[-1]
-        pipeline_id = (await fake_gitlab.list_pipelines(PROJECT_ID, sha=sha))[0].id
-        fake_gitlab.set_pipeline_jobs(pipeline_id, [job("test", "success")])
-
-        await service.evaluate_waiting_ci()
-
-        run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
-        assert (run.status_reason or "").startswith("checks passed")
-        verification = (run.evidence or {})["verification"]
-        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
-        assert verification["status"] == "passed"
-        assert verification["tested_oid"] == run.candidate_shas[-1]
-        assert verification["producer"] == PRODUCER_GITLAB_PIPELINE
-        notes = [note["body"] for note in fake_gitlab.notes if "Forge run ready" in note["body"]]
-        assert notes and "No verification profile" not in notes[0]
-        assert "All checks passed" in notes[0]
+@pytest.mark.parametrize("newest_status", ("passed", "failed", "pending"))
+def test_attempt_ten_decides_over_attempt_nine_in_every_api_order(newest_status):
+    old = observation(attempt=9, native_id="old")
+    new = observation(status=newest_status, attempt=10, native_id="new")
+    for ordered in permutations((old, new)):
+        result = evaluate(ordered)
+        assert result.status == newest_status
+        assert [row["native_id"] for row in json.loads(result.evidence)["checks"]] == ["new"]
 
 
-class TestPostReviewFreshness:
-    async def test_head_drift_during_review_blocks(self, db, fake_gitlab):
-        # The reviewer is where the race happens: the human push lands while
-        # the review is in flight — past the pre-review external_change check.
-        service = make_service(db, fake_gitlab)
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
-        await service.handle_command_note(
-            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+@pytest.mark.parametrize("status", ("passed", "failed", "skipped"))
+def test_duplicate_execution_identity_with_conflicting_native_receipts_is_unknown(status):
+    first, second = observation(), observation(status=status, native_id="another-native-job")
+    for ordered in permutations((first, second)):
+        assert evaluate(ordered).status == "unknown"
+    assert evaluate((first, first)).status == "passed"
+
+
+@pytest.mark.parametrize("failure_kind", ("unknown", "infrastructure", "configuration", "code"))
+def test_only_explicit_native_code_failure_can_authorize_repair(failure_kind):
+    checks = (
+        observation(status="failed", failure_kind=failure_kind, evidence="arbitrary runner text"),
+    )
+    result = evaluate(checks)
+    assert code_failure(checks, result) == (failure_kind == "code")
+    assert not code_failure((observation(),), evaluate((observation(),)))
+
+
+async def test_empty_native_surface_never_reaches_ready_or_spends_closing_budget(delivery):
+    env = delivery["env"]
+    run, _, _, _ = await published(delivery)
+    assert (await env.runner.tick()).rescheduled == 1
+    advance(delivery, 2)
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.reason == "verification_not_configured"
+    assert not delivery["reviewer"].calls
+    assert not any(name == "post_review" for name, _ in env.fake.calls)
+
+
+async def test_complete_independent_contract_reaches_ready_with_exact_durable_evidence(delivery):
+    env = delivery["env"]
+    run, _, _, sha = await published(delivery)
+    check(delivery, sha)
+    for _ in range(3):
+        assert (await env.runner.tick()).completed == 1
+    from forge.domain.states import State
+    from forge.store.models_execution import EngineCandidate
+    from sqlalchemy import select
+
+    assert (await env.runs.load(run.id)).state == State.READY_FOR_HUMAN
+    async with env.factory() as session:
+        candidate = await session.scalar(
+            select(EngineCandidate).where(EngineCandidate.run_id == run.id)
         )
-        branch = factory_branch(ISSUE_IID, run_id)
-        sha = (await get_run(db, run_id)).candidate_shas[-1]
-        service._reviewer = DriftingReviewer(fake_gitlab, branch)
-        fake_gitlab.seed_commit(branch, sha, "forge commit")
-        pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
-        fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)
-
-        await service.evaluate_waiting_ci()
-
-        run = await get_run(db, run_id)
-        assert run.status == FlowStatus.BLOCKED.value
-        assert run.status_reason.startswith("candidate_drift_after_review")
-
-    async def test_stable_head_reaches_ready(self, db, fake_gitlab):
-        service = make_service(db, fake_gitlab)
-        run_id, _branch = await drive_to_green_pipeline(service, fake_gitlab, db)
-
-        await service.evaluate_waiting_ci()
-
-        assert (await get_run(db, run_id)).status == FlowStatus.READY_FOR_HUMAN.value
-
-
-# ----------------------------------------------------------------------
-# A01: the positive-proof contract shared by the GitHub/Azure gates
-# ----------------------------------------------------------------------
-
-
-class TestPositiveProof:
-    """Verification is POSITIVE PROOF that the required checks RAN and
-    succeeded for the candidate commit — never "nothing failed" (A01).
-
-    The evaluator is provider-neutral: GitHub passes its conclusion
-    vocabulary, Azure its build results; the semantics are identical."""
-
-    def proof(
-        self,
-        required: tuple[str, ...],
-        observations: dict[str, str | None],
-        *,
-        waived: frozenset[str] = frozenset(),
-        custom: bool = False,
-    ) -> PositiveProof:
-        return evaluate_positive_proof(
-            required,
-            observations,
-            success_conclusions=CUSTOM_SUCCESS_RESULTS if custom else GITHUB_SUCCESS_CONCLUSIONS,
-            code_failure_conclusions=(
-                CUSTOM_CODE_FAILURE_RESULTS if custom else GITHUB_CODE_FAILURE_CONCLUSIONS
-            ),
-            infra_conclusions=CUSTOM_INFRA_RESULTS if custom else GITHUB_INFRA_CONCLUSIONS,
-            waived_conclusions=waived,
+        result = CheckVerdict.model_validate_json(
+            json.dumps(json.loads(candidate.validation_json)["verification"])
         )
-
-    def test_required_absent_with_a_green_optional_is_never_verified(self):
-        """A01 AC1: the required `tests` check never ran — a green
-        `documentation` workflow proves nothing and never substitutes."""
-        proof = self.proof(("tests",), {"documentation": "success"})
-
-        assert proof.verified is False
-        assert proof.missing == ("tests",)
-        assert proof.unproven == ("tests",)
-        assert proof.code_failures == () and proof.infra_failures == ()
-        assert "tests" in proof.summary() and "not run" in proof.summary()
-
-    @pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
-    def test_inconclusive_required_conclusion_never_verifies(self, conclusion):
-        """A01 AC2: a skipped/neutral required check is not proof — the
-        verdict is unknown, not green."""
-        proof = self.proof(("tests",), {"tests": conclusion})
-
-        assert proof.verified is False
-        assert proof.inconclusive == ("tests",)
-
-    def test_missing_conclusion_is_inconclusive_not_missing(self):
-        """A check the provider observed but that concluded NOTHING carries
-        no proof either."""
-        proof = self.proof(("tests",), {"tests": None})
-
-        assert proof.verified is False
-        assert proof.inconclusive == ("tests",)
-        assert proof.missing == ()
-
-    def test_waiver_config_flips_an_inconclusive_required_to_verified(self):
-        """FORGE_VERIFICATION_WAIVE_CONCLUSIONS is the ONLY way a skipped/
-        neutral required check counts — an explicit deployment policy."""
-        proof = self.proof(
-            ("tests", "lint"),
-            {"tests": "skipped", "lint": "success"},
-            waived=frozenset({"skipped", "neutral"}),
-        )
-
-        assert proof.verified is True
-        assert proof.waived == ("tests",)
-        assert proof.succeeded == ("lint",)
-
-    @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
-    def test_the_waiver_can_never_flip_failure_or_infra_conclusions(self, conclusion):
-        """The waiver is for genuinely inconclusive conclusions only: a
-        failure-class or cancelled/timed_out conclusion never becomes proof."""
-        proof = self.proof(("tests",), {"tests": conclusion}, waived=frozenset({conclusion}))
-
-        assert proof.verified is False
-
-    def test_github_cancelled_and_timed_out_are_infrastructure(self):
-        """A01 AC3: cancel/timeout evidence blames the EXECUTION — the infra
-        class blocks, the code-repair budget is never spent on it."""
-        for conclusion, expected in (
-            ("cancelled", "infra_failure"),
-            ("timed_out", "infra_failure"),
-            ("failure", "code_failure"),
-            ("action_required", "code_failure"),
-            ("success", "succeeded"),
-        ):
-            proof = self.proof(("tests",), {"tests": conclusion})
-            state = (
-                "infra_failure"
-                if proof.infra_failures
-                else (
-                    "code_failure"
-                    if proof.code_failures
-                    else ("succeeded" if proof.verified else "inconclusive")
-                )
-            )
-            assert state == expected, conclusion
-
-    def test_custom_results_classify_the_same_way(self):
-        """Azure parity: succeeded proves; failed/partiallySucceeded blame
-        the change; canceled/abandoned are infrastructure. Matching is
-        case-insensitive (the Azure vocabulary is camelCase)."""
-        assert self.proof(("ci",), {"ci": "succeeded"}, custom=True).verified is True
-        assert self.proof(("ci",), {"ci": "SUCCEEDED"}, custom=True).verified is True
-        proof = self.proof(("ci",), {"ci": "partiallySucceeded"}, custom=True)
-        assert proof.code_failures == ("ci",) and proof.verified is False
-        for result in ("canceled", "abandoned"):
-            proof = self.proof(("ci",), {"ci": result}, custom=True)
-            assert proof.infra_failures == ("ci",) and proof.verified is False
-
-    def test_empty_required_contract_makes_every_observed_check_required(self):
-        """With NO frozen contract, every OBSERVED check is the proof set —
-        so a lone skipped workflow still never verifies without the waiver
-        (A01 AC2), while a green surface does."""
-        proof = self.proof((), {"ci": "skipped"})
-        assert proof.verified is False and proof.inconclusive == ("ci",)
-
-        proof = self.proof((), {"ci": "success", "docs": "success"})
-        assert proof.verified is True
-
-    def test_unobserved_names_only_count_when_required(self):
-        """Names nobody observed only matter when the contract REQUIRES
-        them — an empty required list never invents missing checks."""
-        proof = self.proof((), {})
-        assert proof.verified is True
-        proof = self.proof(("tests",), {})
-        assert proof.verified is False and proof.missing == ("tests",)
-
-    def test_waived_conclusions_parse_from_settings(self):
-        settings = make_settings(FORGE_VERIFICATION_WAIVE_CONCLUSIONS="Skipped, neutral ,")
-        assert waived_conclusions_from_settings(settings) == frozenset({"skipped", "neutral"})
-        assert waived_conclusions_from_settings(make_settings()) == frozenset()
-
-    def test_infra_reason_token_is_the_parked_vocabulary(self):
-        """The infra blocked reason is the verification_timeout-family token
-        both provider gates park runs with."""
-        assert VERIFICATION_INFRA_REASON == "verification_infrastructure"
+        assert result.verified_for(sha, ("unit",), now=env.clock.now(), max_age_seconds=3600)
+        assert json.loads(result.evidence)["checks"][0]["native_id"] == "check-1"

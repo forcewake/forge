@@ -134,6 +134,8 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_text_reviewer.py",
             "tests/test_native_review.py",
             "tests/test_native_model_services.py",
+            "tests/test_system_verification.py",
+            "tests/test_report_inventory_strict.py",
         ),
     ),
     Invariant(

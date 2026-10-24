@@ -9,12 +9,11 @@ from forge.engine.effects import Effects
 from forge.engine.plan import result_json
 from forge.engine.publish import stopped
 from forge.engine.runner import StepContext, StepResult
-from forge.port_values import Applied, CommentOutcome, ReadUnavailable, ReviewVerdict
+from forge.port_values import ReadUnavailable, ReviewVerdict
 from forge.ports import CIPort, Clock, RepoPort, ReviewPort
 from forge.store.delivery import DeliveryStore
 from forge.store.lane_work import LaneWorkStore
 from forge.verification.checks import verdict
-from pydantic import TypeAdapter
 
 
 class ReadyHandler:
@@ -49,16 +48,8 @@ class ReadyHandler:
             )
         ):
             return stopped("readiness_evidence_stale")
-        effect = await context.effects.store.get(
-            f"{context.lease.run_id}:{context.lease.attempt}:{context.lease.generation}:review"
-        )
-        if (
-            effect is None
-            or effect.state not in ("committed", "adopted")
-            or effect.outcome_json is None
-            or not isinstance(
-                TypeAdapter(CommentOutcome).validate_json(effect.outcome_json), Applied
-            )
+        if not await self.store.review_posted(
+            context.lease, work.review, review, now=self.clock.now()
         ):
             return stopped("readiness_review_unpublished")
         try:

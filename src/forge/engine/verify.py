@@ -41,6 +41,7 @@ class VerifyHandler:
         await self.store.evidence(context.lease, work.candidate_sha, now=self.clock.now())
         if work.review.repo.identity != approved.repo.identity:
             raise StoreConflict("verification draft differs from approved repository")
+        age = (self.clock.now() - work.published_at).total_seconds()
         try:
             if (
                 await self.repo.head(approved.repo, f"forge/{approved.root_run_id}")
@@ -50,8 +51,11 @@ class VerifyHandler:
                 return stopped("verification_stale:branch_drift")
             checks = await self.ci.checks_for(approved.repo, work.candidate_sha)
         except ReadUnavailable:
+            if (
+                self.clock.now() - work.published_at
+            ).total_seconds() >= work.settings.verification_seconds:
+                return stopped("verification_unavailable_timeout")
             raise Retryable("verification_unavailable") from None
-        age = (self.clock.now() - work.published_at).total_seconds()
         result = verdict(
             checks,
             work.candidate_sha,

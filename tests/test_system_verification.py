@@ -1,121 +1,119 @@
-"""Frozen verification evidence on the actual per-run binding owner.
+"""Immutable execution and exact published SHA replace the retired world model.
 
-Multi-service twins are deferred. The shipped verifier still binds the
-exact candidate, base, tested commit, revision and environment.
+This suite claims no environment/image identity or multi-service qualification.
 """
 
-from dataclasses import FrozenInstanceError, replace
+import json
+
 import pytest
-from forge.adaptive.verification_binding import (
-    BoundEvidence,
-    GenerationBinding,
-    VerificationSubject,
-    invalidate_for_environment_change,
-    subject_freshness,
+from pydantic import ValidationError
+from sqlalchemy import select
+
+from forge.domain.approved_input import ApprovedInput
+from forge.domain.run_spec import RunSpec2, VerificationContract
+from forge.domain.states import State
+from forge.domain.verdicts import CheckVerdict
+from forge.port_values import CheckResult
+from forge.store.command_runs import CommandRuns
+from forge.store.models_execution import EngineCandidate
+from forge_protocol import RunIdentity
+from tests.test_engine_delivery import (
+    case as case,
+    delivery as delivery,
+    env as env,
+    settings as settings,
 )
-from forge.runs.verification import evaluate_positive_proof
+from tests.test_verification_binding import candidate, ready_input
+from tests.test_runs_verification import NOW, SHA, evaluate, observation
 
 
-def subject():
-    return VerificationSubject(
-        candidate_digest="1" * 64,
-        source_oid="a" * 40,
-        tested_oid="a" * 40,
-        source_base_oid="b" * 40,
-        plan_revision_digest="2" * 64,
-        environment_profile_digest="3" * 64,
-        generation=GenerationBinding(
-            work_id="run-1", checkpoint_id="4" * 64, checkpoint_binding="exact", source="generation"
-        ),
+@pytest.mark.parametrize("field", ("base_sha", "revision", "task_title", "model", "verification"))
+async def test_every_changed_execution_input_changes_approval_authority(env, field):
+    _, frozen = await env.planned()
+    original = frozen.spec
+    changes = {
+        "base_sha": "9" * 40,
+        "revision": original.revision + 1,
+        "task_title": "An editorial change still needs a new frozen approval",
+        "model": "another-explicit-model",
+        "verification": VerificationContract(required_checks=("unit", "secondary")),
+    }
+    moved = RunSpec2.model_validate_json(
+        original.model_copy(update={field: changes[field]}).canonical_bytes
     )
+    assert moved.digest != original.digest
+    before, after = ApprovedInput.from_spec(original), ApprovedInput.from_spec(moved)
+    assert before.approved_digest != after.approved_digest
+    with pytest.raises(ValueError, match="frozen specification"):
+        before.to_brief(RunIdentity(forge_run_id="a" * 32, attempt=1, generation=1), moved)
+
+
+async def test_unchanged_approved_identity_round_trips_deterministically_and_is_immutable(env):
+    _, frozen = await env.planned()
+    original = frozen.spec
+    assert RunSpec2.model_validate_json(original.spec_json) == original
+    assert ApprovedInput.model_validate_json(frozen.approved.canonical_bytes) == frozen.approved
+    assert ApprovedInput.from_spec(original) == frozen.approved
+    with pytest.raises(ValidationError):
+        original.base_sha = "9" * 40
+
+
+@pytest.mark.parametrize("field", tuple(ApprovedInput.model_fields))
+async def test_tampered_serialized_approval_is_refused_never_repaired_into_a_pass(env, field):
+    _, frozen = await env.planned()
+    document = json.loads(frozen.approved.canonical_bytes)
+    document[field] = (
+        999 if field == "revision" else "9" * 40 if field == "base_sha" else "tampered"
+    )
+    with pytest.raises(ValidationError):
+        ApprovedInput.model_validate_json(json.dumps(document))
+    document.pop(field)
+    with pytest.raises(ValidationError):
+        ApprovedInput.model_validate_json(json.dumps(document))
 
 
 @pytest.mark.parametrize(
-    "field",
-    [
-        "candidate_digest",
-        "source_oid",
-        "tested_oid",
-        "source_base_oid",
-        "plan_revision_digest",
-        "environment_profile_digest",
-    ],
+    "field", ("tested_sha", "native_id", "attempt", "observed_at", "role", "evidence")
 )
-def test_every_changed_runtime_input_invalidates_the_frozen_verdict(field):
-    original = subject()
-    moved = replace(original, **{field: "9" * len(getattr(original, field))})
-    assert moved.subject_digest != original.subject_digest
-    verdict = subject_freshness({"subject_identity": original.as_document()}, current_subject=moved)
-    assert verdict.status == "stale"
-    assert field in verdict.reason
+def test_missing_native_identity_cannot_claim_a_successful_check(field):
+    document = observation().model_dump(mode="json")
+    document.pop(field)
+    with pytest.raises(ValidationError):
+        CheckResult.model_validate_json(json.dumps(document))
 
 
-def test_generation_identity_changes_the_canonical_frozen_subject():
-    original = subject()
-    moved = replace(original, generation=replace(original.generation, checkpoint_id="9" * 64))
-    assert moved.subject_digest != original.subject_digest
+@pytest.mark.parametrize("status", ("pending", "skipped", "cancelled", "failed", "unknown"))
+def test_a_required_check_must_have_run_successfully(status):
+    result = evaluate((observation(status=status),))
+    assert not result.verified_for(SHA, ("unit",), now=NOW, max_age_seconds=60)
 
 
-def test_unchanged_identity_round_trips_deterministically_and_is_immutable():
-    original = subject()
-    assert subject().subject_digest == original.subject_digest
-    assert VerificationSubject.from_document(original.as_document()) == original
-    with pytest.raises(FrozenInstanceError):
-        original.source_oid = "9" * 40
+@pytest.mark.parametrize("missing", ("tested_sha", "required", "observed_at", "evidence"))
+def test_missing_or_foreign_verdict_shape_has_no_legacy_success_fallback(missing):
+    document = evaluate((observation(),)).model_dump(mode="json")
+    document.pop(missing)
+    document["subject_identity"] = {"schema": "forge.verification.subject/1", "source_oid": SHA}
+    with pytest.raises(ValidationError):
+        CheckVerdict.model_validate_json(json.dumps(document))
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "candidate_digest",
-        "source_oid",
-        "tested_oid",
-        "source_base_oid",
-        "plan_revision_digest",
-        "environment_profile_digest",
-    ],
-)
-def test_tampered_serialized_identity_is_unknown_never_repaired_into_a_pass(field):
-    original = subject()
-    document = original.as_document()
-    document[field] = "tampered"
-    assert VerificationSubject.from_document(document) is None
-    assert (
-        subject_freshness({"subject_identity": document}, current_subject=original).status
-        == "unknown"
-    )
-
-
-@pytest.mark.parametrize("document", [None, {}, {"schema": "future/99"}])
-def test_missing_or_foreign_identity_cannot_claim_current_evidence(document):
-    assert (
-        subject_freshness({"subject_identity": document}, current_subject=subject()).status
-        == "unknown"
-    )
-
-
-def test_environment_invalidation_retains_history_and_only_withdraws_matching_authority():
-    records = (
-        BoundEvidence("old", "s1", "old-env"),
-        BoundEvidence("new", "s2", "new-env"),
-        BoundEvidence("unknown", "s3", ""),
-    )
-    result = invalidate_for_environment_change(
-        records, previous_digest="old-env", current_digest="new-env"
-    )
-    assert len(result) == len(records)
-    assert result[0].invalidated and result[0].invalidated_reason
-    assert result[1:] == records[1:]
-    assert records[0].invalidated is False
-
-
-@pytest.mark.parametrize("conclusion", [None, "skipped", "cancelled", "failure", "unknown"])
-def test_a_required_check_must_have_run_successfully(conclusion):
-    result = evaluate_positive_proof(
-        ("required",),
-        {"required": conclusion},
-        success_conclusions=frozenset({"success"}),
-        code_failure_conclusions=frozenset({"failure"}),
-        infra_conclusions=frozenset({"cancelled"}),
-    )
-    assert result.verified is False
+async def test_refused_current_readiness_keeps_historical_candidate_and_operator_state_consistent(
+    delivery,
+):
+    env = delivery["env"]
+    run, _, _, sha = await ready_input(delivery)
+    async with env.factory.begin() as session:
+        row = await candidate(session, run.id)
+        history = json.loads(row.validation_json)
+        history["verification"]["tested_sha"] = "f" * 40
+        row.validation_json = json.dumps(history)
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.state == State.BLOCKED
+    view = json.loads(await CommandRuns(env.factory).snapshot(current))
+    assert view["state"] == "blocked" and view["reason"] == "readiness_evidence_stale"
+    assert view["candidates"][0]["sha"] == sha
+    async with env.factory() as session:
+        row = await session.scalar(select(EngineCandidate).where(EngineCandidate.run_id == run.id))
+        assert row.published_sha == sha and row.validation_json is not None
+        assert json.loads(row.validation_json)["review"]["candidate_sha"] == sha

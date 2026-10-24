@@ -12,8 +12,8 @@ from forge.domain.candidate import ValidatedCandidate
 from forge.domain.run_spec import RunSpec2
 from forge.domain.states import Handler, State, transition
 from forge.domain.verdicts import CheckVerdict, Committed
-from forge.port_values import ReviewVerdict
-from forge.store.models_execution import EngineCandidate, EngineEffect
+from forge.port_values import ReviewRef, ReviewVerdict
+from forge.store.models_execution import EngineCandidate, EngineEffect, EngineStep
 from forge.store.models_runs import EngineRunSpec
 from forge.store.records import Lease, StoreConflict
 from forge.store.transactions import SessionFactory, fence, locked_run, transaction
@@ -127,6 +127,28 @@ class DeliveryStore:
                 raise StoreConflict("a durable model review cannot be repeated or replaced")
             document[name] = encoded
             row.validation_json = json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+    async def review_posted(
+        self, lease: Lease, review: ReviewRef, result: ReviewVerdict, *, now: datetime
+    ) -> bool:
+        from forge.store.review_proof import review_proof
+
+        async with transaction(self.factory) as session:
+            await fence(session, lease, now)
+            row = await candidate_row(session, lease)
+            if row.state != "published" or row.published_sha != result.candidate_sha:
+                return False
+            effect = await session.scalar(
+                select(EngineEffect).where(
+                    EngineEffect.key == f"{lease.run_id}:{lease.attempt}:{lease.generation}:review"
+                )
+            )
+            owner = (
+                await session.get(EngineStep, effect.step_id)
+                if effect is not None and effect.step_id is not None
+                else None
+            )
+            return review_proof(lease, review, result, effect, owner)
 
     async def root_spec(self, root_run_id: str) -> RunSpec2:
         async with self.factory() as session:
