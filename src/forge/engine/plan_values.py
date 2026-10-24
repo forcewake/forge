@@ -13,6 +13,7 @@ from forge.port_values import Actor, PlanningSnapshot, TaskSnapshot
 
 class PlanIntent(Value):
     actor: Actor
+    revision: Annotated[int, Field(gt=0)] = 1
     task: TaskSnapshot
     snapshot: PlanningSnapshot
     policy: RunPolicy
@@ -32,5 +33,6 @@ class PlanIntent(Value):
             task_description=self.task.description,
             plan=plan.model_dump(mode="json"),
             base_sha=self.snapshot.primary.sha,
+            revision=self.revision,
         )
         return RunSpec2.model_validate_json(canonical_json(document))

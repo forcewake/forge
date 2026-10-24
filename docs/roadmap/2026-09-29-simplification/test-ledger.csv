@@ -147,6 +147,7 @@ tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,
 tests/test_engine_lane.py,14,548,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
 tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_operator.py,9,350,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Original-handler retry, atomic controls and exact checkpoint resume."
+tests/test_engine_rounds.py,11,378,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Native feedback correction rounds with fresh child approval and one root Draft.
 tests/test_engine_runner.py,18,445,false,true,,invariant evidence; edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
 tests/test_engine_store.py,14,419,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,
