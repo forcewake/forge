@@ -88,3 +88,37 @@ async def until(predicate):
 
 def config_path(session):
     return session.owned.path if hasattr(session, "owned") else Path(session.config.name)
+
+
+class ScriptClient(claude.FakeClient):
+    async def query(self, text):
+        self.prompts.append(text)
+        if len(self.prompts) == 1:
+            if self.sdk.edit:
+                self.sdk.edit(Path(self.options.cwd))
+            for message in self.sdk.frames:
+                self.messages.put_nowait(message)
+
+    async def receive_messages(self):
+        while (message := await self.messages.get()) is not None:
+            yield message
+
+
+async def completed_case(root, *, frames=None, edit=True, mutate=None, **dispatch):
+    case = Case(root, **dispatch)
+    case.sdk.frames = (
+        frames
+        if frames is not None
+        else [Result(usage={"input_tokens": 10, "output_tokens": 20}, total_cost_usd=0.1)]
+    )
+    case.sdk.edit = (
+        (lambda workspace: (workspace / "base.txt").write_text("approved change\n"))
+        if edit
+        else None
+    )
+    case.sdk.ClaudeSDKClient = lambda options: ScriptClient(case.sdk, options)
+    if mutate:
+        mutate(case)
+    case.driver = ClaudeCodeDriver(case.sdk)
+    case.result = await case.execute(case.driver)
+    return case

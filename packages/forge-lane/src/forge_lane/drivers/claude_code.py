@@ -1,6 +1,7 @@
 """Claude Agent SDK lifecycle with frozen file and public HTTPS MCP authority."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -106,6 +107,7 @@ class ClaudeSession:
         self.input_tokens, self.output_tokens = 0, 0
         self.seen_results: set[str] = set()
         self.usage: Usage | None = None
+        self.usage_unknown = False
         self.task = asyncio.create_task(self._owner())
 
     def _emit(self, value: DriverEvent | LaneFailure | None) -> None:
@@ -113,7 +115,7 @@ class ClaudeSession:
             self.queue.get_nowait()
         self.queue.put_nowait(value)
 
-    def _options(self):
+    def _options(self) -> Any:
         grant = self.env.model_key
         assert grant is not None
         return self.sdk.ClaudeAgentOptions(
@@ -268,19 +270,51 @@ class ClaudeSession:
     def _record_usage(self, message: Any) -> None:
         usage = message.usage
         if usage is None:
-            return
-        self.input_tokens += sum(
-            usage.get(key, 0)
-            for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-        )
-        self.output_tokens += usage.get("output_tokens", 0)
+            self.usage_unknown = True
+            if self.usage is None:
+                return
+            raise self._invalid_usage()
+        counters = ("input_tokens", "output_tokens")
+        caches = ("cache_creation_input_tokens", "cache_read_input_tokens")
+        if (
+            self.usage_unknown
+            or not isinstance(usage, dict)
+            or any(type(usage.get(key)) is not int or usage[key] < 0 for key in counters)
+            or any(type(usage.get(key, 0)) is not int or usage.get(key, 0) < 0 for key in caches)
+        ):
+            raise self._invalid_usage()
         cost = message.total_cost_usd
+        if cost is not None:
+            try:
+                if type(cost) not in (int, float, Decimal):
+                    raise ValueError("invalid cost type")
+                cost = Decimal(str(cost))
+                if (
+                    not cost.is_finite()
+                    or cost < 0
+                    or (
+                        self.usage is not None
+                        and self.usage.cost_usd is not None
+                        and cost < self.usage.cost_usd
+                    )
+                ):
+                    raise ValueError("invalid cumulative cost")
+            except (ValueError, ArithmeticError):
+                raise self._invalid_usage() from None
+        self.input_tokens += usage["input_tokens"] + sum(usage.get(key, 0) for key in caches)
+        self.output_tokens += usage["output_tokens"]
         self.usage = Usage(
-            input_tokens=self.input_tokens,
-            output_tokens=self.output_tokens,
-            cost_usd=Decimal(str(cost)) if cost is not None else None,
+            input_tokens=self.input_tokens, output_tokens=self.output_tokens, cost_usd=cost
         )
         self._emit(DriverEvent("message", usage=self.usage))
+
+    @staticmethod
+    def _invalid_usage() -> LaneFailure:
+        return LaneFailure(
+            ExitCode.DRIVER,
+            "driver_usage_invalid",
+            "Claude usage does not establish complete nonnegative counters and finite cost",
+        )
 
     def _classify(self, exc: Exception) -> LaneFailure:
         name = type(exc).__name__
@@ -293,7 +327,7 @@ class ClaudeSession:
         }.get(name, "driver_error")
         return LaneFailure(ExitCode.DRIVER, kind, "Claude SDK execution failed")
 
-    async def events(self):
+    async def events(self) -> AsyncIterator[DriverEvent]:
         while (event := await self.queue.get()) is not None:
             if isinstance(event, LaneFailure):
                 raise event

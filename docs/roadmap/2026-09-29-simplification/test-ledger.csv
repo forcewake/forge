@@ -214,6 +214,7 @@ tests/test_lane_frozen_policy.py,9,284,true,true,,edge-case pin,,lane,keep,P2-10
 tests/test_lane_mcp.py,7,264,true,true,,edge-case pin,,lane,keep,P2-10,Frozen lane policy and native MCP contracts
 tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-engine,P3,
 tests/test_lane_runner_v1.py,14,560,true,true,,edge-case pin,,lane,keep,-,
+tests/test_lane_sdk_usage.py,3,131,false,false,,edge-case pin,,lane,keep,P2-04,Actual pinned SDK parser usage is validated before receipts; partial or invalid axes never become zero and wholly missing usage remains unknown.
 tests/test_lane_templates_v1.py,2,31,false,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_trace.py,6,117,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_v1.py,16,480,true,true,,edge-case pin,,lane,keep,-,
