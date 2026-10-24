@@ -143,6 +143,7 @@ tests/test_durable_gates.py,9,154,true,true,,invariant evidence,,durable,keep,-,
 tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,
 tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
+tests/test_effect_probe_deadline.py,2,147,false,false,,invariant evidence; edge-case pin,,effect,keep,P3-04,Whole native recovery probes are bounded; timeout preserves unknown and cancellation never authorizes redispatch.
 tests/test_engine_approval.py,8,557,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Durable command ownership, native reply recovery and cancellation fencing."
 tests/test_engine_delivery.py,15,456,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"

@@ -185,7 +185,10 @@ class Effects:
         if digest(json.loads(row.payload_json)) != row.payload_digest:
             raise EffectProtocolError("persisted effect payload digest mismatch")
         try:
-            result = _PROBE.validate_python(await self._probe(kind, json.loads(row.payload_json)))
+            async with asyncio.timeout(self.call_timeout):
+                result = _PROBE.validate_python(
+                    await self._probe(kind, json.loads(row.payload_json))
+                )
         except Exception as exc:
             result = Inconclusive(
                 reason="probe_unavailable", evidence=_encoded({"error_type": type(exc).__name__})
