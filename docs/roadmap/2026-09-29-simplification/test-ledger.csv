@@ -127,8 +127,8 @@ tests/test_dependency_contract.py,3,37,false,false,,edge-case pin,,dependency,ke
 tests/test_deployment_ops.py,3,34,true,false,,edge-case pin,,deployment,keep,-,
 tests/test_discovery_authority.py,3,55,true,false,,edge-case pin,,discovery,keep,-,
 tests/test_docs_links.py,4,131,false,false,,edge-case pin,,docs,keep,-,
-tests/test_doctor.py,24,597,true,false,,,,doctor,keep,-,
-tests/test_doctor_settings.py,4,48,true,false,,,,doctor,keep,-,
+tests/test_doctor.py,25,254,true,false,,edge-case pin,,doctor,keep,-,
+tests/test_doctor_settings.py,4,44,false,false,,,,doctor,keep,-,
 tests/test_domain_approved_input.py,7,290,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_binary_candidate.py,5,246,true,true,,invariant evidence; edge-case pin,,domain,keep,P3-09,"Native Git binary, mode and symlink validation with durable byte-exact recovery"
 tests/test_domain_boundary.py,2,84,false,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract

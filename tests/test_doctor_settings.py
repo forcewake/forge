@@ -1,48 +1,44 @@
-"""forge doctor reports missing settings as FAIL lines, never a traceback."""
-
-from __future__ import annotations
+"""Installed CLI failures carry no tracebacks, ambient config or secret values."""
 
 import json
 
+from forge.runtime import cli
+from forge.runtime.settings import RuntimeSettings
+from pydantic import ValidationError
 import pytest
 
-from forge import doctor
-from forge.config import Settings
+from tests.runtime_fixture import configuration
 
 
-@pytest.fixture()
-def empty_env(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)  # no .env file is read
-    for name in ("GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET", "FORGE_GITLAB_ENABLED"):
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
+def test_missing_settings_are_reported_not_raised(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["doctor"]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "failed"
+    assert not captured.err and "Traceback" not in captured.out
 
 
-def test_missing_settings_are_reported_not_raised(empty_env, capsys):
-    assert doctor.main([]) == 1
-    out = capsys.readouterr().out
-    assert "FAIL" in out
-    assert "GITLAB_URL" in out
-    assert "Traceback" not in out
-
-
-def test_missing_settings_in_json(empty_env, capsys):
-    assert doctor.main(["--json"]) == 1
+def test_missing_settings_in_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GITLAB_TOKEN=synthetic-secret-must-not-be-read\n")
+    assert cli.main(["doctor"]) == 1
     report = json.loads(capsys.readouterr().out)
-    assert report["status"] == "failed"
-    assert report["checks"][0]["name"] == "settings"
-    assert "GITLAB_URL" in report["checks"][0]["detail"]
-    assert not report["checks"][0]["detail"].startswith("Value error")
+    assert report["checks"][0]["name"] == "installation"
+    assert "synthetic-secret" not in json.dumps(report)
 
 
-async def test_disabled_gitlab_is_a_warning_not_a_network_call(empty_env):
-    empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
-    results = await doctor.check_gitlab_identity(Settings())
-    assert [(r.name, r.status) for r in results] == [("gitlab.token", doctor.WARN)]
+def test_disabled_gitlab_is_a_warning_not_a_network_call(tmp_path):
+    # Disabled-provider flags are retired; unknown flags refuse during parsing.
+    config, _ = configuration(tmp_path)
+    body = config.model_dump(mode="json", by_alias=True)
+    body["connections"][0]["enabled"] = False
+    with pytest.raises(ValidationError):
+        RuntimeSettings.model_validate_json(json.dumps(body))
 
 
-async def test_project_checks_refuse_when_gitlab_is_disabled(empty_env):
-    empty_env.setenv("FORGE_GITLAB_ENABLED", "false")
-    results = await doctor.check_gitlab_project(Settings(), 68)
-    assert [(r.name, r.status) for r in results] == [("project", doctor.FAIL)]
-    assert "FORGE_GITLAB_ENABLED=false" in results[0].detail
+def test_project_checks_refuse_when_gitlab_is_disabled(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FORGE_GITLAB_ENABLED", "false")
+    assert cli.main(["onboard", "unconfigured"]) == 1
+    output = capsys.readouterr().err
+    assert "operation refused" in output and "Traceback" not in output
