@@ -15,6 +15,7 @@ from forge_protocol import (
     CheckpointManifest,
     ControlAck,
     ControlCommand,
+    ControlDelivery,
     Heartbeat,
     LaneReport,
     ModelKeyGrant,
@@ -112,6 +113,15 @@ async def controls(
     who: Identity, lane: Service, after: int = Query(0, ge=0)
 ) -> list[ControlCommand]:
     return await lane.controls(who, after)
+
+
+@router.post("/controls/{command_id}/begin", response_model=ControlDelivery)
+async def begin_control(
+    command_id: str, body: ControlDelivery, who: Identity, lane: Service
+) -> ControlDelivery:
+    if command_id != body.command_id:
+        raise LaneConflict("delivery path and command id differ")
+    return await lane.begin(who, body)
 
 
 @router.post("/controls/{command_id}/ack", response_model=ControlAck)

@@ -26,7 +26,8 @@ class EngineControlCommand(RunBound, Timestamps, Base):
         UniqueConstraint("run_id", "command_key", name="uq_control_key"),
         UniqueConstraint("run_id", "attempt", "sequence", name="uq_control_sequence"),
         CheckConstraint(
-            "state IN ('pending','acknowledged','refused','expired')", name="ck_control_state"
+            "state IN ('pending','inflight','acknowledged','refused','expired')",
+            name="ck_control_state",
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -38,6 +39,7 @@ class EngineControlCommand(RunBound, Timestamps, Base):
     payload_json: Mapped[str] = mapped_column(Text)
     state: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    delivery_json: Mapped[str | None] = mapped_column(Text)
     acknowledgement_json: Mapped[str | None] = mapped_column(Text)
 
 

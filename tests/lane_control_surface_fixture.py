@@ -5,7 +5,13 @@ import json
 from uuid import uuid4
 
 from fastapi import FastAPI
-from forge_protocol import ControlAck, ControlCommand, ModelKeyGrant, SessionRequest
+from forge_protocol import (
+    ControlAck,
+    ControlCommand,
+    ControlDelivery,
+    ModelKeyGrant,
+    SessionRequest,
+)
 import httpx
 import pytest
 from sqlalchemy import select
@@ -36,6 +42,7 @@ class LaneControlCase:
         self.lane, self.factory, self.pending = lane, factory, pending
         self.app, self.client, self.token, self.key = app, client, token, key
         self.identity = pending.identity
+        self.deliveries = {}
 
     async def queue(self, action="steer", text="bounded operator guidance"):
         provider = self.pending.dispatch.provider
@@ -74,18 +81,38 @@ class LaneControlCase:
             assert row is not None
             return ControlCommand.model_validate_json(row.payload_json)
 
+    async def begin(self, command, delivery_id=None):
+        delivery = ControlDelivery(
+            **self.identity.model_dump(),
+            command_id=command.command_id,
+            sequence=command.sequence,
+            delivery_id=delivery_id or uuid4().hex,
+        )
+        response = await self.client.post(
+            "/lane/v1/controls/" + command.command_id + "/begin",
+            json=delivery.model_dump(mode="json"),
+        )
+        if response.status_code == 200:
+            self.deliveries[command.command_id] = delivery.delivery_id
+        return response
+
     def ack(self, command, **changes):
         return ControlAck(
             **{
                 **self.identity.model_dump(),
                 "command_id": command.command_id,
                 "sequence": command.sequence,
+                "delivery_id": self.deliveries.get(command.command_id, "0" * 32),
                 "status": "applied",
                 **changes,
             }
         )
 
     async def acknowledge(self, command, **changes):
+        if command.command_id not in self.deliveries:
+            begun = await self.begin(command)
+            if begun.status_code != 200:
+                return begun
         return await self.client.post(
             "/lane/v1/controls/" + command.command_id + "/ack",
             json=self.ack(command, **changes).model_dump(mode="json"),

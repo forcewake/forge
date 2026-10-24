@@ -12,6 +12,7 @@ import pytest
 from forge_protocol import (
     ControlAck,
     ControlCommand,
+    ControlDelivery,
     Heartbeat,
     LaneReport,
     ModelKeyGrant,
@@ -60,9 +61,17 @@ async def test_session_brief_and_control_ack_use_exact_frozen_models(api, signin
         command.model_dump(mode="json")
     ]
     assert (await client.get("/lane/v1/controls?after=1")).json() == []
-    ack = ControlAck(
-        **pending.identity.model_dump(), command_id=command.command_id, sequence=1, status="applied"
+    delivery = ControlDelivery(
+        **pending.identity.model_dump(),
+        command_id=command.command_id,
+        sequence=1,
+        delivery_id="d" * 32,
     )
+    begin = await client.post(
+        "/lane/v1/controls/pause-1/begin", json=delivery.model_dump(mode="json")
+    )
+    assert begin.status_code == 200
+    ack = ControlAck(**delivery.model_dump(), status="applied")
     for _ in range(2):
         response = await client.post(
             "/lane/v1/controls/pause-1/ack", json=ack.model_dump(mode="json")

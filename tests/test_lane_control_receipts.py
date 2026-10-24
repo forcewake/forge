@@ -17,6 +17,7 @@ from tests.native_lane_fixture import auth as auth, settings as settings, signin
 async def test_restart_same_identity_after_ack_does_not_redeliver(control_case, status):
     case = control_case
     command = await case.queue()
+    assert (await case.begin(command)).status_code == 200
     ack = case.ack(command, status=status)
     first = await case.client.post(
         "/lane/v1/controls/" + command.command_id + "/ack", json=ack.model_dump(mode="json")

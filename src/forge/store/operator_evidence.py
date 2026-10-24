@@ -119,6 +119,10 @@ async def controls(session: AsyncSession, run: RunRecord) -> dict[str, object]:
                 "generation": row.generation,
                 "sequence": row.sequence,
                 "world_version": row.world_version,
+                "delivery_intent": "recorded" if row.delivery_json is not None else "absent",
+                "delivery_outcome": ack.status
+                if ack
+                else ("unknown" if row.delivery_json is not None else "unobserved"),
                 "acknowledged_status": ack.status if ack else None,
                 "checkpoint_id": ack.checkpoint_id if ack else None,
             }

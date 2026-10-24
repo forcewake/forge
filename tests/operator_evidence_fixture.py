@@ -10,6 +10,7 @@ from forge_protocol import (
     CheckpointManifest,
     ControlAck,
     ControlCommand,
+    ControlDelivery,
     digest,
 )
 from sqlalchemy import select
@@ -153,6 +154,7 @@ async def control(
             **wire.model_dump(
                 include={"forge_run_id", "attempt", "generation", "command_id", "sequence"}
             ),
+            delivery_id="d" * 32,
             status=ack_status,
             detail="raw ack detail excluded",
             checkpoint_id=checkpoint_id,
@@ -171,6 +173,11 @@ async def control(
         payload_json=wire.model_dump_json(),
         state=state,
         deadline_at=case.service.budget.clock.now() + timedelta(seconds=60),
+        delivery_json=ControlDelivery.model_validate(
+            ack.model_dump(include=set(ControlDelivery.model_fields))
+        ).model_dump_json()
+        if ack
+        else None,
         acknowledgement_json=ack.model_dump_json() if ack else None,
     )
     async with case.service.factory() as session, session.begin():

@@ -54,6 +54,8 @@ async def poll(case, token=None, after=0):
 
 
 async def raw_ack(case, command, **changes):
+    if command.command_id not in case.deliveries:
+        assert (await case.begin(command)).status_code == 200
     body = {**case.ack(command).model_dump(mode="json"), **changes}
     return await case.client.post("/lane/v1/controls/" + command.command_id + "/ack", json=body)
 
@@ -160,9 +162,8 @@ class TestReplaySafeAcks:
     ):
         case = control_case
         command = await case.queue()
-        before = await case.rows()
         assert (await raw_ack(case, command, generation=6)).status_code == 409
-        assert await case.rows() == before
+        assert (await case.rows())[0][1:3] == ("inflight", None)
 
     async def test_a_generationless_ack_still_transitions_during_migration(self, control_case):
         case = control_case
@@ -219,7 +220,7 @@ class TestAuth:
         case = control_case
         command = await case.queue()
         assert (await raw_ack(case, command, forge_run_id="b" * 32)).status_code == 409
-        assert (await case.rows())[0][1] == "pending"
+        assert (await case.rows())[0][1] == "inflight"
 
 
 class TestPendingView:
@@ -313,7 +314,11 @@ class TestAckTransitions:
 
     async def test_unknown_command_returns_404(self, control_case):
         body = ControlAck(
-            **control_case.identity.model_dump(), command_id="unknown", sequence=1, status="applied"
+            **control_case.identity.model_dump(),
+            command_id="unknown",
+            sequence=1,
+            delivery_id="0" * 32,
+            status="applied",
         )
         response = await control_case.client.post(
             "/lane/v1/controls/unknown/ack", json=body.model_dump(mode="json")

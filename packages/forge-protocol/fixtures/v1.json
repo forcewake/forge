@@ -64,6 +64,7 @@
     "attempt": 0,
     "checkpoint_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "command_id": "control-1",
+    "delivery_id": "11111111111111111111111111111111",
     "detail": "",
     "forge_run_id": "run-1",
     "generation": 0,
@@ -80,6 +81,15 @@
     "protocol": "forge.lane/1",
     "sequence": 1,
     "text": null
+  },
+  "ControlDelivery": {
+    "attempt": 0,
+    "command_id": "control-1",
+    "delivery_id": "11111111111111111111111111111111",
+    "forge_run_id": "run-1",
+    "generation": 0,
+    "protocol": "forge.lane/1",
+    "sequence": 1
   },
   "Heartbeat": {
     "attempt": 0,

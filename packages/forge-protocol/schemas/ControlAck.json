@@ -26,6 +26,11 @@
       "title": "Command Id",
       "type": "string"
     },
+    "delivery_id": {
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Delivery Id",
+      "type": "string"
+    },
     "detail": {
       "default": "",
       "title": "Detail",
@@ -69,6 +74,7 @@
     "generation",
     "command_id",
     "sequence",
+    "delivery_id",
     "status"
   ],
   "title": "ControlAck",

@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, TypeVar
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -14,6 +15,7 @@ from forge_protocol import (
     CheckpointManifest,
     ControlAck,
     ControlCommand,
+    ControlDelivery,
     Heartbeat,
     LaneDispatch,
     LaneReport,
@@ -181,6 +183,15 @@ class LaneClient:
                 ExitCode.TRANSPORT, "echo_mismatch", "Server did not accept exact payload"
             )
         return result
+
+    async def begin(self, command: ControlCommand) -> ControlDelivery:
+        delivery = ControlDelivery(
+            **self.identity,
+            command_id=command.command_id,
+            sequence=command.sequence,
+            delivery_id=uuid4().hex,
+        )
+        return await self.send(f"/controls/{command.command_id}/begin", delivery)
 
     async def ack(self, value: ControlAck) -> None:
         await self.send(f"/controls/{value.command_id}/ack", value)

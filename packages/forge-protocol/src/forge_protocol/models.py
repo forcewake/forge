@@ -208,9 +208,13 @@ class ControlCommand(RunIdentity):
         return self
 
 
-class ControlAck(RunIdentity):
+class ControlDelivery(RunIdentity):
     command_id: Identifier
     sequence: Positive
+    delivery_id: Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
+
+
+class ControlAck(ControlDelivery):
     status: Literal["applied", "refused"]
     detail: str = ""
     checkpoint_id: Digest | None = None

@@ -11,6 +11,7 @@ from forge_protocol import (
     CheckpointManifest,
     ControlAck,
     ControlCommand,
+    ControlDelivery,
     Heartbeat,
     LaneReport,
     ModelKeyGrant,
@@ -66,6 +67,31 @@ class LaneV1Service:
             ],
         )
 
+    async def begin(self, identity: RunIdentity, delivery: ControlDelivery) -> ControlDelivery:
+        self.body_identity(identity, delivery)
+
+        def reserve(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> ControlDelivery:
+            command = next(
+                (
+                    raw
+                    for raw in namespace["pending_controls"]
+                    if raw["command_id"] == delivery.command_id
+                ),
+                None,
+            )
+            if command is None or command["sequence"] != delivery.sequence:
+                raise LaneConflict("control is not pending for a first delivery")
+            if state.get("report") is not None:
+                raise LaneConflict("dispatch already has a terminal report")
+            state.setdefault("deliveries", {})[delivery.command_id] = delivery.model_dump(
+                mode="json"
+            )
+            return delivery
+
+        return await self.store.access(identity, reserve, write=True)
+
     async def acknowledge(self, identity: RunIdentity, ack: ControlAck) -> ControlAck:
         self.body_identity(identity, ack)
 
@@ -83,6 +109,9 @@ class LaneV1Service:
                     pending,
                     CheckpointManifest.model_validate(namespace["checkpoints"][ack.checkpoint_id]),
                 )
+            delivery = state.get("deliveries", {}).get(ack.command_id)
+            if delivery is None or delivery["delivery_id"] != ack.delivery_id:
+                raise LaneConflict("acknowledgment has no matching delivery intent")
             acknowledgments = state.setdefault("acks", {})
             if state.get("report") is not None and ack.command_id not in acknowledgments:
                 raise LaneConflict("dispatch already has a terminal report")

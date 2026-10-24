@@ -15,6 +15,7 @@ WIRE_TYPES = (
     models.SessionToken,
     models.Brief,
     models.ControlCommand,
+    models.ControlDelivery,
     models.ControlAck,
     models.CheckpointEntry,
     models.CheckpointManifest,

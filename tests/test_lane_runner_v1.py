@@ -21,6 +21,8 @@ from forge_protocol import (
     CandidateBundle,
     CheckpointManifest,
     ControlCommand,
+    ControlDelivery,
+    ControlAck,
     LaneDispatch,
     LaneReport,
     SessionRequest,
@@ -97,6 +99,7 @@ class WireServer:
         self.blobs, self.checkpoints = {}, []
         self.candidates, self.reports, self.acks, self.heartbeats = [], [], [], []
         self.commands, self.calls = [], []
+        self.deliveries = {}
         self.corrupt_blob = False
         self.reject_report = False
         self.model_keys = 0
@@ -120,10 +123,30 @@ class WireServer:
             return self.brief
         if path == "controls":
             after = int(request.query_params["after"])
-            return [command for command in self.commands if command["sequence"] > after]
-        if path.startswith("controls/"):
-            body = await request.json()
-            self.acks.append(body)
+            return [
+                command
+                for command in self.commands
+                if command["sequence"] > after and command["command_id"] not in self.deliveries
+            ]
+        if path.startswith("controls/") and path.endswith("/begin"):
+            body = ControlDelivery.model_validate(await request.json()).model_dump(mode="json")
+            command_id = path.split("/")[1]
+            command = next((c for c in self.commands if c["command_id"] == command_id), None)
+            if command is None or command_id in self.deliveries:
+                return Response(status_code=409)
+            assert body["command_id"] == command_id and body["sequence"] == command["sequence"]
+            self.deliveries[command_id] = body
+            return body
+        if path.startswith("controls/") and path.endswith("/ack"):
+            body = ControlAck.model_validate(await request.json()).model_dump(mode="json")
+            delivery = self.deliveries.get(body["command_id"])
+            assert delivery is not None and body["delivery_id"] == delivery["delivery_id"]
+            assert all(body[key] == value for key, value in delivery.items())
+            previous = next((a for a in self.acks if a["command_id"] == body["command_id"]), None)
+            if previous is not None and previous != body:
+                return Response(status_code=409)
+            if previous is None:
+                self.acks.append(body)
             return body
         if path.startswith("blobs/"):
             key = path.split("/")[1]

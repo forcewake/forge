@@ -4,7 +4,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from forge_protocol import CandidateBundle, CheckpointManifest, ControlAck, ControlCommand, digest
+from forge_protocol import CandidateBundle, CheckpointManifest, ControlCommand, digest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from forge.store.models_lane import (
     EngineLaneSession,
 )
 from forge.store.models_runs import EngineRun
+from forge.store.lane_control_receipts import persist_receipts
 
 Json = dict[str, Any]
 
@@ -59,6 +60,11 @@ async def load_namespace(
     ).all()
     state["blobs"] = {item.digest: item.size for item in blobs}
     state["controls"] = [json.loads(item.payload_json) for item in controls]
+    state["deliveries"] = {
+        item.command_key: json.loads(item.delivery_json)
+        for item in controls
+        if item.delivery_json is not None
+    }
     state["acks"] = {
         item.command_key: json.loads(item.acknowledgement_json)
         for item in controls
@@ -83,7 +89,9 @@ async def load_namespace(
         "pending_controls": [
             json.loads(item.payload_json)
             for item in controls
-            if item.state == "pending" and item.acknowledgement_json is None
+            if item.state == "pending"
+            and item.acknowledgement_json is None
+            and item.delivery_json is None
         ],
     }
 
@@ -211,20 +219,7 @@ async def persist_controls(
             await session.flush()
         elif previous.payload_json != document:
             raise LaneConflict("control is already registered differently")
-        ack = state.get("acks", {}).get(value.command_id)
-        if ack is not None:
-            acknowledgement = ControlAck.model_validate(ack)
-            if acknowledgement.sequence != value.sequence or (
-                acknowledgement.forge_run_id,
-                acknowledgement.attempt,
-                acknowledgement.generation,
-            ) != (run.id, run.attempt, run.generation):
-                raise LaneConflict("acknowledgment identity differs from control")
-            encoded_ack = encoded(acknowledgement.model_dump(mode="json"))
-            if previous.acknowledgement_json not in (None, encoded_ack):
-                raise LaneConflict("control acknowledgment is already registered differently")
-            previous.acknowledgement_json = encoded_ack
-            previous.state = "acknowledged" if acknowledgement.status == "applied" else "refused"
+        persist_receipts(previous, value, state)
 
 
 async def persist_namespace(
@@ -245,6 +240,6 @@ async def persist_namespace(
         {
             key: value
             for key, value in state.items()
-            if key not in {"blobs", "controls", "acks", "candidate"}
+            if key not in {"blobs", "controls", "deliveries", "acks", "candidate"}
         }
     )
