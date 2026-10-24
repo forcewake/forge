@@ -9,6 +9,7 @@ from forge.store.command_runs import CommandRuns
 from forge.store.models_runs import EngineRun
 from forge.store.runs import run_record
 from forge.store.records import RunRecord
+from forge.store.records import StoreConflict
 from forge.store.transactions import SessionFactory
 
 
@@ -82,11 +83,14 @@ class Projection:
         import json
 
         run = await self.get(principal, run_id)
-        return (
-            {**public_run(run), "evidence": json.loads(await self.commands.snapshot(run))}
-            if run is not None
-            else None
-        )
+        for _ in range(2):
+            if run is None:
+                return None
+            evidence = json.loads(await self.commands.snapshot(run))
+            if evidence["run_version"] == run.version:
+                return {**public_run(run), "evidence": evidence}
+            run = await self.get(principal, run_id)
+        raise StoreConflict("operator snapshot changed while being read")
 
     async def metrics(self, principal: Principal) -> str:
         from forge.runtime.metrics import Metrics

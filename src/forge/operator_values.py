@@ -2,9 +2,14 @@
 
 import re
 
-_SECRET_KEY = re.compile(r"(?:token|secret|password|passwd|api[-_]?key|credential|auth)$", re.I)
+_SECRET_KEY = re.compile(
+    r"(?:token|secret|password|passwd|api[-_]?key|private[-_]?key|credential|auth|authorization)$",
+    re.I,
+)
 _SECRET_VALUE = re.compile(
-    r"Bearer\s+\S|(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}|glpat-",
+    r"(?:Bearer|Basic)\s+\S|(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}|glpat-"
+    r"|://[^/\s:@]+:[^/\s@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|(?:authorization|api[-_]?key|password|private[-_]?key)\s*[:=]\s*\S",
     re.I,
 )
 

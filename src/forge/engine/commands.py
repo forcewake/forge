@@ -5,7 +5,6 @@ import json
 import re
 
 from forge.command_values import CommandEnvelope, CommandLease, CommandResult, REFUSALS
-from forge.operator_values import safe_text
 from forge.domain.verdicts import Unknown
 from forge.engine.effects import Effects
 from forge.port_values import Applied, EffectKind, GatewayKeyRef, RepoRef
@@ -137,11 +136,16 @@ class Commands:
         if kind in _READONLY:
             if run is None:
                 return refusal("run_not_found")
+            snapshot = await self.runs.snapshot(run)
+            facts: dict[str, object] = json.loads(snapshot)
+            reason = facts["reason"] or facts["state"]
+            if not isinstance(reason, str):
+                raise StoreConflict("operator snapshot has no reason or state")
             return CommandResult(
                 status="observed",
-                reason=safe_text(run.reason) or run.state.value,
+                reason=reason,
                 run_id=run.id,
-                data_json=await self.runs.snapshot(run),
+                data_json=snapshot,
             )
         subject = (
             await self.runs.subject(run.id)

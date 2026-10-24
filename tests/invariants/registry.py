@@ -64,6 +64,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_runtime_metrics.py",
             "tests/test_budget_commands.py",
             "tests/test_pause_publication.py",
+            "tests/test_operator_read_snapshot.py",
         ),
     ),
     Invariant(

@@ -56,7 +56,7 @@ def scoped_config(root):
                 {
                     "repository": repo,
                     "native_id": "43" if name == "observer" else "42",
-                    "login": name,
+                    "login": "observer" if name == "observer" else "reviewer",
                 }
                 for repo in (
                     ("alpha", "beta", "project")
@@ -95,6 +95,8 @@ async def seed_run(case, repository="project", *, run_id=None, number=7, **chang
             identity.repository_id,
             "issue",
             str(number),
+            root_run_id=changes.pop("root_run_id", None),
+            parent_run_id=changes.pop("parent_run_id", None),
         )
     )
     task = TaskSnapshot(

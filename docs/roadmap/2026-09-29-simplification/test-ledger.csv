@@ -54,7 +54,7 @@ tests/test_adaptive_lane_supervisor.py,21,549,true,false,,,,adaptive,keep,-,
 tests/test_adaptive_lease_occupancy.py,58,1616,true,false,,edge-case pin,,adaptive,port-engine,P3,
 tests/test_adaptive_mailbox_db.py,30,757,true,false,,edge-case pin,,adaptive,keep,-,
 tests/test_adaptive_operator_timeline.py,26,487,true,false,,,,adaptive,keep,-,
-tests/test_adaptive_operator_view.py,126,2089,true,false,,,,adaptive,keep,-,
+tests/test_adaptive_operator_view.py,127,1174,true,false,,edge-case pin,,adaptive,keep,-,
 tests/test_adaptive_ops.py,49,360,true,false,,,,adaptive,keep,-,
 tests/test_adaptive_project_credentials.py,32,450,true,false,,,,adaptive,keep,-,
 tests/test_adaptive_qualification.py,12,283,true,false,P1-15,,,adaptive,keep,-,
@@ -71,7 +71,7 @@ tests/test_adaptive_workpackage_service.py,7,176,true,false,,edge-case pin,,adap
 tests/test_adr_status_banners.py,1,27,false,false,,,,adr,keep,-,
 tests/test_align_lab.py,11,395,false,false,,,,align,keep,-,
 tests/test_api_lane_control.py,64,1345,true,false,,,,api,keep,-,
-tests/test_api_operator.py,26,1119,true,false,,edge-case pin,,api,keep,-,
+tests/test_api_operator.py,26,364,true,false,,edge-case pin,,api,keep,-,
 tests/test_application_regressions.py,25,1726,true,false,,edge-case pin,,application,keep,-,
 tests/test_approval_comment_current.py,5,196,true,true,,invariant evidence; edge-case pin,,approval,keep,P3-04,Consume approval only after rereading exact bot-authored displayed plan identity and bytes; unknown or edited native evidence cannot authorize execution.
 tests/test_approval_round_current.py,3,141,true,true,,invariant evidence; edge-case pin,,approval,keep,P3-04,"Child approval requires its durable approve-revision command and fresh root issue, native feedback, Draft and head; generic go and direct-step shortcuts refuse."
@@ -236,8 +236,9 @@ tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_native_model_services.py,6,273,true,true,,invariant evidence,,native,keep,P3-13,"Lease-bound native review model grants and exact persisted diff, policy and closing-call authority."
 tests/test_native_review.py,17,557,true,true,,invariant evidence; edge-case pin,,native,keep,P3-13,"Incremental human-push review on exact native heads, separate read-only authority, bounded budget and immutable comment recovery."
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,
-tests/test_operator_canonical_subjects.py,26,249,false,false,,edge-case pin,,operator,keep,-,
+tests/test_operator_canonical_subjects.py,26,257,false,false,,edge-case pin,,operator,keep,-,
 tests/test_operator_experience.py,18,670,true,false,,,,operator,keep,-,
+tests/test_operator_read_snapshot.py,3,96,true,false,,edge-case pin,,operator,keep,P3-11,"Operator evidence uses one bounded repeatable SQL snapshot, retries changed run versions and refuses corrupt authority without fabricated empty facts."
 tests/test_operator_recovery_surface.py,20,830,true,false,,,,operator,keep,-,
 tests/test_operator_snapshot.py,36,1145,true,false,,,,operator,keep,-,
 tests/test_ops_drills.py,2,58,true,false,,edge-case pin,,ops,keep,-,

@@ -247,3 +247,11 @@ def test_recursive_operator_redaction_keeps_input_immutable():
         "tokens": 14,
     }
     assert original == frozen
+    for key in ("Authorization", "private_key", "apiKey"):
+        assert redact({key: "opaque-private-value"}) == {key: "[redacted]"}
+    for value in (
+        "https://user:private@host.invalid/",
+        "-----BEGIN PRIVATE KEY-----",
+        "Basic cHJpdmF0ZQ==",
+    ):
+        assert redact({"message": value}) == {"message": "[redacted]"}

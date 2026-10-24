@@ -4,18 +4,19 @@ import json
 import re
 
 from pydantic import TypeAdapter
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.command_values import CommandEnvelope
 from forge.operator_values import redact
+from forge.store.operator_evidence import read_evidence
 from forge.domain.budget import Pool
 from forge.budget.projection import pool_projection
 from forge.store.budget_command_projection import amendment_snapshot
 from forge.domain.states import TERMINAL
 from forge.port_values import Applied, DraftOutcome, SubjectRef, TaskSnapshot
 from forge.store.models_budget import EngineBudgetPool
-from forge.store.models_execution import EngineCandidate, EngineEffect, EngineStep
+from forge.store.models_execution import EngineEffect, EngineStep
 from forge.store.models_runs import EngineRun
 from forge.store.records import RunRecord, StoreConflict
 from forge.store.runs import run_record
@@ -102,15 +103,17 @@ class CommandRuns:
             return task.subject
 
     async def snapshot(self, run: RunRecord) -> str:
-        async with self.factory() as session:
-            candidates = (
-                await session.scalars(
-                    select(EngineCandidate)
-                    .where(EngineCandidate.run_id == run.id)
-                    .order_by(EngineCandidate.created_at.desc())
-                    .limit(20)
+        async with self.factory() as session, session.begin():
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN"))
+            else:
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 )
-            ).all()
+            current = await session.scalar(select(EngineRun).where(EngineRun.id == run.id))
+            if current is None:
+                raise StoreConflict("operator run is no longer available")
+            run = run_record(current)
             pools = (
                 await session.scalars(
                     select(EngineBudgetPool).where(EngineBudgetPool.run_id == run.id)
@@ -121,48 +124,20 @@ class CommandRuns:
                     select(EngineEffect)
                     .where(EngineEffect.run_id == run.id)
                     .order_by(EngineEffect.created_at.desc())
-                    .limit(50)
+                    .limit(51)
                 )
             ).all()
-            from forge.store.models_review import EngineReactiveReview
-
-            native = await session.scalar(
-                select(EngineReactiveReview).where(EngineReactiveReview.run_id == run.id)
-            )
-            native_data = (
-                {}
-                if native is None
-                else {
-                    "role": "read_only_review",
-                    "native_review": {
-                        "base_sha": native.base_sha,
-                        "head_sha": native.head_sha,
-                        "state": native.state,
-                        "decision": json.loads(native.result_json)["decision"]
-                        if native.result_json
-                        else None,
-                    },
-                }
-            )
             return json.dumps(
                 redact(
                     {
-                        **native_data,
+                        **(await read_evidence(session, run)),
                         "state": run.state.value,
                         "reason": run.reason,
                         "attempt": run.attempt,
                         "generation": run.generation,
+                        "run_version": run.version,
                         "cancel_requested": run.cancel_requested,
                         "failed_handler": run.failed_handler.value if run.failed_handler else None,
-                        "candidates": [
-                            {
-                                "sha": row.published_sha,
-                                "state": row.state,
-                                "attempt": row.attempt,
-                                "generation": row.generation,
-                            }
-                            for row in candidates
-                        ],
                         "budgets": {
                             row.purpose: pool_projection(Pool.model_validate_json(row.state_json))
                             for row in pools
@@ -170,8 +145,9 @@ class CommandRuns:
                         "budget_amendments": await amendment_snapshot(session, run.id),
                         "effects": [
                             {"kind": row.kind, "state": row.state, "key": row.key}
-                            for row in effects
+                            for row in effects[:50]
                         ],
+                        "effects_complete": len(effects) <= 50,
                     }
                 ),
                 sort_keys=True,
