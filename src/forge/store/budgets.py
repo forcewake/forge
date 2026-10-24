@@ -238,8 +238,20 @@ class BudgetStore:
         *,
         now: datetime,
     ) -> Resources:
-        if amount == Resources() or not actor.strip() or not reason.strip():
-            raise ValueError("amendment requires explicit authority, reason and positive amount")
+        if (
+            amount == Resources()
+            or not command
+            or command.strip() != command
+            or len(command) > 300
+            or any(ord(character) < 32 for character in command)
+            or not actor.strip()
+            or len(actor) > 200
+            or not reason.strip()
+            or len(reason) > 300
+        ):
+            raise ValueError(
+                "amendment requires bounded command identity, authority, reason and positive amount"
+            )
         async with transaction(self.factory) as session:
             await fence(session, lease, now)
             row = await self._pool(session, lease.run_id, purpose)

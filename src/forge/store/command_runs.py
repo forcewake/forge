@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.command_values import CommandEnvelope
 from forge.domain.budget import Pool
+from forge.budget.projection import pool_projection
 from forge.domain.states import TERMINAL
 from forge.port_values import Applied, DraftOutcome, SubjectRef, TaskSnapshot
 from forge.store.models_budget import EngineBudgetPool
@@ -160,9 +161,7 @@ class CommandRuns:
                         for row in candidates
                     ],
                     "budgets": {
-                        row.purpose: Pool.model_validate_json(row.state_json).balance.model_dump(
-                            mode="json"
-                        )
+                        row.purpose: pool_projection(Pool.model_validate_json(row.state_json))
                         for row in pools
                     },
                     "effects": [
