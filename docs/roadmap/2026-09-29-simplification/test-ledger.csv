@@ -148,7 +148,7 @@ tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin
 tests/test_engine_delivery.py,15,456,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_dispatch_intents.py,3,64,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Indexed dispatch recovery bound to immutable effect and native repository.
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
-tests/test_engine_lane.py,14,440,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
+tests/test_engine_lane.py,14,444,true,false,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
 tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_operator.py,9,350,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Original-handler retry, atomic controls and exact checkpoint resume."
 tests/test_engine_rounds.py,11,378,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Native feedback correction rounds with fresh child approval and one root Draft.

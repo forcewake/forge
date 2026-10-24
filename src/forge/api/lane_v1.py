@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, MutableMapping
-from pathlib import Path
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
@@ -24,9 +23,8 @@ from forge_protocol import (
     SessionToken,
 )
 
-from forge.api.lane_auth import LaneAuthService
 from forge.api.lane_auth_values import LaneAuthError, LaneAuthPending
-from forge.api.lane_v1_blobs import BlobError, BlobTooLarge, LaneBlobStore
+from forge.api.lane_v1_blobs import BlobError, BlobTooLarge
 from forge.api.lane_v1_service import LaneV1Service, ModelKeyUnavailable
 from forge.api.lane_v1_values import LaneConflict, LaneNotFound
 
@@ -176,21 +174,3 @@ async def heartbeat(body: Heartbeat, who: Identity, lane: Service) -> Heartbeat:
 @router.post("/model-key", response_model=ModelKeyGrant)
 async def model_key(who: Identity, lane: Service) -> ModelKeyGrant:
     return await lane.model_key(who)
-
-
-def configure_lane_v1(app: FastAPI) -> None:
-    """Compose after database startup; no old shared-secret authentication fallback."""
-    from forge.api.lane_auth_store import SqlLaneAuthStore
-    from forge.api.lane_v1_store import SqlLaneV1Store
-
-    settings = app.state.settings
-    app.state.lane_v1_service = None
-    if not settings.FORGE_SECRET_KEY or not settings.FORGE_PUBLIC_URL:
-        return
-    auth = LaneAuthService(SqlLaneAuthStore(app.state.session_factory), settings)
-    app.state.lane_v1_service = LaneV1Service(
-        auth,
-        SqlLaneV1Store(app.state.session_factory),
-        LaneBlobStore(Path(settings.FORGE_LANE_BLOB_DIR)),
-        model_key_provider=getattr(app.state, "lane_v1_model_key_provider", None),
-    )

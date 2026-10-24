@@ -406,7 +406,11 @@ def test_engine_lane_import_graph_loads_no_legacy_run_owner():
             "import sys; import forge.runtime.app; import forge.runtime.assembly; import forge.api.lane_v1; "
             "assert 'forge.durable.models' not in sys.modules; "
             "assert 'forge.api.lane_auth_store' not in sys.modules; "
-            "assert 'forge.api.lane_v1_store' not in sys.modules",
+            "assert 'forge.api.lane_v1_store' not in sys.modules; "
+            "assert 'forge.main' not in sys.modules; "
+            "assert not hasattr(forge.api.lane_v1, 'configure_lane_v1'); "
+            "from importlib.util import find_spec; "
+            "assert find_spec('forge.api.lane_engine') is None",
         ],
         capture_output=True,
         text=True,
