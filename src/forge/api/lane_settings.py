@@ -1,6 +1,7 @@
 """Explicit native connection trust for lane identity; no provider defaults."""
 
 from typing import Annotated, Literal, Self
+from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 
@@ -13,6 +14,14 @@ class OidcAuthority(Value):
     provider: Literal["github", "gitlab"]
     issuer: str
     jwks_url: str
+    tls_ca_path: Path | None = None
+
+    @field_validator("tls_ca_path")
+    @classmethod
+    def ca_path(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("OIDC CA path must be an explicit absolute path")
+        return value
 
     @field_validator("issuer", "jwks_url")
     @classmethod

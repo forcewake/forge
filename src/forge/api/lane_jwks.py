@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+import ssl
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -30,6 +32,14 @@ def trusted_https_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def ca_context(path: Path) -> ssl.SSLContext:
+    if not path.is_absolute():
+        raise ValueError("OIDC CA path must be an explicit absolute path")
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=str(path))
+    return context
+
+
 class JwksCache:
     """No token-selected issuer, key URL, redirects, stale keys or unbounded bodies."""
 
@@ -39,6 +49,7 @@ class JwksCache:
         *,
         ttl: int = 300,
         transport: httpx.AsyncBaseTransport | None = None,
+        ca_paths: Mapping[str, Path] | None = None,
     ):
         if not 10 <= ttl <= 3600 or not 1 <= len(authorities) <= 64:
             raise ValueError("invalid OIDC cache configuration")
@@ -46,6 +57,10 @@ class JwksCache:
             provider: (trusted_https_url(issuer), trusted_https_url(url))
             for provider, (issuer, url) in authorities.items()
         }
+        self.ca_paths = dict(ca_paths or {})
+        if set(self.ca_paths) - set(self.authorities):
+            raise ValueError("OIDC CA trust must belong to a configured connection")
+        self._contexts = {key: ca_context(path) for key, path in self.ca_paths.items()}
         self.ttl = ttl
         self.transport = transport
         self._entries: dict[str, tuple[float, dict[str, RSAPublicKey]]] = {}
@@ -64,17 +79,20 @@ class JwksCache:
             if now - self._refresh_at.get(provider, float("-inf")) < 30:
                 raise LaneAuthError("OIDC signing key is not available")
             self._refresh_at[provider] = now
-            keys = await self._fetch(self.authorities[provider][1])
+            keys = await self._fetch(
+                self.authorities[provider][1], verify=self._contexts.get(provider, True)
+            )
             self._entries[provider] = (now, keys)
             if kid not in keys:
                 raise LaneAuthError("OIDC signing key is not available")
             return keys[kid]
 
-    async def _fetch(self, url: str) -> dict[str, RSAPublicKey]:
+    async def _fetch(self, url: str, *, verify: ssl.SSLContext | bool) -> dict[str, RSAPublicKey]:
         try:
             async with (
                 httpx.AsyncClient(
                     transport=self.transport,
+                    verify=verify,
                     timeout=httpx.Timeout(5, connect=2),
                     follow_redirects=False,
                     trust_env=False,

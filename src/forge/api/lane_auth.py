@@ -39,8 +39,15 @@ class LaneAuthService:
         self.ttl, self.skew = settings.session_ttl_seconds, settings.clock_skew_seconds
         self.authorities = {a.connection_id: a for a in settings.authorities}
         roots = {key: (value.issuer, value.jwks_url) for key, value in self.authorities.items()}
-        self.jwks = jwks_cache or JwksCache(roots, ttl=settings.jwks_cache_seconds)
-        if self.jwks.authorities != roots:
+        ca_paths = {
+            key: value.tls_ca_path
+            for key, value in self.authorities.items()
+            if value.tls_ca_path is not None
+        }
+        self.jwks = jwks_cache or JwksCache(
+            roots, ttl=settings.jwks_cache_seconds, ca_paths=ca_paths
+        )
+        if self.jwks.authorities != roots or self.jwks.ca_paths != ca_paths:
             raise ValueError("OIDC cache authorities differ from server configuration")
 
     @staticmethod

@@ -198,6 +198,7 @@ def lane_auth(
                 provider=c.provider,
                 issuer=c.oidc_issuer,
                 jwks_url=c.oidc_jwks_url,
+                tls_ca_path=c.tls_ca_path,
             )
             for c in config.connections
         ),
