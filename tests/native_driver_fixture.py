@@ -12,6 +12,7 @@ from forge_lane.drivers.claude_code import ClaudeCodeDriver
 from forge_lane.drivers.copilot_cli import CopilotCLIDriver
 from forge_lane.runner import Runner
 from forge_lane.supervisor import Timings
+from forge_protocol import CheckpointManifest
 from tests import test_lane_claude_code as claude
 from tests import test_lane_copilot_cli as copilot
 from tests import test_lane_runner_v1 as lane
@@ -20,9 +21,14 @@ FakeSDK, Result, FakeACP = claude.FakeSDK, claude.Result, copilot.FakeACP
 
 
 class Case:
-    def __init__(self, root, *, driver="claude_code", **changes):
+    def __init__(self, root, *, driver="claude_code", clone_from=None, **changes):
+        root.mkdir(parents=True, exist_ok=True)
         self.root, self.workspace = root, root / "work"
-        self.base = lane.checkout(self.workspace)
+        if clone_from is None:
+            self.base = lane.checkout(self.workspace)
+        else:
+            lane.git(root, "clone", "-q", str(clone_from), str(self.workspace))
+            self.base = lane.git(self.workspace, "rev-parse", "HEAD").decode().strip()
         self.dispatch, self.brief = lane.inputs(self.base, driver=driver, **changes)
         self.server = lane.WireServer(self.dispatch, self.brief)
         self.sdk = FakeSDK(root, auto_result=False)
@@ -120,5 +126,71 @@ async def completed_case(root, *, frames=None, edit=True, mutate=None, **dispatc
     if mutate:
         mutate(case)
     case.driver = ClaudeCodeDriver(case.sdk)
+    case.result = await case.execute(case.driver)
+    return case
+
+
+async def restored_case(root, *, corrupt=False, requested=True):
+    first = await completed_case(
+        root / "first", frames=[], mutate=lambda case: case.server.command("pause")
+    )
+    assert first.result.report.status == "paused" and first.server.checkpoints
+    manifest = first.server.checkpoints[-1]
+    seen = []
+
+    def restore(case):
+        case.server.checkpoints = first.server.checkpoints
+        case.server.blobs = first.server.blobs
+        case.server.corrupt_blob = corrupt
+        case.sdk.edit = lambda workspace: seen.append((workspace / "base.txt").read_text())
+
+    second = await completed_case(
+        root / "second",
+        clone_from=first.workspace,
+        checkpoint_id=CheckpointManifest.model_validate(manifest).checkpoint_id
+        if requested
+        else None,
+        generation=1,
+        mutate=restore,
+    )
+    if not corrupt:
+        assert seen == ["approved change\n" if requested else "base\n"]
+    return SimpleNamespace(first=first, second=second, manifest=manifest, seen=seen)
+
+
+async def copilot_case(root, monkeypatch, *, reason="end_turn", controls=(), **dispatch):
+    case = Case(root, driver="copilot_cli", **dispatch)
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "synthetic-copilot-only")
+
+    class ACP(FakeACP):
+        async def send(self, frame):
+            await super().send(frame)
+            if frame.get("method") == "session/prompt":
+                (case.workspace / "base.txt").write_text("Copilot candidate\n")
+                if reason == "eof":
+                    self.frames.put_nowait(None)
+                elif reason == "rpc_error":
+                    self.frames.put_nowait(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": frame["id"],
+                            "error": {"message": "vendor detail must stay private"},
+                        }
+                    )
+                elif reason is not None:
+                    self.respond(frame["id"], {"stopReason": reason})
+
+    wire = ACP(automatic=False)
+    case.wire = wire
+
+    async def transport(binary, cwd, config, token, model, emit):
+        case.received.append(
+            SimpleNamespace(binary=binary, cwd=cwd, config=config, token=token, model=model)
+        )
+        return wire
+
+    for action, text in controls:
+        case.server.command(action, len(case.server.commands) + 1, text)
+    case.driver = CopilotCLIDriver(transport_factory=transport)
     case.result = await case.execute(case.driver)
     return case
