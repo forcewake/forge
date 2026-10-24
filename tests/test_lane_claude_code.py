@@ -25,6 +25,9 @@ class Result:
     usage: dict | None = None
     total_cost_usd: float | None = None
     permission_denials: list | None = None
+    subtype: str = "success"
+    terminal_reason: str | None = "completed"
+    origin: dict | None = None
 
 
 class FakeClient:

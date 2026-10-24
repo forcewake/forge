@@ -205,6 +205,8 @@ class ClaudeSession:
     async def _receive(self) -> DriverEvent:
         async for message in self.client.receive_messages():
             if isinstance(message, self.sdk.ResultMessage):
+                if message.origin is not None and message.origin.get("kind") != "human":
+                    continue
                 async with self.lock:
                     identity = getattr(message, "uuid", None)
                     if identity and identity in self.seen_results:
@@ -215,6 +217,7 @@ class ClaudeSession:
                     self._record_usage(message)
                     if (
                         message.is_error
+                        or message.subtype != "success"
                         or self.policy.denials
                         or getattr(message, "permission_denials", None)
                     ):
@@ -224,6 +227,12 @@ class ClaudeSession:
                             if self.policy.denials or getattr(message, "permission_denials", None)
                             else "driver_result_error",
                             "Claude could not complete the approved request",
+                        )
+                    if message.terminal_reason not in (None, "completed"):
+                        raise LaneFailure(
+                            ExitCode.DRIVER,
+                            "driver_result_incomplete",
+                            "Claude did not report a complete terminal turn",
                         )
                     if self.received == self.issued:
                         self.finishing = True
