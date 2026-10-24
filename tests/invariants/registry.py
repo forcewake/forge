@@ -27,7 +27,10 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant(
         "I1",
         "The bot never merges; the lane holds no write credential",
-        ("tests/invariants/test_i1_no_merge.py",),
+        (
+            "tests/invariants/test_i1_no_merge.py",
+            "tests/test_gitlab_engine_ports.py",
+        ),
     ),
     Invariant(
         "I2",
@@ -109,12 +112,17 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_runs_verification.py",
             "tests/test_verification_binding.py",
             "tests/test_engine_delivery.py",
+            "tests/test_gitlab_engine_ports.py",
         ),
     ),
     Invariant(
         "SELF-TRIGGER",
         "Bot-authored notes are never commands",
-        ("tests/test_bot_loop.py", "tests/test_github_webhook.py"),
+        (
+            "tests/test_bot_loop.py",
+            "tests/test_github_webhook.py",
+            "tests/test_gitlab_engine_ingress.py",
+        ),
     ),
 )
 

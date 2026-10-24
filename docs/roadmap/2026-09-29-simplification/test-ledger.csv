@@ -183,6 +183,10 @@ tests/test_github_webhook.py,45,974,true,false,,invariant evidence; edge-case pi
 tests/test_gitlab_client.py,30,646,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_client_commits.py,6,150,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_dispatch_parity.py,13,533,true,false,,,,gitlab,port-engine,P3,
+tests/test_gitlab_engine_boundaries.py,6,116,false,true,,edge-case pin,,gitlab,keep,P3-19,Explicit GitLab read/write authority and confined project paths
+tests/test_gitlab_engine_ingress.py,8,163,false,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,Signed scoped GitLab events and bot command loop refusal
+tests/test_gitlab_engine_ports.py,20,417,true,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,"Native GitLab reads, writes, CI identity and quick-action refusal"
+tests/test_gitlab_engine_recovery.py,6,134,true,true,,,,gitlab,keep,P3-19,Native GitLab conservative probes and exact candidate tree recovery
 tests/test_gitlab_sdk_lane_finalization.py,8,442,false,false,,,,gitlab,keep,-,
 tests/test_go_resolution_typed.py,5,230,true,false,,,,go,port-engine,P3,
 tests/test_guarded_mutations.py,16,681,true,false,,,,guarded,keep,-,
