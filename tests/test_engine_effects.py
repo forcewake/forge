@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from forge.domain.states import Handler
 from forge.domain.verdicts import Unknown
 from forge.engine.effects import Effects
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.port_values import Applied, CommentRef, DefinitelyAbsent, Found, Inconclusive
 from forge.store.effects import EffectStore
 from forge.store.models_execution import EngineStep

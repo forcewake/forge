@@ -22,7 +22,7 @@ from forge.api.lane_v1 import router
 from forge.api.lane_v1_blobs import LaneBlobStore
 from forge.api.lane_v1_service import LaneV1Service
 from forge.domain.approved_input import ApprovedInput
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.inbox_models import EventInbox
 from forge.store.lane_auth import EngineLaneAuthStore
 from forge.store.lane_v1 import EngineLaneV1Store
@@ -127,10 +127,7 @@ async def auth(tmp_path, request, signing_key, settings):
         else request.param
     )
     engine = create_async_engine(url)
-    tables = [
-        EventInbox.__table__,
-        *[table for table in Base.metadata.sorted_tables if table.name.startswith("eng_")],
-    ]
+    tables = list(Base.metadata.sorted_tables)
     async with engine.begin() as conn:
         await conn.run_sync(lambda sync: Base.metadata.drop_all(sync, tables=tables))
         await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))

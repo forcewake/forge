@@ -61,4 +61,4 @@ async def test_dispatch_nonce_has_one_owner_on_the_effect_journal(case):
         row = await session.scalar(select(EngineEffect).where(EngineEffect.kind == "dispatch_lane"))
         assert row.dispatch_nonce_digest == nonce_digest(pending.dispatch.nonce)
         indexes = {index.name: index for index in EngineEffect.__table__.indexes}
-        assert indexes["uq_eng_effect_dispatch_nonce"].unique
+        assert indexes["uq_effect_dispatch_nonce"].unique

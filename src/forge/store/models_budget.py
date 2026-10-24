@@ -17,19 +17,19 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.models_common import RunBound, Timestamps
 from forge.store.types import ExactCount, ExactMoney
 
 
 class EngineBudgetPool(RunBound, Timestamps, Base):
-    __tablename__ = "eng_budget_pools"
+    __tablename__ = "budget_pools"
     __table_args__ = (
-        UniqueConstraint("run_id", "purpose", name="uq_eng_pool_purpose"),
+        UniqueConstraint("run_id", "purpose", name="uq_pool_purpose"),
         CheckConstraint(
-            "usd >= 0 AND calls >= 0 AND tokens >= 0 AND version > 0", name="ck_eng_pool_capacity"
+            "usd >= 0 AND calls >= 0 AND tokens >= 0 AND version > 0", name="ck_pool_capacity"
         ),
-        CheckConstraint("purpose IN ('implementation','closing')", name="ck_eng_pool_purpose"),
+        CheckConstraint("purpose IN ('implementation','closing')", name="ck_pool_purpose"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     purpose: Mapped[str] = mapped_column(String(20))
@@ -41,15 +41,15 @@ class EngineBudgetPool(RunBound, Timestamps, Base):
 
 
 class EngineBudgetReservation(Timestamps, Base):
-    __tablename__ = "eng_budget_reservations"
+    __tablename__ = "budget_reservations"
     __table_args__ = (
-        UniqueConstraint("pool_id", "reservation_key", name="uq_eng_reservation_key"),
+        UniqueConstraint("pool_id", "reservation_key", name="uq_reservation_key"),
         CheckConstraint(
-            "state IN ('reserved','accrued','unknown','settled')", name="ck_eng_reservation_state"
+            "state IN ('reserved','accrued','unknown','settled')", name="ck_reservation_state"
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    pool_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_budget_pools.id"), index=True)
+    pool_id: Mapped[str] = mapped_column(String(32), ForeignKey("budget_pools.id"), index=True)
     reservation_key: Mapped[str] = mapped_column(String(300))
     requested_json: Mapped[str] = mapped_column(Text)
     minimum_json: Mapped[str] = mapped_column(Text)
@@ -62,15 +62,15 @@ class EngineBudgetReservation(Timestamps, Base):
 
 
 class EngineBudgetAmendment(RunBound, Timestamps, Base):
-    __tablename__ = "eng_budget_amendments"
+    __tablename__ = "budget_amendments"
     __table_args__ = (
-        UniqueConstraint("run_id", "command_key", name="uq_eng_amendment_command"),
+        UniqueConstraint("run_id", "command_key", name="uq_amendment_command"),
         CheckConstraint(
-            "state IN ('authorized','applied','refused','unknown')", name="ck_eng_amendment_state"
+            "state IN ('authorized','applied','refused','unknown')", name="ck_amendment_state"
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    pool_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_budget_pools.id"))
+    pool_id: Mapped[str] = mapped_column(String(32), ForeignKey("budget_pools.id"))
     command_key: Mapped[str] = mapped_column(String(300))
     actor: Mapped[str] = mapped_column(String(200))
     reason: Mapped[str] = mapped_column(String(300))
@@ -82,16 +82,16 @@ class EngineBudgetAmendment(RunBound, Timestamps, Base):
 
 
 class EngineUsage(RunBound, Timestamps, Base):
-    __tablename__ = "eng_usage"
+    __tablename__ = "usage"
     __table_args__ = (
-        UniqueConstraint("source_key", name="uq_eng_usage_source"),
+        UniqueConstraint("source_key", name="uq_usage_source"),
         CheckConstraint(
             "completeness IN ('exact','aggregate','partial','unknown','unmetered')",
-            name="ck_eng_usage_completeness",
+            name="ck_usage_completeness",
         ),
         CheckConstraint(
             "(usd IS NULL OR usd >= 0) AND (calls IS NULL OR calls >= 0) AND (tokens IS NULL OR tokens >= 0)",
-            name="ck_eng_usage_nonnegative",
+            name="ck_usage_nonnegative",
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -109,13 +109,13 @@ class EngineUsage(RunBound, Timestamps, Base):
 
 
 class EngineGatewayKey(RunBound, Timestamps, Base):
-    __tablename__ = "eng_gateway_keys"
+    __tablename__ = "gateway_keys"
     __table_args__ = (
-        UniqueConstraint("run_id", "attempt", "generation", "purpose", name="uq_eng_key_dispatch"),
+        UniqueConstraint("run_id", "attempt", "generation", "purpose", name="uq_key_dispatch"),
         CheckConstraint(
-            "state IN ('reserved','active','unknown','blocked','purged')", name="ck_eng_key_state"
+            "state IN ('reserved','active','unknown','blocked','purged')", name="ck_key_state"
         ),
-        CheckConstraint("state <> 'purged' OR ciphertext IS NULL", name="ck_eng_key_purged"),
+        CheckConstraint("state <> 'purged' OR ciphertext IS NULL", name="ck_key_purged"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     alias: Mapped[str] = mapped_column(String(200), unique=True)

@@ -85,6 +85,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_engine_commands.py",
             "tests/test_server_models.py",
             "tests/test_server_model_services.py",
+            "tests/test_schema_cutover.py",
         ),
     ),
     Invariant(
@@ -106,6 +107,8 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_engine_commands.py",
             "tests/test_engine_dispatch_intents.py",
             "tests/test_engine_operator.py",
+            "tests/test_schema_baseline.py",
+            "tests/test_schema_cutover.py",
         ),
     ),
     Invariant(

@@ -4,22 +4,17 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
-import importlib.util
 import os
-from pathlib import Path
 from uuid import uuid4
 
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
 import pytest
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import forge.durable.models  # noqa: F401
 import forge.store.models  # noqa: F401
 from forge.domain.states import Handler, State
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.effects import EffectStore
 from forge.store.records import RunRequest, StepRequest, StaleLease, StoreConflict
 from forge.store.runs import RunStore
@@ -40,7 +35,7 @@ async def store(tmp_path, request):
         else request.param
     )
     engine = create_async_engine(url)
-    tables = [table for table in Base.metadata.sorted_tables if table.name.startswith("eng_")]
+    tables = list(Base.metadata.sorted_tables)
     async with engine.begin() as conn:
         await conn.run_sync(lambda sync: Base.metadata.drop_all(sync, tables=tables))
         await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
@@ -266,56 +261,50 @@ async def test_frozen_spec_checks_digest_and_rejects_changed_reinsert(store):
         )
 
 
-async def test_schema_has_only_seventeen_groups_and_enforces_closed_states(store):
+async def test_schema_has_only_owned_groups_and_enforces_closed_states(store):
     async with store() as session:
-        names = await session.run_sync(lambda sync: inspect(sync.bind).get_table_names())
-        assert len([name for name in names if name.startswith("eng_")]) == 17
+        names = set(await session.run_sync(lambda sync: inspect(sync.bind).get_table_names()))
+        assert names == set(Base.metadata.tables)
+        assert "flow_runs" not in names and not any(name.startswith("eng_") for name in names)
     run = await RunStore(store).admit(request())
     async with store() as session:
         with pytest.raises(IntegrityError):
             await session.execute(
-                text("UPDATE eng_runs SET state='invented' WHERE id=:id"), {"id": run.id}
+                text("UPDATE runs SET state='invented' WHERE id=:id"), {"id": run.id}
             )
             await session.commit()
         await session.rollback()
 
 
-async def test_additive_revision_preserves_legacy_bytes_and_refuses_history_downgrade(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-    path = Path(__file__).parents[1] / "alembic/versions/033_engine_tables.py"
-    module_spec = importlib.util.spec_from_file_location("engine_revision", path)
-    migration = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(migration)
+async def test_existing_history_refuses_fresh_initialization_and_destructive_downgrade(tmp_path):
+    from forge.store.schema import initialize, SchemaMismatch
+    from forge.store.schema.__main__ import engine as schema_engine
+    from forge.store.schema import baseline
+    from forge.store.schema.migration import script
+
+    database = schema_engine(f"sqlite+aiosqlite:///{tmp_path / 'history.db'}")
     try:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("CREATE TABLE flow_runs (id TEXT PRIMARY KEY, evidence TEXT NOT NULL)")
+        async with database.begin() as connection:
+            await connection.execute(
+                text("CREATE TABLE old_history (id TEXT PRIMARY KEY, evidence BLOB NOT NULL)")
             )
-            await conn.execute(
-                text("INSERT INTO flow_runs VALUES (:id, :evidence)"),
-                {"id": "legacy", "evidence": '{"literal":true}'},
+            await connection.execute(
+                text("INSERT INTO old_history VALUES (:id,:evidence)"),
+                {"id": "preserved", "evidence": b"\x00\xff\r\n"},
             )
-
-            def upgrade(sync):
-                with Operations.context(MigrationContext.configure(sync)):
-                    migration.upgrade()
-
-            await conn.run_sync(upgrade)
+        with pytest.raises(SchemaMismatch, match="empty database"):
+            await initialize(database)
+        async with database.connect() as connection:
             assert (
-                await conn.execute(text("SELECT evidence FROM flow_runs"))
-            ).scalar_one() == '{"literal":true}'
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        await RunStore(factory).admit(request())
-        async with engine.begin() as conn:
-
-            def downgrade(sync):
-                with Operations.context(MigrationContext.configure(sync)):
-                    migration.downgrade()
-
-            with pytest.raises(RuntimeError, match="history exists"):
-                await conn.run_sync(downgrade)
+                await connection.execute(text("SELECT evidence FROM old_history"))
+            ).scalar_one() == b"\x00\xff\r\n"
+            assert await connection.run_sync(lambda sync: inspect(sync).get_table_names()) == [
+                "old_history"
+            ]
+        with pytest.raises(RuntimeError, match="destructive downgrade"):
+            script().get_revision(baseline.REVISION).module.downgrade()
     finally:
-        await engine.dispose()
+        await database.dispose()
 
 
 async def test_money_and_count_storage_preserves_exact_values_without_float(store):

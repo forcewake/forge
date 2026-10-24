@@ -239,7 +239,7 @@ async def test_crash_during_successor_insert_rolls_back_result_and_all_children(
     engine = store.kw["bind"].sync_engine
 
     def crash(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO eng_steps") and "crash-child" in str(parameters):
+        if statement.startswith("INSERT INTO steps") and "crash-child" in str(parameters):
             raise InjectedCrash()
 
     event.listen(engine, "before_cursor_execute", crash)

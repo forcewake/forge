@@ -23,7 +23,7 @@ from forge.domain.budget import BudgetExhausted, Observation, Resources
 from forge.domain.states import Handler, State
 from forge.domain.verdicts import Unknown
 from forge.engine.effects import Effects
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.port_values import Applied, ModelReply
 from forge.store.budget_calls import ModelCallStore
 from forge.store.budgets import BudgetStore
@@ -609,53 +609,28 @@ async def test_concurrent_server_calls_cannot_both_spend_one_context_hold(case):
         await first
 
 
-async def test_budget_migration_preserves_old_rows_and_refuses_scope_losing_downgrade(tmp_path):
-    import importlib.util
-    from pathlib import Path
-    from alembic.migration import MigrationContext
-    from alembic.operations import Operations
-    from sqlalchemy import inspect, text
+async def test_budget_scope_survives_refused_initialization_and_destructive_downgrade(case):
+    from forge.store.schema import initialize, SchemaMismatch
+    from forge.store.schema import baseline
+    from forge.store.schema.migration import script
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-
-    def load(filename):
-        module = importlib.util.spec_from_file_location(
-            filename, Path(__file__).parents[1] / "alembic/versions" / filename
-        )
-        value = importlib.util.module_from_spec(module)
-        module.loader.exec_module(value)
-        return value
-
-    initial, addition = load("033_engine_tables.py"), load("035_budget_gateway.py")
-    try:
-        async with engine.begin() as connection:
-
-            def upgrade(sync):
-                with Operations.context(MigrationContext.configure(sync)):
-                    initial.upgrade()
-                    addition.upgrade()
-
-            await connection.run_sync(upgrade)
-            names = await connection.run_sync(
-                lambda sync: {
-                    column["name"] for column in inspect(sync).get_columns("eng_gateway_keys")
-                }
-            )
-            assert {"purpose", "reference_json", "token_digest"} <= names
-            await connection.execute(
-                text(
-                    "INSERT INTO eng_gateway_keys (id,alias,attempt,generation,aad_digest,expires_at,state,run_id) VALUES ('key','alias',1,1,'digest','2026-10-23','purged','run')"
-                )
-            )
-
-            def downgrade(sync):
-                with Operations.context(MigrationContext.configure(sync)):
-                    addition.downgrade()
-
-            with pytest.raises(RuntimeError, match="history exists"):
-                await connection.run_sync(downgrade)
-    finally:
-        await engine.dispose()
+    assert isinstance(await prepare(case), Applied)
+    async with case["factory"]() as session:
+        row = await session.scalar(select(EngineGatewayKey))
+        original = {
+            column.name: getattr(row, column.name) for column in EngineGatewayKey.__table__.columns
+        }
+    with pytest.raises(SchemaMismatch, match="empty database"):
+        await initialize(case["factory"].kw["bind"])
+    with pytest.raises(RuntimeError, match="destructive downgrade"):
+        script().get_revision(baseline.REVISION).module.downgrade()
+    async with case["factory"]() as session:
+        row = await session.scalar(select(EngineGatewayKey))
+        assert {
+            column.name: getattr(row, column.name) for column in EngineGatewayKey.__table__.columns
+        } == original
+        assert row.reference_json and row.ciphertext and row.aad_digest
+        assert row.purpose == "implementation"
 
 
 async def test_applied_gateway_receipt_without_active_durable_material_is_unknown(case):

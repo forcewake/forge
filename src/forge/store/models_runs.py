@@ -1,4 +1,4 @@
-"""Run identity, immutable decisions and temporary cross-path admission."""
+"""Run identity, immutable decisions and canonical admission."""
 
 from datetime import datetime
 
@@ -16,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.models_common import RunBound, Timestamps
 
 _ACTIVE = "state NOT IN ('ready_for_human', 'blocked', 'failed', 'cancelled')"
@@ -24,17 +24,17 @@ _STATES = "'queued','planning','awaiting_approval','running','publishing','verif
 
 
 class EngineRun(Timestamps, Base):
-    __tablename__ = "eng_runs"
+    __tablename__ = "runs"
     __table_args__ = (
-        CheckConstraint(f"state IN ({_STATES})", name="ck_eng_run_state"),
-        CheckConstraint("provider IN ('github','gitlab')", name="ck_eng_run_provider"),
+        CheckConstraint(f"state IN ({_STATES})", name="ck_run_state"),
+        CheckConstraint("provider IN ('github','gitlab')", name="ck_run_provider"),
         CheckConstraint(
             "attempt > 0 AND generation > 0 AND cancellation_generation >= 0 AND version > 0",
-            name="ck_eng_run_counters",
+            name="ck_run_counters",
         ),
-        CheckConstraint("subject_kind IN ('issue','review')", name="ck_eng_run_subject_kind"),
+        CheckConstraint("subject_kind IN ('issue','review')", name="ck_run_subject_kind"),
         Index(
-            "uq_eng_active_subject",
+            "uq_active_subject",
             "subject_key",
             unique=True,
             sqlite_where=text(_ACTIVE),
@@ -52,7 +52,7 @@ class EngineRun(Timestamps, Base):
     failed_handler: Mapped[str | None] = mapped_column(String(32))
     reason: Mapped[str | None] = mapped_column(String(300))
     root_run_id: Mapped[str] = mapped_column(String(32))
-    parent_run_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("eng_runs.id"))
+    parent_run_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("runs.id"))
     attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     generation: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     cancellation_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -63,18 +63,18 @@ class EngineRun(Timestamps, Base):
 
 
 class EngineRunSpec(RunBound, Timestamps, Base):
-    __tablename__ = "eng_run_specs"
-    __table_args__ = (UniqueConstraint("run_id", name="uq_eng_spec_run"),)
+    __tablename__ = "run_specs"
+    __table_args__ = (UniqueConstraint("run_id", name="uq_spec_run"),)
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     digest: Mapped[str] = mapped_column(String(64))
     document_json: Mapped[str] = mapped_column(Text)
 
 
 class EngineApprovedInput(RunBound, Timestamps, Base):
-    __tablename__ = "eng_approved_inputs"
+    __tablename__ = "approved_inputs"
     __table_args__ = (
-        UniqueConstraint("run_id", "revision", name="uq_eng_approved_revision"),
-        CheckConstraint("revision > 0", name="ck_eng_approved_revision"),
+        UniqueConstraint("run_id", "revision", name="uq_approved_revision"),
+        CheckConstraint("revision > 0", name="ck_approved_revision"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     revision: Mapped[int] = mapped_column(Integer)
@@ -86,11 +86,11 @@ class EngineApprovedInput(RunBound, Timestamps, Base):
 
 
 class EngineGate(RunBound, Timestamps, Base):
-    __tablename__ = "eng_gates"
+    __tablename__ = "gates"
     __table_args__ = (
-        UniqueConstraint("run_id", "decision_key", name="uq_eng_gate_decision"),
+        UniqueConstraint("run_id", "decision_key", name="uq_gate_decision"),
         CheckConstraint(
-            "state IN ('prepared','open','consumed','expired','refused')", name="ck_eng_gate_state"
+            "state IN ('prepared','open','consumed','expired','refused')", name="ck_gate_state"
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -102,5 +102,5 @@ class EngineGate(RunBound, Timestamps, Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consumed_by: Mapped[str | None] = mapped_column(String(200))
     consumed_step_id: Mapped[str | None] = mapped_column(
-        String(32), ForeignKey("eng_steps.id", name="fk_eng_gate_consuming_step")
+        String(32), ForeignKey("steps.id", name="fk_gate_consuming_step")
     )

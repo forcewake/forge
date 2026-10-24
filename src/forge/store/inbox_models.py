@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import JSON, CheckConstraint, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from forge.models.base import Base
+from forge.store.base import Base
 
 
 def _utcnow() -> datetime:

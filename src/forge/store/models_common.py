@@ -1,4 +1,4 @@
-"""Shared column shapes for the additive engine schema."""
+"""Shared column shapes for the engine schema."""
 
 from datetime import datetime, timezone
 
@@ -20,4 +20,4 @@ class Timestamps:
 
 
 class RunBound:
-    run_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_runs.id"), index=True)
+    run_id: Mapped[str] = mapped_column(String(32), ForeignKey("runs.id"), index=True)

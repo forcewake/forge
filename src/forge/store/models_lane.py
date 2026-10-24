@@ -16,17 +16,17 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.models_common import RunBound, Timestamps
 
 
 class EngineControlCommand(RunBound, Timestamps, Base):
-    __tablename__ = "eng_control_commands"
+    __tablename__ = "control_commands"
     __table_args__ = (
-        UniqueConstraint("run_id", "command_key", name="uq_eng_control_key"),
-        UniqueConstraint("run_id", "attempt", "sequence", name="uq_eng_control_sequence"),
+        UniqueConstraint("run_id", "command_key", name="uq_control_key"),
+        UniqueConstraint("run_id", "attempt", "sequence", name="uq_control_sequence"),
         CheckConstraint(
-            "state IN ('pending','acknowledged','refused','expired')", name="ck_eng_control_state"
+            "state IN ('pending','acknowledged','refused','expired')", name="ck_control_state"
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -42,10 +42,10 @@ class EngineControlCommand(RunBound, Timestamps, Base):
 
 
 class EngineCheckpoint(RunBound, Timestamps, Base):
-    __tablename__ = "eng_checkpoints"
+    __tablename__ = "checkpoints"
     __table_args__ = (
         UniqueConstraint(
-            "run_id", "attempt", "generation", "digest", name="uq_eng_checkpoint_identity"
+            "run_id", "attempt", "generation", "digest", name="uq_checkpoint_identity"
         ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -60,12 +60,10 @@ class EngineCheckpoint(RunBound, Timestamps, Base):
 
 
 class EngineBlob(RunBound, Timestamps, Base):
-    __tablename__ = "eng_blobs"
+    __tablename__ = "blobs"
     __table_args__ = (
-        UniqueConstraint(
-            "run_id", "attempt", "generation", "digest", name="uq_eng_blob_authorization"
-        ),
-        CheckConstraint("size >= 0", name="ck_eng_blob_size"),
+        UniqueConstraint("run_id", "attempt", "generation", "digest", name="uq_blob_authorization"),
+        CheckConstraint("size >= 0", name="ck_blob_size"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     attempt: Mapped[int] = mapped_column(Integer)
@@ -73,16 +71,16 @@ class EngineBlob(RunBound, Timestamps, Base):
     digest: Mapped[str] = mapped_column(String(64), index=True)
     size: Mapped[int] = mapped_column(Integer)
     storage_ref: Mapped[str] = mapped_column(String(500))
-    checkpoint_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("eng_checkpoints.id"))
+    checkpoint_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("checkpoints.id"))
 
 
 class EngineReviewRound(RunBound, Timestamps, Base):
-    __tablename__ = "eng_review_rounds"
+    __tablename__ = "review_rounds"
     __table_args__ = (
-        UniqueConstraint("root_run_id", "feedback_key", name="uq_eng_round_feedback"),
-        CheckConstraint("state IN ('open','closed','refused')", name="ck_eng_round_state"),
+        UniqueConstraint("root_run_id", "feedback_key", name="uq_round_feedback"),
+        CheckConstraint("state IN ('open','closed','refused')", name="ck_round_state"),
         Index(
-            "uq_eng_round_slot",
+            "uq_round_slot",
             "root_review_ref",
             unique=True,
             sqlite_where=text("state = 'open'"),
@@ -90,9 +88,9 @@ class EngineReviewRound(RunBound, Timestamps, Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    root_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_runs.id"))
-    parent_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_runs.id"))
-    child_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("eng_runs.id"), unique=True)
+    root_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("runs.id"))
+    parent_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("runs.id"))
+    child_run_id: Mapped[str] = mapped_column(String(32), ForeignKey("runs.id"), unique=True)
     root_review_ref: Mapped[str] = mapped_column(String(600))
     feedback_key: Mapped[str] = mapped_column(String(300))
     base_sha: Mapped[str] = mapped_column(String(64))
@@ -100,12 +98,12 @@ class EngineReviewRound(RunBound, Timestamps, Base):
 
 
 class EngineLaneSession(RunBound, Timestamps, Base):
-    __tablename__ = "eng_lane_sessions"
+    __tablename__ = "lane_sessions"
     __table_args__ = (
-        UniqueConstraint("run_id", "attempt", "generation", name="uq_eng_session_dispatch"),
+        UniqueConstraint("run_id", "attempt", "generation", name="uq_session_dispatch"),
         CheckConstraint(
             "attempt > 0 AND generation > 0 AND cancellation_generation >= 0",
-            name="ck_eng_session_counters",
+            name="ck_session_counters",
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)

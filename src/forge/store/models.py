@@ -1,4 +1,4 @@
-"""Register additive engine tables on the application's one declarative Base."""
+"""Register the complete single-engine schema on its one declarative Base."""
 
 from forge.store.inbox_models import EventInbox
 from forge.store.models_budget import (
@@ -18,6 +18,7 @@ from forge.store.models_lane import (
     EngineReviewRound,
 )
 from forge.store.models_runs import EngineApprovedInput, EngineGate, EngineRun, EngineRunSpec
+from forge.store.schema.record import SchemaInstallation
 
 __all__ = [
     "EventInbox",
@@ -39,4 +40,5 @@ __all__ = [
     "EngineRunSpec",
     "EngineStep",
     "EngineUsage",
+    "SchemaInstallation",
 ]

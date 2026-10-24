@@ -4,16 +4,12 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-import importlib.util
 import os
 import json
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import forge.store.models  # noqa: F401
@@ -30,7 +26,7 @@ from forge.engine.effects import Effects
 from forge.engine.plan import Implement, PlanHandler
 from forge.engine.plan_values import PlanIntent
 from forge.engine.runner import LeaseHolder, StepContext, StepRunner
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.port_values import (
     Actor,
     NeighborSnapshot,
@@ -112,7 +108,7 @@ async def env(tmp_path, request):
         os.environ.get("FORGE_ENGINE_TEST_DATABASE_URL")
         or f"sqlite+aiosqlite:///{tmp_path / 'approval.db'}"
     )
-    tables = [table for table in Base.metadata.sorted_tables if table.name.startswith("eng_")]
+    tables = list(Base.metadata.sorted_tables)
     async with engine.begin() as connection:
         if engine.dialect.name == "postgresql":
             await connection.run_sync(lambda sync: Base.metadata.drop_all(sync, tables=tables))
@@ -475,53 +471,29 @@ async def test_double_go_and_lost_epoch_never_duplicate_approval(env):
 
 
 @pytest.mark.asyncio
-async def test_approval_migration_preserves_prior_gates(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-    root = Path(__file__).resolve().parents[1]
+async def test_approval_binding_survives_refused_fresh_reinitialization(env):
+    from sqlalchemy import inspect
+    from forge.store.schema import initialize, SchemaMismatch
 
-    def upgrade(connection):
-        with Operations.context(MigrationContext.configure(connection)):
-            for index, path in enumerate(
-                (
-                    root / "alembic/versions/033_engine_tables.py",
-                    root / "alembic/versions/034_approval_step_binding.py",
-                )
-            ):
-                spec = importlib.util.spec_from_file_location(path.stem, path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                module.upgrade()
-                if index == 0:
-                    connection.execute(
-                        text(
-                            "INSERT INTO eng_runs (id,provider,connection_id,repository_id,subject_kind,subject_id,subject_key,root_run_id) VALUES (:id,'github','test','42','issue','1','literal-scope',:id)"
-                        ),
-                        {"id": "a" * 32},
-                    )
-                    connection.execute(
-                        text(
-                            "INSERT INTO eng_gates (id,run_id,decision_key,state,approved_digest,actor_scope_json,expires_at) VALUES (:gate,:run,'initial','open',:digest,'literal-scope','2099-01-01 00:00:00')"
-                        ),
-                        {"gate": "b" * 32, "run": "a" * 32, "digest": "c" * 64},
-                    )
-                    original = dict(
-                        connection.exec_driver_sql("SELECT * FROM eng_gates").mappings().one()
-                    )
-            upgraded = dict(connection.exec_driver_sql("SELECT * FROM eng_gates").mappings().one())
-            assert all(upgraded[key] == value for key, value in original.items())
-            assert upgraded["consumed_step_id"] is None
-        columns = connection.exec_driver_sql("PRAGMA table_info(eng_gates)").all()
-        assert "consumed_step_id" in [column[1] for column in columns]
-        ddl = connection.exec_driver_sql(
-            "SELECT sql FROM sqlite_master WHERE name='eng_gates'"
-        ).scalar_one()
-        assert "'prepared'" in ddl and "FOREIGN KEY(consumed_step_id)" in ddl
-
-    try:
-        async with engine.begin() as connection:
-            await connection.run_sync(upgrade)
-    finally:
-        await engine.dispose()
+    run, frozen = await env.planned()
+    async with env.factory() as session:
+        before = await session.get(EngineGate, frozen.gate_id)
+        original = {
+            column.name: getattr(before, column.name) for column in EngineGate.__table__.columns
+        }
+        keys = await session.run_sync(lambda sync: inspect(sync.bind).get_foreign_keys("gates"))
+        assert any(
+            key["constrained_columns"] == ["consumed_step_id"] and key["referred_table"] == "steps"
+            for key in keys
+        )
+    with pytest.raises(SchemaMismatch, match="empty database"):
+        await initialize(env.factory.kw["bind"])
+    async with env.factory() as session:
+        after = await session.get(EngineGate, frozen.gate_id)
+        assert {
+            column.name: getattr(after, column.name) for column in EngineGate.__table__.columns
+        } == original
+        assert after.run_id == run.id and after.consumed_step_id is None
 
 
 @pytest.mark.asyncio

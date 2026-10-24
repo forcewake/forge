@@ -85,7 +85,7 @@ tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,bou
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
 tests/test_budget_amendment.py,25,853,true,false,,invariant evidence,,budget,keep,-,
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
-tests/test_budget_engine.py,22,706,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
+tests/test_budget_engine.py,22,681,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
 tests/test_candidate.py,49,678,true,false,,edge-case pin,,candidate,keep,-,
@@ -139,16 +139,16 @@ tests/test_durable_gates.py,9,148,true,false,,invariant evidence,,durable,keep,-
 tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,
 tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
-tests/test_engine_approval.py,8,585,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
+tests/test_engine_approval.py,8,557,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Durable command ownership, native reply recovery and cancellation fencing."
 tests/test_engine_delivery.py,15,451,true,true,,edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_dispatch_intents.py,3,64,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Indexed dispatch recovery bound to immutable effect and native repository.
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
-tests/test_engine_lane.py,14,551,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
+tests/test_engine_lane.py,14,548,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
 tests/test_engine_lane_handlers.py,15,515,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-08,"Approved dispatch, durable discovery and lane receipt handlers"
 tests/test_engine_operator.py,9,350,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Original-handler retry, atomic controls and exact checkpoint resume."
 tests/test_engine_runner.py,18,445,false,true,,invariant evidence; edge-case pin,,engine,keep,P3-06,Fenced worker execution and original-step recovery
-tests/test_engine_store.py,14,430,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
+tests/test_engine_store.py,14,419,true,true,,edge-case pin,,engine,keep,P3-03,Engine SQL persistence and fencing contracts
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,
 tests/test_evidence_policy.py,7,219,true,false,,edge-case pin,,evidence,port-engine,P3,
 tests/test_exact_composition_guard.py,6,76,false,false,,edge-case pin,,exact,keep,-,
@@ -278,6 +278,10 @@ tests/test_runs_verification.py,21,419,true,false,,invariant evidence,,runs,port
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_saga_durable.py,6,132,true,false,,edge-case pin,,saga,keep,-,
 tests/test_saga_native.py,7,133,true,false,,edge-case pin,,saga,port-adapter,P3,
+tests/test_schema_baseline.py,9,178,true,true,,invariant evidence; edge-case pin,,schema,keep,P3-20,Exact read-only schema startup gate and transactional fresh installation.
+tests/test_schema_cli.py,6,84,true,true,,edge-case pin,,schema,keep,P3-20,Explicit packaged schema commands refuse unsupported or incomplete authority.
+tests/test_schema_cutover.py,7,201,true,true,,invariant evidence; edge-case pin,,schema,keep,P3-20,Offline native backup restoration and exact historical export before fresh cutover.
+tests/test_schema_expressions.py,3,44,true,false,,edge-case pin,,schema,keep,P3-20,Narrow PostgreSQL native restoration expression equivalence preserves policy grammar.
 tests/test_script_assert_no_skips.py,4,36,false,false,,,,script,keep,-,
 tests/test_script_ast_equivalence.py,12,175,false,false,,edge-case pin,,script,keep,-,
 tests/test_script_build_test_ledger.py,8,180,false,false,,,,script,keep,-,

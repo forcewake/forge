@@ -5,26 +5,26 @@ from datetime import datetime
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
-from forge.models.base import Base
+from forge.store.base import Base
 from forge.store.models_common import Timestamps
 
 
 class EngineCommand(Timestamps, Base):
-    __tablename__ = "eng_commands"
+    __tablename__ = "commands"
     __table_args__ = (
         CheckConstraint(
-            "state IN ('accepted','running','resolved','completed')", name="ck_eng_command_state"
+            "state IN ('accepted','running','resolved','completed')", name="ck_command_state"
         ),
         CheckConstraint(
-            "lease_epoch >= 0 AND attempts >= 0 AND max_attempts > 0", name="ck_eng_command_counts"
+            "lease_epoch >= 0 AND attempts >= 0 AND max_attempts > 0", name="ck_command_counts"
         ),
-        Index("ix_eng_commands_due", "state", "due_at"),
+        Index("ix_commands_due", "state", "due_at"),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     source_key: Mapped[str] = mapped_column(String(64), unique=True)
     kind: Mapped[str] = mapped_column(String(32))
     document_json: Mapped[str] = mapped_column(Text)
-    run_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("eng_runs.id"), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("runs.id"), index=True)
     state: Mapped[str] = mapped_column(String(20), default="accepted", server_default="accepted")
     result_json: Mapped[str | None] = mapped_column(Text)
     reply_json: Mapped[str | None] = mapped_column(Text)
