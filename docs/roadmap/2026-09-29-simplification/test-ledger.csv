@@ -7,7 +7,7 @@ tests/invariants/test_i1_no_merge.py,7,216,false,false,,invariant suite; invaria
 tests/invariants/test_registry_integrity.py,6,66,false,false,,invariant suite,,invariants,keep,-,
 tests/production_entry/test_causal_steering.py,2,61,true,false,,edge-case pin,,production_entry,port-engine,P3,
 tests/production_entry/test_composed_faults.py,4,1009,true,false,,,,production_entry,port-engine,P3,
-tests/production_entry/test_concurrent_publication.py,2,240,true,false,,invariant evidence; edge-case pin,,production_entry,port-engine,P3,
+tests/production_entry/test_concurrent_publication.py,6,381,true,false,,invariant evidence; edge-case pin,,production_entry,port-engine,P3,
 tests/production_entry/test_continuation_identity.py,3,443,true,false,,,,production_entry,port-engine,P3,
 tests/production_entry/test_credential_dispatch.py,31,1741,true,false,,,,production_entry,port-engine,P3,
 tests/production_entry/test_durable_ingress.py,15,1019,true,false,,,,production_entry,port-engine,P3,
