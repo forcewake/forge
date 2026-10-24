@@ -276,6 +276,7 @@ tests/test_runs_service.py,63,1872,true,false,,,,runs,port-engine,P3,
 tests/test_runs_spec.py,50,1064,true,false,,invariant evidence,,runs,port-engine,P3,
 tests/test_runs_verification.py,21,419,true,false,,invariant evidence,,runs,port-engine,P3,
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
+tests/test_runtime_lane_authority.py,4,167,true,true,,invariant evidence,,runtime,keep,P3-17,Explicit per-connection OIDC authority with no provider or token-selected fallback.
 tests/test_saga_durable.py,6,132,true,false,,edge-case pin,,saga,keep,-,
 tests/test_saga_native.py,7,133,true,false,,edge-case pin,,saga,port-adapter,P3,
 tests/test_schema_baseline.py,9,178,true,true,,invariant evidence; edge-case pin,,schema,keep,P3-20,Exact read-only schema startup gate and transactional fresh installation.

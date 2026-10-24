@@ -55,6 +55,7 @@ def current(
     try:
         pending = PendingDispatch(
             dispatch=LaneDispatch.model_validate_json(row.dispatch_json),
+            connection_id=run.connection_id,
             brief=Brief.model_validate_json(row.brief_json),
             expires_at=stored_time(row.expires_at),
             cancellation_generation=row.cancellation_generation,
@@ -198,6 +199,7 @@ class EngineLaneAuthStore:
             if (
                 run is None
                 or run.cancel_requested
+                or pending.connection_id != run.connection_id
                 or State(run.state) in TERMINAL
                 or (run.attempt, run.generation, run.provider)
                 != (

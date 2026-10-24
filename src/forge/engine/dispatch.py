@@ -234,6 +234,7 @@ class DispatchHandler:
             dispatch,
             approved.brief,
             expires_at=work.expires_at,
+            connection_id=approved.repo.identity.connection_id,
             github_workflow_ref=(
                 f"{approved.repo.full_name}/{work.settings.github_workflow_path}@refs/heads/{dispatch.ref}"
                 if dispatch.provider == "github"

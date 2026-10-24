@@ -18,8 +18,8 @@ from forge.api.lane_auth_values import (
     identity_of,
     replay_hash,
 )
-from forge.api.lane_jwks import JwksCache, trusted_https_url
-from forge.config import Settings
+from forge.api.lane_jwks import JwksCache
+from forge.api.lane_settings import LaneAuthSettings
 
 _SESSION_TYPE = "forge-lane-session+jwt"
 _DATES = ("exp", "iat", "nbf")
@@ -27,41 +27,20 @@ _DATES = ("exp", "iat", "nbf")
 
 class LaneAuthService:
     def __init__(
-        self, store: LaneAuthStore, settings: Settings, *, jwks_cache: JwksCache | None = None
+        self,
+        store: LaneAuthStore,
+        settings: LaneAuthSettings,
+        *,
+        jwks_cache: JwksCache | None = None,
     ):
         self.store = store
-        secret = settings.FORGE_SECRET_KEY
-        self._secret = secret.get_secret_value() if secret else ""
-        if len(self._secret.encode()) < 32:
-            raise ValueError("FORGE_SECRET_KEY must contain at least 32 bytes")
-        self.public_url = trusted_https_url(settings.FORGE_PUBLIC_URL)
-        self.ttl = settings.FORGE_LANE_SESSION_TTL_SECONDS
-        self.skew = settings.FORGE_LANE_OIDC_CLOCK_SKEW_SECONDS
-        if not 30 <= self.ttl <= 900 or not 0 <= self.skew <= 120:
-            raise ValueError("invalid lane session lifetime or OIDC clock skew")
-        authorities = {
-            "github": (
-                settings.FORGE_GITHUB_OIDC_ISSUER,
-                settings.FORGE_GITHUB_OIDC_JWKS_URL,
-            )
-        }
-        gitlab = settings.FORGE_GITLAB_OIDC_ISSUER or (
-            settings.GITLAB_URL if settings.FORGE_GITLAB_ENABLED else ""
-        )
-        if gitlab:
-            authorities["gitlab"] = (
-                gitlab,
-                settings.FORGE_GITLAB_OIDC_JWKS_URL or gitlab.rstrip("/") + "/oauth/discovery/keys",
-            )
-        self.jwks = jwks_cache or JwksCache(
-            authorities,
-            ttl=settings.FORGE_LANE_OIDC_JWKS_CACHE_SECONDS,
-        )
-        # A supplied cache can change transport, never the configured trust roots.
-        expected = {
-            p: (trusted_https_url(i), trusted_https_url(u)) for p, (i, u) in authorities.items()
-        }
-        if self.jwks.authorities != expected:
+        self._secret = settings.secret_key.get_secret_value()
+        self.public_url = settings.public_url
+        self.ttl, self.skew = settings.session_ttl_seconds, settings.clock_skew_seconds
+        self.authorities = {a.connection_id: a for a in settings.authorities}
+        roots = {key: (value.issuer, value.jwks_url) for key, value in self.authorities.items()}
+        self.jwks = jwks_cache or JwksCache(roots, ttl=settings.jwks_cache_seconds)
+        if self.jwks.authorities != roots:
             raise ValueError("OIDC cache authorities differ from server configuration")
 
     @staticmethod
@@ -79,11 +58,15 @@ class LaneAuthService:
         brief: Brief,
         *,
         expires_at: datetime,
+        connection_id: str,
         github_workflow_ref: str | None = None,
         github_workflow_claim: Literal["workflow_ref", "job_workflow_ref"] = "job_workflow_ref",
         gitlab_pipeline_id: str | None = None,
     ) -> PendingDispatch:
         """Trusted dispatch composition only; this operation is not an HTTP endpoint."""
+        authority = self.authorities.get(connection_id)
+        if authority is None or authority.provider != dispatch.provider:
+            raise LaneAuthError("dispatch connection has no matching configured OIDC authority")
         if (
             identity_of(dispatch) != identity_of(brief)
             or dispatch.approved_digest != brief.approved_digest
@@ -100,9 +83,7 @@ class LaneAuthService:
             not github_workflow_ref or len(dispatch.nonce or "") < 32
         ):
             raise LaneAuthError("GitHub dispatch requires a pinned workflow and random nonce")
-        if dispatch.provider == "gitlab" and (
-            not gitlab_pipeline_id or "gitlab" not in self.jwks.authorities
-        ):
+        if dispatch.provider == "gitlab" and (not gitlab_pipeline_id):
             raise LaneAuthError("GitLab dispatch requires a configured issuer and pipeline id")
         caller_ref = dispatch.ref
         if dispatch.provider == "github":
@@ -115,6 +96,7 @@ class LaneAuthService:
             PendingDispatch(
                 dispatch=dispatch,
                 brief=brief,
+                connection_id=connection_id,
                 expires_at=expires_at,
                 cancellation_generation=0,
                 github_workflow_ref=github_workflow_ref,
@@ -162,7 +144,10 @@ class LaneAuthService:
         if not isinstance(kid, str) or not 1 <= len(kid) <= 256:
             raise LaneAuthError("OIDC token requires a signing key id")
         provider = pending.dispatch.provider
-        key = await self.jwks.key(provider, kid)
+        authority = self.authorities.get(pending.connection_id)
+        if authority is None or authority.provider != provider:
+            raise LaneAuthError("lane connection has no matching configured OIDC authority")
+        key = await self.jwks.key(pending.connection_id, kid)
         audience = self.public_url
         if provider == "github":
             audience += "/lane/" + str(pending.dispatch.nonce)
@@ -171,7 +156,7 @@ class LaneAuthService:
                 token,
                 key,
                 algorithms=["RS256"],
-                issuer=self.jwks.authorities[provider][0],
+                issuer=authority.issuer,
                 audience=audience,
                 leeway=self.skew,
                 options={

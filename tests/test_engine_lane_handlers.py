@@ -34,7 +34,7 @@ from forge.store.lane_work import LaneWorkStore
 from forge_protocol import CandidateBundle, LaneReport, RunIdentity
 from tests.test_budget_engine import NativeAdmin
 from tests.test_engine_approval import env as env
-from tests.test_lane_auth import settings as settings
+from tests.lane_settings_fixture import settings as settings
 
 
 class LocalAdmission:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -39,7 +40,7 @@ class JwksCache:
         ttl: int = 300,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
-        if not 10 <= ttl <= 3600 or not 1 <= len(authorities) <= 2:
+        if not 10 <= ttl <= 3600 or not 1 <= len(authorities) <= 64:
             raise ValueError("invalid OIDC cache configuration")
         self.authorities = {
             provider: (trusted_https_url(issuer), trusted_https_url(url))
@@ -101,7 +102,7 @@ class JwksCache:
             raise LaneAuthError("OIDC signing keys could not be loaded") from None
 
     @staticmethod
-    def _public_key(value: dict) -> tuple[str, RSAPublicKey]:
+    def _public_key(value: dict[str, Any]) -> tuple[str, RSAPublicKey]:
         if (
             not isinstance(value, dict)
             or value.get("kty") != "RSA"

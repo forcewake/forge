@@ -25,6 +25,7 @@ class PendingDispatch(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     dispatch: LaneDispatch
+    connection_id: str = Field(strict=True, min_length=1, max_length=64)
     brief: Brief
     expires_at: AwareDatetime
     cancellation_generation: int = Field(strict=True, ge=0)

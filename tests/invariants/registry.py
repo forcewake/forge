@@ -30,6 +30,7 @@ INVARIANTS: tuple[Invariant, ...] = (
         (
             "tests/invariants/test_i1_no_merge.py",
             "tests/test_gitlab_engine_ports.py",
+            "tests/test_runtime_lane_authority.py",
         ),
     ),
     Invariant(
