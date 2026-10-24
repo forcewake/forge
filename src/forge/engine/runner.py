@@ -191,6 +191,11 @@ class StepRunner(Generic[E]):
                     due_at=self.clock.now() + timedelta(seconds=self.retry.delay(step.attempts)),
                     now=self.clock.now(),
                     reason=f"retry_exhausted:{error.reason}",
+                    observation_json=json.dumps(
+                        {"reason": error.reason, "retryable": True},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                 )
                 return "parked" if retry.state == "dead" else "rescheduled"
             except StaleLease:
@@ -222,6 +227,7 @@ class StepRunner(Generic[E]):
                     due_at=result.defer_until,
                     reason="awaiting_observation",
                     now=self.clock.now(),
+                    observation_json=result.result_json,
                 )
                 return "rescheduled" if retried.state == "scheduled" else "parked"
             completed = await self.store.complete_and_enqueue(

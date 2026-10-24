@@ -110,6 +110,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_engine_operator.py",
             "tests/test_schema_baseline.py",
             "tests/test_schema_cutover.py",
+            "tests/test_flow_runner.py",
         ),
     ),
     Invariant(

@@ -332,13 +332,25 @@ class StepStore:
             return step_record(row)
 
     async def reschedule(
-        self, lease: Lease, *, due_at: datetime, now: datetime, reason: str = "retry_exhausted"
+        self,
+        lease: Lease,
+        *,
+        due_at: datetime,
+        now: datetime,
+        reason: str = "retry_exhausted",
+        observation_json: str | None = None,
     ) -> StepRecord:
         due_at = aware(due_at)
         if due_at < aware(now):
             raise ValueError("retry cannot be due in the past")
+        if observation_json is not None:
+            canonical_json(observation_json)
+            if len(observation_json.encode()) > 65536:
+                raise ValueError("step observation exceeds its bound")
         async with transaction(self.factory) as session:
             row = await fence(session, lease, now)
+            if observation_json is not None and row.result_json is None:
+                row.result_json = observation_json
             exhausted = row.attempts >= row.max_attempts or (
                 row.deadline_at is not None and due_at >= stored_time(row.deadline_at)
             )
