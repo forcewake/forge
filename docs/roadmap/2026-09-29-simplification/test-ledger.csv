@@ -166,7 +166,7 @@ tests/test_github_actions_executor.py,51,1029,true,false,,edge-case pin,,github,
 tests/test_github_actions_template.py,42,1036,false,false,,,,github,keep,-,
 tests/test_github_client.py,37,807,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_engine_auth.py,6,199,false,true,,edge-case pin,,github,keep,P3-16,Repository-scoped App authority and bounded transport
-tests/test_github_engine_client.py,8,193,false,true,,edge-case pin,,github,keep,P3-16,Native repository routing and explicit HTTP uncertainty
+tests/test_github_engine_client.py,8,190,false,true,,edge-case pin,,github,keep,P3-16,Native repository routing and explicit HTTP uncertainty
 tests/test_github_engine_ingress.py,7,138,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
 tests/test_github_flow.py,30,708,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_harness.py,18,720,true,false,,edge-case pin,,github,port-engine,P3,

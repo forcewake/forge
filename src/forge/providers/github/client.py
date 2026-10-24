@@ -17,12 +17,6 @@ class Reply:
     request_id: str
 
 
-class GraphQLFailure(TransportFailure):
-    def __init__(self, codes: tuple[str, ...], request_id: str):
-        self.codes = codes
-        super().__init__("graphql_error", request_id=request_id)
-
-
 class API:
     def __init__(self, auth: AppAuth, transport: Transport):
         self._auth, self._transport = auth, transport
@@ -37,7 +31,6 @@ class API:
         body: dict[str, Any] | None = None,
         params: dict[str, str | int] | None = None,
         write: bool = False,
-        graphql: bool = False,
         limit: int = MAX_JSON,
     ) -> Reply:
         for attempt in range(2):
@@ -49,7 +42,6 @@ class API:
                     token.value,
                     body=body,
                     params=params,
-                    graphql=graphql,
                     limit=limit,
                 )
                 return Reply(document, request_id)
@@ -139,53 +131,3 @@ class API:
                     "resource_not_found", status=404, request_id=error.request_id
                 ) from None
             raise
-
-    async def graphql(
-        self,
-        repo: RepoRef,
-        query: str,
-        variables: dict[str, Any],
-        *,
-        write: bool = False,
-        limit: int = MAX_JSON,
-    ) -> Reply:
-        if not query or len(query) > 65536:
-            raise ValueError("GitHub GraphQL document must be explicitly bounded")
-        # Reading also requires an explicit query document: callers cannot disguise a
-        # mutation behind a low-privilege API call or an omitted operation declaration.
-        operation = re.match(r"\s*(query|mutation)\b", query)
-        if operation is None or (operation[1] == "mutation" and not write):
-            raise ValueError("GitHub GraphQL operation requires explicit authority")
-        reply = await self._request(
-            repo,
-            "POST",
-            "/graphql",
-            body={"query": query, "variables": variables},
-            write=write,
-            graphql=True,
-            limit=limit,
-        )
-        value = reply.document
-        if not isinstance(value, dict):
-            raise TransportFailure("malformed_graphql_response", request_id=reply.request_id)
-        if value.get("errors"):
-            errors = value["errors"]
-            codes: set[str] = set()
-            if isinstance(errors, list):
-                for item in errors:
-                    if isinstance(item, dict):
-                        extensions = item.get("extensions")
-                        code = extensions.get("code") if isinstance(extensions, dict) else None
-                        kind = code if isinstance(code, str) else item.get("type")
-                        if kind in (
-                            "STALE_DATA",
-                            "CONFLICT",
-                            "FORBIDDEN",
-                            "NOT_FOUND",
-                            "RATE_LIMITED",
-                        ):
-                            codes.add(kind)
-            raise GraphQLFailure(tuple(sorted(codes)), reply.request_id)
-        if "data" not in value or not isinstance(value["data"], dict):
-            raise TransportFailure("malformed_graphql_response", request_id=reply.request_id)
-        return reply

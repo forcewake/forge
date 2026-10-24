@@ -185,15 +185,15 @@ async def test_transport_refuses_ambiguous_or_oversized_provider_json(payload):
 
 
 @pytest.mark.parametrize(
-    "api,graphql",
+    "api,git",
     [
-        ("http://example.test", "http://example.test/graphql"),
-        ("https://user:pass@example.test", "https://example.test/graphql"),
-        ("https://example.test", "https://other.test/graphql"),
-        ("https://example.test?key=secret", "https://example.test/graphql"),
-        ("https://example.test/../api", "https://example.test/graphql"),
+        ("http://example.test", "http://example.test"),
+        ("https://user:pass@example.test", "https://example.test"),
+        ("https://example.test", "https://user:pass@other.test"),
+        ("https://example.test?key=secret", "https://example.test"),
+        ("https://example.test/../api", "https://example.test"),
     ],
 )
-def test_endpoints_have_one_explicit_https_trust_root(api, graphql):
+def test_endpoints_require_explicit_https_without_credentials_or_path_rewriting(api, git):
     with pytest.raises(ValueError):
-        Endpoint(api, graphql)
+        Endpoint(api, git)

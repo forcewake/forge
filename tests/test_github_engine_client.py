@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from forge.providers.github.auth import AppAuth
-from forge.providers.github.client import API, GraphQLFailure
+from forge.providers.github.client import API
 from forge.providers.github.transport import Transport, TransportFailure
 from tests.fakes.ports import FixedClock
 from tests.test_github_engine_auth import key as key, response
@@ -98,22 +98,21 @@ async def test_only_an_explicit_unauthenticated_response_retries_a_write(key, st
         await transport.close()
 
 
-async def test_graphql_error_has_typed_conflict_without_remote_messages_or_retries(key):
-    api, transport, requests = api_fixture(
-        key,
-        lambda request: httpx.Response(
-            200,
-            json={"errors": [{"type": "STALE_DATA", "message": "synthetic-secret"}], "data": None},
-        ),
-    )
+async def test_native_http_errors_keep_no_remote_message_and_never_retry_uncertainty(key):
+    def route(request):
+        if request.url.path == "/installation/repositories":
+            return selected_repository()
+        return httpx.Response(422, json={"message": "synthetic-secret"})
+
+    api, transport, requests = api_fixture(key, route)
     try:
-        with pytest.raises(GraphQLFailure) as caught:
-            await api.graphql(
-                REPO, "mutation Commit($id:ID!){x(id:$id){id}}", {"id": "R_42"}, write=True
+        with pytest.raises(TransportFailure) as caught:
+            await api.request(
+                REPO, "POST", "git/refs", body={"ref": "refs/heads/forge/test"}, write=True
             )
-        assert caught.value.codes == ("STALE_DATA",)
+        assert caught.value.status == 422
         assert "synthetic" not in caught.value.evidence + str(caught.value)
-        assert sum(request.url.path == "/graphql" for request in requests) == 1
+        assert sum(request.url.path.endswith("/git/refs") for request in requests) == 1
     finally:
         await transport.close()
 
@@ -137,8 +136,6 @@ async def test_metadata_id_mismatch_and_implicit_write_authority_refuse(key):
     try:
         with pytest.raises(ValueError, match="write authority"):
             await api.request(REPO, "POST", "issues/1/comments", body={})
-        with pytest.raises(ValueError, match="authority"):
-            await api.graphql(REPO, "mutation {x{id}}", {})
         assert not requests
         with pytest.raises(TransportFailure, match="repository_identity_mismatch"):
             await api.metadata(REPO)

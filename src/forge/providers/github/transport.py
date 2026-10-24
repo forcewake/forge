@@ -17,17 +17,15 @@ MAX_JSON = 16 * 1024 * 1024
 @dataclass(frozen=True)
 class Endpoint:
     api_url: str = "https://api.github.com"
-    graphql_url: str = "https://api.github.com/graphql"
     git_url: str = "https://github.com"
 
     def __post_init__(self) -> None:
         if any(
             "\\" in value or any(ord(char) < 33 for char in value)
-            for value in (self.api_url, self.graphql_url, self.git_url)
+            for value in (self.api_url, self.git_url)
         ):
             raise ValueError("GitHub endpoints cannot contain whitespace or backslashes")
-        api, graphql = urlsplit(self.api_url), urlsplit(self.graphql_url)
-        for url in (api, graphql, urlsplit(self.git_url)):
+        for url in (urlsplit(self.api_url), urlsplit(self.git_url)):
             if (
                 url.scheme != "https"
                 or not url.hostname
@@ -38,8 +36,6 @@ class Endpoint:
                 or any(part in (".", "..") for part in url.path.split("/"))
             ):
                 raise ValueError("GitHub endpoints require trusted credential-free HTTPS URLs")
-        if (api.hostname, api.port) != (graphql.hostname, graphql.port):
-            raise ValueError("GitHub REST and GraphQL must share the trusted origin")
 
 
 class TransportFailure(Exception):
@@ -88,7 +84,6 @@ class Transport:
         *,
         body: dict[str, Any] | None = None,
         params: dict[str, str | int] | None = None,
-        graphql: bool = False,
         limit: int = MAX_JSON,
     ) -> tuple[object, str]:
         if (
@@ -103,7 +98,7 @@ class Transport:
             raise ValueError("GitHub request path must be explicit and relative")
         if not 0 < limit <= MAX_JSON:
             raise ValueError("invalid response bound")
-        url = self.endpoint.graphql_url if graphql else self.endpoint.api_url.rstrip("/") + path
+        url = self.endpoint.api_url.rstrip("/") + path
         headers = {
             "Authorization": "Bearer " + token,
             "Accept": "application/vnd.github+json",
