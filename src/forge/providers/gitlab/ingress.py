@@ -21,7 +21,7 @@ EVENTS = {
     "Job Hook": "build",
 }
 COMMAND = re.compile(
-    r"/(implement|go|cancel|retry|status|why-blocked|reconcile|pause|resume|steer|fix|ask|approve-revision)(?:[ \t]+([^\r\n]*))?[ \t]*"
+    r"/(implement|go|cancel|retry|status|why-blocked|reconcile|pause|resume|steer|fix|ask|approve-revision|amend)(?:[ \t]+([^\r\n]*))?[ \t]*"
 )
 
 

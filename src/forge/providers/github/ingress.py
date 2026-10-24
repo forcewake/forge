@@ -17,7 +17,7 @@ from forge.providers.github.repo import native_id, object_doc, text
 
 MAX_WEBHOOK = 2 * 1024 * 1024
 _COMMAND = re.compile(
-    r"^/(implement|go|cancel|retry|status|why-blocked|reconcile|pause|resume|steer|fix|ask|approve-revision)(?:[ \t]+([^\r\n]*))?[ \t]*$",
+    r"^/(implement|go|cancel|retry|status|why-blocked|reconcile|pause|resume|steer|fix|ask|approve-revision|amend)(?:[ \t]+([^\r\n]*))?[ \t]*$",
     re.MULTILINE,
 )
 _EVENTS = frozenset(

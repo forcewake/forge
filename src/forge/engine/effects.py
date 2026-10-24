@@ -491,7 +491,7 @@ class Effects:
         key: str,
         payload_json: str,
     ) -> Outcome:
-        if kind not in (EffectKind.POST_COMMENT, EffectKind.GW_BLOCK):
+        if kind not in (EffectKind.POST_COMMENT, EffectKind.GW_BLOCK, EffectKind.GW_UPDATE):
             raise EffectProtocolError("command effect kind is not permitted")
         row = await authority.request_once(
             lease, key=key, kind=kind.value, payload_json=payload_json
@@ -508,6 +508,10 @@ class Effects:
         async def call() -> Outcome:
             if kind == EffectKind.GW_BLOCK:
                 return await self._gateway.block(payload["alias"])
+            if kind == EffectKind.GW_UPDATE:
+                return await self._gateway.update(
+                    payload["alias"], Resources.model_validate_json(payload["allowance_json"])
+                )
             target: SubjectRef | ReviewRef = TypeAdapter(SubjectRef | ReviewRef).validate_python(
                 payload["subject"]
             )

@@ -27,11 +27,24 @@ bounded CI repair loop and the lane-side MCP client configuration remain.
 | `/go <run-id>` | Consumes the gate decision exactly once and advances: frozen RunSpec verified by digest → CI lane → candidate → Draft MR/PR | Approver list only; requires a pending, unconsumed decision that is still inside its TTL and whose plan/base/spec digests still match — expired or drifted decisions block the run with an explanatory comment, never a silent ignore | Both providers |
 | `/cancel [run-id]` | Cancel-as-revoke (F13): the publication grant is revoked FIRST, scheduled steps are withdrawn, then the run is cancelled durably. Bare = the latest active run on the subject; terminal runs are never touched | Approver list only | Both providers |
 | `/retry [run-id]` | Tier-2 operator revival of a dead run (see [below](#revival-and-retry-tier-1-auto-tier-2-operator)) | Approver list only; rejection table below | Both providers |
+| `/amend <run-id> <implementation\|closing> usd=<amount> calls=<count> tokens=<count> reason=<text>` | Reserves an explicit increment, then updates only that run's current active gateway grant through the effect journal | Current repository approver; all three nonnegative axes and a reason are required, with at least one positive increment | Both providers and authenticated operator API |
 | `/status [run-id]` | **Read-only** snapshot from durable state: status, reason, commit cycle, candidates, budget headroom, verification evidence, publication-intent states, revive/retry counters. Bare = the issue's latest run, any state | None — any authenticated webhook actor; the only write is the journaled reply note | Both providers |
 | `/why-blocked [run-id]` | **Read-only** explanation of a terminal/blocked cause: the parked reason, its transient/fatal classification, and the honest revive/retry verdict — quoting the SAME rejection table `/retry` enforces | None — read-only, as `/status` | Both providers |
 | `/reconcile <run-id>` | Drives the publication-intent recovery pass explicitly: probe → adopt / report duplicate / report unknown with manual instruction. Refuses runs with no publication intent — revival is `/retry`'s job, not this command's | Approver list only (it is the one mutating R29 command) | Both providers |
 | `/fix <bounded description>` | Review feedback on the Draft MR (GitLab only, behind `FORGE_REVIEW_FEEDBACK_ENABLED`): classifies against the frozen write scope — every explicitly claimed path (backticked) inside it stages a bounded input revision through the EXISTING human gate; a human `/approve-revision` activates it and the reconciler's registered correction pass re-drives the run through the repair edge with the reviewer's text in the executor brief | Approver list only (the same authority as `/go`); unauthorized, deleted-discussion, conflicting, stale-head and closed-window cases are typed refusals with an operator-visible MR reply | GitLab MR note only |
 | `/ask <question>` | Review feedback, clarification class: a durable clarification record + a reply routed to the approvers — **no coding attempt, no coder reservation, no dispatch** (reviewer-only recovery consumes no implementation budget) | Approver list only, like `/fix` | GitLab MR note only |
+
+In the new server, an amendment is one durable decision per native note or
+operator request identity. Redelivery keeps the original amount and target;
+changed content is refused. The full increment is held before the gateway
+write. A lost response is probed through the same journal, and cannot cause
+another blind update. `/status` and run detail distinguish authorized,
+applied and refused amendments. Authorization alone does not report the
+native cap as applied.
+
+Amendments cannot extend a deadline, increase the frozen planning allowance,
+select another alias, reopen a blocked or expired grant, or call the model
+again. Cancellation fences a pending update. Unknown model spend stays held.
 
 Approval authority is **connection-scoped** (ADR-0018 §3): GitHub reads
 `FORGE_GITHUB_APPROVERS` (empty →

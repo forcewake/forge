@@ -191,6 +191,8 @@ class BudgetService:
         )
         if isinstance(outcome, Applied) and outcome.value.allowance == target:
             await self.store.apply_amendment(lease.run_id, command)
+        elif isinstance(outcome, Refused):
+            await self.store.refuse_amendment(lease.run_id, command)
         return outcome
 
     async def grant(self, identity: RunIdentity, gateway_url: str) -> ModelKeyGrant:

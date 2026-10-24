@@ -1,4 +1,4 @@
-"""Command authority permits only its fixed reply or owned cancellation-key blocks."""
+"""Command writes are fixed replies, owned cancellation blocks or exact accepted cap updates."""
 
 from datetime import datetime, timezone
 import json
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.command_values import CommandLease, CommandResult
 from forge.store.commands import command_fence
+from forge.store.budget_command_values import authorize_update
 from forge.store.effects import effect_record
 from forge.store.models_commands import EngineCommand
 from forge.store.models_execution import EngineEffect
@@ -25,6 +26,11 @@ async def allowed(session: AsyncSession, command: EngineCommand, kind: str, payl
     if kind == "post_comment":
         if command.reply_json != payload:
             raise StoreConflict("command reply differs from the fixed resolved reply")
+        return
+    if kind == "gw_update":
+        if command.kind != "amend":
+            raise StoreConflict("command authority cannot perform this external operation")
+        await authorize_update(session, command, payload, datetime.now(timezone.utc))
         return
     if kind != "gw_block" or command.kind != "cancel" or command.run_id is None:
         raise StoreConflict("command authority cannot perform this external operation")

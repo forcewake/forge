@@ -23,6 +23,7 @@ from forge.budget.service import BudgetService
 from forge.budget.settlement import Settlement
 from forge.budget.strict import TrustedPolicy
 from forge.engine.commands import Commands
+from forge.engine.budget_actions import BudgetActions
 from forge.engine.effects import Effects
 from forge.engine.model_services import ServerPlanners, ServerReviewers
 from forge.engine.operator_actions import OperatorActions
@@ -43,6 +44,7 @@ from forge.runtime.projection import Projection
 from forge.runtime.reactive import ReactiveServices, reactive_services
 from forge.runtime.settings import RuntimeSettings, environment, secret
 from forge.store.budget_calls import ModelCallStore
+from forge.store.budget_commands import BudgetCommands
 from forge.store.budgets import BudgetStore
 from forge.store.command_effects import CommandEffectStore
 from forge.store.command_runs import CommandRuns
@@ -230,6 +232,8 @@ def command_service(
         RoundStore(factory), native.registry, native.registry, clock, native.registry.actor_for
     )
     actions = {**initial.actions, **operator.actions, **rounds.actions()}
+    amendments = BudgetActions(BudgetCommands(factory), effects, CommandEffectStore(factory), clock)
+    actions["amend"] = amendments.amend
     return Commands(
         CommandStore(factory),
         runs,
@@ -240,6 +244,7 @@ def command_service(
         native.registry.actor_for,
         clock,
         actions=actions,
+        finishers={"amend": amendments.finish},
         owner="commands:" + uuid4().hex,
     )
 

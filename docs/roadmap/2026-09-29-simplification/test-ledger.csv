@@ -87,6 +87,8 @@ tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,bou
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
 tests/test_budget_amendment.py,25,311,true,false,,invariant evidence; edge-case pin,,budget,keep,-,
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
+tests/test_budget_commands.py,15,441,true,false,,invariant evidence; edge-case pin,,budget,keep,P3-12,"Command-owned native amendments stage full liability before effect; lost responses are probed, and only exact committed receipts apply or known refusals roll back."
+tests/test_budget_commands_api.py,3,158,true,false,,invariant evidence,,budget,keep,P3-12,"Authenticated API budget amendments bind trusted actor, current native grant and one SQL command; replay cannot add liability or invoke another model."
 tests/test_budget_engine.py,22,681,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,593,true,true,,invariant evidence,,budgets,keep,-,

@@ -20,6 +20,7 @@ CommandKind = Literal[
     "fix",
     "ask",
     "approve_revision",
+    "amend",
 ]
 
 

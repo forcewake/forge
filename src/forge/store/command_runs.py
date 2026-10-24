@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.command_values import CommandEnvelope
 from forge.domain.budget import Pool
 from forge.budget.projection import pool_projection
+from forge.store.budget_command_projection import amendment_snapshot
 from forge.domain.states import TERMINAL
 from forge.port_values import Applied, DraftOutcome, SubjectRef, TaskSnapshot
 from forge.store.models_budget import EngineBudgetPool
@@ -164,6 +165,7 @@ class CommandRuns:
                         row.purpose: pool_projection(Pool.model_validate_json(row.state_json))
                         for row in pools
                     },
+                    "budget_amendments": await amendment_snapshot(session, run.id),
                     "effects": [
                         {"kind": row.kind, "state": row.state, "key": row.key} for row in effects
                     ],

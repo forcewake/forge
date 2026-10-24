@@ -17,6 +17,7 @@ from forge.store.operator import OperatorStore
 from forge.store.records import RunRecord, StoreConflict
 
 Action = Callable[[CommandLease, CommandEnvelope, RunRecord | None], Awaitable[CommandResult]]
+Finisher = Callable[[CommandLease], Awaitable[bool]]
 _READONLY = frozenset(("status", "why_blocked"))
 
 
@@ -37,11 +38,13 @@ class Commands:
         clock: Clock,
         *,
         actions: Mapping[str, Action],
+        finishers: Mapping[str, Finisher] | None = None,
         owner: str = "commands",
     ) -> None:
         self.store, self.runs, self.operator, self.effects = store, runs, operator, effects
         self.authority, self.keys, self.actor_for, self.clock = authority, keys, actor_for, clock
         self.actions, self.owner = dict(actions), owner
+        self.finishers = dict(finishers or {})
 
     async def submit(self, envelope: CommandEnvelope) -> CommandResult:
         if self.bot_authored(envelope):
@@ -91,6 +94,9 @@ class Commands:
                 code = str(error) if str(error) in REFUSALS else "command_conflict"
                 result = refusal(code)
             await self.store.resolve(lease, result, now=self.clock.now())
+        finisher = self.finishers.get(command.envelope.command.kind)
+        if finisher is not None and not await finisher(lease):
+            return result
         if not await self.cleanup(lease):
             return result
         command = await self.store.load(lease.command_id)
@@ -119,7 +125,9 @@ class Commands:
             return refusal("bot_authored")
         kind, argument = envelope.command.kind, envelope.command.argument.strip()
         named = (
-            argument
+            argument.split(" ", 1)[0]
+            if kind == "amend"
+            else argument
             if kind
             in {"go", "cancel", "retry", "status", "why_blocked", "reconcile", "approve_revision"}
             else ""

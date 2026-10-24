@@ -111,6 +111,7 @@ REFUSALS = {
     "revision_out_of_scope": "The proposed path is outside the frozen write authority.",
     "revision_approval_required": "Use /approve-revision on the original Draft for this correction.",
     "review_window_closed": "This draft has no eligible completed candidate to revise.",
+    "amendment_grant_inactive": "Only a current open implementation or closing grant can be increased.",
 }
 
 

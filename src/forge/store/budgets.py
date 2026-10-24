@@ -19,7 +19,14 @@ from forge.store.models_budget import (
 from forge.store.models_runs import EngineRunSpec
 from forge.store.models_execution import EngineStep
 from forge.store.records import Lease, StoreConflict
-from forge.store.transactions import SessionFactory, fence, locked_run, transaction, canonical_json
+from forge.store.transactions import (
+    SessionFactory,
+    fence,
+    locked_run,
+    transaction,
+    canonical_json,
+    payload_digest,
+)
 
 PoolPurpose = Literal["implementation", "closing"]
 
@@ -287,21 +294,21 @@ class BudgetStore:
             if reservation is None or reservation.status != "open":
                 raise StoreConflict("only an open gateway reservation may be amended")
             target = reservation.allowance + amount
-            session.add(
-                EngineBudgetAmendment(
-                    id=uuid4().hex,
-                    run_id=lease.run_id,
-                    pool_id=row.id,
-                    command_key=command,
-                    actor=actor,
-                    reason=reason,
-                    amount_json=amount.model_dump_json(),
-                    state="authorized",
-                    gateway_effect_key=f"{lease.run_id}:amend:{command}",
-                    reservation_key=key,
-                    target_json=target.model_dump_json(),
-                )
+            amendment = EngineBudgetAmendment(
+                id=uuid4().hex,
+                run_id=lease.run_id,
+                pool_id=row.id,
+                command_key=command,
+                actor=actor,
+                reason=reason,
+                amount_json=amount.model_dump_json(),
+                state="authorized",
+                gateway_effect_key=f"{lease.run_id}:amend:{command}",
+                reservation_key=key,
+                target_json=target.model_dump_json(),
             )
+            session.add(amendment)
+            await self.stage_in(session, amendment)
             return target
 
     async def apply_amendment(self, run_id: str, command: str) -> None:
@@ -315,38 +322,137 @@ class BudgetStore:
             )
             if amendment is None:
                 raise StoreConflict("amendment was not authorized")
-            if amendment.state == "applied":
-                return
-            row = await session.get(EngineBudgetPool, amendment.pool_id)
-            assert row is not None
-            pool = Pool.model_validate_json(row.state_json)
-            amount = Resources.model_validate_json(amendment.amount_json)
-            if amendment.target_json is None:
-                raise StoreConflict("amendment predates authenticated target storage")
-            target = Resources.model_validate_json(amendment.target_json)
-            rows = []
-            for item in pool.reservations:
-                if item.identity == amendment.reservation_key:
-                    if item.allowance + amount != target:
-                        raise BudgetConflict("amendment overlaps another unapplied update")
-                    item = Reservation(
-                        identity=item.identity,
-                        requested=item.requested + amount,
-                        allowance=target,
-                        minimum=item.minimum,
-                        status=item.status,
-                        observed=item.observed,
-                    )
-                rows.append(item)
-            updated = pool.amend(command, amount)
-            updated = Pool(
-                identity=pool.identity,
-                capacity=pool.capacity,
-                amendments=updated.amendments,
-                reservations=tuple(rows),
+            await self.apply_in(session, amendment)
+
+    @staticmethod
+    async def apply_in(session: AsyncSession, amendment: EngineBudgetAmendment) -> None:
+        if amendment.state == "applied":
+            return
+        await BudgetStore.stage_in(session, amendment)
+        amendment.state = "applied"
+
+    @staticmethod
+    async def stage_in(session: AsyncSession, amendment: EngineBudgetAmendment) -> None:
+        row = await session.get(EngineBudgetPool, amendment.pool_id)
+        assert row is not None
+        pool = Pool.model_validate_json(row.state_json)
+        amount = Resources.model_validate_json(amendment.amount_json)
+        if amendment.target_json is None:
+            raise StoreConflict("amendment predates authenticated target storage")
+        target = Resources.model_validate_json(amendment.target_json)
+        previous = next(
+            (item for item in pool.amendments if item.command_id == amendment.command_key), None
+        )
+        if previous is not None:
+            if previous.amount != amount or not any(
+                item.identity == amendment.reservation_key and item.allowance == target
+                for item in pool.reservations
+            ):
+                raise BudgetConflict("staged amendment differs from its exact target")
+            return
+        rows = []
+        for item in pool.reservations:
+            if item.identity == amendment.reservation_key:
+                if item.allowance + amount != target or item.status != "open":
+                    raise BudgetConflict("amendment overlaps another unapplied update")
+                item = Reservation(
+                    identity=item.identity,
+                    requested=item.requested + amount,
+                    allowance=target,
+                    minimum=item.minimum,
+                    status=item.status,
+                    observed=item.observed,
+                )
+            rows.append(item)
+        updated = pool.amend(amendment.command_key, amount)
+        updated = Pool(
+            identity=pool.identity,
+            capacity=pool.capacity,
+            amendments=updated.amendments,
+            reservations=tuple(rows),
+        )
+        await BudgetStore._save(session, row, updated)
+
+    @staticmethod
+    async def unstage_in(session: AsyncSession, amendment: EngineBudgetAmendment) -> None:
+        row = await session.get(EngineBudgetPool, amendment.pool_id)
+        assert row is not None
+        pool = Pool.model_validate_json(row.state_json)
+        amount = Resources.model_validate_json(amendment.amount_json)
+        if not any(item.command_id == amendment.command_key for item in pool.amendments):
+            return
+        reservations = tuple(
+            Reservation(
+                identity=item.identity,
+                requested=item.requested.subtract(amount),
+                allowance=item.allowance.subtract(amount),
+                minimum=item.minimum,
+                status=item.status,
+                observed=item.observed,
             )
-            await self._save(session, row, updated)
-            amendment.state = "applied"
+            if item.identity == amendment.reservation_key
+            else item
+            for item in pool.reservations
+        )
+        restored = Pool(
+            identity=pool.identity,
+            capacity=pool.capacity,
+            reservations=reservations,
+            amendments=tuple(
+                item for item in pool.amendments if item.command_id != amendment.command_key
+            ),
+        )
+        await BudgetStore._save(session, row, restored)
+
+    async def refuse_amendment(self, run_id: str, command: str) -> None:
+        from pydantic import TypeAdapter
+        from forge.port_values import GatewayOutcome, Refused
+        from forge.store.models_execution import EngineEffect
+        from forge.store.models_budget import EngineGatewayKey
+
+        async with transaction(self.factory) as session:
+            await locked_run(session, run_id)
+            amendment = await session.scalar(
+                select(EngineBudgetAmendment).where(
+                    EngineBudgetAmendment.run_id == run_id,
+                    EngineBudgetAmendment.command_key == command,
+                )
+            )
+            if amendment is None or amendment.state == "applied":
+                raise StoreConflict("amendment has no refundable pending allocation")
+            effect = await session.scalar(
+                select(EngineEffect).where(
+                    EngineEffect.key == amendment.gateway_effect_key, EngineEffect.run_id == run_id
+                )
+            )
+            if (
+                effect is None
+                or effect.kind != "gw_update"
+                or effect.state != "failed"
+                or effect.outcome_json is None
+            ):
+                raise StoreConflict("amendment has no exact native refusal")
+            assert amendment.reservation_key is not None
+            purpose, attempt, generation = amendment.reservation_key.split(":")
+            alias = await session.scalar(
+                select(EngineGatewayKey.alias).where(
+                    EngineGatewayKey.run_id == run_id,
+                    EngineGatewayKey.purpose == purpose,
+                    EngineGatewayKey.attempt == int(attempt),
+                    EngineGatewayKey.generation == int(generation),
+                )
+            )
+            result: GatewayOutcome = TypeAdapter(GatewayOutcome).validate_json(effect.outcome_json)
+            if (
+                not isinstance(result, Refused)
+                or alias is None
+                or json.loads(effect.payload_json).get("alias") != alias
+                or effect.payload_digest != payload_digest(effect.payload_json)
+                or json.loads(effect.payload_json).get("allowance_json") != amendment.target_json
+            ):
+                raise StoreConflict("amendment has no exact native refusal")
+            await self.unstage_in(session, amendment)
+            amendment.state = "refused"
 
     async def record_unmetered(self, lease: Lease, source: str, *, now: datetime) -> None:
         async with transaction(self.factory) as session:
