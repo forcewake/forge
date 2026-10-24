@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 import httpx
 from sqlalchemy import select
-from forge_protocol import CheckpointEntry, LaneDispatch, RunIdentity
+from forge_protocol import CheckpointEntry, CheckpointManifest, LaneDispatch, RunIdentity
 
 from forge.api.lane_v1 import router
 from forge.api.lane_v1_blobs import LaneBlobStore
@@ -147,3 +147,83 @@ def entry(path, data=b"checkpoint bytes", *, state="new", mode="100644"):
         sha256=sha256(data).hexdigest() if state != "deleted" else None,
         size_bytes=len(data) if state != "deleted" else 0,
     )
+
+
+def restore_setup(root, *, entries=None, blobs=None, change=None):
+    from hashlib import sha256
+    from types import SimpleNamespace
+    from forge_protocol import digest
+    from tests.test_lane_runner_v1 import checkout, inputs, WireServer, FakeDriver
+
+    target = root / "target"
+    base = checkout(target)
+    dispatch, brief = inputs(base, generation=1)
+    default = b"restored exact\x00bytes\r\n"
+    if blobs is None:
+        blobs = {sha256(default).hexdigest(): default}
+    manifest = CheckpointManifest(
+        forge_run_id=dispatch.forge_run_id,
+        attempt=dispatch.attempt,
+        generation=0,
+        base_sha=base,
+        approved_digest=dispatch.approved_digest,
+        sequence=7,
+        driver=dispatch.driver,
+        entries=tuple(entries)
+        if entries is not None
+        else (entry("base.txt", default, state="modified"),),
+    )
+    document = manifest.model_dump(mode="json")
+    if change:
+        change(document)
+    dispatch = dispatch.model_copy(update={"checkpoint_id": digest(document)})
+    server = WireServer(dispatch, brief)
+    server.checkpoints, server.blobs = [document], dict(blobs)
+    return SimpleNamespace(
+        target=target,
+        base=base,
+        dispatch=dispatch,
+        brief=brief,
+        manifest=manifest,
+        document=document,
+        server=server,
+        driver=FakeDriver(),
+    )
+
+
+async def run_restore(case):
+    from tests.test_lane_runner_v1 import execute
+
+    case.result = await execute(case.dispatch, case.server, case.driver, case.target)
+    return case.result
+
+
+@asynccontextmanager
+async def capture_setup(root, mutate=None, *, limits=None, prepare=None):
+    from forge_lane.client import LaneClient
+    from forge_lane.checkpoint import Checkpoints
+    from forge_lane.workspace import Limits, Workspace
+    from types import SimpleNamespace
+    from tests.test_lane_runner_v1 import checkout, inputs, WireServer, git
+
+    source = root / "source"
+    base = checkout(source)
+    if prepare:
+        prepare(source)
+        base = git(source, "rev-parse", "HEAD").decode().strip()
+    dispatch, brief = inputs(base)
+    if mutate:
+        mutate(source)
+    server = WireServer(dispatch, brief)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app)) as http:
+        client = LaneClient(dispatch, http)
+        await client.exchange("ci-oidc")
+        workspace = Workspace(source, base, limits or Limits())
+        yield SimpleNamespace(
+            source=source,
+            base=base,
+            dispatch=dispatch,
+            brief=brief,
+            server=server,
+            checkpoints=Checkpoints(dispatch, client, workspace),
+        )
