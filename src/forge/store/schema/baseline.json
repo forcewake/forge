@@ -13,15 +13,18 @@
         "CREATE TABLE control_commands (\n\tid VARCHAR(32) NOT NULL, \n\tcommand_key VARCHAR(300) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tsequence INTEGER NOT NULL, \n\tworld_version INTEGER NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'pending' NOT NULL, \n\tdeadline_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tacknowledgement_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_control_key UNIQUE (run_id, command_key), \n\tCONSTRAINT uq_control_sequence UNIQUE (run_id, attempt, sequence), \n\tCONSTRAINT ck_control_state CHECK (state IN ('pending','acknowledged','refused','expired')), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE gateway_keys (\n\tid VARCHAR(32) NOT NULL, \n\talias VARCHAR(200) NOT NULL, \n\tpurpose VARCHAR(20) DEFAULT 'implementation' NOT NULL, \n\treference_json TEXT, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tciphertext BYTEA, \n\ttoken_digest VARCHAR(64), \n\taad_digest VARCHAR(64) NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'reserved' NOT NULL, \n\tblock_effect_key VARCHAR(300), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_key_dispatch UNIQUE (run_id, attempt, generation, purpose), \n\tCONSTRAINT ck_key_state CHECK (state IN ('reserved','active','unknown','blocked','purged')), \n\tCONSTRAINT ck_key_purged CHECK (state <> 'purged' OR ciphertext IS NULL), \n\tUNIQUE (alias), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE lane_sessions (\n\tid VARCHAR(32) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tnonce_hash VARCHAR(64) NOT NULL, \n\tnonce_consumed BOOLEAN DEFAULT false NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tdispatch_json TEXT NOT NULL, \n\tbrief_json TEXT NOT NULL, \n\tprovider_binding_json TEXT NOT NULL, \n\tfirst_job_json TEXT, \n\tapi_state_json TEXT DEFAULT '{}' NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_session_dispatch UNIQUE (run_id, attempt, generation), \n\tCONSTRAINT ck_session_counters CHECK (attempt > 0 AND generation > 0 AND cancellation_generation >= 0), \n\tUNIQUE (nonce_hash), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE review_cursors (\n\troot_review_ref VARCHAR(600) NOT NULL, \n\troot_run_id VARCHAR(32) NOT NULL, \n\treview_json TEXT NOT NULL, \n\tlast_reviewed_sha VARCHAR(64) NOT NULL, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (root_review_ref), \n\tCONSTRAINT ck_review_cursor_version CHECK (version > 0), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE review_rounds (\n\tid VARCHAR(32) NOT NULL, \n\troot_run_id VARCHAR(32) NOT NULL, \n\tparent_run_id VARCHAR(32) NOT NULL, \n\tchild_run_id VARCHAR(32) NOT NULL, \n\troot_review_ref VARCHAR(600) NOT NULL, \n\tfeedback_key VARCHAR(300) NOT NULL, \n\tbase_sha VARCHAR(64) NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'open' NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_round_feedback UNIQUE (root_run_id, feedback_key), \n\tCONSTRAINT ck_round_state CHECK (state IN ('open','closed','refused')), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(parent_run_id) REFERENCES runs (id), \n\tUNIQUE (child_run_id), \n\tFOREIGN KEY(child_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE run_specs (\n\tid VARCHAR(32) NOT NULL, \n\tdigest VARCHAR(64) NOT NULL, \n\tdocument_json TEXT NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_spec_run UNIQUE (run_id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
-        "CREATE TABLE steps (\n\tid VARCHAR(32) NOT NULL, \n\tkey VARCHAR(300) NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'scheduled' NOT NULL, \n\tdue_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tdeadline_at TIMESTAMP WITH TIME ZONE, \n\tattempts INTEGER DEFAULT '0' NOT NULL, \n\tmax_attempts INTEGER DEFAULT '3' NOT NULL, \n\tlease_epoch INTEGER DEFAULT '0' NOT NULL, \n\tlease_owner VARCHAR(200), \n\tlease_expires_at TIMESTAMP WITH TIME ZONE, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tresult_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_step_state CHECK (state IN ('scheduled','running','succeeded','failed','cancelled','dead')), \n\tCONSTRAINT ck_step_counts CHECK (attempts >= 0 AND max_attempts > 0 AND lease_epoch >= 0), \n\tCONSTRAINT ck_step_handler CHECK (handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready')), \n\tCONSTRAINT ck_step_lease CHECK ((state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR state <> 'running'), \n\tUNIQUE (key), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE steps (\n\tid VARCHAR(32) NOT NULL, \n\tkey VARCHAR(300) NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'scheduled' NOT NULL, \n\tdue_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tdeadline_at TIMESTAMP WITH TIME ZONE, \n\tattempts INTEGER DEFAULT '0' NOT NULL, \n\tmax_attempts INTEGER DEFAULT '3' NOT NULL, \n\tlease_epoch INTEGER DEFAULT '0' NOT NULL, \n\tlease_owner VARCHAR(200), \n\tlease_expires_at TIMESTAMP WITH TIME ZONE, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tresult_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_step_state CHECK (state IN ('scheduled','running','succeeded','failed','cancelled','dead')), \n\tCONSTRAINT ck_step_counts CHECK (attempts >= 0 AND max_attempts > 0 AND lease_epoch >= 0), \n\tCONSTRAINT ck_step_handler CHECK (handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready','feedback_review')), \n\tCONSTRAINT ck_step_lease CHECK ((state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR state <> 'running'), \n\tUNIQUE (key), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE usage (\n\tid VARCHAR(32) NOT NULL, \n\tsource_key VARCHAR(300) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\talias VARCHAR(200), \n\tcompleteness VARCHAR(20) NOT NULL, \n\tfinal BOOLEAN DEFAULT false NOT NULL, \n\tusd NUMERIC(38, 18), \n\tcalls BIGINT, \n\ttokens BIGINT, \n\treceipt_json TEXT NOT NULL, \n\tconflict_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_usage_source UNIQUE (source_key), \n\tCONSTRAINT ck_usage_completeness CHECK (completeness IN ('exact','aggregate','partial','unknown','unmetered')), \n\tCONSTRAINT ck_usage_nonnegative CHECK ((usd IS NULL OR usd >= 0) AND (calls IS NULL OR calls >= 0) AND (tokens IS NULL OR tokens >= 0)), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE blobs (\n\tid VARCHAR(32) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tdigest VARCHAR(64) NOT NULL, \n\tsize INTEGER NOT NULL, \n\tstorage_ref VARCHAR(500) NOT NULL, \n\tcheckpoint_id VARCHAR(64), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_blob_authorization UNIQUE (run_id, attempt, generation, digest), \n\tCONSTRAINT ck_blob_size CHECK (size >= 0), \n\tFOREIGN KEY(checkpoint_id) REFERENCES checkpoints (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE budget_amendments (\n\tid VARCHAR(32) NOT NULL, \n\tpool_id VARCHAR(32) NOT NULL, \n\tcommand_key VARCHAR(300) NOT NULL, \n\tactor VARCHAR(200) NOT NULL, \n\treason VARCHAR(300) NOT NULL, \n\tamount_json TEXT NOT NULL, \n\tstate VARCHAR(20) NOT NULL, \n\tgateway_effect_key VARCHAR(300), \n\treservation_key VARCHAR(300), \n\ttarget_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_amendment_command UNIQUE (run_id, command_key), \n\tCONSTRAINT ck_amendment_state CHECK (state IN ('authorized','applied','refused','unknown')), \n\tFOREIGN KEY(pool_id) REFERENCES budget_pools (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE budget_reservations (\n\tid VARCHAR(32) NOT NULL, \n\tpool_id VARCHAR(32) NOT NULL, \n\treservation_key VARCHAR(300) NOT NULL, \n\trequested_json TEXT NOT NULL, \n\tminimum_json TEXT NOT NULL, \n\tallowance_json TEXT NOT NULL, \n\tstate VARCHAR(20) NOT NULL, \n\tobserved_usd NUMERIC(38, 18), \n\tobserved_calls BIGINT, \n\tobserved_tokens BIGINT, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_reservation_key UNIQUE (pool_id, reservation_key), \n\tCONSTRAINT ck_reservation_state CHECK (state IN ('reserved','accrued','unknown','settled')), \n\tFOREIGN KEY(pool_id) REFERENCES budget_pools (id)\n)",
         "CREATE TABLE effects (\n\tid VARCHAR(32) NOT NULL, \n\tkey VARCHAR(300) NOT NULL, \n\tkind VARCHAR(100) NOT NULL, \n\trun_id VARCHAR(32), \n\tstep_id VARCHAR(32), \n\tcommand_id VARCHAR(32), \n\tlease_epoch INTEGER NOT NULL, \n\tpayload_digest VARCHAR(64) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'requested' NOT NULL, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\toutcome_json TEXT, \n\tobservations_json TEXT DEFAULT '[]' NOT NULL, \n\trepo_key VARCHAR(400), \n\thead_branch VARCHAR(255), \n\tdispatch_nonce_digest VARCHAR(64), \n\tdispatched_at TIMESTAMP WITH TIME ZONE, \n\tdispatch_deadline_at TIMESTAMP WITH TIME ZONE, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_effect_owner CHECK ((step_id IS NOT NULL AND run_id IS NOT NULL AND command_id IS NULL) OR (step_id IS NULL AND command_id IS NOT NULL)), \n\tCONSTRAINT ck_effect_state CHECK (state IN ('requested','dispatched','committed','adopted','conflict','failed','unknown')), \n\tCONSTRAINT ck_effect_counters CHECK (version > 0 AND lease_epoch > 0), \n\tCONSTRAINT ck_effect_draft_identity CHECK (kind <> 'ensure_draft' OR (repo_key IS NOT NULL AND head_branch IS NOT NULL)), \n\tCONSTRAINT ck_effect_dispatch_nonce CHECK ((kind = 'dispatch_lane' AND dispatch_nonce_digest IS NOT NULL) OR (kind <> 'dispatch_lane' AND dispatch_nonce_digest IS NULL)), \n\tUNIQUE (key), \n\tFOREIGN KEY(run_id) REFERENCES runs (id), \n\tFOREIGN KEY(step_id) REFERENCES steps (id), \n\tFOREIGN KEY(command_id) REFERENCES commands (id)\n)",
         "CREATE TABLE gates (\n\tid VARCHAR(32) NOT NULL, \n\tdecision_key VARCHAR(200) NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'prepared' NOT NULL, \n\tapproved_digest VARCHAR(64) NOT NULL, \n\tactor_scope_json TEXT NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\tconsumed_at TIMESTAMP WITH TIME ZONE, \n\tconsumed_by VARCHAR(200), \n\tconsumed_step_id VARCHAR(32), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_gate_decision UNIQUE (run_id, decision_key), \n\tCONSTRAINT ck_gate_state CHECK (state IN ('prepared','open','consumed','expired','refused')), \n\tCONSTRAINT fk_gate_consuming_step FOREIGN KEY(consumed_step_id) REFERENCES steps (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE reactive_reviews (\n\tid VARCHAR(32) NOT NULL, \n\trun_id VARCHAR(32), \n\troot_run_id VARCHAR(32) NOT NULL, \n\troot_review_ref VARCHAR(600) NOT NULL, \n\tbase_sha VARCHAR(64) NOT NULL, \n\thead_sha VARCHAR(64) NOT NULL, \n\tactor_json TEXT NOT NULL, \n\tpolicy_json TEXT NOT NULL, \n\tinput_json TEXT, \n\tresult_json TEXT, \n\tstate VARCHAR(32) DEFAULT 'accepted' NOT NULL, \n\texpires_at TIMESTAMP WITH TIME ZONE, \n\tcreated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tupdated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_reactive_review_head UNIQUE (root_review_ref, head_sha), \n\tCONSTRAINT ck_reactive_review_state CHECK (state IN ('accepted','model_requested','model_completed','commented','stale')), \n\tUNIQUE (run_id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(root_review_ref) REFERENCES review_cursors (root_review_ref)\n)",
+        "CREATE TABLE step_timings (\n\tid VARCHAR(32) NOT NULL, \n\tstep_id VARCHAR(32) NOT NULL, \n\tlease_epoch INTEGER NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tseconds FLOAT NOT NULL, \n\toutcome VARCHAR(20) NOT NULL, \n\tobserved_at TIMESTAMP WITH TIME ZONE NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_step_timing_epoch UNIQUE (step_id, lease_epoch), \n\tCONSTRAINT ck_step_timing_bound CHECK (lease_epoch > 0 AND seconds >= 0 AND seconds <= 86400), \n\tCONSTRAINT ck_step_timing_outcome CHECK (outcome IN ('completed','parked','rescheduled')), \n\tFOREIGN KEY(step_id) REFERENCES steps (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE INDEX ix_event_inbox_project_id ON event_inbox (project_id)",
         "CREATE UNIQUE INDEX ix_event_inbox_source_event_id ON event_inbox (source_event_id)",
         "CREATE INDEX ix_runs_subject_key ON runs (subject_key)",
@@ -35,6 +38,7 @@
         "CREATE INDEX ix_control_commands_run_id ON control_commands (run_id)",
         "CREATE INDEX ix_gateway_keys_run_id ON gateway_keys (run_id)",
         "CREATE INDEX ix_lane_sessions_run_id ON lane_sessions (run_id)",
+        "CREATE INDEX ix_review_cursors_root_run_id ON review_cursors (root_run_id)",
         "CREATE INDEX ix_review_rounds_run_id ON review_rounds (run_id)",
         "CREATE UNIQUE INDEX uq_round_slot ON review_rounds (root_review_ref) WHERE state = 'open'",
         "CREATE INDEX ix_run_specs_run_id ON run_specs (run_id)",
@@ -50,7 +54,11 @@
         "CREATE INDEX ix_effects_run_id ON effects (run_id)",
         "CREATE UNIQUE INDEX uq_effect_dispatch_nonce ON effects (dispatch_nonce_digest)",
         "CREATE UNIQUE INDEX uq_effect_draft ON effects (repo_key, head_branch) WHERE kind = 'ensure_draft'",
-        "CREATE INDEX ix_gates_run_id ON gates (run_id)"
+        "CREATE INDEX ix_gates_run_id ON gates (run_id)",
+        "CREATE INDEX ix_reactive_reviews_root_review_ref ON reactive_reviews (root_review_ref)",
+        "CREATE INDEX ix_reactive_reviews_root_run_id ON reactive_reviews (root_run_id)",
+        "CREATE INDEX ix_step_timings_run_id ON step_timings (run_id)",
+        "CREATE INDEX ix_step_timings_step_id ON step_timings (step_id)"
       ],
       "signature": {
         "constraint_options": [
@@ -745,6 +753,106 @@
             "UNIQUE (run_id, attempt, generation)"
           ],
           [
+            "reactive_reviews",
+            "ck_reactive_review_state",
+            "c",
+            false,
+            false,
+            true,
+            false,
+            "CHECK (((state)::text = ANY (ARRAY['accepted'::text, 'model_requested'::text, 'model_completed'::text, 'commented'::text, 'stale'::text])))"
+          ],
+          [
+            "reactive_reviews",
+            "reactive_reviews_pkey",
+            "p",
+            false,
+            false,
+            true,
+            true,
+            "PRIMARY KEY (id)"
+          ],
+          [
+            "reactive_reviews",
+            "reactive_reviews_root_review_ref_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (root_review_ref) REFERENCES review_cursors(root_review_ref)"
+          ],
+          [
+            "reactive_reviews",
+            "reactive_reviews_root_run_id_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (root_run_id) REFERENCES runs(id)"
+          ],
+          [
+            "reactive_reviews",
+            "reactive_reviews_run_id_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (run_id) REFERENCES runs(id)"
+          ],
+          [
+            "reactive_reviews",
+            "reactive_reviews_run_id_key",
+            "u",
+            false,
+            false,
+            true,
+            true,
+            "UNIQUE (run_id)"
+          ],
+          [
+            "reactive_reviews",
+            "uq_reactive_review_head",
+            "u",
+            false,
+            false,
+            true,
+            true,
+            "UNIQUE (root_review_ref, head_sha)"
+          ],
+          [
+            "review_cursors",
+            "ck_review_cursor_version",
+            "c",
+            false,
+            false,
+            true,
+            false,
+            "CHECK ((version > 0))"
+          ],
+          [
+            "review_cursors",
+            "review_cursors_pkey",
+            "p",
+            false,
+            false,
+            true,
+            true,
+            "PRIMARY KEY (root_review_ref)"
+          ],
+          [
+            "review_cursors",
+            "review_cursors_root_run_id_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (root_run_id) REFERENCES runs(id)"
+          ],
+          [
             "review_rounds",
             "ck_round_state",
             "c",
@@ -945,6 +1053,66 @@
             "PRIMARY KEY (id)"
           ],
           [
+            "step_timings",
+            "ck_step_timing_bound",
+            "c",
+            false,
+            false,
+            true,
+            false,
+            "CHECK (((lease_epoch > 0) AND (seconds >= (0)::double precision) AND (seconds <= (86400)::double precision)))"
+          ],
+          [
+            "step_timings",
+            "ck_step_timing_outcome",
+            "c",
+            false,
+            false,
+            true,
+            false,
+            "CHECK (((outcome)::text = ANY (ARRAY['completed'::text, 'parked'::text, 'rescheduled'::text])))"
+          ],
+          [
+            "step_timings",
+            "step_timings_pkey",
+            "p",
+            false,
+            false,
+            true,
+            true,
+            "PRIMARY KEY (id)"
+          ],
+          [
+            "step_timings",
+            "step_timings_run_id_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (run_id) REFERENCES runs(id)"
+          ],
+          [
+            "step_timings",
+            "step_timings_step_id_fkey",
+            "f",
+            false,
+            false,
+            true,
+            true,
+            "FOREIGN KEY (step_id) REFERENCES steps(id)"
+          ],
+          [
+            "step_timings",
+            "uq_step_timing_epoch",
+            "u",
+            false,
+            false,
+            true,
+            true,
+            "UNIQUE (step_id, lease_epoch)"
+          ],
+          [
             "steps",
             "ck_step_counts",
             "c",
@@ -962,7 +1130,7 @@
             false,
             true,
             false,
-            "CHECK (((handler)::text = ANY (ARRAY['plan'::text, 'approve'::text, 'dispatch'::text, 'await_lane'::text, 'publish'::text, 'verify'::text, 'review'::text, 'ready'::text])))"
+            "CHECK (((handler)::text = ANY (ARRAY['plan'::text, 'approve'::text, 'dispatch'::text, 'await_lane'::text, 'publish'::text, 'verify'::text, 'review'::text, 'ready'::text, 'feedback_review'::text])))"
           ],
           [
             "steps",
@@ -1361,6 +1529,30 @@
             false
           ],
           [
+            "ix_reactive_reviews_root_review_ref",
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          [
+            "ix_reactive_reviews_root_run_id",
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          [
+            "ix_review_cursors_root_run_id",
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          [
             "ix_review_rounds_run_id",
             true,
             true,
@@ -1378,6 +1570,22 @@
           ],
           [
             "ix_runs_subject_key",
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          [
+            "ix_step_timings_run_id",
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          [
+            "ix_step_timings_step_id",
             true,
             true,
             true,
@@ -1418,6 +1626,30 @@
           ],
           [
             "lane_sessions_pkey",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
+            "reactive_reviews_pkey",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
+            "reactive_reviews_run_id_key",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
+            "review_cursors_pkey",
             true,
             true,
             true,
@@ -1466,6 +1698,14 @@
           ],
           [
             "schema_installation_pkey",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
+            "step_timings_pkey",
             true,
             true,
             true,
@@ -1593,6 +1833,14 @@
             false
           ],
           [
+            "uq_reactive_review_head",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
             "uq_reservation_key",
             true,
             true,
@@ -1626,6 +1874,14 @@
           ],
           [
             "uq_spec_run",
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          [
+            "uq_step_timing_epoch",
             true,
             true,
             true,
@@ -1769,6 +2025,18 @@
             false
           ],
           [
+            "reactive_reviews",
+            "p",
+            false,
+            false
+          ],
+          [
+            "review_cursors",
+            "p",
+            false,
+            false
+          ],
+          [
             "review_rounds",
             "p",
             false,
@@ -1788,6 +2056,12 @@
           ],
           [
             "schema_installation",
+            "p",
+            false,
+            false
+          ],
+          [
+            "step_timings",
             "p",
             false,
             false
@@ -4564,6 +4838,360 @@
               }
             ]
           },
+          "reactive_reviews": {
+            "checks": [
+              {
+                "comment": null,
+                "name": "ck_reactive_review_state",
+                "sqltext": "state::text = ANY (ARRAY['accepted'::text, 'model_requested'::text, 'model_completed'::text, 'commented'::text, 'stale'::text])"
+              }
+            ],
+            "columns": [
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "run_id",
+                "nullable": true,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "root_run_id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "root_review_ref",
+                "nullable": false,
+                "type": "VARCHAR(600)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "base_sha",
+                "nullable": false,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "head_sha",
+                "nullable": false,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "actor_json",
+                "nullable": false,
+                "type": "TEXT"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "policy_json",
+                "nullable": false,
+                "type": "TEXT"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "input_json",
+                "nullable": true,
+                "type": "TEXT"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "result_json",
+                "nullable": true,
+                "type": "TEXT"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "'accepted'::character varying",
+                "name": "state",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "expires_at",
+                "nullable": true,
+                "type": "TIMESTAMP"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "now()",
+                "name": "created_at",
+                "nullable": false,
+                "type": "TIMESTAMP"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "now()",
+                "name": "updated_at",
+                "nullable": false,
+                "type": "TIMESTAMP"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "root_review_ref"
+                ],
+                "name": "reactive_reviews_root_review_ref_fkey",
+                "options": {},
+                "referred_columns": [
+                  "root_review_ref"
+                ],
+                "referred_schema": null,
+                "referred_table": "review_cursors"
+              },
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "root_run_id"
+                ],
+                "name": "reactive_reviews_root_run_id_fkey",
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              },
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "run_id"
+                ],
+                "name": "reactive_reviews_run_id_fkey",
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "root_review_ref"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "include_columns": [],
+                "name": "ix_reactive_reviews_root_review_ref",
+                "unique": false
+              },
+              {
+                "column_names": [
+                  "root_run_id"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "include_columns": [],
+                "name": "ix_reactive_reviews_root_run_id",
+                "unique": false
+              },
+              {
+                "column_names": [
+                  "run_id"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "duplicates_constraint": "reactive_reviews_run_id_key",
+                "include_columns": [],
+                "name": "reactive_reviews_run_id_key",
+                "unique": true
+              },
+              {
+                "column_names": [
+                  "root_review_ref",
+                  "head_sha"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "duplicates_constraint": "uq_reactive_review_head",
+                "include_columns": [],
+                "name": "uq_reactive_review_head",
+                "unique": true
+              }
+            ],
+            "primary_key": {
+              "comment": null,
+              "constrained_columns": [
+                "id"
+              ],
+              "dialect_options": {
+                "postgresql_include": []
+              },
+              "name": "reactive_reviews_pkey"
+            },
+            "unique": [
+              {
+                "column_names": [
+                  "root_review_ref",
+                  "head_sha"
+                ],
+                "comment": null,
+                "dialect_options": {
+                  "postgresql_include": [],
+                  "postgresql_nulls_not_distinct": false
+                },
+                "name": "uq_reactive_review_head"
+              },
+              {
+                "column_names": [
+                  "run_id"
+                ],
+                "comment": null,
+                "dialect_options": {
+                  "postgresql_include": [],
+                  "postgresql_nulls_not_distinct": false
+                },
+                "name": "reactive_reviews_run_id_key"
+              }
+            ]
+          },
+          "review_cursors": {
+            "checks": [
+              {
+                "comment": null,
+                "name": "ck_review_cursor_version",
+                "sqltext": "version > 0"
+              }
+            ],
+            "columns": [
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "root_review_ref",
+                "nullable": false,
+                "type": "VARCHAR(600)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "root_run_id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "review_json",
+                "nullable": false,
+                "type": "TEXT"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "last_reviewed_sha",
+                "nullable": false,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "1",
+                "name": "version",
+                "nullable": false,
+                "type": "INTEGER"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "now()",
+                "name": "created_at",
+                "nullable": false,
+                "type": "TIMESTAMP"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": "now()",
+                "name": "updated_at",
+                "nullable": false,
+                "type": "TIMESTAMP"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "root_run_id"
+                ],
+                "name": "review_cursors_root_run_id_fkey",
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "root_run_id"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "include_columns": [],
+                "name": "ix_review_cursors_root_run_id",
+                "unique": false
+              }
+            ],
+            "primary_key": {
+              "comment": null,
+              "constrained_columns": [
+                "root_review_ref"
+              ],
+              "dialect_options": {
+                "postgresql_include": []
+              },
+              "name": "review_cursors_pkey"
+            },
+            "unique": []
+          },
           "review_rounds": {
             "checks": [
               {
@@ -5244,6 +5872,175 @@
               }
             ]
           },
+          "step_timings": {
+            "checks": [
+              {
+                "comment": null,
+                "name": "ck_step_timing_bound",
+                "sqltext": "lease_epoch > 0 AND seconds >= 0::double precision AND seconds <= 86400::double precision"
+              },
+              {
+                "comment": null,
+                "name": "ck_step_timing_outcome",
+                "sqltext": "outcome::text = ANY (ARRAY['completed'::text, 'parked'::text, 'rescheduled'::text])"
+              }
+            ],
+            "columns": [
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "step_id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "lease_epoch",
+                "nullable": false,
+                "type": "INTEGER"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "handler",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "seconds",
+                "nullable": false,
+                "type": "DOUBLE PRECISION"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "outcome",
+                "nullable": false,
+                "type": "VARCHAR(20)"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "observed_at",
+                "nullable": false,
+                "type": "TIMESTAMP"
+              },
+              {
+                "autoincrement": false,
+                "comment": null,
+                "default": null,
+                "name": "run_id",
+                "nullable": false,
+                "type": "VARCHAR(32)"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "run_id"
+                ],
+                "name": "step_timings_run_id_fkey",
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              },
+              {
+                "comment": null,
+                "constrained_columns": [
+                  "step_id"
+                ],
+                "name": "step_timings_step_id_fkey",
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "steps"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "run_id"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "include_columns": [],
+                "name": "ix_step_timings_run_id",
+                "unique": false
+              },
+              {
+                "column_names": [
+                  "step_id"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "include_columns": [],
+                "name": "ix_step_timings_step_id",
+                "unique": false
+              },
+              {
+                "column_names": [
+                  "step_id",
+                  "lease_epoch"
+                ],
+                "dialect_options": {
+                  "postgresql_include": []
+                },
+                "duplicates_constraint": "uq_step_timing_epoch",
+                "include_columns": [],
+                "name": "uq_step_timing_epoch",
+                "unique": true
+              }
+            ],
+            "primary_key": {
+              "comment": null,
+              "constrained_columns": [
+                "id"
+              ],
+              "dialect_options": {
+                "postgresql_include": []
+              },
+              "name": "step_timings_pkey"
+            },
+            "unique": [
+              {
+                "column_names": [
+                  "step_id",
+                  "lease_epoch"
+                ],
+                "comment": null,
+                "dialect_options": {
+                  "postgresql_include": [],
+                  "postgresql_nulls_not_distinct": false
+                },
+                "name": "uq_step_timing_epoch"
+              }
+            ]
+          },
           "steps": {
             "checks": [
               {
@@ -5254,7 +6051,7 @@
               {
                 "comment": null,
                 "name": "ck_step_handler",
-                "sqltext": "handler::text = ANY (ARRAY['plan'::text, 'approve'::text, 'dispatch'::text, 'await_lane'::text, 'publish'::text, 'verify'::text, 'review'::text, 'ready'::text])"
+                "sqltext": "handler::text = ANY (ARRAY['plan'::text, 'approve'::text, 'dispatch'::text, 'await_lane'::text, 'publish'::text, 'verify'::text, 'review'::text, 'ready'::text, 'feedback_review'::text])"
               },
               {
                 "comment": null,
@@ -5716,15 +6513,18 @@
         "CREATE TABLE control_commands (\n\tid VARCHAR(32) NOT NULL, \n\tcommand_key VARCHAR(300) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tsequence INTEGER NOT NULL, \n\tworld_version INTEGER NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'pending' NOT NULL, \n\tdeadline_at DATETIME NOT NULL, \n\tacknowledgement_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_control_key UNIQUE (run_id, command_key), \n\tCONSTRAINT uq_control_sequence UNIQUE (run_id, attempt, sequence), \n\tCONSTRAINT ck_control_state CHECK (state IN ('pending','acknowledged','refused','expired')), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE gateway_keys (\n\tid VARCHAR(32) NOT NULL, \n\talias VARCHAR(200) NOT NULL, \n\tpurpose VARCHAR(20) DEFAULT 'implementation' NOT NULL, \n\treference_json TEXT, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tciphertext BLOB, \n\ttoken_digest VARCHAR(64), \n\taad_digest VARCHAR(64) NOT NULL, \n\texpires_at DATETIME NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'reserved' NOT NULL, \n\tblock_effect_key VARCHAR(300), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_key_dispatch UNIQUE (run_id, attempt, generation, purpose), \n\tCONSTRAINT ck_key_state CHECK (state IN ('reserved','active','unknown','blocked','purged')), \n\tCONSTRAINT ck_key_purged CHECK (state <> 'purged' OR ciphertext IS NULL), \n\tUNIQUE (alias), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE lane_sessions (\n\tid VARCHAR(32) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tnonce_hash VARCHAR(64) NOT NULL, \n\tnonce_consumed BOOLEAN DEFAULT false NOT NULL, \n\texpires_at DATETIME NOT NULL, \n\tdispatch_json TEXT NOT NULL, \n\tbrief_json TEXT NOT NULL, \n\tprovider_binding_json TEXT NOT NULL, \n\tfirst_job_json TEXT, \n\tapi_state_json TEXT DEFAULT '{}' NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_session_dispatch UNIQUE (run_id, attempt, generation), \n\tCONSTRAINT ck_session_counters CHECK (attempt > 0 AND generation > 0 AND cancellation_generation >= 0), \n\tUNIQUE (nonce_hash), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE review_cursors (\n\troot_review_ref VARCHAR(600) NOT NULL, \n\troot_run_id VARCHAR(32) NOT NULL, \n\treview_json TEXT NOT NULL, \n\tlast_reviewed_sha VARCHAR(64) NOT NULL, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (root_review_ref), \n\tCONSTRAINT ck_review_cursor_version CHECK (version > 0), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE review_rounds (\n\tid VARCHAR(32) NOT NULL, \n\troot_run_id VARCHAR(32) NOT NULL, \n\tparent_run_id VARCHAR(32) NOT NULL, \n\tchild_run_id VARCHAR(32) NOT NULL, \n\troot_review_ref VARCHAR(600) NOT NULL, \n\tfeedback_key VARCHAR(300) NOT NULL, \n\tbase_sha VARCHAR(64) NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'open' NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_round_feedback UNIQUE (root_run_id, feedback_key), \n\tCONSTRAINT ck_round_state CHECK (state IN ('open','closed','refused')), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(parent_run_id) REFERENCES runs (id), \n\tUNIQUE (child_run_id), \n\tFOREIGN KEY(child_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE run_specs (\n\tid VARCHAR(32) NOT NULL, \n\tdigest VARCHAR(64) NOT NULL, \n\tdocument_json TEXT NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_spec_run UNIQUE (run_id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
-        "CREATE TABLE steps (\n\tid VARCHAR(32) NOT NULL, \n\t\"key\" VARCHAR(300) NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'scheduled' NOT NULL, \n\tdue_at DATETIME NOT NULL, \n\tdeadline_at DATETIME, \n\tattempts INTEGER DEFAULT '0' NOT NULL, \n\tmax_attempts INTEGER DEFAULT '3' NOT NULL, \n\tlease_epoch INTEGER DEFAULT '0' NOT NULL, \n\tlease_owner VARCHAR(200), \n\tlease_expires_at DATETIME, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tresult_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_step_state CHECK (state IN ('scheduled','running','succeeded','failed','cancelled','dead')), \n\tCONSTRAINT ck_step_counts CHECK (attempts >= 0 AND max_attempts > 0 AND lease_epoch >= 0), \n\tCONSTRAINT ck_step_handler CHECK (handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready')), \n\tCONSTRAINT ck_step_lease CHECK ((state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR state <> 'running'), \n\tUNIQUE (\"key\"), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE steps (\n\tid VARCHAR(32) NOT NULL, \n\t\"key\" VARCHAR(300) NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'scheduled' NOT NULL, \n\tdue_at DATETIME NOT NULL, \n\tdeadline_at DATETIME, \n\tattempts INTEGER DEFAULT '0' NOT NULL, \n\tmax_attempts INTEGER DEFAULT '3' NOT NULL, \n\tlease_epoch INTEGER DEFAULT '0' NOT NULL, \n\tlease_owner VARCHAR(200), \n\tlease_expires_at DATETIME, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tcancellation_generation INTEGER NOT NULL, \n\tresult_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_step_state CHECK (state IN ('scheduled','running','succeeded','failed','cancelled','dead')), \n\tCONSTRAINT ck_step_counts CHECK (attempts >= 0 AND max_attempts > 0 AND lease_epoch >= 0), \n\tCONSTRAINT ck_step_handler CHECK (handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready','feedback_review')), \n\tCONSTRAINT ck_step_lease CHECK ((state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR state <> 'running'), \n\tUNIQUE (\"key\"), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE usage (\n\tid VARCHAR(32) NOT NULL, \n\tsource_key VARCHAR(300) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\talias VARCHAR(200), \n\tcompleteness VARCHAR(20) NOT NULL, \n\tfinal BOOLEAN DEFAULT false NOT NULL, \n\tusd TEXT, \n\tcalls BIGINT, \n\ttokens BIGINT, \n\treceipt_json TEXT NOT NULL, \n\tconflict_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_usage_source UNIQUE (source_key), \n\tCONSTRAINT ck_usage_completeness CHECK (completeness IN ('exact','aggregate','partial','unknown','unmetered')), \n\tCONSTRAINT ck_usage_nonnegative CHECK ((usd IS NULL OR usd >= 0) AND (calls IS NULL OR calls >= 0) AND (tokens IS NULL OR tokens >= 0)), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE blobs (\n\tid VARCHAR(32) NOT NULL, \n\tattempt INTEGER NOT NULL, \n\tgeneration INTEGER NOT NULL, \n\tdigest VARCHAR(64) NOT NULL, \n\tsize INTEGER NOT NULL, \n\tstorage_ref VARCHAR(500) NOT NULL, \n\tcheckpoint_id VARCHAR(64), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_blob_authorization UNIQUE (run_id, attempt, generation, digest), \n\tCONSTRAINT ck_blob_size CHECK (size >= 0), \n\tFOREIGN KEY(checkpoint_id) REFERENCES checkpoints (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE budget_amendments (\n\tid VARCHAR(32) NOT NULL, \n\tpool_id VARCHAR(32) NOT NULL, \n\tcommand_key VARCHAR(300) NOT NULL, \n\tactor VARCHAR(200) NOT NULL, \n\treason VARCHAR(300) NOT NULL, \n\tamount_json TEXT NOT NULL, \n\tstate VARCHAR(20) NOT NULL, \n\tgateway_effect_key VARCHAR(300), \n\treservation_key VARCHAR(300), \n\ttarget_json TEXT, \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_amendment_command UNIQUE (run_id, command_key), \n\tCONSTRAINT ck_amendment_state CHECK (state IN ('authorized','applied','refused','unknown')), \n\tFOREIGN KEY(pool_id) REFERENCES budget_pools (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE TABLE budget_reservations (\n\tid VARCHAR(32) NOT NULL, \n\tpool_id VARCHAR(32) NOT NULL, \n\treservation_key VARCHAR(300) NOT NULL, \n\trequested_json TEXT NOT NULL, \n\tminimum_json TEXT NOT NULL, \n\tallowance_json TEXT NOT NULL, \n\tstate VARCHAR(20) NOT NULL, \n\tobserved_usd TEXT, \n\tobserved_calls BIGINT, \n\tobserved_tokens BIGINT, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_reservation_key UNIQUE (pool_id, reservation_key), \n\tCONSTRAINT ck_reservation_state CHECK (state IN ('reserved','accrued','unknown','settled')), \n\tFOREIGN KEY(pool_id) REFERENCES budget_pools (id)\n)",
         "CREATE TABLE effects (\n\tid VARCHAR(32) NOT NULL, \n\t\"key\" VARCHAR(300) NOT NULL, \n\tkind VARCHAR(100) NOT NULL, \n\trun_id VARCHAR(32), \n\tstep_id VARCHAR(32), \n\tcommand_id VARCHAR(32), \n\tlease_epoch INTEGER NOT NULL, \n\tpayload_digest VARCHAR(64) NOT NULL, \n\tpayload_json TEXT NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'requested' NOT NULL, \n\tversion INTEGER DEFAULT '1' NOT NULL, \n\toutcome_json TEXT, \n\tobservations_json TEXT DEFAULT '[]' NOT NULL, \n\trepo_key VARCHAR(400), \n\thead_branch VARCHAR(255), \n\tdispatch_nonce_digest VARCHAR(64), \n\tdispatched_at DATETIME, \n\tdispatch_deadline_at DATETIME, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_effect_owner CHECK ((step_id IS NOT NULL AND run_id IS NOT NULL AND command_id IS NULL) OR (step_id IS NULL AND command_id IS NOT NULL)), \n\tCONSTRAINT ck_effect_state CHECK (state IN ('requested','dispatched','committed','adopted','conflict','failed','unknown')), \n\tCONSTRAINT ck_effect_counters CHECK (version > 0 AND lease_epoch > 0), \n\tCONSTRAINT ck_effect_draft_identity CHECK (kind <> 'ensure_draft' OR (repo_key IS NOT NULL AND head_branch IS NOT NULL)), \n\tCONSTRAINT ck_effect_dispatch_nonce CHECK ((kind = 'dispatch_lane' AND dispatch_nonce_digest IS NOT NULL) OR (kind <> 'dispatch_lane' AND dispatch_nonce_digest IS NULL)), \n\tUNIQUE (\"key\"), \n\tFOREIGN KEY(run_id) REFERENCES runs (id), \n\tFOREIGN KEY(step_id) REFERENCES steps (id), \n\tFOREIGN KEY(command_id) REFERENCES commands (id)\n)",
         "CREATE TABLE gates (\n\tid VARCHAR(32) NOT NULL, \n\tdecision_key VARCHAR(200) NOT NULL, \n\tstate VARCHAR(20) DEFAULT 'prepared' NOT NULL, \n\tapproved_digest VARCHAR(64) NOT NULL, \n\tactor_scope_json TEXT NOT NULL, \n\texpires_at DATETIME NOT NULL, \n\tconsumed_at DATETIME, \n\tconsumed_by VARCHAR(200), \n\tconsumed_step_id VARCHAR(32), \n\trun_id VARCHAR(32) NOT NULL, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_gate_decision UNIQUE (run_id, decision_key), \n\tCONSTRAINT ck_gate_state CHECK (state IN ('prepared','open','consumed','expired','refused')), \n\tCONSTRAINT fk_gate_consuming_step FOREIGN KEY(consumed_step_id) REFERENCES steps (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
+        "CREATE TABLE reactive_reviews (\n\tid VARCHAR(32) NOT NULL, \n\trun_id VARCHAR(32), \n\troot_run_id VARCHAR(32) NOT NULL, \n\troot_review_ref VARCHAR(600) NOT NULL, \n\tbase_sha VARCHAR(64) NOT NULL, \n\thead_sha VARCHAR(64) NOT NULL, \n\tactor_json TEXT NOT NULL, \n\tpolicy_json TEXT NOT NULL, \n\tinput_json TEXT, \n\tresult_json TEXT, \n\tstate VARCHAR(32) DEFAULT 'accepted' NOT NULL, \n\texpires_at DATETIME, \n\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tupdated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_reactive_review_head UNIQUE (root_review_ref, head_sha), \n\tCONSTRAINT ck_reactive_review_state CHECK (state IN ('accepted','model_requested','model_completed','commented','stale')), \n\tUNIQUE (run_id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id), \n\tFOREIGN KEY(root_run_id) REFERENCES runs (id), \n\tFOREIGN KEY(root_review_ref) REFERENCES review_cursors (root_review_ref)\n)",
+        "CREATE TABLE step_timings (\n\tid VARCHAR(32) NOT NULL, \n\tstep_id VARCHAR(32) NOT NULL, \n\tlease_epoch INTEGER NOT NULL, \n\thandler VARCHAR(32) NOT NULL, \n\tseconds FLOAT NOT NULL, \n\toutcome VARCHAR(20) NOT NULL, \n\tobserved_at DATETIME NOT NULL, \n\trun_id VARCHAR(32) NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_step_timing_epoch UNIQUE (step_id, lease_epoch), \n\tCONSTRAINT ck_step_timing_bound CHECK (lease_epoch > 0 AND seconds >= 0 AND seconds <= 86400), \n\tCONSTRAINT ck_step_timing_outcome CHECK (outcome IN ('completed','parked','rescheduled')), \n\tFOREIGN KEY(step_id) REFERENCES steps (id), \n\tFOREIGN KEY(run_id) REFERENCES runs (id)\n)",
         "CREATE INDEX ix_event_inbox_project_id ON event_inbox (project_id)",
         "CREATE UNIQUE INDEX ix_event_inbox_source_event_id ON event_inbox (source_event_id)",
         "CREATE INDEX ix_runs_subject_key ON runs (subject_key)",
@@ -5738,6 +6538,7 @@
         "CREATE INDEX ix_control_commands_run_id ON control_commands (run_id)",
         "CREATE INDEX ix_gateway_keys_run_id ON gateway_keys (run_id)",
         "CREATE INDEX ix_lane_sessions_run_id ON lane_sessions (run_id)",
+        "CREATE INDEX ix_review_cursors_root_run_id ON review_cursors (root_run_id)",
         "CREATE INDEX ix_review_rounds_run_id ON review_rounds (run_id)",
         "CREATE UNIQUE INDEX uq_round_slot ON review_rounds (root_review_ref) WHERE state = 'open'",
         "CREATE INDEX ix_run_specs_run_id ON run_specs (run_id)",
@@ -5753,7 +6554,11 @@
         "CREATE INDEX ix_effects_run_id ON effects (run_id)",
         "CREATE UNIQUE INDEX uq_effect_dispatch_nonce ON effects (dispatch_nonce_digest)",
         "CREATE UNIQUE INDEX uq_effect_draft ON effects (repo_key, head_branch) WHERE kind = 'ensure_draft'",
-        "CREATE INDEX ix_gates_run_id ON gates (run_id)"
+        "CREATE INDEX ix_gates_run_id ON gates (run_id)",
+        "CREATE INDEX ix_reactive_reviews_root_review_ref ON reactive_reviews (root_review_ref)",
+        "CREATE INDEX ix_reactive_reviews_root_run_id ON reactive_reviews (root_run_id)",
+        "CREATE INDEX ix_step_timings_run_id ON step_timings (run_id)",
+        "CREATE INDEX ix_step_timings_step_id ON step_timings (step_id)"
       ],
       "signature": {
         "table_options": [
@@ -5833,6 +6638,16 @@
             0
           ],
           [
+            "reactive_reviews",
+            0,
+            0
+          ],
+          [
+            "review_cursors",
+            0,
+            0
+          ],
+          [
             "review_rounds",
             0,
             0
@@ -5849,6 +6664,11 @@
           ],
           [
             "schema_installation",
+            0,
+            0
+          ],
+          [
+            "step_timings",
             0,
             0
           ],
@@ -7987,6 +8807,281 @@
               }
             ]
           },
+          "reactive_reviews": {
+            "checks": [
+              {
+                "name": "ck_reactive_review_state",
+                "sqltext": "state IN ('accepted','model_requested','model_completed','commented','stale')"
+              }
+            ],
+            "columns": [
+              {
+                "default": null,
+                "name": "id",
+                "nullable": false,
+                "primary_key": 1,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "run_id",
+                "nullable": true,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "root_run_id",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "root_review_ref",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(600)"
+              },
+              {
+                "default": null,
+                "name": "base_sha",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "default": null,
+                "name": "head_sha",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "default": null,
+                "name": "actor_json",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "TEXT"
+              },
+              {
+                "default": null,
+                "name": "policy_json",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "TEXT"
+              },
+              {
+                "default": null,
+                "name": "input_json",
+                "nullable": true,
+                "primary_key": 0,
+                "type": "TEXT"
+              },
+              {
+                "default": null,
+                "name": "result_json",
+                "nullable": true,
+                "primary_key": 0,
+                "type": "TEXT"
+              },
+              {
+                "default": "'accepted'",
+                "name": "state",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "expires_at",
+                "nullable": true,
+                "primary_key": 0,
+                "type": "DATETIME"
+              },
+              {
+                "default": "CURRENT_TIMESTAMP",
+                "name": "created_at",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "DATETIME"
+              },
+              {
+                "default": "CURRENT_TIMESTAMP",
+                "name": "updated_at",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "DATETIME"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "constrained_columns": [
+                  "root_review_ref"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "root_review_ref"
+                ],
+                "referred_schema": null,
+                "referred_table": "review_cursors"
+              },
+              {
+                "constrained_columns": [
+                  "root_run_id"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              },
+              {
+                "constrained_columns": [
+                  "run_id"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "root_review_ref"
+                ],
+                "dialect_options": {},
+                "name": "ix_reactive_reviews_root_review_ref",
+                "unique": 0
+              },
+              {
+                "column_names": [
+                  "root_run_id"
+                ],
+                "dialect_options": {},
+                "name": "ix_reactive_reviews_root_run_id",
+                "unique": 0
+              }
+            ],
+            "primary_key": {
+              "constrained_columns": [
+                "id"
+              ],
+              "name": null
+            },
+            "unique": [
+              {
+                "column_names": [
+                  "root_review_ref",
+                  "head_sha"
+                ],
+                "name": "uq_reactive_review_head"
+              },
+              {
+                "column_names": [
+                  "run_id"
+                ],
+                "name": null
+              }
+            ]
+          },
+          "review_cursors": {
+            "checks": [
+              {
+                "name": "ck_review_cursor_version",
+                "sqltext": "version > 0"
+              }
+            ],
+            "columns": [
+              {
+                "default": null,
+                "name": "root_review_ref",
+                "nullable": false,
+                "primary_key": 1,
+                "type": "VARCHAR(600)"
+              },
+              {
+                "default": null,
+                "name": "root_run_id",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "review_json",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "TEXT"
+              },
+              {
+                "default": null,
+                "name": "last_reviewed_sha",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(64)"
+              },
+              {
+                "default": "'1'",
+                "name": "version",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "INTEGER"
+              },
+              {
+                "default": "CURRENT_TIMESTAMP",
+                "name": "created_at",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "DATETIME"
+              },
+              {
+                "default": "CURRENT_TIMESTAMP",
+                "name": "updated_at",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "DATETIME"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "constrained_columns": [
+                  "root_run_id"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "root_run_id"
+                ],
+                "dialect_options": {},
+                "name": "ix_review_cursors_root_run_id",
+                "unique": 0
+              }
+            ],
+            "primary_key": {
+              "constrained_columns": [
+                "root_review_ref"
+              ],
+              "name": null
+            },
+            "unique": []
+          },
           "review_rounds": {
             "checks": [
               {
@@ -8514,6 +9609,135 @@
               }
             ]
           },
+          "step_timings": {
+            "checks": [
+              {
+                "name": "ck_step_timing_outcome",
+                "sqltext": "outcome IN ('completed','parked','rescheduled')"
+              },
+              {
+                "name": "ck_step_timing_bound",
+                "sqltext": "lease_epoch > 0 AND seconds >= 0 AND seconds <= 86400"
+              }
+            ],
+            "columns": [
+              {
+                "default": null,
+                "name": "id",
+                "nullable": false,
+                "primary_key": 1,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "step_id",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "lease_epoch",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "INTEGER"
+              },
+              {
+                "default": null,
+                "name": "handler",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              },
+              {
+                "default": null,
+                "name": "seconds",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "FLOAT"
+              },
+              {
+                "default": null,
+                "name": "outcome",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(20)"
+              },
+              {
+                "default": null,
+                "name": "observed_at",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "DATETIME"
+              },
+              {
+                "default": null,
+                "name": "run_id",
+                "nullable": false,
+                "primary_key": 0,
+                "type": "VARCHAR(32)"
+              }
+            ],
+            "foreign_keys": [
+              {
+                "constrained_columns": [
+                  "run_id"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "runs"
+              },
+              {
+                "constrained_columns": [
+                  "step_id"
+                ],
+                "name": null,
+                "options": {},
+                "referred_columns": [
+                  "id"
+                ],
+                "referred_schema": null,
+                "referred_table": "steps"
+              }
+            ],
+            "indexes": [
+              {
+                "column_names": [
+                  "run_id"
+                ],
+                "dialect_options": {},
+                "name": "ix_step_timings_run_id",
+                "unique": 0
+              },
+              {
+                "column_names": [
+                  "step_id"
+                ],
+                "dialect_options": {},
+                "name": "ix_step_timings_step_id",
+                "unique": 0
+              }
+            ],
+            "primary_key": {
+              "constrained_columns": [
+                "id"
+              ],
+              "name": null
+            },
+            "unique": [
+              {
+                "column_names": [
+                  "step_id",
+                  "lease_epoch"
+                ],
+                "name": "uq_step_timing_epoch"
+              }
+            ]
+          },
           "steps": {
             "checks": [
               {
@@ -8522,7 +9746,7 @@
               },
               {
                 "name": "ck_step_handler",
-                "sqltext": "handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready')"
+                "sqltext": "handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready','feedback_review')"
               },
               {
                 "name": "ck_step_state",

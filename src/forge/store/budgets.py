@@ -75,6 +75,17 @@ class BudgetStore:
                 raise StoreConflict("persisted run specification is not canonical or digest-bound")
             document = {name: spec.model_dump(mode="json")[name] for name in RunPolicy.model_fields}
             return RunPolicy.model_validate_json(json.dumps(document))
+        from forge.review.native_values import NativeReviewPolicy
+        from forge.store.models_review import EngineReactiveReview
+
+        review = await session.scalar(
+            select(EngineReactiveReview).where(EngineReactiveReview.run_id == run_id)
+        )
+        if review is not None:
+            policy = NativeReviewPolicy.model_validate_json(review.policy_json)
+            if policy.canonical_bytes.decode() != review.policy_json:
+                raise StoreConflict("native review policy is not canonical")
+            return policy.budget
         rows = await session.scalars(
             select(EngineStep)
             .where(EngineStep.run_id == run_id, EngineStep.handler == "plan")

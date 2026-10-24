@@ -30,7 +30,7 @@ class EngineStep(RunBound, Timestamps, Base):
             "attempts >= 0 AND max_attempts > 0 AND lease_epoch >= 0", name="ck_step_counts"
         ),
         CheckConstraint(
-            "handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready')",
+            "handler IN ('plan','approve','dispatch','await_lane','publish','verify','review','ready','feedback_review')",
             name="ck_step_handler",
         ),
         CheckConstraint(

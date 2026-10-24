@@ -136,3 +136,19 @@ def test_duplicate_json_nonfinite_oversize_or_invalid_delivery_are_refused(ingre
     headers["X-GitHub-Delivery"] = "../../different"
     with pytest.raises(ValueError):
         ingress.parse(headers, body)
+
+
+def test_signed_human_push_carries_exact_native_head_and_rejects_a_fork(ingress):
+    document = payload(
+        action="synchronize",
+        pull_request={"number": 8, "head": {"repo": {"id": 123}, "sha": "a" * 40}},
+    )
+    event = ingress.parse(*signed(document, "pull_request"))
+    assert event.head_sha == "a" * 40 and event.target.kind == "review"
+    assert event.commands == () and event.actor.native_id == "42"
+    headers, body = signed(document, "pull_request")
+    with pytest.raises(ValueError):
+        ingress.parse(headers, body.replace(b"synchronize", b"closed"))
+    document["pull_request"]["head"]["repo"]["id"] = 999
+    with pytest.raises(ValueError):
+        ingress.parse(*signed(document, "pull_request"))

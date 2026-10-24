@@ -133,7 +133,7 @@ tests/test_domain_approved_input.py,7,290,true,true,,edge-case pin,,domain,keep,
 tests/test_domain_binary_candidate.py,5,246,true,true,,edge-case pin,,domain,keep,P3-09,"Native Git binary, mode and symlink validation with durable byte-exact recovery"
 tests/test_domain_boundary.py,2,84,false,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_domain_candidate.py,10,282,true,false,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
-tests/test_domain_core.py,12,226,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
+tests/test_domain_core.py,12,222,true,true,,edge-case pin,,domain,keep,P3-01,New pure engine domain contract
 tests/test_durable_controller.py,28,423,true,false,,,,durable,keep,-,
 tests/test_durable_gates.py,9,154,true,true,,invariant evidence,,durable,keep,-,
 tests/test_durable_inbox.py,9,168,true,false,,,,durable,keep,-,
@@ -171,7 +171,7 @@ tests/test_github_actions_template.py,42,1036,false,false,,,,github,keep,-,
 tests/test_github_client.py,37,807,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_engine_auth.py,6,199,false,true,,edge-case pin,,github,keep,P3-16,Repository-scoped App authority and bounded transport
 tests/test_github_engine_client.py,8,190,false,true,,edge-case pin,,github,keep,P3-16,Native repository routing and explicit HTTP uncertainty
-tests/test_github_engine_ingress.py,7,138,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
+tests/test_github_engine_ingress.py,8,154,false,true,,edge-case pin,,github,keep,P3-16,Authenticated GitHub webhook command facts and bot self-trigger refusal
 tests/test_github_flow.py,30,708,true,false,,edge-case pin,,github,port-adapter,P3,
 tests/test_github_harness.py,18,720,true,false,,edge-case pin,,github,port-engine,P3,
 tests/test_github_native_commit.py,4,201,false,true,,,,github,keep,P3-16,Selected App authority with actual local native Git publication and recovery
@@ -185,7 +185,7 @@ tests/test_gitlab_client.py,30,646,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_client_commits.py,6,150,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_dispatch_parity.py,13,533,true,false,,,,gitlab,port-engine,P3,
 tests/test_gitlab_engine_boundaries.py,6,116,false,true,,edge-case pin,,gitlab,keep,P3-19,Explicit GitLab read/write authority and confined project paths
-tests/test_gitlab_engine_ingress.py,8,163,false,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,Signed scoped GitLab events and bot command loop refusal
+tests/test_gitlab_engine_ingress.py,9,176,false,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,Signed scoped GitLab events and bot command loop refusal
 tests/test_gitlab_engine_ports.py,20,417,true,true,,invariant evidence; edge-case pin,,gitlab,keep,P3-19,"Native GitLab reads, writes, CI identity and quick-action refusal"
 tests/test_gitlab_engine_recovery.py,6,134,true,true,,,,gitlab,keep,P3-19,Native GitLab conservative probes and exact candidate tree recovery
 tests/test_gitlab_sdk_lane_finalization.py,8,442,false,false,,,,gitlab,keep,-,
@@ -225,6 +225,8 @@ tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,kee
 tests/test_native_git_ca.py,2,108,false,true,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
 tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
+tests/test_native_model_services.py,6,273,true,true,,invariant evidence,,native,keep,P3-13,"Lease-bound native review model grants and exact persisted diff, policy and closing-call authority."
+tests/test_native_review.py,17,557,true,true,,invariant evidence; edge-case pin,,native,keep,P3-13,"Incremental human-push review on exact native heads, separate read-only authority, bounded budget and immutable comment recovery."
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,
 tests/test_operator_canonical_subjects.py,24,637,true,false,,edge-case pin,,operator,keep,-,
 tests/test_operator_experience.py,18,670,true,false,,,,operator,keep,-,
@@ -280,6 +282,7 @@ tests/test_runs_verification.py,21,419,true,false,,invariant evidence,,runs,port
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_runtime_app.py,7,348,true,true,,,,runtime,keep,P3-17,Production runtime composition against owned TLS native HTTP and scoped model fixtures.
 tests/test_runtime_lane_authority.py,4,167,true,true,,invariant evidence,,runtime,keep,P3-17,Explicit per-connection OIDC authority with no provider or token-selected fallback.
+tests/test_runtime_reactive.py,3,140,true,true,,,,runtime,keep,P3-17,Configured signed native review ingress and recovery-before-activation wiring in the sole runtime.
 tests/test_runtime_settings.py,5,86,false,true,,,,runtime,keep,P3-17,"Closed configuration, explicit secret sources and native authority validation."
 tests/test_saga_durable.py,6,132,true,false,,edge-case pin,,saga,keep,-,
 tests/test_saga_native.py,7,133,true,false,,edge-case pin,,saga,port-adapter,P3,

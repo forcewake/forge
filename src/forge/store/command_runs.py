@@ -82,6 +82,16 @@ class CommandRuns:
         async with self.factory() as session:
             row = await session.scalar(select(EngineStep).where(EngineStep.key == f"{run_id}:plan"))
             if row is None:
+                from forge.store.models_review import EngineReactiveReview
+
+                request = await session.scalar(
+                    select(EngineReactiveReview).where(EngineReactiveReview.run_id == run_id)
+                )
+                if request is not None:
+                    row = await session.scalar(
+                        select(EngineStep).where(EngineStep.key == f"{request.root_run_id}:plan")
+                    )
+            if row is None:
                 raise StoreConflict("run has no original admitted issue")
             task = TaskSnapshot.model_validate_json(
                 json.dumps(json.loads(row.payload_json)["task"])
@@ -111,8 +121,29 @@ class CommandRuns:
                     .limit(50)
                 )
             ).all()
+            from forge.store.models_review import EngineReactiveReview
+
+            native = await session.scalar(
+                select(EngineReactiveReview).where(EngineReactiveReview.run_id == run.id)
+            )
+            native_data = (
+                {}
+                if native is None
+                else {
+                    "role": "read_only_review",
+                    "native_review": {
+                        "base_sha": native.base_sha,
+                        "head_sha": native.head_sha,
+                        "state": native.state,
+                        "decision": json.loads(native.result_json)["decision"]
+                        if native.result_json
+                        else None,
+                    },
+                }
+            )
             return json.dumps(
                 {
+                    **native_data,
                     "state": run.state.value,
                     "reason": run.reason,
                     "attempt": run.attempt,

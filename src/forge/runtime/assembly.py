@@ -40,6 +40,7 @@ from forge.runtime.authority import Operators
 from forge.runtime.connections import Connections, assemble_connections
 from forge.runtime.handlers import Handlers
 from forge.runtime.projection import Projection
+from forge.runtime.reactive import ReactiveServices, reactive_services
 from forge.runtime.settings import RuntimeSettings, environment, secret
 from forge.store.budget_calls import ModelCallStore
 from forge.store.budgets import BudgetStore
@@ -82,6 +83,7 @@ class Runtime:
     lane: LaneV1Service
     worker: EngineWorker[Effects]
     wakeups: Wakeups
+    reactive: ReactiveServices
 
 
 def database(url: str) -> AsyncEngine:
@@ -263,7 +265,16 @@ def budget_services(
     )
     policy_raw = config.gateway.policy_path.read_bytes()
     policy = TrustedPolicy.parse(policy_raw)
-    if any(r.policy.model not in policy.models for c in config.connections for r in c.repositories):
+    configured_models = {
+        model
+        for connection in config.connections
+        for repository in connection.repositories
+        for model in (
+            repository.policy.model,
+            *((repository.native_review.budget.model,) if repository.native_review else ()),
+        )
+    }
+    if not configured_models.issubset(policy.models):
         raise ValueError("every configured model requires an explicit native tariff")
     gateway = LiteLLMGateway(
         config.gateway.url,
@@ -335,6 +346,7 @@ def runtime_value(
         lane,
         worker,
         wakeups,
+        reactive_services(config, factory, native.registry, effects, budget.clock),
     )
 
 

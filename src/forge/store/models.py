@@ -18,7 +18,9 @@ from forge.store.models_lane import (
     EngineReviewRound,
 )
 from forge.store.models_runs import EngineApprovedInput, EngineGate, EngineRun, EngineRunSpec
+from forge.store.models_review import EngineReactiveReview, EngineReviewCursor
 from forge.store.schema.record import SchemaInstallation
+from forge.store.models_timing import EngineStepTiming
 
 __all__ = [
     "EventInbox",
@@ -38,7 +40,10 @@ __all__ = [
     "EngineReviewRound",
     "EngineRun",
     "EngineRunSpec",
+    "EngineReactiveReview",
+    "EngineReviewCursor",
     "EngineStep",
     "EngineUsage",
     "SchemaInstallation",
+    "EngineStepTiming",
 ]

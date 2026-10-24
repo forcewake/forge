@@ -3,6 +3,7 @@
 from typing import Literal
 
 from forge.domain.value import Value
+from forge.domain.verdicts import Sha
 from forge.port_values import Actor, RepoRef, ReviewRef, SubjectRef
 
 CommandKind = Literal[
@@ -38,3 +39,4 @@ class IngressEvent(Value):
     native_id: str | None = None
     native_attempt: int | None = None
     correlation_id: str | None = None
+    head_sha: Sha | None = None

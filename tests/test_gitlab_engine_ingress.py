@@ -161,3 +161,16 @@ def test_webhook_duplicate_keys_nonfinite_and_bound_are_refused(ingress):
     ):
         with pytest.raises((ValueError, ReadUnavailable)):
             ingress.parse(headers, body)
+
+
+def test_signed_merge_request_update_carries_the_native_head_without_a_command(ingress):
+    document = payload(
+        object_kind="merge_request",
+        object_attributes={**f.mr(), "action": "update", "last_commit": {"id": f.SHA}},
+    )
+    event = ingress.parse(*signed(document, "Merge Request Hook"))
+    assert event.head_sha == f.SHA and event.target.kind == "review" and event.commands == ()
+    headers, body = signed(document, "Merge Request Hook")
+    headers["X-Gitlab-Token"] = "wrong"
+    with pytest.raises(ValueError):
+        ingress.parse(headers, body)

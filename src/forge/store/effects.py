@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge_protocol import LaneDispatch
 from forge.port_values import RepoRef
+from forge.domain.states import Handler
+from forge.store.native_review_effects import authorize_native_review_effect
 from forge.store.dispatch_intents import derive_nonce, nonce_digest, read_dispatch
 
 from forge.store.models_execution import EngineEffect
@@ -79,6 +81,26 @@ def append_observation(
         row.observations_json = json.dumps(observations, separators=(",", ":"), ensure_ascii=False)
 
 
+def validate_request(
+    key: str,
+    kind: str,
+    payload_json: str,
+    payload_digest: str,
+    repo_key: str | None,
+    head_branch: str | None,
+) -> None:
+    if (
+        not key
+        or len(key) > 300
+        or not kind
+        or len(kind) > 100
+        or digest_of(payload_json) != payload_digest
+    ):
+        raise StoreConflict("invalid effect identity or canonical payload digest")
+    if kind == "ensure_draft" and (not repo_key or not head_branch):
+        raise StoreConflict("draft effect requires canonical repository and head branch")
+
+
 class EffectStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
@@ -94,19 +116,14 @@ class EffectStore:
         repo_key: str | None = None,
         head_branch: str | None = None,
     ) -> EffectRecord:
-        if (
-            not key
-            or len(key) > 300
-            or not kind
-            or len(kind) > 100
-            or digest_of(payload_json) != payload_digest
-        ):
-            raise StoreConflict("invalid effect identity or canonical payload digest")
-        if kind == "ensure_draft" and (not repo_key or not head_branch):
-            raise StoreConflict("draft effect requires canonical repository and head branch")
+        validate_request(key, kind, payload_json, payload_digest, repo_key, head_branch)
         try:
             async with transaction(self.factory) as session:
                 await fence(session, lease, datetime.now(timezone.utc))
+                if lease.handler == Handler.FEEDBACK_REVIEW:
+                    await authorize_native_review_effect(
+                        session, lease, key, kind, payload_json, datetime.now(timezone.utc)
+                    )
                 nonce = (
                     await derive_nonce(session, lease, payload_json)
                     if kind == "dispatch_lane"

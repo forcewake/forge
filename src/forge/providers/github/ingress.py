@@ -161,6 +161,11 @@ class GitHubIngress:
         elif event.startswith("pull_request"):
             pull = object_doc(doc.get("pull_request"))
             values["target"] = ReviewRef(repo=repo, number=int(native_id(pull.get("number"))))
+            if event == "pull_request" and action == "synchronize":
+                head = object_doc(pull.get("head"))
+                if native_id(object_doc(head.get("repo")).get("id")) != repo_id:
+                    raise ValueError("native factory review cannot use a fork head")
+                values["head_sha"] = text(head.get("sha"))
             self._content(doc, event, action, values)
         else:
             issue = object_doc(doc.get("issue"))

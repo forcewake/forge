@@ -64,5 +64,10 @@ async def hook(connection: str, request: Request, service: RuntimeDep) -> dict[s
                 native_reply=True,
             )
             results.append((await service.commands.submit(envelope)).model_dump(mode="json"))
+    review = (
+        (await service.reactive.reviews.submit(event)).model_dump(mode="json")
+        if event.head_sha is not None
+        else None
+    )
     service.wakeups.signal()
-    return {"accepted": True, "commands": results}
+    return {"accepted": True, "commands": results, **({"review": review} if review else {})}

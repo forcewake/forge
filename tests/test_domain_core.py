@@ -17,7 +17,6 @@ from forge.domain.budget import (
 )
 from forge.domain.states import (
     HANDLER_STATE,
-    LEGACY_STATES,
     TERMINAL,
     TRANSITIONS,
     Handler,
@@ -27,7 +26,6 @@ from forge.domain.states import (
     transition,
 )
 from forge.domain.verdicts import CheckVerdict
-from forge.durable.models import FLOW_STATUSES
 
 
 def resource(usd=0, calls=0, tokens=0):
@@ -40,8 +38,6 @@ def observation(usd=0, calls=0, tokens=0):
 
 def test_transition_graph_is_closed_and_terminal_states_are_absorbing():
     assert set(TRANSITIONS) == set(State)
-    assert set(LEGACY_STATES) == set(FLOW_STATUSES)
-    assert set(LEGACY_STATES.values()) == set(State)
     assert set(HANDLER_STATE) == set(Handler)
     for current in State:
         assert TRANSITIONS[current] <= set(State)

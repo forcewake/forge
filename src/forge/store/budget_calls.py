@@ -22,7 +22,11 @@ class ModelCallStore:
         self, lease: Lease, alias: str, model: str, tokens: int, *, now: datetime
     ) -> str:
         requested = Resources(calls=1, tokens=tokens)
-        purpose = {Handler.PLAN: "planning", Handler.REVIEW: "closing"}.get(lease.handler)
+        purpose = {
+            Handler.PLAN: "planning",
+            Handler.REVIEW: "closing",
+            Handler.FEEDBACK_REVIEW: "closing",
+        }.get(lease.handler)
         async with transaction(self.factory) as session:
             await fence(session, lease, now)
             key = await session.scalar(

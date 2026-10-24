@@ -10,9 +10,10 @@ async def serve(runtime: Runtime, stop: asyncio.Event) -> None:
     url = runtime.engine.url.render_as_string(hide_password=False)
     async with runtime.wakeups.listen(url):
         while not stop.is_set():
+            reactive = await runtime.reactive.tick()
             commands = await runtime.commands.tick(limit=20)
             execution = await runtime.worker.tick()
-            if commands == 0 and execution.execution.claimed == 0:
+            if reactive == commands == 0 and execution.execution.claimed == 0:
                 waiter = asyncio.create_task(runtime.wakeups.wait())
                 stopped = asyncio.create_task(stop.wait())
                 try:

@@ -15,6 +15,8 @@ from forge.engine.dispatch import DispatchHandler
 from forge.engine.delivery_values import DeliverySettings
 from forge.engine.lane_values import LaneSettings
 from forge.engine.model_services import ServerPlanners, ServerReviewers
+from forge.engine.native_model_services import ServerNativeReviewers
+from forge.engine.native_review import NativeReviewHandler
 from forge.engine.plan import PlanHandler
 from forge.engine.publish import PublishHandler
 from forge.engine.ready import ReadyHandler
@@ -31,6 +33,7 @@ from forge.store.command_runs import CommandRuns
 from forge.store.delivery import DeliveryStore
 from forge.store.lane_work import LaneWorkStore
 from forge.store.runs import RunStore
+from forge.store.native_reviews import NativeReviewStore
 from forge.store.steps import StepStore
 from forge.store.transactions import SessionFactory
 
@@ -99,6 +102,14 @@ class Handlers:
             ),
             Handler.READY: ReadyHandler(
                 self.lanes, self.delivery, self.ports, self.ports, self.ports, self.clock
+            ),
+            Handler.FEEDBACK_REVIEW: NativeReviewHandler(
+                NativeReviewStore(self.factory),
+                self.ports,
+                self.ports,
+                self.budget,
+                ServerNativeReviewers(self.models, NativeReviewStore(self.factory), self.clock),
+                self.clock,
             ),
         }
 

@@ -14,6 +14,7 @@ from forge.domain.value import Value
 from forge.domain.plan import RepositoryIdentity
 from forge.port_values import Actor, RepoRef
 from forge.api.lane_jwks import trusted_https_url
+from forge.review.native_values import NativeReviewPolicy
 
 Identifier = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")]
 EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,127}$")]
@@ -34,6 +35,7 @@ class Repository(Value):
     bot_login: Annotated[str, Field(min_length=1, max_length=128)]
     approver_ids: Annotated[tuple[NativeId, ...], Field(min_length=1)]
     policy: RunPolicy
+    native_review: NativeReviewPolicy | None = None
     neighbors: tuple[Neighbor, ...] = ()
     installation_id: Annotated[int, Field(gt=0)] | None = None
     read_token_env: EnvName | None = None

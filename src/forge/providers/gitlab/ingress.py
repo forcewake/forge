@@ -193,6 +193,8 @@ class GitLabIngress:
         action = text(row.get("action"))
         values["action"] = action
         if kind != "issue":
+            if action == "update" and row.get("last_commit") is not None:
+                values["head_sha"] = text(obj(row["last_commit"]).get("id"))
             return
         changes = obj(document.get("changes", {}))
         label_change = changes.get("labels")

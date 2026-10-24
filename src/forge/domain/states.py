@@ -27,6 +27,7 @@ class Handler(StrEnum):
     VERIFY = "verify"
     REVIEW = "review"
     READY = "ready"
+    FEEDBACK_REVIEW = "feedback_review"
 
 
 TERMINAL = frozenset({State.READY_FOR_HUMAN, State.BLOCKED, State.FAILED, State.CANCELLED})
@@ -56,26 +57,7 @@ HANDLER_STATE = MappingProxyType(
         Handler.VERIFY: State.VERIFYING,
         Handler.REVIEW: State.REVIEWING,
         Handler.READY: State.REVIEWING,
-    }
-)
-LEGACY_STATES = MappingProxyType(
-    {
-        "accepted": State.QUEUED,
-        "preflight": State.QUEUED,
-        "planning": State.PLANNING,
-        "waiting_approval": State.AWAITING_APPROVAL,
-        "proposing": State.RUNNING,
-        "waiting_harness": State.RUNNING,
-        "validating": State.PUBLISHING,
-        "committing": State.PUBLISHING,
-        "ensuring_draft_mr": State.PUBLISHING,
-        "waiting_ci": State.VERIFYING,
-        "evaluating_ci": State.VERIFYING,
-        "reviewing": State.REVIEWING,
-        "ready_for_human": State.READY_FOR_HUMAN,
-        "blocked": State.BLOCKED,
-        "failed": State.FAILED,
-        "cancelled": State.CANCELLED,
+        Handler.FEEDBACK_REVIEW: State.REVIEWING,
     }
 )
 REVIVAL_STATE = MappingProxyType({**HANDLER_STATE, Handler.PUBLISH: State.RUNNING})
