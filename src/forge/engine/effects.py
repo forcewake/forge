@@ -279,6 +279,8 @@ class Effects:
         expected_head: str,
         marker: str,
     ) -> CommitOutcome:
+        if not isinstance(candidate, ValidatedCandidate):
+            raise TypeError("publication requires a ValidatedCandidate")
         payload = {
             "repo": repo.model_dump(mode="json"),
             "branch": candidate.changeset.branch,

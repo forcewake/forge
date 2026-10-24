@@ -69,6 +69,8 @@ async def _checked(git: GitProcess, *args: str, data: bytes | None = None) -> by
 async def publish(
     target: GitTarget, candidate: ValidatedCandidate, expected_head: Sha, marker: str, *, stamp: int
 ) -> Sha:
+    if not isinstance(candidate, ValidatedCandidate):
+        raise TypeError("publication requires a ValidatedCandidate")
     branch = factory_branch(candidate.changeset.branch)
     if (
         not re.fullmatch(r"[0-9a-f]{40}", expected_head)

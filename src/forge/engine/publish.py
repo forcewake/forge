@@ -26,6 +26,8 @@ from forge.store.delivery import DeliveryStore
 from forge.store.lane_work import ApprovedLane, LaneWorkStore
 from forge.store.records import StepRequest, StoreConflict
 
+MAX_BASE_BYTES = 400_000
+
 
 def publication_key(context: StepContext[Effects]) -> str:
     lease = context.lease
@@ -181,6 +183,8 @@ class PublishHandler:
                 raw = await self.repo.read_blob(approved.repo, candidate.base_sha, path)
                 if raw is None:
                     raise CandidateError("stale_base", "authoritative base blob is absent")
+                if len(raw) > MAX_BASE_BYTES:
+                    raise CandidateError("file_too_large", "authoritative base exceeds its bound")
                 header = b"blob " + str(len(raw)).encode() + b"\x00"
                 oracle = (
                     hashlib.sha1(header + raw).hexdigest()

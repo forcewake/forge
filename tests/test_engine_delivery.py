@@ -107,8 +107,8 @@ def full_patch(old, new):
     )
 
 
-async def completed(case, pending, *, old=b"old\n", new=b"new\n", claimed_base=None):
-    diff = full_patch(old, new)
+async def completed(case, pending, *, old=b"old\n", new=b"new\n", claimed_base=None, diff=None):
+    diff = full_patch(old, new) if diff is None else diff
     key = hashlib.sha256(diff).hexdigest()
 
     async def chunks():

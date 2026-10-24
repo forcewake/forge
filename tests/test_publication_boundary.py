@@ -1,507 +1,193 @@
-"""Negative conformance suite for the publication boundary (ADR-0026).
+"""The single publication boundary refuses invalid work before any native write."""
 
-ONE policy, EVERY provider×backend path: a candidate that violates the
-write policy is refused with ZERO commit-API calls, whatever entry it
-arrives through, and the only route to a write is a
-:class:`~forge.runs.publisher.ValidatedCandidate` issued by the boundary.
-
-The matrix is parametrized over the publish paths the test fakes support —
-
-- the GitHub builtin bridge (``GitHubPublishFlow.publish_proposal`` over
-  :class:`tests.fixtures.fake_github.FakeGitHub`; the R01 path that used to
-  bypass validation entirely),
-- the GitHub transport entry (``publish_changeset`` invoked directly — a
-  caller claiming "trust me" must still not be able to publish),
-- the GitLab builtin publisher (``publish_candidate`` over
-  :class:`tests.fixtures.fake_gitlab.FakeGitLab`),
-
-and over every policy-violating shape: denylisted CI config, the
-``.github/`` prefix, lockfiles, absolute paths, ``..`` traversal,
-out-of-scope paths, too many files, oversized content and duplicate paths
-(R18). The positive control publishes EXACTLY the validated manifest.
-"""
+from dataclasses import replace
+import hashlib
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
-from forge.durable import FlowRun, RunSpec
-from forge.gitlab.blob_reads import BlobReadResult
-from forge.integrations.github_flow import (
-    GitHubPublishFlow,
-    github_factory_branch,
-)
-from forge.models.base import Base
-from forge.repository import (
-    ChangesetWriter,
-)
-from forge.domain.change_types import (
-    Change,
-    ChangeSet,
-    Operation,
-)
-from forge.domain.paths import (
-    resolve_write_policy,
-)
-from forge.domain.candidate import (
-    bundle_from_changeset,
-)
 from forge.domain.candidate import (
     ValidatedCandidate,
-    validate_candidate_bundle,
 )
-from forge.runs.publisher import (
-    publish_candidate,
+from forge.domain.change_types import Change, ChangeSet, Operation
+from forge.domain.paths import resolve_write_policy
+from forge.domain.states import State
+from forge.port_values import ReadUnavailable
+from tests.test_engine_delivery import delivery as delivery, completed, full_patch
+from tests.test_engine_lane_handlers import case as case, env as env, settings as settings, started
+
+
+def oid(raw):
+    return hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+
+
+def creation(path, raw=b"x\n"):
+    lines = raw.splitlines(keepends=True)
+    content = b"".join(b"+" + line for line in lines)
+    return (
+        f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
+        f"index {'0' * 40}..{oid(raw)}\n--- /dev/null\n+++ b/{path}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n"
+    ).encode() + content
+
+
+def frozen_policy(env, policy):
+    env.intent = env.intent.model_copy(
+        update={"policy": env.intent.policy.model_copy(update={"write_policy": policy})}
+    )
+
+
+SCENARIOS = (
+    ("ci", creation(".gitlab-ci.yml")),
+    ("workflow", creation(".github/workflows/pwn.yml")),
+    ("lockfile", creation("package-lock.json")),
+    ("duplicate", creation("dup.py") + creation("dup.py")),
+    ("absolute", creation("/etc/evil.py")),
+    ("traversal", creation("../escape.py")),
+    ("scope", creation("outside.py")),
+    ("too_many", b"".join(creation(f"file{n}.py") for n in range(21))),
+    ("oversized", creation("large.py", b"x" * (256 * 1024 + 1) + b"\n")),
 )
-from tests.fixtures.fake_github import FakeGitHub
-from tests.fixtures.fake_gitlab import FakeGitLab
-
-GH_REPO = "acme/acme-widget"
-GH_BASE_HEAD = "1" * 40
-GL_PROJECT_ID = 42
-ISSUE_IID = 7
-RUN_ID = "abcd1234" + "0" * 24
-BASE_SHA = "base-sha-1"
-
-#: The commit-API mutations a rejection must never reach (GitHub side).
-GH_MUTATIONS = ("create_branch", "create_commit_on_branch", "create_draft_pr")
-
-
-# ----------------------------------------------------------------------
-# Scenario matrix: (name, changeset factory, expected refusal fragment, scope)
-# ----------------------------------------------------------------------
-
-
-def _cs(*changes: Change, message: str = "forge: implement 7") -> ChangeSet:
-    return ChangeSet(
-        branch=github_factory_branch(ISSUE_IID, RUN_ID),
-        commit_message=message,
-        changes=list(changes),
-    )
-
-
-def create(path: str, content: str = "x\n") -> Change:
-    return Change(path=path, operation=Operation.CREATE, content=content)
-
-
-SCENARIOS = [
-    pytest.param(
-        "denylisted_ci_config",
-        lambda: _cs(create(".gitlab-ci.yml", "rogue: true\n")),
-        "denylisted",
-        None,
-        id="denylisted_ci_config",
-    ),
-    pytest.param(
-        "denylisted_workflow_prefix",
-        lambda: _cs(create(".github/workflows/pwn.yml", "on: push\n")),
-        "denylisted prefix",
-        None,
-        id="denylisted_workflow_prefix",
-    ),
-    pytest.param(
-        "lockfile",
-        lambda: _cs(create("package-lock.json", "{}\n")),
-        "lockfiles are denylisted",
-        None,
-        id="lockfile",
-    ),
-    pytest.param(
-        "duplicate_path",
-        # R18: two entries for one path — even under different spellings —
-        # are an ambiguous candidate, refused before any write.
-        lambda: _cs(create("dup/report.md", "one\n"), create("./dup//report.md", "two\n")),
-        "duplicate",
-        None,
-        id="duplicate_path",
-    ),
-    pytest.param(
-        "absolute_path",
-        lambda: _cs(create("/etc/evil.py")),
-        "absolute paths",
-        None,
-        id="absolute_path",
-    ),
-    pytest.param(
-        "path_traversal",
-        lambda: _cs(create("../escape.py")),
-        "path traversal",
-        None,
-        id="path_traversal",
-    ),
-    pytest.param(
-        "out_of_scope",
-        lambda: _cs(create("web/components/x.ts", "hi\n")),
-        "outside the allowed scope",
-        ["services/**"],
-        id="out_of_scope",
-    ),
-    pytest.param(
-        "too_many_files",
-        lambda: _cs(*(create(f"dir/file{i}.txt", "x") for i in range(21))),
-        "max 20",
-        None,
-        id="too_many_files",
-    ),
-    pytest.param(
-        "oversized_content",
-        lambda: _cs(create("big.txt", "x" * (256 * 1024 + 1))),
-        "bytes",
-        None,
-        id="oversized_content",
-    ),
-]
-
-
-# ----------------------------------------------------------------------
-# Shared fixtures / helpers
-# ----------------------------------------------------------------------
-
-
-def make_run(**overrides) -> FlowRun:
-    run = FlowRun(
-        id=RUN_ID,
-        project_id=GL_PROJECT_ID,
-        issue_iid=ISSUE_IID,
-        base_sha=BASE_SHA,
-    )
-    for key, value in overrides.items():
-        setattr(run, key, value)
-    return run
-
-
-@pytest.fixture()
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
-
-
-@pytest.fixture()
-def fake_gitlab() -> FakeGitLab:
-    fake = FakeGitLab()
-    fake.seed_commit("main", BASE_SHA, "initial")
-    return fake
-
-
-@pytest.fixture()
-def fake_github() -> FakeGitHub:
-    github = FakeGitHub()
-    github.seed_repo(GH_REPO, {"src/app.py": "print('hi')\n", "README.md": "# acme\n"})
-    github.heads[GH_REPO]["main"] = GH_BASE_HEAD
-    github.seed_issue(GH_REPO, 42, "Add password reset", "Users are locked out.")
-    return github
-
-
-async def publish_via_github(fake: FakeGitHub, changeset: ChangeSet, scope):
-    """The lane-candidate entry validates bytes before any native write."""
-    flow = GitHubPublishFlow(fake, base_branch="main")
-    return await flow.publish_candidate(
-        "acme",
-        "acme-widget",
-        issue_number=42,
-        run_id=RUN_ID,
-        bundle=bundle_from_changeset(changeset, attempt_base_oid=GH_BASE_HEAD),
-        commit_message=changeset.commit_message,
-        base_branch="main",
-        expected_head=GH_BASE_HEAD,
-        allowed_paths=list(scope) if scope else None,
-    )
-
-
-async def publish_via_github_transport(fake: FakeGitHub, changeset: ChangeSet, scope):
-    """The transport entry, invoked DIRECTLY with an unvalidated changeset."""
-    flow = GitHubPublishFlow(fake, base_branch="main")
-    return await flow.publish_changeset(
-        "acme",
-        "acme-widget",
-        issue_number=42,
-        run_id=RUN_ID,
-        changeset=changeset,
-        allowed_paths=list(scope) if scope else None,
-    )
-
-
-async def publish_via_gitlab(db, fake: FakeGitLab, changeset: ChangeSet, scope) -> object:
-    """The GitLab builtin publisher entry over the same candidate shape."""
-    run = make_run()
-    async with db() as session:
-        session.add(run)
-        if scope:
-            session.add(
-                RunSpec(
-                    run_id=run.id,
-                    document={"allowed_paths": list(scope)},
-                    digest="digest-with-scope",
-                )
-            )
-        await session.commit()
-    writer = ChangesetWriter(fake, db, GL_PROJECT_ID)
-    return await publish_candidate(
-        gitlab=fake,
-        session_factory=db,
-        writer=writer,
-        run=run,
-        bundle=bundle_from_changeset(changeset, attempt_base_oid=BASE_SHA),
-    )
-
-
-# ----------------------------------------------------------------------
-# The negative matrix: zero commit-API calls on EVERY path
-# ----------------------------------------------------------------------
 
 
 class TestZeroWritesOnRejection:
-    @pytest.mark.parametrize("name,make_cs,fragment,scope", SCENARIOS)
-    async def test_github_lane_candidate_refuses_and_never_mutates(
-        self, fake_github, name, make_cs, fragment, scope
-    ):
-        outcome = await publish_via_github(fake_github, make_cs(), scope)
-
-        assert outcome.ok is False
-        assert outcome.invalid is True  # the boundary rejected it
-        assert outcome.drift is True  # blocked-class: callers BLOCK, never retry
-        assert fragment in outcome.reason
-        for mutation in GH_MUTATIONS:
-            assert fake_github.calls_of(mutation) == [], name
-
-    @pytest.mark.parametrize("name,make_cs,fragment,scope", SCENARIOS)
-    async def test_github_transport_refuses_a_direct_unvalidated_changeset(
-        self, fake_github, name, make_cs, fragment, scope
-    ):
-        """Direct bridge invocation with an unvalidated candidate cannot publish."""
-        outcome = await publish_via_github_transport(fake_github, make_cs(), scope)
-
-        assert outcome.ok is False
-        assert outcome.invalid is True
-        assert fragment in outcome.reason
-        for mutation in GH_MUTATIONS:
-            assert fake_github.calls_of(mutation) == [], name
-
-    @pytest.mark.parametrize("name,make_cs,fragment,scope", SCENARIOS)
-    async def test_gitlab_publisher_refuses_and_never_commits(
-        self, db, fake_gitlab, name, make_cs, fragment, scope
-    ):
-        result = await publish_via_gitlab(db, fake_gitlab, make_cs(), scope)
-
-        assert result.ok is False
-        assert fragment in result.reason
-        assert fake_gitlab.calls_of("create_commit") == []
-        assert fake_gitlab.calls_of("create_branch") == []
-
-
-# ----------------------------------------------------------------------
-# The type/guard: only the boundary's wrapper reaches a write
-# ----------------------------------------------------------------------
+    @pytest.mark.parametrize("name,diff", SCENARIOS, ids=[name for name, _ in SCENARIOS])
+    async def test_publisher_refuses_and_never_commits(self, delivery, name, diff):
+        env = delivery["env"]
+        if name == "scope":
+            frozen_policy(
+                env, replace(env.intent.policy.write_policy, allowed_globs=("services/**",))
+            )
+        run, _, pending = await started(delivery)
+        before = await env.fake.head(env.intent.task.subject.repo, "forge/" + run.id)
+        await completed(delivery, pending, diff=diff)
+        tick = await env.runner.tick()
+        current = await env.runs.load(run.id)
+        assert tick.parked == 1 and current.state == State.BLOCKED, current.reason
+        assert current.reason.startswith("candidate_")
+        assert not any(name in {"commit", "ensure_draft"} for name, _ in env.fake.calls)
+        assert not env.fake.drafts
+        assert await env.fake.head(env.intent.task.subject.repo, "forge/" + run.id) == before
 
 
 class TestValidatedWrapperGuard:
-    async def test_transport_write_leg_refuses_a_raw_changeset(self, fake_github):
-        """The commit API is reachable only through the boundary's wrapper."""
-        flow = GitHubPublishFlow(fake_github, base_branch="main")
-        raw = _cs(create("src/ok.py"))
+    async def test_write_leg_refuses_a_raw_changeset_before_journaling(self, delivery):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        await completed(delivery, pending)
+        (lease,) = await env.steps.claim_due("boundary", env.clock.now(), 60)
+        raw = ChangeSet(
+            branch="forge/" + run.id,
+            commit_message="raw",
+            changes=(Change("x.py", Operation.CREATE, "x\n"),),
+        )
         assert not isinstance(raw, ValidatedCandidate)
+        with pytest.raises(TypeError, match="ValidatedCandidate"):
+            await env.effects.commit(
+                lease,
+                "raw-commit",
+                env.intent.task.subject.repo,
+                raw,
+                pending.dispatch.base_sha,
+                "raw",
+            )
+        from forge.providers.git_commit import GitTarget, publish
 
         with pytest.raises(TypeError, match="ValidatedCandidate"):
-            await flow.publish_validated(
-                "acme",
-                "acme-widget",
-                issue_number=42,
-                run_id=RUN_ID,
-                candidate=raw,  # type: ignore[arg-type]
+            await publish(
+                GitTarget("https://example.invalid/repository.git", "synthetic"),
+                raw,
+                pending.dispatch.base_sha,
+                "raw",
+                stamp=0,
             )
-        for mutation in GH_MUTATIONS:
-            assert fake_github.calls_of(mutation) == []
-
-    async def test_wrapper_issued_by_the_boundary_is_accepted(self, fake_github):
-        flow = GitHubPublishFlow(fake_github, base_branch="main")
-        candidate = validate_candidate_bundle(
-            bundle_from_changeset(
-                _cs(create("src/feature.py", "VALUE = 1\n")), attempt_base_oid=GH_BASE_HEAD
-            ),
-            base_contents={},
-            branch=github_factory_branch(42, RUN_ID),
-            commit_message="forge: implement 42",
-        )
-
-        outcome = await flow.publish_validated(
-            "acme",
-            "acme-widget",
-            issue_number=42,
-            run_id=RUN_ID,
-            candidate=candidate,
-            expected_head=GH_BASE_HEAD,
-        )
-
-        assert outcome.ok is True
-        assert fake_github.files[GH_REPO]["src/feature.py"] == "VALUE = 1\n"
-
-
-# ----------------------------------------------------------------------
-# The positive control: the validated manifest is exactly what publishes
-# ----------------------------------------------------------------------
+        assert await env.effects.store.get("raw-commit") is None
+        assert not any(name == "commit" for name, _ in env.fake.calls)
 
 
 class TestPositiveControl:
-    async def test_github_publishes_exactly_the_validated_manifest(self, fake_github):
-        changeset = _cs(
-            create("src/feature.py", "VALUE = 1\n"),
-            Change(path="src/app.py", operation=Operation.UPDATE, content="print('hello')\n"),
-        )
-
-        outcome = await publish_via_github(fake_github, changeset, None)
-
-        assert outcome.ok is True
-        # Exactly the validated manifest — no more, no less.
-        assert fake_github.files[GH_REPO]["src/feature.py"] == "VALUE = 1\n"
-        assert fake_github.files[GH_REPO]["src/app.py"] == "print('hello')\n"
-        assert set(fake_github.files[GH_REPO]) == {"src/app.py", "README.md", "src/feature.py"}
-        assert outcome.pr_draft is True
-
-    async def test_gitlab_publishes_exactly_the_validated_manifest(self, db, fake_gitlab):
-        changeset = _cs(create("forge-demo/x.md", "hello\n"))
-
-        result = await publish_via_gitlab(db, fake_gitlab, changeset, None)
-
-        assert result.ok is True
-        (commit_call,) = fake_gitlab.calls_of("create_commit")
-        actions = commit_call[1][2]
-        assert [(a["action"], a["file_path"]) for a in actions] == [("create", "forge-demo/x.md")]
-        assert actions[0]["content"] == "hello\n"
-
-
-# ----------------------------------------------------------------------
-# R14: authoritative evidence is never conflated at the boundary
-# ----------------------------------------------------------------------
+    async def test_publishes_exactly_the_validated_manifest(self, delivery):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        diff = full_patch(b"old\n", b"new\n") + creation("feature.py", b"VALUE = 1\n")
+        await completed(delivery, pending, diff=diff)
+        assert (await env.runner.tick()).completed == 1
+        assert (await env.runs.load(run.id)).state == State.VERIFYING
+        commits = [args for name, args in env.fake.calls if name == "commit"]
+        assert len(commits) == 1 and isinstance(commits[0][1], ValidatedCandidate)
+        sha = await env.fake.head(env.intent.task.subject.repo, "forge/" + run.id)
+        native = env.fake.repo(env.intent.task.subject.repo).commits[sha]
+        files = dict(native.files)
+        assert set(files) == {"a.py", "feature.py"}
+        assert files["a.py"].content == b"new\n"
+        assert files["feature.py"].content == b"VALUE = 1\n"
+        assert len(env.fake.drafts) == 1
 
 
 class TestAuthoritativeEvidence:
-    async def test_gitlab_forbidden_base_read_refuses_with_zero_commits(
-        self, db, fake_gitlab, monkeypatch
-    ):
-        """A 403 on an EXISTING base file is never evidence of absence."""
-        fake_gitlab.seed_file("src/app.py", "print('hi')\n")
+    @pytest.mark.parametrize("reason", ("forbidden", "unavailable", "incomplete"))
+    async def test_unreadable_base_never_becomes_absence(self, delivery, monkeypatch, reason):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        await completed(delivery, pending)
 
-        async def forbidden_read(project_id, file_path, ref="HEAD"):
-            return BlobReadResult.forbidden(f"gitlab api error 403: denied for {file_path!r}")
+        async def unreadable(*args):
+            raise ReadUnavailable(reason, "sanitized native read failure")
 
-        monkeypatch.setattr(fake_gitlab, "read_blob", forbidden_read)
-        changeset = _cs(
-            Change(path="src/app.py", operation=Operation.UPDATE, content="print('hello')\n")
+        monkeypatch.setattr(env.fake, "read_blob", unreadable)
+        tick = await env.runner.tick()
+        current = await env.runs.load(run.id)
+        assert tick.rescheduled == 1 and current.state == State.PUBLISHING
+        assert not any(name == "commit" for name, _ in env.fake.calls)
+        assert not env.fake.drafts
+
+    async def test_confirmed_absence_is_the_only_honest_missing(self, delivery):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        await completed(
+            delivery, pending, diff=full_patch(b"old\n", b"new\n").replace(b"a.py", b"missing.py")
         )
+        assert (await env.runner.tick()).parked == 1
+        assert (await env.runs.load(run.id)).state == State.BLOCKED
+        assert not any(name == "commit" for name, _ in env.fake.calls)
 
-        result = await publish_via_gitlab(db, fake_gitlab, changeset, None)
-
-        assert result.ok is False
-        assert "authoritative_read_failed" in result.reason
-        assert fake_gitlab.calls_of("create_commit") == []
-        assert fake_gitlab.calls_of("create_branch") == []
-
-    async def test_confirmed_absence_is_the_only_honest_missing(self, db, fake_gitlab):
-        """A real 404 at the base makes an update honestly unapplicable —
-        the candidate is refused for having no base content, and nothing
-        is created, updated or deleted."""
-        changeset = _cs(Change(path="never/there.py", operation=Operation.UPDATE, content="x\n"))
-
-        result = await publish_via_gitlab(db, fake_gitlab, changeset, None)
-
-        assert result.ok is False
-        assert "no authoritative base content" in result.reason
-        assert fake_gitlab.calls_of("create_commit") == []
-
-    async def test_github_unreadable_base_stays_blocked_with_zero_mutations(
-        self, fake_github, monkeypatch
-    ):
-        """The GitHub transport entry keeps refusing a candidate whose base
-        cannot be read — blocked-class, zero commit-API calls."""
-        from forge.integrations.github import GitHubAPIError
-
-        async def forbidden_text(file_path, ref="HEAD"):
-            raise GitHubAPIError(403, "read denied")
-
-        monkeypatch.setattr(fake_github, "read_text", forbidden_text)
-        changeset = _cs(
-            Change(path="src/app.py", operation=Operation.UPDATE, content="print('hello')\n")
-        )
-
-        outcome = await publish_via_github(fake_github, changeset, None)
-
-        assert outcome.ok is False
-        assert outcome.invalid is True
-        assert outcome.drift is True
-        for mutation in GH_MUTATIONS:
-            assert fake_github.calls_of(mutation) == []
-
-    async def test_github_create_over_confirmed_existing_is_refused(self, fake_github):
-        """The strict base read FOUND src/app.py — a create over it is a
-        violation, never a silent overwrite (R14 create rule)."""
-        changeset = _cs(create("src/app.py", "clobber = True\n"))
-
-        outcome = await publish_via_github(fake_github, changeset, None)
-
-        assert outcome.ok is False
-        assert outcome.invalid is True
-        assert "already exists in the base snapshot" in outcome.reason
-        for mutation in GH_MUTATIONS:
-            assert fake_github.calls_of(mutation) == []
-
-
-# ----------------------------------------------------------------------
-# R18: write profiles at the boundary
-# ----------------------------------------------------------------------
+    async def test_create_over_confirmed_existing_is_refused(self, delivery):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        await completed(delivery, pending, diff=creation("a.py"))
+        assert (await env.runner.tick()).parked == 1
+        assert (await env.runs.load(run.id)).reason == "candidate_write_policy_refused"
+        assert not any(name == "commit" for name, _ in env.fake.calls)
 
 
 class TestWriteProfileBoundary:
-    """The boundary accepts an explicit write policy (R18). The default is
-    the historical behavior (the matrix above); an explicit profile both
-    RELAXES exactly its own category and never escapes the sensitive-path
-    deny."""
-
-    async def test_dependency_update_publishes_the_lockfile(self):
-        """The R18 case: legitimate dependency work publishes under
-        ``dependency_update`` — the same candidate the default denies."""
-        bundle = bundle_from_changeset(
-            _cs(create("package-lock.json", "{}\n")), attempt_base_oid=GH_BASE_HEAD
-        )
-        with pytest.raises(Exception, match="lockfiles are denylisted"):
-            validate_candidate_bundle(
-                bundle,
-                base_contents={},
-                branch=github_factory_branch(ISSUE_IID, RUN_ID),
-                commit_message="forge: implement 7",
-            )
-
-        candidate = validate_candidate_bundle(
-            bundle,
-            base_contents={},
-            branch=github_factory_branch(ISSUE_IID, RUN_ID),
-            commit_message="forge: implement 7",
-            policy=resolve_write_policy("dependency_update"),
-        )
-        assert [c.path for c in candidate.changeset.changes] == ["package-lock.json"]
+    async def test_dependency_update_publishes_the_lockfile(self, delivery):
+        env = delivery["env"]
+        frozen_policy(env, resolve_write_policy("dependency_update"))
+        run, _, pending = await started(delivery)
+        await completed(delivery, pending, diff=creation("package-lock.json", b"{}\n"))
+        assert (await env.runner.tick()).completed == 1
+        assert (await env.runs.load(run.id)).state == State.VERIFYING
+        assert sum(name == "commit" for name, _ in env.fake.calls) == 1
 
     @pytest.mark.parametrize(
-        "profile", ["no_dependencies", "code_only", "dependency_update", "ci_change"]
+        "profile", ("no_dependencies", "code_only", "dependency_update", "ci_change")
     )
-    async def test_pipeline_entrypoint_is_refused_under_every_profile(self, profile):
-        """The Azure hook: an onboarding-provided pipeline entrypoint stays
-        denied under EVERY profile — a candidate never rewrites the lane
-        that executes it (even where ci_change permits CI files)."""
-        policy = resolve_write_policy(profile, extra_denied_paths=["pipelines/build.yml"])
-        with pytest.raises(Exception, match="protected pipeline entrypoint"):
-            validate_candidate_bundle(
-                bundle_from_changeset(
-                    _cs(create("pipelines/build.yml", "steps: []\n")),
-                    attempt_base_oid=GH_BASE_HEAD,
-                ),
-                base_contents={},
-                branch=github_factory_branch(ISSUE_IID, RUN_ID),
-                commit_message="forge: implement 7",
-                policy=policy,
-            )
+    async def test_pipeline_entrypoint_is_refused_under_every_profile(self, delivery, profile):
+        env = delivery["env"]
+        frozen_policy(
+            env, resolve_write_policy(profile, extra_denied_paths=("pipelines/build.yml",))
+        )
+        run, _, pending = await started(delivery)
+        await completed(delivery, pending, diff=creation("pipelines/build.yml"))
+        assert (await env.runner.tick()).parked == 1
+        assert (await env.runs.load(run.id)).reason == "candidate_write_policy_refused"
+        assert not any(name == "commit" for name, _ in env.fake.calls)
+
+    async def test_later_ambient_policy_cannot_expand_the_approved_profile(self, delivery):
+        env = delivery["env"]
+        run, _, pending = await started(delivery)
+        frozen_policy(env, resolve_write_policy("dependency_update"))
+        await completed(delivery, pending, diff=creation("package-lock.json"))
+        assert (await env.runner.tick()).parked == 1
+        assert (await env.runs.load(run.id)).reason == "candidate_write_policy_refused"
+        assert not any(name == "commit" for name, _ in env.fake.calls)

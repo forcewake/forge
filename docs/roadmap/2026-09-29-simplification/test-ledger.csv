@@ -141,7 +141,7 @@ tests/test_durable_models.py,6,121,true,false,,,,durable,keep,-,
 tests/test_edge_case_register.py,4,56,false,false,,,,edge,keep,-,
 tests/test_engine_approval.py,8,557,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-07,Atomic displayed-input approval and admission contracts
 tests/test_engine_commands.py,8,251,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,"Durable command ownership, native reply recovery and cancellation fencing."
-tests/test_engine_delivery.py,15,451,true,true,,edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
+tests/test_engine_delivery.py,15,451,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-09,"Durable publish, independent checks, same-pool repair, closing review and readiness"
 tests/test_engine_dispatch_intents.py,3,64,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-10,Indexed dispatch recovery bound to immutable effect and native repository.
 tests/test_engine_effects.py,7,400,true,true,,invariant evidence; edge-case pin,,engine,keep,P3-04,Journaled effect crash and full typed recovery contracts
 tests/test_engine_lane.py,14,548,true,true,,invariant evidence; edge-case pin,,engine,keep,P2-04,"Engine-only lane persistence, native authority and restart contracts"
@@ -242,10 +242,10 @@ tests/test_project_config_location.py,5,64,true,false,,edge-case pin,,project,ke
 tests/test_protocol_v1.py,5,64,true,true,,,,protocol,keep,-,Protocol v1 wire contract for the separate shipped distribution
 tests/test_provider_namespaces.py,22,829,true,false,,,,provider,port-engine,P3,
 tests/test_provider_retirement.py,5,65,true,false,,,,provider,keep,-,
-tests/test_publication_boundary.py,13,507,true,false,,invariant evidence; edge-case pin,,publication,port-adapter,P3,
+tests/test_publication_boundary.py,9,193,true,true,,invariant evidence; edge-case pin,,publication,port-adapter,P3,
 tests/test_publication_intents.py,39,1362,true,false,,invariant evidence; edge-case pin,,publication,port-engine,P3,
 tests/test_publication_manifest.py,2,69,true,true,,,,publication,keep,P3-04,Complete native tree recovery against immutable candidate post-images
-tests/test_publisher.py,49,988,true,false,,invariant evidence; edge-case pin,,publisher,port-adapter,P3,
+tests/test_publisher.py,19,347,true,true,,invariant evidence; edge-case pin,,publisher,port-adapter,P3,
 tests/test_real_construction_surfaces.py,36,657,true,false,,,,real,port-adapter,P3,
 tests/test_redactor.py,5,44,true,false,,edge-case pin,,redactor,keep,-,
 tests/test_release_flow.py,10,242,false,false,,edge-case pin,,release,keep,-,
