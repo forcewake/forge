@@ -1,5 +1,6 @@
 """Scoped metrics report durable observations; absent usage is never a zero price."""
 
+import asyncio
 from collections import Counter, defaultdict
 from decimal import Decimal, localcontext
 import json
@@ -16,7 +17,7 @@ from forge.store.models_runs import EngineRun
 from forge.store.models_timing import EngineStepTiming
 from forge.store.transactions import SessionFactory
 
-MAX_ROWS = 1000
+QUERY_SECONDS = 10.0
 Scope = tuple[tuple[str, str, str], ...]
 
 
@@ -52,7 +53,7 @@ class Metrics:
         self.factory, self.scope = factory, scope
 
     async def render(self) -> str:
-        async with self.factory() as session:
+        async with asyncio.timeout(QUERY_SECONDS), self.factory() as session:
             lines = [
                 await self.runs(session),
                 await self.timings(session),
@@ -99,24 +100,16 @@ class Metrics:
         return "".join(lines)
 
     async def effects(self, session: AsyncSession) -> str:
-        query = (
-            select(EngineEffect)
-            .where(
-                or_(
-                    EngineEffect.run_id.in_(_runs(self.scope)),
-                    EngineEffect.command_id.in_(_commands(session, self.scope)),
-                )
+        query = select(EngineEffect).where(
+            or_(
+                EngineEffect.run_id.in_(_runs(self.scope)),
+                EngineEffect.command_id.in_(_commands(session, self.scope)),
             )
-            .limit(MAX_ROWS + 1)
         )
         rows = await session.stream_scalars(query.execution_options(yield_per=1))
         counts: Counter[tuple[str, str]] = Counter()
-        observed = bytes_seen = unresolved = 0
+        unresolved = 0
         async for row in rows:
-            observed += 1
-            bytes_seen += len(row.observations_json)
-            if observed > MAX_ROWS or bytes_seen > 8 * 1024 * 1024:
-                raise ValueError("metric snapshot exceeds its complete bounded scope")
             unresolved += row.state in ("unknown", "dispatched")
             if (
                 row.kind not in {kind.value for kind in EffectKind}
@@ -154,23 +147,14 @@ class Metrics:
         return "".join(lines)
 
     async def spend(self, session: AsyncSession) -> str:
-        query = (
-            select(EngineBudgetPool)
-            .where(EngineBudgetPool.run_id.in_(_runs(self.scope)))
-            .limit(MAX_ROWS + 1)
-        )
+        query = select(EngineBudgetPool).where(EngineBudgetPool.run_id.in_(_runs(self.scope)))
         pools = await session.stream_scalars(query.execution_options(yield_per=1))
         settled: dict[str, Decimal] = defaultdict(Decimal)
         held: dict[str, Decimal] = defaultdict(Decimal)
         unknown: Counter[str] = Counter()
         with localcontext() as context:
             context.prec = 80
-            observed = bytes_seen = 0
             async for row in pools:
-                observed += 1
-                bytes_seen += len(row.state_json)
-                if observed > MAX_ROWS or bytes_seen > 8 * 1024 * 1024:
-                    raise ValueError("metric snapshot exceeds its complete bounded scope")
                 if len(row.state_json) > 1048576:
                     raise ValueError("budget metric observation exceeds its bound")
                 pool = Pool.model_validate_json(row.state_json)

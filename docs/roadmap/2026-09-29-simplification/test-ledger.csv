@@ -283,7 +283,7 @@ tests/test_runs_verification.py,10,166,true,false,,invariant evidence; edge-case
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_runtime_app.py,7,348,true,true,,,,runtime,keep,P3-17,Production runtime composition against owned TLS native HTTP and scoped model fixtures.
 tests/test_runtime_lane_authority.py,4,167,true,true,,invariant evidence,,runtime,keep,P3-17,Explicit per-connection OIDC authority with no provider or token-selected fallback.
-tests/test_runtime_metrics.py,8,264,true,true,,invariant evidence,,runtime,keep,P3-14,"Observed execution timing, append-only effect counters and explicit held or unknown spend projections."
+tests/test_runtime_metrics.py,9,282,true,false,,invariant evidence; edge-case pin,,runtime,keep,P3-14,"Observed execution timing, append-only effect counters and explicit held or unknown spend projections."
 tests/test_runtime_reactive.py,3,140,true,true,,,,runtime,keep,P3-17,Configured signed native review ingress and recovery-before-activation wiring in the sole runtime.
 tests/test_runtime_settings.py,5,86,false,true,,,,runtime,keep,P3-17,"Closed configuration, explicit secret sources and native authority validation."
 tests/test_saga_durable.py,6,132,true,false,,edge-case pin,,saga,keep,-,

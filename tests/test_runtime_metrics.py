@@ -1,5 +1,6 @@
 """Scoped metrics preserve observed duration, unknown liability and effect history."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -205,22 +206,39 @@ async def test_scoped_spend_reports_only_settled_cost_and_explicit_unknowns(nati
     assert "private" not in rendered
 
 
-async def test_metrics_refuse_partial_truncated_observation_scope(native_store, monkeypatch):
+async def test_metrics_count_complete_history_beyond_a_thousand_effects(native_store):
+    run, step, _ = await seeded(native_store)
+    async with native_store.begin() as session:
+        for index in range(1001):
+            session.add(
+                EngineEffect(
+                    id=uuid4().hex,
+                    key="history:" + str(index),
+                    kind="post_comment",
+                    run_id=run.id,
+                    step_id=step.id,
+                    lease_epoch=1,
+                    payload_json="{}",
+                    payload_digest="a" * 64,
+                    state="unknown",
+                    observations_json=json.dumps([json.dumps({"state": "unknown"})]),
+                )
+            )
+    rendered = await Metrics(native_store, SCOPE).render()
+    assert 'forge_effects_total{kind="post_comment",outcome="unknown"} 1001\n' in rendered
+    assert "forge_unknown_effects 1001\n" in rendered
+
+
+async def test_metrics_deadline_refuses_incomplete_series(native_store, monkeypatch):
     import forge.runtime.metrics as metrics
 
-    run, _, now = await seeded(native_store)
-    (lease,) = await StepStore(native_store).claim_due("metrics", now, 60)
-    for key in ("one", "two"):
-        await EffectStore(native_store).request_once(
-            lease,
-            key=key,
-            kind="post_comment",
-            payload_json="{}",
-            payload_digest="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        )
-    monkeypatch.setattr(metrics, "MAX_ROWS", 1)
-    with pytest.raises(ValueError, match="complete bounded scope"):
-        await Metrics(native_store, SCOPE).render()
+    class Stalled(Metrics):
+        async def timings(self, session):
+            await asyncio.Future()
+
+    monkeypatch.setattr(metrics, "QUERY_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await Stalled(native_store, SCOPE).render()
 
 
 @pytest.mark.parametrize("state", list(State))
