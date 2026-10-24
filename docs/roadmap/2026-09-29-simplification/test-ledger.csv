@@ -222,6 +222,7 @@ tests/test_mcp_runs_tools.py,7,101,true,false,,edge-case pin,,mcp,keep,-,
 tests/test_mcp_server.py,7,89,true,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,true,false,,,,mention,keep,-,
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
+tests/test_native_git_ca.py,2,108,false,true,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
 tests/test_native_git_publication.py,9,278,true,true,,,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_locator.py,34,565,true,false,,,,native,keep,-,
 tests/test_operation_grant.py,73,2210,true,false,,,,operation,port-engine,P3,

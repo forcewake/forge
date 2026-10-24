@@ -77,7 +77,7 @@ def github(
         lane_workflow_path=repository.lane_workflow,
         verification_workflow_paths=repository.verification_workflows,
     )
-    committer = GitHubCommitter(api, auth, repo, clock, bot=bot)
+    committer = GitHubCommitter(api, auth, repo, clock, bot=bot, ca_path=connection.tls_ca_path)
     writes = GitHubWrites(
         api,
         bot=bot,
@@ -124,7 +124,7 @@ def gitlab(
         dispatch_lookup=effects.dispatch_for_nonce,
         configuration_path=repository.ci_configuration,
     )
-    committer = GitLabCommitter(api, repo, clock)
+    committer = GitLabCommitter(api, repo, clock, ca_path=connection.tls_ca_path)
     writes = GitLabWrites(
         api,
         repositories=repo,

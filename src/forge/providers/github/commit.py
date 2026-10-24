@@ -1,6 +1,7 @@
 """Selected-repository App publication through one native expected-head Git path."""
 
 import base64
+from pathlib import Path
 
 from forge.domain.candidate import ValidatedCandidate
 from forge.domain.verdicts import CommitOutcome, Committed, Conflict, Sha, Unknown
@@ -16,7 +17,14 @@ from forge.providers.github.transport import TransportFailure
 
 class GitHubCommitter:
     def __init__(
-        self, api: API, auth: AppAuth, repositories: RepoPort, clock: Clock, *, bot: Actor
+        self,
+        api: API,
+        auth: AppAuth,
+        repositories: RepoPort,
+        clock: Clock,
+        *,
+        bot: Actor,
+        ca_path: Path | None = None,
     ):
         if (
             not bot.is_bot
@@ -28,6 +36,7 @@ class GitHubCommitter:
             or str(int(bot.native_id)) != bot.native_id
         ):
             raise ValueError("publication requires an explicit matching native bot")
+        self.ca_path = ca_path
         self.api, self.auth, self.repositories, self.clock, self.bot = (
             api,
             auth,
@@ -72,6 +81,7 @@ class GitHubCommitter:
                 "Basic " + credential,
                 author=self.bot.login,
                 email=f"{self.bot.native_id}+{self.bot.login}@users.noreply.github.com",
+                ca_path=self.ca_path,
             )
             now = self.clock.now()
             if now.utcoffset() is None:

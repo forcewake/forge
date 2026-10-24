@@ -17,6 +17,7 @@ class GitTarget:
     authorization: str = field(repr=False)
     author: str = "forge"
     email: str = "forge@localhost"
+    ca_path: Path | None = None
 
     def __post_init__(self) -> None:
         url = urlsplit(self.url)
@@ -33,6 +34,10 @@ class GitTarget:
             or not url.path.endswith(".git")
         ):
             raise ValueError("Git publication requires an explicit trusted HTTPS repository")
+        if self.ca_path is not None and (
+            not self.ca_path.is_absolute() or not self.ca_path.is_file()
+        ):
+            raise ValueError("Git publication CA must be an explicit readable absolute file")
         if any(ord(c) < 32 or ord(c) == 127 for c in self.author + self.email + self.authorization):
             raise ValueError("Git identity and authorization must be single-line values")
         if not self.authorization or not self.author or "@" not in self.email:
@@ -86,7 +91,9 @@ async def publish(
     with tempfile.TemporaryDirectory(prefix="forge-publish-") as directory:
         root = Path(directory)
         root.chmod(0o700)
-        git = GitProcess(root, target.authorization, target.author, target.email, stamp)
+        git = GitProcess(
+            root, target.authorization, target.author, target.email, stamp, ca_path=target.ca_path
+        )
         await _checked(git, "init", "--quiet", "--template=", "--object-format=sha1")
         await _checked(
             git,

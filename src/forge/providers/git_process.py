@@ -23,7 +23,16 @@ class GitResult:
 
 
 class GitProcess:
-    def __init__(self, root: Path, authorization: str, author: str, email: str, stamp: int):
+    def __init__(
+        self,
+        root: Path,
+        authorization: str,
+        author: str,
+        email: str,
+        stamp: int,
+        *,
+        ca_path: Path | None = None,
+    ):
         executable = shutil.which("git")
         if executable is None:
             raise GitFailure("git_unavailable")
@@ -31,6 +40,7 @@ class GitProcess:
         config = {
             "http.extraHeader": "Authorization: " + authorization,
             "http.followRedirects": "false",
+            "http.sslVerify": "true",
             "credential.helper": "",
             "core.hooksPath": "/dev/null",
             "core.autocrlf": "false",
@@ -44,6 +54,10 @@ class GitProcess:
             "fetch.fsckObjects": "true",
             "transfer.fsckObjects": "true",
         }
+        if ca_path is not None:
+            if not ca_path.is_absolute() or not ca_path.is_file():
+                raise GitFailure("git_trusted_ca_unavailable")
+            config["http.sslCAInfo"] = str(ca_path)
         self.env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(root),
