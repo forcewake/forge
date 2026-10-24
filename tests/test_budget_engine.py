@@ -107,6 +107,7 @@ class NativeAdmin:
         self.writes.append(path)
         if path == "/key/generate":
             assert data["key_type"] == "default" and data["budget_duration"] is None
+            assert data["blocked"] is False
             token = hashlib.sha256(data["key"].encode()).hexdigest()
             assert token not in self.keys
             self.keys[token] = {

@@ -291,6 +291,7 @@ class LiteLLMGateway:
                 "key_type": "default",
                 "allowed_routes": list(ALLOWED_ROUTES),
                 "max_parallel_requests": 1,
+                "blocked": False,
             },
             alias,
             allowance,
