@@ -275,7 +275,7 @@ tests/test_runs_reconciler.py,14,432,true,false,,,,runs,port-engine,P3,
 tests/test_runs_repair.py,21,566,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_revival.py,36,860,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_service.py,63,1872,true,false,,,,runs,port-engine,P3,
-tests/test_runs_spec.py,50,1064,true,false,,invariant evidence,,runs,port-engine,P3,
+tests/test_runs_spec.py,31,352,true,true,,invariant evidence; edge-case pin,,runs,port-engine,P3,
 tests/test_runs_verification.py,21,419,true,false,,invariant evidence,,runs,port-engine,P3,
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_runtime_app.py,7,348,true,true,,,,runtime,keep,P3-17,Production runtime composition against owned TLS native HTTP and scoped model fixtures.
