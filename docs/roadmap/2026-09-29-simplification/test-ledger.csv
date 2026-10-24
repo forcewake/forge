@@ -157,7 +157,7 @@ tests/test_engine_store.py,14,419,true,true,,edge-case pin,,engine,keep,P3-03,En
 tests/test_event_parsing.py,10,139,true,false,,,,event,keep,-,
 tests/test_evidence_policy.py,7,219,true,false,,edge-case pin,,evidence,port-engine,P3,
 tests/test_exact_composition_guard.py,6,76,false,false,,edge-case pin,,exact,keep,-,
-tests/test_execution_profile.py,93,1348,true,false,,,,execution,keep,-,
+tests/test_execution_profile.py,93,573,true,false,,,,execution,keep,-,
 tests/test_execution_spec.py,50,613,true,true,,,,execution,keep,-,
 tests/test_factory_llm.py,21,278,true,false,,edge-case pin,,factory,keep,-,
 tests/test_failure_injection.py,8,256,true,true,,invariant evidence; edge-case pin,,failure,port-engine,P3,

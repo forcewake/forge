@@ -101,3 +101,94 @@ def planned(summary="Approved implementation"):
             ),
         ),
     )
+
+
+async def native_file(body=b"exact target bytes", *, status=None, absent=False):
+    import base64
+    from hashlib import sha1
+    import httpx
+
+    wire = native.Wire()
+    oid = sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+    wire.routes["repository/tree"] = (
+        [] if absent else [{"path": "uv.lock", "id": oid, "mode": "100644", "type": "blob"}]
+    )
+    wire.routes["repository/blobs/" + oid] = (
+        httpx.Response(status)
+        if status
+        else {
+            "sha": oid,
+            "size": len(body),
+            "encoding": "base64",
+            "content": base64.b64encode(body).decode(),
+        }
+    )
+    wire.routes["repository/files/uv.lock"] = httpx.Response(status or 404)
+    api, repositories, *_ = native.adapters(wire)
+    try:
+        return await repositories.read_blob(native.REPO, native.SHA, "uv.lock")
+    finally:
+        await api.transport.close()
+
+
+async def native_checks(status="success", reason=None):
+    wire = native.Wire()
+    wire.routes["pipelines/700/variables"] = []
+    wire.routes["pipelines/700"]["source"] = "push"
+    wire.routes["pipelines/700/jobs"][0].update(status=status, failure_reason=reason)
+    api, _, _, _, ci, _ = native.adapters(wire)
+    try:
+        return await ci.checks_for(native.REPO, native.SHA)
+    finally:
+        await api.transport.close()
+
+
+def frozen_brief(**changes):
+    from forge.domain.approved_input import ApprovedInput
+    from forge_protocol import RunIdentity
+
+    frozen = spec(**changes)
+    return ApprovedInput.from_spec(frozen).to_brief(
+        RunIdentity(forge_run_id="policy-run", attempt=0, generation=0), frozen
+    )
+
+
+def file_guard(root, **changes):
+    from forge_lane.drivers.claude_policy import FilePolicy
+
+    brief = frozen_brief(**changes)
+    return FilePolicy(
+        root, None, scope=brief.frozen_spec.write_policy, execution=brief.execution_policy
+    )
+
+
+def execution_refuses(**changes):
+    from forge_protocol import ExecutionPolicy
+
+    document = ExecutionPolicy().model_dump(mode="json")
+    document.update(changes)
+    with pytest.raises(ValidationError) as failure:
+        ExecutionPolicy.model_validate_json(json.dumps(document))
+    assert failure.value.errors()
+    return failure.value
+
+
+def spec_refuses(**changes):
+    from forge.domain.run_spec import RunSpec2
+
+    document = spec().model_dump(mode="json")
+    document.update(changes)
+    with pytest.raises(ValidationError) as failure:
+        RunSpec2.model_validate_json(json.dumps(document))
+    assert failure.value.errors()
+    return failure.value
+
+
+async def isolated_child(root, monkeypatch, **environment):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    case = await completed_case(root)
+    assert case.result.report.status == "completed" and case.server.model_keys == 1
+    options = case.sdk.clients[0].options
+    assert case.sdk.clients[0].disconnected
+    return case, options
