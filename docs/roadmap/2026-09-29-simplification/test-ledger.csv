@@ -85,7 +85,7 @@ tests/test_boundary_contract_translation.py,5,98,false,false,,edge-case pin,,bou
 tests/test_bounded_steps.py,18,925,true,false,,,,bounded,port-engine,P3,
 tests/test_budget_amendment.py,25,853,true,false,,invariant evidence,,budget,keep,-,
 tests/test_budget_calibration.py,24,772,true,false,,,,budget,port-engine,P3,
-tests/test_budget_engine.py,22,689,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
+tests/test_budget_engine.py,22,706,true,true,,invariant evidence; edge-case pin,,budget,keep,P3-12,Cumulative budget and sealed gateway orchestration contracts
 tests/test_budget_wiring.py,13,561,true,false,,edge-case pin,,budget,port-engine,P3,
 tests/test_budgets.py,53,1092,true,false,,invariant evidence,,budgets,keep,-,
 tests/test_candidate.py,49,678,true,false,,edge-case pin,,candidate,keep,-,
@@ -286,6 +286,8 @@ tests/test_script_metrics.py,8,93,false,false,,,,script,keep,-,
 tests/test_script_prose_lint.py,10,102,false,false,,,,script,keep,-,
 tests/test_script_ratchet.py,13,155,false,false,,,,script,keep,-,
 tests/test_script_rendering.py,4,156,true,false,,,,script,keep,-,
+tests/test_server_model_services.py,8,424,true,true,,invariant evidence; edge-case pin,,server,keep,P3-13,Lease-bound planner and reviewer grants over durable approved inputs.
+tests/test_server_models.py,7,202,true,true,,invariant evidence; edge-case pin,,server,keep,P3-13,"Exact scoped model routing, native observations and retained unknown liabilities."
 tests/test_settings_gitlab_optional.py,7,81,true,false,,,,settings,keep,-,
 tests/test_setup_script.py,4,102,false,false,,,,setup,keep,-,
 tests/test_slash_routing.py,2,60,true,false,,edge-case pin,,slash,keep,-,
@@ -293,6 +295,7 @@ tests/test_step_runtime.py,24,963,true,false,,,,step,port-engine,P3,
 tests/test_system_verification.py,7,121,true,false,,edge-case pin,,system,keep,-,
 tests/test_task_queue.py,12,209,true,false,,,,task,keep,-,
 tests/test_templates.py,63,755,true,false,,,,templates,keep,-,
+tests/test_text_reviewer.py,6,155,true,true,,invariant evidence; edge-case pin,,text,keep,P3-13,Bounded structured review tied to exact approved candidate bytes.
 tests/test_usage_ingestion.py,44,1687,true,false,,edge-case pin,,usage,keep,-,
 tests/test_usage_receipts.py,22,508,true,false,,invariant evidence,,usage,keep,-,
 tests/test_usecases.py,19,640,true,false,,edge-case pin,,usecases,keep,-,

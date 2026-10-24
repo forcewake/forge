@@ -1,18 +1,21 @@
 """Freeze the actual plan, prove the displayed input and atomically open approval."""
 
 import json
+from collections.abc import Callable
 
 from forge.domain.states import Handler, State
+from forge.domain.run_spec import RunPolicy
 from forge.engine.effects import Effects
 from forge.engine.plan_values import PlanIntent
 from forge.engine.runner import Park, Retryable, StepContext, StepResult
 from forge.port_values import Applied, SubjectRef
 from forge.domain.verdicts import Unknown
 from forge.ports import ActorPort, Clock, Planner
+from forge.planning.limits import PlanningRefused
 from forge.store.admission import AdmissionStore
 from forge.store.approval import ApprovalStore
 from forge.store.approval_values import OpenGate
-from forge.store.records import RunRecord, RunRequest, StepRequest, StoreConflict
+from forge.store.records import Lease, RunRecord, RunRequest, StepRequest, StoreConflict
 from forge.store.runs import RunStore
 
 
@@ -58,7 +61,7 @@ class PlanHandler:
         self,
         runs: RunStore,
         approvals: ApprovalStore,
-        planner: Planner,
+        planner: Callable[[Callable[[], Lease], RunPolicy], Planner],
         actors: ActorPort,
         clock: Clock,
     ) -> None:
@@ -94,7 +97,10 @@ class PlanHandler:
         frozen = await self.approvals.load(run.id)
         if frozen is None:
             try:
-                plan = await self.planner.plan(intent.task, intent.snapshot)
+                planner = self.planner(lambda: context.lease, intent.policy)
+                plan = await planner.plan(intent.task, intent.snapshot)
+            except PlanningRefused as error:
+                return StepResult(result_json(refused=error.reason), park=Park(error.reason))
             except TimeoutError:
                 raise Retryable("planner_unavailable") from None
             spec = intent.freeze(plan)

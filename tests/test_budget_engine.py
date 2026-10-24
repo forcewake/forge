@@ -404,7 +404,11 @@ async def test_server_planning_admits_each_call_before_model_and_does_not_reset(
 
     inner = Model()
     facade = BudgetedModelClient(
-        inner, ModelCallStore(case["factory"]), case["lease"], case["clock"], case["admission"]
+        inner,
+        ModelCallStore(case["factory"]),
+        lambda: case["lease"],
+        case["clock"],
+        case["admission"],
     )
     inputs = dict(
         model=case["frozen"].model,
@@ -434,7 +438,11 @@ async def test_unknown_model_call_fully_holds_and_prevents_oversized_next_contex
 
     inner = Lost()
     facade = BudgetedModelClient(
-        inner, ModelCallStore(case["factory"]), case["lease"], case["clock"], case["admission"]
+        inner,
+        ModelCallStore(case["factory"]),
+        lambda: case["lease"],
+        case["clock"],
+        case["admission"],
     )
     inputs = dict(
         model=case["frozen"].model,
@@ -489,7 +497,11 @@ async def test_real_adapter_refuses_strict_budget_before_any_pool_key_or_model_r
         assert await session.scalar(select(EngineGatewayKey)) is None
     inner = ScriptedPorts(())
     facade = BudgetedModelClient(
-        inner, ModelCallStore(case["factory"]), case["lease"], case["clock"], case["gateway"]
+        inner,
+        ModelCallStore(case["factory"]),
+        lambda: case["lease"],
+        case["clock"],
+        case["gateway"],
     )
     with pytest.raises(BudgetExhausted, match="strict_budget_enforcement_unavailable"):
         await facade.complete(
@@ -573,7 +585,11 @@ async def test_concurrent_server_calls_cannot_both_spend_one_context_hold(case):
 
     inner = Waiting()
     facade = BudgetedModelClient(
-        inner, ModelCallStore(case["factory"]), case["lease"], case["clock"], case["admission"]
+        inner,
+        ModelCallStore(case["factory"]),
+        lambda: case["lease"],
+        case["clock"],
+        case["admission"],
     )
     inputs = dict(
         model=case["frozen"].model,

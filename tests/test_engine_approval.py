@@ -175,7 +175,7 @@ async def env(tmp_path, request):
     planner = ScriptedPorts((("plan", plan),))
     runs, steps, approvals = RunStore(factory), StepStore(factory), ApprovalStore(factory)
     effects = Effects(EffectStore(factory), fake, fake, fake, fake, fake, ScriptedPorts(), clock)
-    plan_handler = PlanHandler(runs, approvals, planner, fake, clock)
+    plan_handler = PlanHandler(runs, approvals, lambda current, policy: planner, fake, clock)
     approve_handler = ApproveHandler(runs, steps, approvals, fake, fake, clock)
     runner = StepRunner(
         steps,

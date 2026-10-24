@@ -1,7 +1,7 @@
 """The native adapter trusts one reviewed callback bundle and explicit pricing bytes."""
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 import json
 import re
@@ -16,6 +16,7 @@ ALLOWED_ROUTES = ("/chat/completions", "/v1/chat/completions", "/messages", "/v1
 class TrustedPolicy:
     digest: str
     models: tuple[str, ...]
+    minimums: tuple[tuple[str, Decimal], ...]
 
     @classmethod
     def parse(cls, raw: bytes) -> "TrustedPolicy":
@@ -64,7 +65,23 @@ class TrustedPolicy:
             for axis in ("max_input_tokens", "max_output_tokens"):
                 if type(tariff[axis]) is not int or not 0 < tariff[axis] <= 2097152:
                     raise ValueError("physical model context ceiling is required")
-        return cls(hashlib.sha256(raw).hexdigest(), tuple(sorted(body["models"])))
+        with localcontext() as context:
+            context.prec = 80
+            minimums = tuple(
+                (
+                    name,
+                    Decimal(tariff["input_rate"]) * tariff["max_input_tokens"]
+                    + Decimal(tariff["output_rate"]) * tariff["max_output_tokens"],
+                )
+                for name, tariff in sorted(body["models"].items())
+            )
+        return cls(hashlib.sha256(raw).hexdigest(), tuple(sorted(body["models"])), minimums)
+
+    def minimum_usd(self, model: str) -> Decimal:
+        for name, amount in self.minimums:
+            if name == model:
+                return amount
+        raise ValueError("model is outside trusted pricing")
 
     def accepts(self, value: object, nonce: str, model: str, artifact_digest: str | None) -> bool:
         return isinstance(value, dict) and (

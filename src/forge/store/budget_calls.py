@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from forge.domain.budget import BudgetExhausted, Observation, Resources
+from forge.domain.states import Handler
 from forge.store.models_budget import EngineGatewayKey, EngineUsage
 from forge.store.records import Lease, StoreConflict
 from forge.store.transactions import SessionFactory, fence, locked_run, stored_time, transaction
@@ -21,6 +22,7 @@ class ModelCallStore:
         self, lease: Lease, alias: str, model: str, tokens: int, *, now: datetime
     ) -> str:
         requested = Resources(calls=1, tokens=tokens)
+        purpose = {Handler.PLAN: "planning", Handler.REVIEW: "closing"}.get(lease.handler)
         async with transaction(self.factory) as session:
             await fence(session, lease, now)
             key = await session.scalar(
@@ -32,9 +34,10 @@ class ModelCallStore:
                 != (lease.run_id, lease.attempt, lease.generation)
                 or key.state != "active"
                 or stored_time(key.expires_at) <= now
-                or key.purpose != "planning"
+                or purpose is None
+                or key.purpose != purpose
             ):
-                raise StoreConflict("server model key is not an active planning grant")
+                raise StoreConflict("server model key is not an active planning or closing grant")
             if key.reference_json is None:
                 raise StoreConflict("gateway key has no authenticated reference")
             reference = GatewayKeyRef.model_validate_json(key.reference_json)
