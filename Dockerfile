@@ -1,44 +1,31 @@
-# Stage 1: build with uv
-FROM python:3.13-slim AS builder
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-# Pin uv to the system interpreter: its path exists identically in the
-# runtime stage, so the built .venv stays valid there (uv's managed
-# CPython does not exist in the runtime image).
+FROM python:3.13-slim@sha256:57b29a7c050c4e679e4bea572e14b3965cf4b5839de2da49d55e49ffc4024f39 AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.9.29@sha256:db9370c2b0b837c74f454bea914343da9f29232035aa7632a1b14dc03add9edb /uv /usr/local/bin/uv
 ENV UV_PYTHON=/usr/local/bin/python3.13
-
-WORKDIR /app
+WORKDIR /build
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --extra postgres
-COPY . .
+COPY src ./src
+COPY packages ./packages
+RUN uv build --all-packages --wheel \
+    && uv export --frozen --no-dev --extra postgres --no-editable \
+       --no-emit-workspace --output-file /build/runtime-requirements.txt > /dev/null \
+    && uv venv /opt/forge --python /usr/local/bin/python3.13 \
+    && uv pip install --python /opt/forge/bin/python --require-hashes \
+       --requirement /build/runtime-requirements.txt \
+    && uv pip install --python /opt/forge/bin/python --no-deps \
+       /build/dist/forge-1.0.0-py3-none-any.whl \
+       /build/dist/forge_protocol-0.1.0-py3-none-any.whl
 
-# Stage 2: runtime
-FROM python:3.13-slim
-
+FROM python:3.13-slim@sha256:57b29a7c050c4e679e4bea572e14b3965cf4b5839de2da49d55e49ffc4024f39
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-RUN groupadd -r forge && useradd -r -g forge forge
-
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r forge && useradd -r -g forge forge \
+    && mkdir -p /app /data && chown forge:forge /app /data
+COPY --from=builder /opt/forge /opt/forge
+ENV PATH=/opt/forge/bin:$PATH
 WORKDIR /app
-COPY --from=builder /app /app
-
-# Create data directory for SQLite and set ownership
-RUN mkdir -p /app/data /app/.cache/uv \
-    && chown -R forge:forge /app/data /app/.cache/uv /app/.venv
-
-ENV UV_CACHE_DIR=/app/.cache/uv \
-    UV_LINK_MODE=copy
-
 EXPOSE 8420
-
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')"]
-
+    CMD ["/opt/forge/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/healthz')"]
 USER forge
-
-CMD ["uv", "run", "uvicorn", "forge.main:app", "--factory", "--host", "0.0.0.0", "--port", "8420"]
+CMD ["forge", "--config", "/etc/forge/forge.toml", "serve", "--host", "0.0.0.0", "--port", "8420"]

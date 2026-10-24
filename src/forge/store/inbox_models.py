@@ -1,4 +1,4 @@
-"""The shared durable inbox, independent of either engine's run tables."""
+"""The durable native-event and replay inbox, independent of run tables."""
 
 from datetime import datetime, timezone
 from typing import Any

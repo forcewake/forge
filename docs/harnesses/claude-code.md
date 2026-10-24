@@ -1,26 +1,22 @@
-# Existing Claude lane
+# Claude Code
 
-The current batch recipe is
-[claude-code.gitlab-ci.yml](../../ci/templates/claude-code.gitlab-ci.yml);
-the SDK recipe is
-[claude-sdk-lane.gitlab-ci.yml](../../ci/templates/claude-sdk-lane.gitlab-ci.yml).
-GitHub uses the [Actions harness](../../ci/templates/forge-harness.github.yml).
-These are separate from the new `forge_lane` driver.
+The supported driver is `claude_code` in the separate `forge-lane` package.
+It uses the pinned Claude Agent SDK and its bundled CLI. The release lane
+requirements must include `forge-lane[claude]`; the server wheel does not run
+inside the lane. Follow [onboarding](onboarding.md) for either provider.
 
-Provision `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` for the selected
-route; never give the lane forge's publisher credential. Keep the reviewed
-CLI/version pin and record `claude --version`. The gateway's model name is
-significant: a required `[1m]` suffix cannot be dropped silently.
+The approved RunSpec binds the driver, model, write scope, execution policy
+and limits. Claude receives this attempt's scoped gateway grant. Ambient
+Anthropic credentials and a different model are not authentication or
+selection fallbacks.
 
-The renderer owns headless flags, settings isolation, strict MCP config,
-turn limits and commit/push denials. Do not bypass a denial by editing a
-running job. Optional `FORGE_HARNESS_MCP` is translated from the canonical
-configuration; secret references use separate masked variables.
+The driver permits confined file operations under the frozen policy. It
+rejects shell and repository-write tools, credential files and authority
+configuration. It uses a private SDK home and does not inherit ambient
+settings. These controls do not establish host isolation or an egress firewall;
+the CI runner must provide its execution boundary.
 
-Usage result events feed the lane's receipt; incomplete metering remains
-explicit. Authentication errors, permission denials and network resets
-need their own diagnosis. A fast-path `FORGE_HARNESS_HTTPS_PROXY` may help
-throttled streams but is deployment configuration, not an assumed fix.
-Start with [onboarding](onboarding.md) and inspect the exact pinned
-rendered script. Historical live observations apply only to their named
-version and remain in the [archive](../archive.md).
+Interrupt and steer are supported. Pause stops writes before checkpointing.
+Resume restores exact filesystem WIP in a new generation; it does not promise
+conversation continuation. SDK usage estimates are not billing receipts;
+unknown usage never becomes zero spend.

@@ -282,10 +282,6 @@ def validate_changeset(
     return violations
 
 
-# Legacy callers retain the same value identity.
-WritePolicy = PathPolicy
-
-
 def _validate_change(
     change: Change,
     effective: PathPolicy,

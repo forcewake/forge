@@ -1,60 +1,43 @@
 # Connect a GitLab project
 
-Current provider services still use the existing GitLab CI lane. The new
-[lane v1](../harnesses/lane-v1.md) is a separately composed migration route.
-Use a disposable target for the first workflow and obtain the project
-owner's authority before changing tokens, hooks or CI.
+Follow the [cold install procedure](../onboarding/cold-install-runbook.md).
+Use a disposable project for the first workflow. Obtain the owner's authority
+before changing tokens, hooks, runners or CI.
 
 ## 1. Approve the execution profile
 
-Use an ephemeral unprivileged Docker executor, never a shell runner,
-Docker socket, production secrets or broad internal-network access.
-Permit only required GitLab, package-registry and model endpoints.
-Protect the target branch: humans may merge, the bot may neither merge nor
-push there. Forge writes only its reserved factory branch.
+Use an ephemeral unprivileged runner with no Docker socket or production
+credentials. Protect the target branch; humans merge and the bot cannot bypass
+protection. The coding lane holds no repository write credential.
 
 ## 2. Configure identity and webhook
 
-Keep the bot's project-scoped `FORGE_BOT_TOKEN` in the control plane only;
-configure the required GitLab API permissions and trusted `FORGE_APPROVERS`.
-An optional lane `FORGE_BOT_READ_TOKEN` is read-only. Never stage the bot's
-write token or forge's admin/database credentials in project CI.
-
-Enable GitLab in forge, set its base URL and `GITLAB_WEBHOOK_SECRET`, and
-configure the project's webhook to the deployment's `/webhook` endpoint.
-Use HTTPS outside a deliberately isolated local environment. Enable Notes,
-Issues, Merge request, Pipeline and Job events as required by the ingress;
-[GitLab documents their event semantics](https://docs.gitlab.com/user/project/integrations/webhook_events/).
-LAN delivery also depends on the administrator's allowed-local-request
-policy. A webhook secret authenticates transport; it never grants actor
-approval authority.
+Declare an explicit GitLab connection with numeric project, project-bot and
+approver IDs. Keep separate read and write project credentials on the server.
+Use a strong configured webhook secret and the HTTPS endpoint
+`/hooks/<connection-key>`. Enable the Notes, Issues, Merge request, Pipeline and
+Job events consumed by the native adapter. Transport authentication does not
+grant the sender approval authority. An unconfigured connection refuses events.
 
 ## 3. Install the matching lane
 
-Include or copy the reviewed [GitLab template](../../ci/templates/) for the
-selected driver. Pin a reviewed immutable published ref or exact template;
-a moving `main` include is not a reproducible deployment. The compiled
-configuration must contain the selected lane job. Normal pipelines must
-skip implementation when no forge dispatch identity is present.
-
-Provision only that driver's masked model/subscription credential, optional
-read-only clone token, and explicitly configured MCP secrets. A protected
-variable invisible on factory refs fails preflight; do not work around it
-with an ambient duplicate. Use the [credential runbooks](../operations/credential-rotation.md).
-`FORGE_REQUIRED_JOBS` names actual independent jobs that must exist and
-succeed on the candidate SHA. A green pipeline without those jobs is not
-verification. Admission refuses missing CI before paid planning.
+Install the pinned [lane v1](../harnesses/lane-v1.md) CI configuration. Bind the
+configured native issuer and JWKS URL, immutable lane requirements and selected
+driver. Declare actual required independent job names. Successful unrelated
+jobs, another pipeline, missing jobs and stale candidate SHAs cannot establish
+verification. Configure the reviewed prospective budget guard before planning.
+The lane redeems only its current authenticated grant; old variable carriers
+and ambient duplicate credentials are unsupported.
 
 ## 4. Verify and operate
 
-Run `forge doctor --project <id>`. Then comment `/implement`, review the
-posted plan and approve `/go <run-id>`. The lane returns a candidate to the
-trusted publisher; independent CI and readonly review precede readiness.
-Inspect the exact Draft/head/check evidence and leave merging to a human.
-[Operator commands](../operations/operator-commands.md) cover cancellation,
-reconciliation, retries and GitLab review feedback.
+Run `forge --config forge.toml doctor` and
+`forge --config forge.toml onboard <repository-key>`. Start with `/implement`,
+inspect the posted plan and approve `/go <run-id>`. The publisher validates
+candidate bytes before native Git publication. Independent CI and closing
+review precede readiness; the bot never merges.
 
-Required resume needs an SDK lane and the exact verified checkpoint before
-any model turn; batch templates refuse it. Steering needs explicit control
-configuration and cannot widen approval. See [harness onboarding](../harnesses/onboarding.md)
-and [runtime recovery](../operations/adaptive-runbook.md).
+[Operator commands](../operations/operator-commands.md) describe corrections,
+exact checkpoint resume, cancellation and budget amendments. Preserve an
+existing installation with the [offline schema procedure](../operations/schema-cutover.md)
+before adopting this local source candidate.

@@ -16,11 +16,12 @@ from forge.domain.approved_input import ApprovedInput
 from forge.domain.budget import BudgetLimits, Resources
 from forge.domain.paths import resolve_write_policy
 from forge.domain.run_spec import RunSpec2, VerificationContract
-from forge.domain.states import State
+from forge.domain.states import Handler, State
 from forge.store.lane_auth import approved_brief
+from forge.store.approval_values import ConsumeGate
 from forge.store.models_execution import EngineStep
 from forge.store.models_runs import EngineApprovedInput, EngineGate, EngineRunSpec
-from forge.store.records import RunRequest, StoreConflict
+from forge.store.records import RunRequest, StepRequest, StoreConflict
 from forge_protocol import Brief, RunIdentity, canonical_json
 from tests.test_domain_approved_input import spec
 from tests.test_durable_gates import consume
@@ -155,9 +156,50 @@ class TestPendingDecision:
         await rewrite_spec(
             env, run, lambda document: document.update(model="tampered"), rehash=True
         )
+        saved = await consume(env, run, frozen)
+        assert json.loads(saved.result_json) == {"refused": "plan_comment_changed"}
+        # Native display validation now refuses before the atomic gate commit.
+        # Exercise that independent SQL boundary as well: rehashing the spec
+        # must never change the original approval or create dispatch authority.
+        altered = await env.approvals.load(run.id)
+        claim = await env.claim(run, altered)
+        step = await env.approve(run.id, claim, command_key="forged-atomic-approval")
+        leases = await env.steps.claim_due("gate-check", env.clock.now(), 60, 100)
+        lease = next(item for item in leases if item.step_id == step.id)
         with pytest.raises(StoreConflict, match="gate disagrees"):
-            await consume(env, run, frozen)
+            await env.steps.complete_and_enqueue(
+                lease,
+                "{}",
+                (
+                    StepRequest(
+                        run.id,
+                        Handler.DISPATCH,
+                        f"{run.id}:forged:dispatch",
+                        canonical_json(
+                            {
+                                "approved_digest": claim.approved_digest,
+                                "revision": claim.revision,
+                            }
+                        ).decode(),
+                        env.clock.now(),
+                    ),
+                ),
+                now=env.clock.now(),
+                transition_to=State.RUNNING,
+                approval=ConsumeGate(claim, altered.spec.base_sha),
+            )
         assert await env.count(EngineApprovedInput) == 0
+        async with env.factory() as session:
+            gate = await session.get(EngineGate, frozen.gate_id)
+            assert gate.state == "open" and gate.consumed_at is None
+            assert gate.approved_digest == frozen.approved.approved_digest
+            assert not (
+                await session.scalars(
+                    select(EngineStep).where(
+                        EngineStep.run_id == run.id, EngineStep.handler == "dispatch"
+                    )
+                )
+            ).all()
 
 
 class TestAdmission:

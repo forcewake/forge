@@ -17,7 +17,7 @@ forge-lane-v1:
       export LANE_TEMP="$(mktemp -d)"
       trap 'rm -rf "$LANE_TEMP"' EXIT
       printf '%s' "$FORGE_LANE_DISPATCH" > "$LANE_TEMP/dispatch.json"
-      base_sha="$(python3 -c 'import json,os,re; d=json.loads(os.environ["FORGE_LANE_DISPATCH"]); assert re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",d["base_sha"]); assert d["provider"] == "gitlab"; assert d["driver"] in {"claude_code","copilot_cli"}; print(d["base_sha"])')"
+      base_sha="$(python3 -c 'import json,os,re; d=json.loads(os.environ["FORGE_LANE_DISPATCH"]); s=d["repair"]["candidate_sha"] if d.get("repair") is not None else d["base_sha"]; assert re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",s); assert d["provider"] == "gitlab"; assert d["driver"] in {"claude_code","copilot_cli"}; print(s)')"
       git cat-file -e "$base_sha^{commit}" || git fetch --depth=1 origin "$base_sha"
       git checkout --detach "$base_sha"
       git remote set-url origin "${CI_PROJECT_URL}.git"

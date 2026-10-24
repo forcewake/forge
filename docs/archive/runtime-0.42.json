@@ -1,0 +1,706 @@
+{
+  "source_commit": "94d66b3e9a24d7c9a7383b2b0d47c8d1b6dbebb4",
+  "purpose": "Recoverable retired runtime source. Not shipped, imported or selected by Forge1.0.0.",
+  "files": [
+    {
+      "path": ".env.example",
+      "sha256": "ec812c16f4e79fd922a2f69a3ddadd413f872bfb24c87df74a2d4cc23d0551df"
+    },
+    {
+      "path": ".github/workflows/forge-harness.yml",
+      "sha256": "b4c0c01c73bcbe8483f2d9601c353ec0ee9ce65a45bb6f64433d1cff64528c93"
+    },
+    {
+      "path": "Containerfile",
+      "sha256": "d676cae98268f20143e8d1de4c72212c1094ea313e8fbe83311d4d74495be56f"
+    },
+    {
+      "path": "ci/templates/claude-code.gitlab-ci.yml",
+      "sha256": "83571ef429c63939dd6ad885ea9bdb4b15a9c3472f0987a638a8fcd6bdb0d290"
+    },
+    {
+      "path": "ci/templates/claude-sdk-lane.gitlab-ci.yml",
+      "sha256": "c79e2e47525d5725162bde79cc421afbeefa7172964864f7943c344e399b8235"
+    },
+    {
+      "path": "ci/templates/codex-sdk-lane.gitlab-ci.yml",
+      "sha256": "b23a579efbacbc7e2828c7812466cace829cf52892947dcca76887f127208d01"
+    },
+    {
+      "path": "ci/templates/copilot-sdk-lane.gitlab-ci.yml",
+      "sha256": "9590d8c00e157154a3867e3cb24f4f49152a8a4a195b0337a42ff222808136fd"
+    },
+    {
+      "path": "ci/templates/copilot.gitlab-ci.yml",
+      "sha256": "829a87737e86b40857585503a6e76204778d21083db76ab02424482b43b46e4a"
+    },
+    {
+      "path": "ci/templates/dotnet-lane.gitlab-ci.yml",
+      "sha256": "6dca8e9377552933bfb3bcac7b0a714e322804f853b0df60a29715b53571a461"
+    },
+    {
+      "path": "ci/templates/forge-harness.github.yml",
+      "sha256": "43e3f17ff8eb1de9411e1bacb4889b301745b3cc486098a9ab6b93a9367dc496"
+    },
+    {
+      "path": "ci/templates/grok.gitlab-ci.yml",
+      "sha256": "fa8ece4906d7ecd4e23d65740c160b8ab85edbf73add71cdbf5d100abfd0de4d"
+    },
+    {
+      "path": "ci/templates/harness-log-filter.mjs",
+      "sha256": "39e0d71228c7ae2023347e8856bd423a9041de4686bb3a781ee1fce9f403cbe2"
+    },
+    {
+      "path": "ci/templates/opencode-sdk-lane.gitlab-ci.yml",
+      "sha256": "5b57fd384423f5d8b773f0d67f3b96c7815598348340c21c1936fb60eac11118"
+    },
+    {
+      "path": "ci/templates/opencode.gitlab-ci.yml",
+      "sha256": "170ddad980381337c5958ada7913c179603442c184f78a93b39eb9d26adb447e"
+    },
+    {
+      "path": "forge-lane.azure-pipelines.yml",
+      "sha256": "6026c4a9f18f60d1e91109d85a6c077e132808c190d9cf2e4bdd68d03898eba2"
+    },
+    {
+      "path": "forge.example.yml",
+      "sha256": "1e351563a7aee9a6561f4d28bc1347fff78ad1b7c6b8bd2e894b3d682bf92370"
+    },
+    {
+      "path": "src/forge/adaptive/__init__.py",
+      "sha256": "a5b779486582efabe158c037d4d41d40ed3a178a71cb1cffcefb32dbbe20a829"
+    },
+    {
+      "path": "src/forge/adaptive/adapters.py",
+      "sha256": "e09cf030a34d1ee4ddfc5c02e7ca4beb632ce45d789de2bf8c60eec273c65dd4"
+    },
+    {
+      "path": "src/forge/adaptive/admission.py",
+      "sha256": "cd1a742b98483d510c61e79dbb690125408a4fd3779219a0192f4c6ba23ab5bd"
+    },
+    {
+      "path": "src/forge/adaptive/artifact_store.py",
+      "sha256": "14665cc501045b3af51dcabc0600baaedfc5802f2199b69e3de08a1334ef07fa"
+    },
+    {
+      "path": "src/forge/adaptive/capability_profiles.py",
+      "sha256": "8875d862d70279794e45ea8ad2175a4b865e14618c18d3f4685169d489ac8eb3"
+    },
+    {
+      "path": "src/forge/adaptive/checkpoint_channel.py",
+      "sha256": "c3eed8a76241ff55959ee15637c957d39bb43bbaf25d6eed47dbc4274018aad7"
+    },
+    {
+      "path": "src/forge/adaptive/checkpoint_repository.py",
+      "sha256": "34a6b5fd5413b2fda0af19e5df4f1be98dcff75cb0e84489547e4b8b53cd85e3"
+    },
+    {
+      "path": "src/forge/adaptive/checkpointing.py",
+      "sha256": "44cde8b717503fd4c1d24ed478944cd1b91c0faaa16ab6e6822bf93a95dd002b"
+    },
+    {
+      "path": "src/forge/adaptive/closing_budget.py",
+      "sha256": "ce55f60103ab7e06ed5351ad3f71b2c9370cb48634ef92e80476263e8ee1e820"
+    },
+    {
+      "path": "src/forge/adaptive/command_router.py",
+      "sha256": "0591dd834ee91c9ffbdeac256ad1bebb14e1c690adb6a6c97e399bab6c94fdaa"
+    },
+    {
+      "path": "src/forge/adaptive/composition_adoption.py",
+      "sha256": "da0b91ba805843a2a5f8f76a885d8327c1e96df6f7aa69d929bde2f7c2726735"
+    },
+    {
+      "path": "src/forge/adaptive/continuation.py",
+      "sha256": "3ce24316029699882872e0bd326692c27bae9c4fbcdd679026d07f728290b6c5"
+    },
+    {
+      "path": "src/forge/adaptive/control.py",
+      "sha256": "f6b80094bcd944c35aa7ee02756a24431781037207acc623b5a99a7b32891796"
+    },
+    {
+      "path": "src/forge/adaptive/credential_audit.py",
+      "sha256": "da71c344964f3451ecdbe6b6eb118cb6113b23396e9100ab97242eeeb77adb1b"
+    },
+    {
+      "path": "src/forge/adaptive/credential_broker.py",
+      "sha256": "6da6b26748d78d096132052166acffb73d128aa7129b742cd1fa6cae613ef4fc"
+    },
+    {
+      "path": "src/forge/adaptive/credential_preflight.py",
+      "sha256": "3d08ab9f9d6e71f7d1c16eb7f1456d652149d77fa31f83d38bc0119bf9b0804f"
+    },
+    {
+      "path": "src/forge/adaptive/discovery.py",
+      "sha256": "37e626fe97a16db66f47c4916a7b1d33bec72720fda1bdb8e5027d1e928876f6"
+    },
+    {
+      "path": "src/forge/adaptive/discovery_stage.py",
+      "sha256": "ee87f85545d01e358d99ea0f20c7e76039a4ce772a60ce7f2e2188cae9d3134a"
+    },
+    {
+      "path": "src/forge/adaptive/discovery_tools.py",
+      "sha256": "5a176b1d71a47378f96156bc0ecb9734035eb53fd0fc6a84590bd57eb6a22520"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/__init__.py",
+      "sha256": "b360a602e7f3c76c0354dba6a58ea9d47b77a15bb4fd30084872ebf5a393c427"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/claude_sdk.py",
+      "sha256": "5bf6ee674ce3ac42e9c780e2aa24b3b8473b5cb30dfff95931622b786cf8f1de"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/codex_app.py",
+      "sha256": "ad4eb1589e6bb4c05abf34327aefcc9347b4c72696f2addcbaa65c45ac0f598b"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/copilot_acp.py",
+      "sha256": "527a020a5ad5999e1e9fc18a4fd9825df7dc609a92b7ed553d6c98712d5e82cd"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/live_registrations.py",
+      "sha256": "3e88c8d009f98c185e6aed93965b3f19f609a705897a38bb3771f2b763cb4378"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/opencode.py",
+      "sha256": "5be6b58f9c6d5b33115e0c0e3b5612cef28ec0772884c03bc2f644ed07a25a65"
+    },
+    {
+      "path": "src/forge/adaptive/drivers/opencode_serve.py",
+      "sha256": "957953a264a1a5a924bba7eb8c02ae075a8735df935576195daf4309ef8ab977"
+    },
+    {
+      "path": "src/forge/adaptive/execution_spec.py",
+      "sha256": "c676e12845c7e7af236aef20268ed2041abe5369c5f5e68ed5765d21961adbcc"
+    },
+    {
+      "path": "src/forge/adaptive/lane_channel.py",
+      "sha256": "84d55e914447077192e558e6fac614757a636dc7a600fd57c5bb9fa10f1fe8bf"
+    },
+    {
+      "path": "src/forge/adaptive/lane_control.py",
+      "sha256": "da671f39d7b8c5529dea68ee5a64b884f0e850a2f83fcba39df2554b4791bd26"
+    },
+    {
+      "path": "src/forge/adaptive/lane_supervisor.py",
+      "sha256": "6daa2c35dc0f91c047338847b7d6c906bfb83b98b4276502103285ce754279c3"
+    },
+    {
+      "path": "src/forge/adaptive/mailbox_bridge.py",
+      "sha256": "fd3044ae5020a05b5b6b624814165bc375efa5fd9b5a53fffb6f49db157b8dae"
+    },
+    {
+      "path": "src/forge/adaptive/mailbox_db.py",
+      "sha256": "a47d8467443d1165a6a7841b6429f5aaef48916dac8b6fed3652fed6bc671f76"
+    },
+    {
+      "path": "src/forge/adaptive/models.py",
+      "sha256": "4ab792f6ca2a8411fcf3e30d11cbdef37eec546e7744a115c1f0bacf2228286a"
+    },
+    {
+      "path": "src/forge/adaptive/operator_redaction.py",
+      "sha256": "26e2b3fb2a4ab48cdca29cbb5aa79db2d2015d66279626582c6bfd7c85a73584"
+    },
+    {
+      "path": "src/forge/adaptive/operator_snapshot.py",
+      "sha256": "3931c9132800f5aaf8a792f1978905799e70a8b19f36967dda8b507bab697311"
+    },
+    {
+      "path": "src/forge/adaptive/operator_timeline.py",
+      "sha256": "e31ca60e6e567a8eda0f724f33135d97aafa703cc72c7532d6f212eb2039c4ef"
+    },
+    {
+      "path": "src/forge/adaptive/operator_view.py",
+      "sha256": "9c0725a650ad4026659880df64480a38c7f3c97326ca5aebd869d62759216585"
+    },
+    {
+      "path": "src/forge/adaptive/ops.py",
+      "sha256": "721e47d362cda8d1fcb964d4f30dc2608ac1729a4d546abc3fd27876430d7c40"
+    },
+    {
+      "path": "src/forge/adaptive/pause_fence.py",
+      "sha256": "f6cad2d731d8d3bf68b366a6b6faa04c9413d6688c94cf28200303aa6a9cc4f6"
+    },
+    {
+      "path": "src/forge/adaptive/project_credentials.py",
+      "sha256": "f3869a0b8090339d81a8c13e2757c221088da4317c0697b45987dbc6e6f9e213"
+    },
+    {
+      "path": "src/forge/adaptive/qualification.py",
+      "sha256": "18862214cc0a729f3607be43ea20e2c91c25731c0c2a774371a885844efd2cf0"
+    },
+    {
+      "path": "src/forge/adaptive/research_planner.py",
+      "sha256": "aa44f02ffea1f6fcee534f40b589a106d1e6f2cb2feb0cb02dcd49e9c7f4b9bf"
+    },
+    {
+      "path": "src/forge/adaptive/revisions.py",
+      "sha256": "4c18708ea3350ed292cb1fc7a5d146bc9da39d1b24af293777268a0b1b9285a8"
+    },
+    {
+      "path": "src/forge/adaptive/system_context.py",
+      "sha256": "86fdd6795d03667a5a36825c4a093009a604c72555b2f428a3707dea612b7919"
+    },
+    {
+      "path": "src/forge/adaptive/usage_ingestion.py",
+      "sha256": "f32e0586439ef3017d39e86ee5e223dbfb373e559b8cde6cfa9abbb224aa26d0"
+    },
+    {
+      "path": "src/forge/adaptive/usage_types.py",
+      "sha256": "21d6f330116770f21a15303f8100d1203c6e689c3bbe6bcf4d99a37ef494e70f"
+    },
+    {
+      "path": "src/forge/adaptive/verification_binding.py",
+      "sha256": "2e9191f287d59e806aaff4e82e56f5c91faea6218890771213672ca8e4628abe"
+    },
+    {
+      "path": "src/forge/adaptive/verification_sets.py",
+      "sha256": "35f2afcc8c33823775acd012656dec587066b2216c44bed0d901cf0be934d114"
+    },
+    {
+      "path": "src/forge/adaptive/wiring.py",
+      "sha256": "13cb9cff68c70d1362f4784312a33262ac61470b178ff1c7fa6ed54c497ddb7c"
+    },
+    {
+      "path": "src/forge/adaptive/workpackage.py",
+      "sha256": "fa3c22c0d567dc7e1f2587a00391e501cc38b200638d575817c538b4730e519f"
+    },
+    {
+      "path": "src/forge/api/lane_auth_store.py",
+      "sha256": "3c5664a895037f21b65278eff86c118be0d6c61ea6374a6db301040bf29f8a20"
+    },
+    {
+      "path": "src/forge/api/lane_v1_store.py",
+      "sha256": "4c54bb71db188cfcf7ac7efba49dfead12acc8a61452afa703330a40096695ba"
+    },
+    {
+      "path": "src/forge/api_checkpoint_channel.py",
+      "sha256": "ff3b4a6815333714821b0ffdebb9c7e95d323063918ed36753ea91611b33fd28"
+    },
+    {
+      "path": "src/forge/api_lane_control.py",
+      "sha256": "9e15cf3e486f14754fa334e3772e1955e7dab1c71f06284bf6a456c2d694e784"
+    },
+    {
+      "path": "src/forge/api_operator.py",
+      "sha256": "6bdc7e251cd2eeb7d3b75215d5586397acc714d05ae3ac046cfc657f4239d2c0"
+    },
+    {
+      "path": "src/forge/candidate_collector.py",
+      "sha256": "5324165e494e3aeffb0026c6635f9dd4aa4197ea62f94e127e9ae3df935e5537"
+    },
+    {
+      "path": "src/forge/cli.py",
+      "sha256": "d96d97c0e7e4bb2ce06fba152b105b48f1b2279f3a141e6e83affb85e1dffb39"
+    },
+    {
+      "path": "src/forge/config.py",
+      "sha256": "3c7ffc262d2d9c01716cecc4621e01ce3e449d8f1ca32fb5b3526c7a9d077c21"
+    },
+    {
+      "path": "src/forge/database.py",
+      "sha256": "17a5fa5d4ad264e364095a1c380ab7a8d31c07d6dbc39c5f2b7a1dba9c450269"
+    },
+    {
+      "path": "src/forge/deferred.py",
+      "sha256": "b49ced00fb78dca349f490d05210847697bd57fa4889fe69e7a1cb4ac74d930c"
+    },
+    {
+      "path": "src/forge/doctor.py",
+      "sha256": "4a56bc207f37b72718dbb4a38bdaef1d8535de95d6591b08eeb71d08ba7558be"
+    },
+    {
+      "path": "src/forge/durable/__init__.py",
+      "sha256": "cf0f839898089635a1ba3e1db02fe5b06e88cfe226edd7b8de8fb5dae8bc87cf"
+    },
+    {
+      "path": "src/forge/durable/budgets.py",
+      "sha256": "ce52d1303f67bcbf16bb4f02d013e577a86d34a987ffcb6de58fd58a2c4211d7"
+    },
+    {
+      "path": "src/forge/durable/claims.py",
+      "sha256": "459ffdfb2ae67b787c895ccb7aaf44304369e24759587b0c809467030cbd9ec2"
+    },
+    {
+      "path": "src/forge/durable/collaboration.py",
+      "sha256": "1d61104362ba8ebda5d94a763949490e02e8f6f8538eb629f10e1b918f640025"
+    },
+    {
+      "path": "src/forge/durable/controller.py",
+      "sha256": "f2787d772efd25f1b7238ae41d8739ecada10e49b677e47f14688499562c148a"
+    },
+    {
+      "path": "src/forge/durable/gates.py",
+      "sha256": "865a50804f44e2ba3c55f60b55d11b426bd172c160ca087bdb076443066889b3"
+    },
+    {
+      "path": "src/forge/durable/identity.py",
+      "sha256": "3dba985008c2c4c64ef54abe428c59790b345afb3a5c0c1b24ef92966dc872f4"
+    },
+    {
+      "path": "src/forge/durable/inbox.py",
+      "sha256": "b809578e22c6c4325e49a79a42477b9242d6e448efdc6ff2aca9d38951de292c"
+    },
+    {
+      "path": "src/forge/durable/intents.py",
+      "sha256": "22746a7a22ac0c8b6efdefabf17a150499e899a0b27308f91a8dd3261b1ac63e"
+    },
+    {
+      "path": "src/forge/durable/models.py",
+      "sha256": "58a42808063dc82f196852db2a280b6f34b41e4c3ec25123cc09578e6493416e"
+    },
+    {
+      "path": "src/forge/execution/__init__.py",
+      "sha256": "a6bf95ae2c104e2ea068c6367f18c276ea1f24ae24ae33d468d8506113c16463"
+    },
+    {
+      "path": "src/forge/execution/github_actions.py",
+      "sha256": "d52421e99c929c244704013c2916a19230128b55d55a355907f5da95b0b25c59"
+    },
+    {
+      "path": "src/forge/factory/__init__.py",
+      "sha256": "dceb9a01e2a3acd69143bcfcd808f9684152af27db3b11e250b5084ca04edb8f"
+    },
+    {
+      "path": "src/forge/factory/llm.py",
+      "sha256": "d742b1ccee2d948dbb57a00208a447e8401595afb34d593733e23fed5f79f858"
+    },
+    {
+      "path": "src/forge/factory/planner.py",
+      "sha256": "8720613d662d9f23a16e29559ab6c83b68cbc4d23ea3f377d3e5ce335e5894b1"
+    },
+    {
+      "path": "src/forge/factory/reviewer.py",
+      "sha256": "d9c4e58033705420644e1a74507475d268209bd08954697bd352142c04c19d7d"
+    },
+    {
+      "path": "src/forge/gateway/__init__.py",
+      "sha256": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f"
+    },
+    {
+      "path": "src/forge/gateway/durable_ingress.py",
+      "sha256": "9de5963e9325b5c78f1e273cfc8b39eaf13e3d2cfdd9e21b0cdb146e0c36cd99"
+    },
+    {
+      "path": "src/forge/gateway/feedback.py",
+      "sha256": "0db849770ecbe04f74d9d160d4f34c30e8bf6dc751a16cd0090cc40f3d0abcd3"
+    },
+    {
+      "path": "src/forge/gateway/github_webhook.py",
+      "sha256": "1a08351fefbcc7b15cf8671d00a23d40de442f6994cb62a6502e0e670a928ac9"
+    },
+    {
+      "path": "src/forge/gateway/mention.py",
+      "sha256": "ca0433edab23877b49e34df15122e84c9d4b2ad71299771200cce53f2add074f"
+    },
+    {
+      "path": "src/forge/gateway/parser.py",
+      "sha256": "7f49794927b0e806a2fe240f9acc9f3b5e7610aeeb5a5d5938c24fca7bf3202e"
+    },
+    {
+      "path": "src/forge/gateway/router.py",
+      "sha256": "0081c01dc7e126b45df23375a5f49ae77822766341baf053966f3967646ff7c2"
+    },
+    {
+      "path": "src/forge/gateway/validator.py",
+      "sha256": "edd4bf3ff95429dbc6a6fc5ac034309f0e1590fd693de36e1f1ed215d67deb9c"
+    },
+    {
+      "path": "src/forge/gitlab/__init__.py",
+      "sha256": "5ea126441e14be924053ee5256f7efb86b8a4a0f7558191ac69b12e5570bd03d"
+    },
+    {
+      "path": "src/forge/gitlab/blob_reads.py",
+      "sha256": "85f2d6638aa7980a4f7d3b83d6a5540504812581cbce85edb974b2281fc4a542"
+    },
+    {
+      "path": "src/forge/gitlab/client.py",
+      "sha256": "cbdffbbc5cdfb158451ba8d97d4cccf0eb9569d94c5ed456e3759c96d398a6a0"
+    },
+    {
+      "path": "src/forge/gitlab/events.py",
+      "sha256": "a91c61c80216084e1d6df176a8da41206ed65c3393e2a975361bd35efda6c031"
+    },
+    {
+      "path": "src/forge/gitlab/schemas.py",
+      "sha256": "ac08b7c5058dd1c70ea07bc2f97f1854eec5c4720b055b1e199abf67c7749cd7"
+    },
+    {
+      "path": "src/forge/harness_entry.py",
+      "sha256": "ad64e6a4c01227f9ed034737e0bda323117ead09c6ca73c55e97989f4b5a58f8"
+    },
+    {
+      "path": "src/forge/harnesses/__init__.py",
+      "sha256": "fc7d810dd557cb0f8022fc89762d1994a546cdb93f4ee7e2dc29371d1106d5bd"
+    },
+    {
+      "path": "src/forge/harnesses/brief_envelope.py",
+      "sha256": "cb17407e061697af785eb2af1bd6d2b4553b36f52e17359e2ac8ddd805f8dfbc"
+    },
+    {
+      "path": "src/forge/harnesses/mcp.py",
+      "sha256": "4f4b9e9bb32e2fa5b9f4f0dda613c925a95f097ba020eb246700b81e63d59c10"
+    },
+    {
+      "path": "src/forge/harnesses/prompt.py",
+      "sha256": "1f100ca574539b9ff04c31ace941d8b85d7cc92097a472f9dc0c12ce7141801e"
+    },
+    {
+      "path": "src/forge/harnesses/script_render.py",
+      "sha256": "b36390bcf033c04c82ee6fb451eca48c231943bd3892f6e99d5860317e1295bc"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/common/credential-blob.sh",
+      "sha256": "132951fe1e556caeec5cfe692a42fbf32e7fd17219e4e1454913341001413ca1"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/common/mcp-heredoc.sh",
+      "sha256": "e1234e1005e8d0ecae37fb6074768a63754b4b13e6392aede7651e71e01ab896"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/common/npm-pin.sh",
+      "sha256": "0bdd656f72f2321b291c35490aac093aa6c380f5db462a3f3fc7bb02c422f2a9"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/claude-code.sh",
+      "sha256": "6e512aca2d89987ae700c65bfd7284807db930d5319787cee9416f867192f292"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/claude-sdk-lane.sh",
+      "sha256": "c02658281ce70d25fab299d342220d7560bbd2d1f0d2ba86288aa9cccf44b2e1"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/codex-sdk-lane.sh",
+      "sha256": "e8757f20db808f4a9b32360fc47561a7073fa4fe554da780752134332bf1d52e"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/copilot-sdk-lane.sh",
+      "sha256": "e44837e513fcb0b489b57e61a6f05d8fc69ce891f0062bd23b78404132679834"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/copilot.sh",
+      "sha256": "56b6b30bd36a7ea7cc761799ae30a47bc96a405f3108aca78d6cfb031522aeb0"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/dotnet-lane.sh",
+      "sha256": "85bb8d0d57a8aaa8b7aea7cefaae63b469eb7e40342cb0ccafe5e81ac6a3652a"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/grok-build.sh",
+      "sha256": "2b98ae9d012fae3691f428b75c1b18c0acd44e73a6f9da291ea6cd1cb9864b56"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/opencode-sdk-lane.sh",
+      "sha256": "3e42ca8f5be7f27972073b0e39e5c6768c8d3ee5f41b484b0f576d14c7444a06"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/drivers/opencode.sh",
+      "sha256": "ccdd523c3dd32b05dc3592b087ac671f5cdf9adc63ca5563081906657a1ee2a1"
+    },
+    {
+      "path": "src/forge/harnesses/scripts/harness-log-filter.mjs",
+      "sha256": "94ae68bdf8864ad44f8822f76f311985c84bdd3505d83e7f6088866ea100908f"
+    },
+    {
+      "path": "src/forge/integrations/__init__.py",
+      "sha256": "1a6b6251fb0260cf76caad40b8bacecb9859ab33a69738d1abac7c22552fdd57"
+    },
+    {
+      "path": "src/forge/integrations/github.py",
+      "sha256": "f7347f301373f66c61a56038774ea88e51e2ac752084f878be5d50800d9f9cc9"
+    },
+    {
+      "path": "src/forge/integrations/github_flow.py",
+      "sha256": "ebf7437488662cca2c754d37e212fc75af636af4c0237735bb17b42ab970c4e3"
+    },
+    {
+      "path": "src/forge/lane_driver.py",
+      "sha256": "96f395ec5274e2f98ab58f8ca254d50d8924d1823e4ac608354be2ada1fc2a85"
+    },
+    {
+      "path": "src/forge/main.py",
+      "sha256": "269cce0855679a1d5db11b80881bd952c03f66145dd0d621c25a4bda048598d6"
+    },
+    {
+      "path": "src/forge/migrate.py",
+      "sha256": "9c4a131f764c04f68218741b1f00ecb4daae2a08b8654ebec0dd55550cc35a4b"
+    },
+    {
+      "path": "src/forge/models/__init__.py",
+      "sha256": "322b6130a7e9f2d917dad752f69bf7a5406af175aeaa38173b17dbc3e3c07207"
+    },
+    {
+      "path": "src/forge/models/base.py",
+      "sha256": "169ee7e047f140ec73aa6df8f83fab632bbad0ff3c7995087b008134ffc8b9ce"
+    },
+    {
+      "path": "src/forge/models/schema_version.py",
+      "sha256": "28b8dbee21d44c8c26007f5186c176b407b28bfac49afca1bedd90bc10f99b28"
+    },
+    {
+      "path": "src/forge/policy/__init__.py",
+      "sha256": "55348ec5afacc2c783dc0af3f9da61a0288e6bbcd8fd7d9047fa312a4ff80462"
+    },
+    {
+      "path": "src/forge/policy/evidence.py",
+      "sha256": "83781b51ec499ec734bcd0f880a4913f09520a328f305ef22aaa22a250a2145e"
+    },
+    {
+      "path": "src/forge/project_config.py",
+      "sha256": "5a31f1741ef61d1e1bf7615dc08e034c58565be1ebb0223a11bce9f45e751a15"
+    },
+    {
+      "path": "src/forge/reactive/__init__.py",
+      "sha256": "811ae73a8d9509046f3881d77d4cda8f9681db38164cb0d56b258ba5a880183f"
+    },
+    {
+      "path": "src/forge/reactive/github_review.py",
+      "sha256": "fe6ea6aa7c678240e71debaa42eae8736ae0496e6cf33e43b0515f308e46735f"
+    },
+    {
+      "path": "src/forge/repository/__init__.py",
+      "sha256": "83f3d046e84c08004bd36f26e3f76cf568db7d41a560e3223a86ee606ef80ec7"
+    },
+    {
+      "path": "src/forge/repository/changeset.py",
+      "sha256": "03043c82fec2a066251a28fbf348c27499b907314eb7d33a34c781214f5dd2ec"
+    },
+    {
+      "path": "src/forge/repository/identity.py",
+      "sha256": "0e72789768c11ff5c4a7f73e872152d6d4e3fd469f32d8eb6059953854d6a52f"
+    },
+    {
+      "path": "src/forge/repository/writer.py",
+      "sha256": "bfd7c4f5c527cad35d085f672452f83fd311de9e122677427f40d6bb6e74937b"
+    },
+    {
+      "path": "src/forge/runs/__init__.py",
+      "sha256": "e021dbbd95a7fa361e59e09784275fbfb2a5558a518e0994ce00414129d672e6"
+    },
+    {
+      "path": "src/forge/runs/admission.py",
+      "sha256": "62ab81231c4a61dd1d7ccc8889e25403d21ae4c07daae4abead30a163c54848f"
+    },
+    {
+      "path": "src/forge/runs/backends.py",
+      "sha256": "fbda54cbd328a22f6afd9decd1eb6f6642f944c9e86b5ef49a01919c7c0e400a"
+    },
+    {
+      "path": "src/forge/runs/candidate.py",
+      "sha256": "b966cf8508d014ce8f3eae54bf7ce04616fd481a0b331876e4a65dd4cb7031f2"
+    },
+    {
+      "path": "src/forge/runs/checkpoints.py",
+      "sha256": "b38a1d8188f1285e49d500dca15b654bd6d3b0b1dfab25d168ee309f802fd894"
+    },
+    {
+      "path": "src/forge/runs/ci_contract.py",
+      "sha256": "f3c1cd76928d0419370d8f1ae002bc509ba9ea6be66ee7da4f71e9f0d47b6fb6"
+    },
+    {
+      "path": "src/forge/runs/composition.py",
+      "sha256": "3c8fa33deceecf01de09260e0c2381b41661a465ed57899f6ad023167a59c4ed"
+    },
+    {
+      "path": "src/forge/runs/consistency.py",
+      "sha256": "fd944e875a606f7ed2831cdf696af26042517d3a4d41ae3d137b6d905194a877"
+    },
+    {
+      "path": "src/forge/runs/execution_profile.py",
+      "sha256": "ef21d14d55be39b2e2827b55d2f98a9e066a8c15c231fca55b933d55a0d9efa1"
+    },
+    {
+      "path": "src/forge/runs/github_service.py",
+      "sha256": "f0ed5cf3cc4cdf1f827bbb65ae194d5f12e94974cbf3669bd69428804729f1f7"
+    },
+    {
+      "path": "src/forge/runs/harness_selection.py",
+      "sha256": "ea38d5c6a59182f295484b47dd94252160b1da5743bd060a42a627d8bd75cc05"
+    },
+    {
+      "path": "src/forge/runs/lane.py",
+      "sha256": "c66592bbeeb849dc53f71ec97691ffdefcf73dcdaf4a282873ac623acd3dd911"
+    },
+    {
+      "path": "src/forge/runs/metrics.py",
+      "sha256": "96d0c7768945428e3628d063d3dcc8e4eb9be943eb8051525ea327606adf5b8a"
+    },
+    {
+      "path": "src/forge/runs/publisher.py",
+      "sha256": "ea27bf1b143f7f337731d0567f4a334e12d51d3a068777cbe420d40b57a8956a"
+    },
+    {
+      "path": "src/forge/runs/reconciler.py",
+      "sha256": "5997932a1d5b9ce8bff54a290a41b7fc0f15f0170993e3caaad0b6deecbe41f5"
+    },
+    {
+      "path": "src/forge/runs/revival.py",
+      "sha256": "7ee0843da4f455d6598454d568bdd8a211b1bba8566b3de72bc8f77ff90fc793"
+    },
+    {
+      "path": "src/forge/runs/round_admission.py",
+      "sha256": "fc11cf0e69c78a1d00f98a8f04635197f94696c0066807e6fd347d1298bdbef2"
+    },
+    {
+      "path": "src/forge/runs/service.py",
+      "sha256": "e1b6c50523e5aaafdddc71a01771bd12410ce7496ff18069d2210be7e98e492e"
+    },
+    {
+      "path": "src/forge/runs/spec.py",
+      "sha256": "555694c70a0d8799c87aa2707549f37cc123062d91c910229bcd9929d9bf7d23"
+    },
+    {
+      "path": "src/forge/runs/stubs.py",
+      "sha256": "d1a6b6aa0d40cb47d9473030429eed2eec0635dd6e6535cc6cddad99a44b319f"
+    },
+    {
+      "path": "src/forge/runs/usecases.py",
+      "sha256": "2a65d87e14fd830eb9803bbd6da0a17575749031500b2f7e3e3b134632ecaf3c"
+    },
+    {
+      "path": "src/forge/runs/verification.py",
+      "sha256": "aa81e0e97d652e0889698e72ec38d7082dcd845cb6d8d7d6b6b7453ef402101c"
+    },
+    {
+      "path": "src/forge/utils/__init__.py",
+      "sha256": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f"
+    },
+    {
+      "path": "src/forge/utils/logging.py",
+      "sha256": "23128867486def588f0ca1c715dcad65a8fd3091b37b62a5c07f23d7b67f60fb"
+    },
+    {
+      "path": "src/forge/utils/redis_client.py",
+      "sha256": "8425c1bc01b89b17466437ef524a0350e8eb5d2d2672972031eb0880e4bc4272"
+    },
+    {
+      "path": "src/forge/worker/__init__.py",
+      "sha256": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f"
+    },
+    {
+      "path": "src/forge/worker/__main__.py",
+      "sha256": "9c9d5131ae9d8de8bcf0074d5b1f69dd796d91c14b88e9978e715f68dcfba0f4"
+    },
+    {
+      "path": "src/forge/worker/app.py",
+      "sha256": "952bd63e6c20b518dbb4bc899ed75b9da363dd94200834dc55a28f8bfee7b0dd"
+    },
+    {
+      "path": "src/forge/worker/queue.py",
+      "sha256": "166a04cf6b9a6d603bffbbb9c0a409c2a6eaff1801d0a2d47e16b636e8cecf50"
+    },
+    {
+      "path": "src/forge/worker/retry.py",
+      "sha256": "a3a75a1a8296951cee62d94daead528b4d71291fba75ae8a3d597304f44b6148"
+    },
+    {
+      "path": "src/forge/worker/steps.py",
+      "sha256": "c6ba1356129c540f4c97c3199181c0b504829d26fe8e73334fb5cb402d3ef351"
+    },
+    {
+      "path": "src/forge/worker/tasks.py",
+      "sha256": "89c1aa751f60152597dba09ffd5ca0c95e38437a04293d814191c5e9912dab09"
+    }
+  ]
+}

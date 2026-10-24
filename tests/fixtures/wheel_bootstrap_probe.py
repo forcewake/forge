@@ -1,26 +1,26 @@
-"""Run only with an installed wheel's isolated Python, outside the checkout."""
+"""Execute only installed entry points, outside the checkout and its import path."""
 
 import asyncio
 import hashlib
+from importlib.metadata import distribution, version
+from importlib.util import find_spec
 import json
+import os
+from pathlib import Path
 import sqlite3
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-import httpx
 import forge
-from forge.config import Settings
-from forge.database import dispose_engine, init_db
-from forge.main import create_app
-from forge.migrate import build_alembic_config
+import httpx
+from forge.runtime.app import create_app
+from forge.runtime.assembly import open_runtime
+from forge.runtime.settings import RuntimeSettings
 
 
-def check(url):
+def schema(command, url):
     return subprocess.run(
-        [sys.executable, "-I", "-m", "forge.migrate", "--check", "--database-url", url],
+        [str(Path(sys.executable).with_name("forge-schema")), command, "--database-url", url],
         capture_output=True,
         text=True,
         timeout=30,
@@ -32,112 +32,128 @@ def tables(path):
         return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-async def bootstrap(url):
-    try:
-        await init_db(url)
-    finally:
-        await dispose_engine()
+async def boot_application(config):
+    calls = []
 
+    def forbidden(request):
+        calls.append(str(request.url))
+        raise AssertionError("Application liveness cannot call providers or models")
 
-class ReadOnlyHealth(BaseHTTPRequestHandler):
-    reads = []
+    from contextlib import asynccontextmanager
 
-    def do_GET(self):
-        type(self).reads.append(self.path)
-        self.send_response(200 if self.path == "/health" else 404)
-        self.end_headers()
-        self.wfile.write(b"{}")
+    @asynccontextmanager
+    async def opener(settings):
+        async with open_runtime(
+            settings,
+            native_transport=httpx.MockTransport(forbidden),
+            gateway_transport=httpx.MockTransport(forbidden),
+        ) as runtime:
+            yield runtime
 
-    def log_message(self, *args):
-        pass
-
-
-async def boot_application(url, address):
-    settings = Settings(
-        _env_file=None,
-        DATABASE_URL=url,
-        REDIS_URL=None,
-        FORGE_GITLAB_ENABLED=False,
-        FORGE_GITHUB_ENABLED=False,
-        LITELLM_URL=address,
-    )
-    app = create_app(settings)
+    app = create_app(config, opener=opener)
     async with app.router.lifespan_context(app):
-        assert app.state.session_factory is not None
-        assert app.state.redis_manager is None and app.state.task_queue is None
+        assert app.state.runtime is not None and app.state.lane_v1_service is not None
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app), base_url="http://local"
+            transport=httpx.ASGITransport(app), base_url="https://local"
         ) as client:
-            response = await client.get("/health")
-            assert response.status_code == 200, response.text
-            assert response.json()["database"] == response.json()["litellm"] == "ok"
+            response = await client.get("/healthz")
+            assert response.status_code == 200 and response.json() == {
+                "service": "forge",
+                "version": "1.0.0",
+            }
+    assert app.state.runtime is None and app.state.lane_v1_service is None
+    assert not calls
 
 
 def main():
     installed = Path(forge.__file__).resolve()
     assert installed.is_relative_to(Path(sys.prefix)), installed
-    scripts = Path(build_alembic_config().get_main_option("script_location")).resolve()
-    assert scripts.is_relative_to(installed.parent), scripts
-    assert "_migrations" in scripts.parts
+    assert forge.__version__ == version("forge") == "1.0.0"
+    entries = {entry.name: entry.value for entry in distribution("forge").entry_points}
+    assert entries == {
+        "forge": "forge.runtime.cli:main",
+        "forge-schema": "forge.store.schema.__main__:main",
+    }
+    for module in (
+        "main",
+        "cli",
+        "doctor",
+        "config",
+        "database",
+        "migrate",
+        "adaptive",
+        "durable",
+        "runs",
+        "worker",
+        "gateway",
+        "repository",
+        "integrations",
+        "gitlab",
+        "lane_driver",
+        "harness_entry",
+        "api.lane_auth_store",
+        "api.lane_v1_store",
+        "api.lane_engine",
+    ):
+        assert find_spec("forge." + module) is None, module
     path = Path.cwd() / "fresh.db"
     url = "sqlite+aiosqlite:///" + str(path)
-    refused = check(url)
-    assert refused.returncode == 1 and "not bootstrapped" in refused.stderr, refused
+    assert schema("check", url).returncode == 1
     assert not tables(path)
-    asyncio.run(bootstrap(url))
+    installed_schema = schema("init", url)
+    assert installed_schema.returncode == 0, installed_schema.stderr
+    names = tables(path)
     assert {
-        "flow_runs",
-        "step_runs",
-        "event_inbox",
-        "run_budgets",
-        "agent_runs",
-        "conversations",
-        "review_states",
-        "security_findings",
+        "runs",
+        "run_specs",
+        "approved_inputs",
+        "gates",
+        "steps",
+        "effects",
+        "candidates",
+        "budget_pools",
+        "step_timings",
+        "review_cursors",
+        "reactive_reviews",
         "alembic_version",
-    } <= tables(path)
-    assert {
-        "eng_runs",
-        "eng_run_specs",
-        "eng_approved_inputs",
-        "eng_gates",
-        "eng_steps",
-        "eng_effects",
-        "eng_candidates",
-        "eng_budget_pools",
-        "eng_budget_reservations",
-        "eng_budget_amendments",
-        "eng_usage",
-        "eng_gateway_keys",
-        "eng_control_commands",
-        "eng_checkpoints",
-        "eng_blobs",
-        "eng_review_rounds",
-        "eng_lane_sessions",
-    } <= tables(path)
+    } <= names
+    assert not any(name.startswith("eng_") for name in names)
+    assert not {"flow_runs", "step_runs", "outbox", "agent_runs", "conversations"} & names
     before = hashlib.sha256(path.read_bytes()).hexdigest()
-    accepted = check(url)
-    assert accepted.returncode == 0, accepted.stderr
+    checked = schema("check", url)
+    assert checked.returncode == 0, checked.stderr
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
-    server = ThreadingHTTPServer(("127.0.0.1", 0), ReadOnlyHealth)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        asyncio.run(boot_application(url, f"http://127.0.0.1:{server.server_port}"))
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
-    assert not thread.is_alive() and ReadOnlyHealth.reads == ["/health"]
+    repeated = schema("init", url)
+    assert repeated.returncode == 1 and hashlib.sha256(path.read_bytes()).hexdigest() == before
+    with sqlite3.connect("old.db") as db:
+        db.execute("CREATE TABLE flow_runs(id TEXT PRIMARY KEY)")
+        db.execute("INSERT INTO flow_runs VALUES('preserved-old-run')")
+    old = Path("old.db")
+    old_before = hashlib.sha256(old.read_bytes()).hexdigest()
+    assert schema("init", "sqlite+aiosqlite:///" + str(old.resolve())).returncode == 1
+    assert hashlib.sha256(old.read_bytes()).hexdigest() == old_before
+    values = json.loads(Path(sys.argv[1]).read_text())
+    os.environ.update(values["environment"])
+    config = RuntimeSettings.model_validate_json(json.dumps(values["config"]))
+    os.environ[config.database_url_env] = url
+    asyncio.run(boot_application(config))
+    result = subprocess.run(
+        [str(Path(sys.executable).with_name("forge")), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "forge 1.0.0"
     print(
         json.dumps(
             {
-                "migration_chain": str(scripts),
+                "version": version("forge"),
                 "fresh_bootstrap": True,
                 "zero_mutation_check": True,
-                "tables": sorted(tables(path)),
                 "asgi_startup_and_health": True,
                 "provider_writes": 0,
+                "retired_runtime_files": 0,
+                "tables": sorted(names),
             }
         )
     )

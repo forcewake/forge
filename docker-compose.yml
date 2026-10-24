@@ -1,88 +1,55 @@
+# Set FORGE_CONFIG_DIRECTORY and FORGE_ENV_FILE to private absolute paths.
+# /etc/forge/forge.toml must use blob_directory = "/data/blobs", the PG URL
+# from the private env file, and an explicitly configured strict HTTPS gateway.
+# Include the reviewed pricing policy and any private CA in that config directory.
+# First installation is explicit and only for an empty database:
+#   docker compose build
+#   docker compose up -d postgres
+#   docker compose run --rm --no-deps app forge --config /etc/forge/forge.toml install
+#   docker compose up -d app worker
+x-forge: &forge
+  image: forge:1.0.0-local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - ${FORGE_ENV_FILE:?Set FORGE_ENV_FILE to the private runtime environment file}
+  volumes:
+    - ${FORGE_CONFIG_DIRECTORY:?Set FORGE_CONFIG_DIRECTORY to the private config directory}:/etc/forge:ro
+    - forge-data:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
 services:
-  forge:
-    build: .
+  app:
+    <<: *forge
+    command: ["forge", "--config", "/etc/forge/forge.toml", "serve", "--host", "0.0.0.0", "--port", "8420"]
     ports:
-      - "8420:8420"
-    env_file:
-      - .env
-    volumes:
-      - forge-data:/app/data
-      - ./forge.example.yml:/app/forge.yml:ro
-      - ./agents:/app/agents:ro
-    depends_on:
-      litellm:
-        condition: service_started
-      redis:
-        condition: service_healthy
-    profiles:
-      - full
-    restart: unless-stopped
+      - "${FORGE_BIND_ADDRESS:-127.0.0.1}:8420:8420"
 
-  forge-worker:
-    build: .
-    command: ["uv", "run", "python", "-m", "forge.worker"]
-    env_file:
-      - .env
-    volumes:
-      - forge-data:/app/data
-      - ./forge.example.yml:/app/forge.yml:ro
-      - ./agents:/app/agents:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      litellm:
-        condition: service_started
-    profiles:
-      - full
-    deploy:
-      replicas: 2
-    restart: unless-stopped
-
-  litellm:
-    image: forge-litellm:1.106.2-strict-v1
-    build:
-      context: .
-      dockerfile: tools/litellm/Dockerfile
-    ports:
-      - "4000:4000"
-    env_file:
-      - .env
-    environment:
-      - DATABASE_URL=postgresql://litellm:litellm@litellm-db:5432/litellm
-    depends_on:
-      litellm-db:
-        condition: service_healthy
-    restart: unless-stopped
-
-  litellm-db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: litellm
-      POSTGRES_PASSWORD: litellm
-      POSTGRES_DB: litellm
-    volumes:
-      - litellm-db-data:/var/lib/postgresql/data
+  worker:
+    <<: *forge
+    command: ["forge", "--config", "/etc/forge/forge.toml", "worker"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      disable: true
+
+  postgres:
+    image: postgres:17.8
+    environment:
+      POSTGRES_DB: forge
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: ${FORGE_POSTGRES_PASSWORD:?Set the password used by the private runtime PG URL}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge -d forge"]
       interval: 5s
       timeout: 3s
-      retries: 5
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
 volumes:
   forge-data:
-  litellm-db-data:
-  redis-data:
+  postgres-data:

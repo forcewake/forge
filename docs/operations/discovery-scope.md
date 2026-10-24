@@ -1,20 +1,19 @@
-# Read-many/write-one scope
+# Read-many, write-one scope
 
-A run has exactly one writable repository. Explicit neighbor declarations
-may authorize reads; discovering a name, URL or dependency never grants
-access. Project configuration can tighten authority, not expand it.
+Each run has one writable native repository. Explicit neighbors authorize
+read-only discovery; a discovered name, URL or dependency grants nothing.
+[Closed configuration](../../src/forge/runtime/settings.py) names allowed
+neighbors and path windows. [Runtime routing](../../src/forge/runtime/routing.py)
+resolves each through its configured connection and freezes its exact source
+SHA before planning. The planner receives bounded repository reads, not
+publication credentials.
 
-The retained [system context contract](../../src/forge/adaptive/system_context.py)
-validates the exact neighbor set, provider/repository identities, immutable
-refs and allowed path windows. Duplicate or unknown entries refuse.
-Reader bindings must cover that declared set exactly; unavailable or
-ambiguous readers require a question, never a fabricated complete plan.
-Neighbor source remains read-only. Wider write scope needs a separate
-explicit approval; it is never inferred from a multi-repository plan.
+[Citations](../../src/forge/domain/plan.py) bind the native provider,
+connection, repository ID, source SHA, path and line range. The final frozen
+specification includes the complete approved plan and execution policy.
+Moving those facts changes the approval digest. Unavailable reads never
+produce an invented complete plan.
 
-The removed discovery-authority/report helpers and full-system epic claims
-do not certify a current multi-repository execution route. The current
-product scope is still one validated publication target. Preserve source
-OIDs and label bounded/truncated context honestly wherever discovery is
-composed. Historical observability names and offline cohort narratives
-remain at `docs/operations/discovery-scope.md` in the [archive](../archive.md).
+Multiwriter packages, discovery cohorts and aggregate tested-world digests
+are outside 1.0. Source repositories remain read-only references. Only the
+validated current candidate can reach the sole publisher.

@@ -1,0 +1,75 @@
+schema = "forge.runtime/1"
+database_url_env = "FORGE_DATABASE_URL"
+secret_key_env = "FORGE_SESSION_KEY"
+public_url = "https://forge.example.com"
+blob_directory = "/var/lib/forge/blobs"
+# Replace with the immutable, hash-verified release requirements for forge-lane.
+lane_requirements_url = "https://releases.example.com/forge/lane-requirements.txt"
+lane_requirements_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[gateway]
+url = "https://gateway.example.com"
+admin_key_env = "FORGE_GATEWAY_ADMIN_KEY"
+policy_path = "/etc/forge/forge-budget-policy.json"
+# Replace with SHA-256 of the manifest built from the reviewed gateway inputs.
+artifact_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[connections]]
+key = "github"
+provider = "github"
+api_url = "https://api.github.com"
+git_url = "https://github.com"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+oidc_jwks_url = "https://token.actions.githubusercontent.com/.well-known/jwks"
+webhook_secret_env = "FORGE_GITHUB_WEBHOOK_SECRET"
+app_issuer = "123456"
+app_private_key_env = "FORGE_GITHUB_APP_PRIVATE_KEY"
+
+[[connections.repositories]]
+key = "project"
+native_id = "123456789"
+full_name = "owner/project"
+bot_id = "1234567"
+bot_login = "forge[bot]"
+approver_ids = ["9876543"]
+installation_id = 12345678
+lane_workflow = ".github/workflows/forge-lane.yml"
+verification_workflows = [".github/workflows/ci.yml"]
+
+[connections.repositories.policy]
+driver = "claude_code"
+model = "claude-haiku-4-5"
+target_branch = "main"
+
+[connections.repositories.policy.verification]
+required_checks = ["unit", "lint"]
+
+[connections.repositories.policy.write_policy]
+name = "no_dependencies"
+denied_paths = [".forge.yml", ".gitlab-ci.yml"]
+denied_prefixes = [".github/"]
+deny_lockfiles = true
+
+[connections.repositories.policy.limits]
+usd = "20"
+calls = 20
+tokens = 2000000
+wallclock_seconds = 900
+
+[connections.repositories.policy.planning_allowance]
+usd = "5"
+calls = 6
+tokens = 500000
+
+[connections.repositories.policy.closing_reserve]
+usd = "2"
+calls = 2
+tokens = 100000
+
+[[operators]]
+key = "owner"
+token_env = "FORGE_OPERATOR_TOKEN"
+[[operators.grants]]
+repository = "project"
+native_id = "9876543"
+login = "owner"

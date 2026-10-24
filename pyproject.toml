@@ -1,6 +1,6 @@
 [project]
 name = "forge"
-version = "0.42.0"
+version = "1.0.0"
 description = "Agentic software factory for GitLab CE and GitHub — issue to reviewed Draft MR/PR; the bot never merges"
 requires-python = ">=3.13"
 license = "BSD-3-Clause"
@@ -8,21 +8,18 @@ license = "BSD-3-Clause"
 dependencies = [
     "forge-protocol>=0.1.0,<0.2.0",
     "fastapi==0.135.2",
-    "uvicorn[standard]==0.42.0",
+    "uvicorn==0.42.0",
     "httpx==0.28.1",
-    "pydantic-settings==2.13.1",
     "pydantic>=2.13.5,<3",
-    "pyyaml==6.0.3",
     "sqlalchemy[asyncio]==2.0.48",
     "alembic==1.18.4",
-    "aiosqlite==0.22.1",
-    "redis==7.4.0",
     "pyjwt[crypto]>=2.10",
     "cryptography>=42",
 ]
 
 [dependency-groups]
 dev = [
+    "aiosqlite==0.22.1",
     "forge-lane[claude]>=0.1.0,<0.2.0",
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",
@@ -30,8 +27,8 @@ dev = [
     "fakeredis>=2.26",
     "ruff==0.15.7",
     "mypy==1.19.1",
-    # Stubs for the `yaml` import in forge.config — keeps mypy clean without
-    # per-module ignore comments (blocking typecheck, F29).
+    # Workflow/template inspection is development tooling, outside the server.
+    "pyyaml==6.0.3",
     "types-PyYAML>=6.0.12",
     "import-linter==2.15",
     "pytest-cov==7.1.0",
@@ -41,24 +38,11 @@ dev = [
 
 [project.optional-dependencies]
 postgres = ["asyncpg==0.31.0"]
-# GitHub source adapter (ADR-0019): RS256 JWT signing needs the crypto extra.
-github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
-# Real interactive-driver clients (forge.adaptive.drivers). Only the Claude
-# lane needs a vendor package — >=0.2.118 is the first release whose aborted
-# turns emit ResultMessage.terminal_reason (interrupt-keyed completion, see
-# docs/research/2026-09-21-claude-sdk-python.md §7.2). Codex rides stdlib asyncio;
-# OpenCode rides the httpx core dependency.
-interactive = ["claude-agent-sdk>=0.2.118"]
+sqlite = ["aiosqlite==0.22.1"]
 
-# R38-17 (issue #318 / ADR-0032 §5): the console entry-points the
-# v0.37.0 wheel owed — the module mains existed, the wheel never
-# exposed them. `forge-doctor` is the machine-checkable environment
-# verification; `forge` is a thin dispatcher onto the same mains (no
-# new logic, no shadowed flags — each subcommand's argparse keeps
-# owning its own surface).
 [project.scripts]
-forge = "forge.cli:main"
-forge-doctor = "forge.doctor:main"
+forge = "forge.runtime.cli:main"
+forge-schema = "forge.store.schema.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -66,18 +50,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/forge"]
-# Package data (script-rendering architecture): the lane driver-script
-# templates (harnesses/scripts/**/*.sh) and the harness log filter
-# (harnesses/scripts/harness-log-filter.mjs) are non-Python files INSIDE
-# the package tree — they ride the wheel as package data and are read at
-# render time via importlib.resources (never fetched over the network at
-# lane time). The explicit include documents that intent: executable lane
-# assets ship with the code they belong to.
-include = ["src/forge"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"alembic" = "forge/_migrations"
-"alembic.ini" = "forge/_migrations/alembic.ini"
 
 [tool.ruff]
 target-version = "py313"
@@ -106,130 +78,6 @@ filterwarnings = [
 ]
 testpaths = ["tests"]
 
-# ADR-0035 guardrail: mechanical import boundaries. The ignore lists record
-# existing debt and may only shrink (ROADMAP P0-07;
-# tests/test_import_contract_debt.py counts them).
-[tool.importlinter]
-root_packages = ["forge", "forge_protocol", "forge_lane"]
-include_external_packages = true
-
-[[tool.importlinter.contracts]]
-name = "durable does not import runs, adaptive, gateway or integrations"
-type = "forbidden"
-source_modules = ["forge.durable"]
-forbidden_modules = ["forge.runs", "forge.adaptive", "forge.gateway", "forge.integrations"]
-# Lazy imports inside durable/budgets.py functions. Each entry covers every
-# import between the two modules, and importing forge.runs.candidate loads
-# forge.runs (RunService) at runtime.
-ignore_imports = [
-    "forge.durable.budgets -> forge.adaptive.usage_ingestion",
-    "forge.durable.budgets -> forge.runs.candidate",
-]
-
-[[tool.importlinter.contracts]]
-name = "harnesses do not import forge.runs"
-type = "forbidden"
-source_modules = ["forge.harnesses"]
-# The whole package: forge/runs/__init__.py loads RunService, which imports
-# forge.harnesses, so any runs import from here would create a cycle.
-forbidden_modules = ["forge.runs"]
-
-[[tool.importlinter.contracts]]
-id = "authority-repository_identity_checkpoint_lifecycle"
-name = "repository_identity_checkpoint_lifecycle: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.checkpoint_repository", "forge.api_checkpoint_channel"]
-allowed_importers = ["forge.doctor", "forge.adaptive.checkpoint_repository", "forge.adaptive.continuation", "forge.adaptive.operator_snapshot", "forge.adaptive.revisions", "forge.adaptive.wiring", "forge.api_checkpoint_channel", "forge.main", "forge.runs.github_service", "forge.runs.revival", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-continuation_authorization"
-name = "continuation_authorization: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.continuation"]
-allowed_importers = ["forge.adaptive.continuation", "forge.runs.github_service", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-native_occupancy"
-name = "native_occupancy: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.admission", "forge.runs.admission"]
-allowed_importers = ["forge.adaptive.admission", "forge.adaptive.command_router", "forge.adaptive.operator_snapshot", "forge.api_operator", "forge.runs", "forge.runs.admission", "forge.runs.github_service", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-verification_applicability"
-name = "verification_applicability: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.runs.usecases"]
-allowed_importers = ["forge.adaptive.verification_binding", "forge.adaptive.verification_sets", "forge.adaptive.workpackage", "forge.runs.github_service", "forge.runs.usecases"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-operator_projection"
-name = "operator_projection: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.operator_view", "forge.adaptive.operator_snapshot"]
-allowed_importers = ["forge.adaptive.credential_broker", "forge.adaptive.credential_preflight", "forge.adaptive.operator_snapshot", "forge.adaptive.operator_view", "forge.adaptive.project_credentials", "forge.api_operator", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-execution_delivery_spec"
-name = "execution_delivery_spec: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.adaptive.execution_spec"]
-allowed_importers = ["forge.adaptive.execution_spec"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-budget_amendment_application"
-name = "budget_amendment_application: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.durable.budgets"]
-allowed_importers = ["forge.adaptive.closing_budget", "forge.durable", "forge.durable.budgets", "forge.factory.llm", "forge.runs.revival", "forge.runs.round_admission", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-feedback_admission"
-name = "feedback_admission: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.gateway.feedback"]
-allowed_importers = ["forge.doctor", "forge.gateway.feedback", "forge.gateway.router", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-command_acceptance_dedup"
-name = "command_acceptance_dedup: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.gateway.durable_ingress"]
-allowed_importers = ["forge.gateway.durable_ingress", "forge.gateway.github_webhook", "forge.gateway.router"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "authority-review_round_admission"
-name = "review_round_admission: registered direct importers only"
-type = "protected"
-protected_modules = ["forge.runs.round_admission"]
-allowed_importers = ["forge.runs.round_admission", "forge.runs.service"]
-as_packages = false
-
-[[tool.importlinter.contracts]]
-id = "usecases-provider-neutral"
-name = "usecases have no direct provider or gateway imports"
-type = "forbidden"
-source_modules = ["forge.runs.usecases"]
-forbidden_modules = ["forge.integrations", "forge.gateway"]
-allow_indirect_imports = true
-
-[[tool.importlinter.contracts]]
-id = "fixture-isolation"
-name = "production modules do not import test fixtures"
-type = "forbidden"
-source_modules = ["forge", "forge_protocol", "forge_lane"]
-forbidden_modules = ["tests"]
-allow_indirect_imports = true
-
 [tool.uv.workspace]
 exclude = ["tools"]
 members = ["packages/forge-protocol", "packages/forge-lane"]
@@ -238,34 +86,372 @@ members = ["packages/forge-protocol", "packages/forge-lane"]
 forge-protocol = { workspace = true }
 forge-lane = { workspace = true }
 
-[[tool.importlinter.contracts]]
-name = "protocol is independent of lane and server"
-type = "forbidden"
-source_modules = ["forge_protocol"]
-forbidden_modules = ["forge", "forge_lane"]
+# Current production authority boundaries. No ignored imports or legacy modules.
+[tool.importlinter]
+root_packages = ["forge", "forge_protocol", "forge_lane"]
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
+id = "store-transaction-boundary"
+name = "store imports only values and transaction owners, never effectful services"
+type = "forbidden"
+source_modules = [
+    "forge.store",
+]
+forbidden_modules = [
+    "forge.runtime",
+    "forge.providers",
+    "forge.planning",
+    "forge.engine.approval_comment",
+    "forge.engine.approval_round",
+    "forge.engine.approve",
+    "forge.engine.await_lane",
+    "forge.engine.budget_actions",
+    "forge.engine.commands",
+    "forge.engine.delivery_values",
+    "forge.engine.dispatch",
+    "forge.engine.effects",
+    "forge.engine.model_services",
+    "forge.engine.native_model_services",
+    "forge.engine.native_review",
+    "forge.engine.operator_actions",
+    "forge.engine.plan",
+    "forge.engine.publish",
+    "forge.engine.ready",
+    "forge.engine.reconciler",
+    "forge.engine.review",
+    "forge.engine.rounds",
+    "forge.engine.runner",
+    "forge.engine.verify",
+    "forge.engine.wakeups",
+    "forge.engine.worker",
+    "forge.review.native",
+    "forge.review.native_diff",
+    "forge.review.native_reviewer",
+    "forge.review.reviewer",
+    "forge.api.lane_auth",
+    "forge.api.lane_jwks",
+    "forge.api.lane_settings",
+    "forge.api.lane_v1",
+    "forge.api.lane_v1_service",
+    "forge.api.lane_v1_blobs",
+    "forge.api.lane_model_key_vault",
+    "forge.budget.gateway",
+    "forge.budget.service",
+    "forge.budget.server_models",
+    "forge.budget.settlement",
+    "forge.budget.strict",
+]
+
+[[tool.importlinter.contracts]]
+id = "engine-provider-neutral"
+name = "engine uses typed ports rather than concrete provider or runtime adapters"
+type = "forbidden"
+source_modules = [
+    "forge.engine",
+]
+forbidden_modules = [
+    "forge.providers",
+    "forge.runtime",
+]
+
+[[tool.importlinter.contracts]]
+id = "planning-read-model-boundary"
+name = "planning and model reviewers have no storage, engine, runtime or native adapters"
+type = "forbidden"
+source_modules = [
+    "forge.planning",
+    "forge.review.reviewer",
+    "forge.review.native_reviewer",
+    "forge.review.native_diff",
+]
+forbidden_modules = [
+    "forge.store",
+    "forge.engine",
+    "forge.runtime",
+    "forge.providers",
+    "forge.api",
+    "forge.budget",
+    "sqlalchemy",
+    "httpx",
+]
+
+[[tool.importlinter.contracts]]
+id = "authority-repository_identity_checkpoint_lifecycle"
+name = "current lane identity and normalized artifact lifecycle: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.lane_auth",
+    "forge.store.lane_v1",
+    "forge.store.lane_state",
+    "forge.store.lane_control_receipts",
+]
+allowed_importers = [
+    "forge.runtime.assembly",
+    "forge.store.controls",
+    "forge.store.lane_control_receipts",
+    "forge.store.lane_state",
+    "forge.store.lane_v1",
+    "forge.store.lane_work",
+    "forge.store.resume",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-continuation_authorization"
+name = "retry, exact resume and durable pause authority: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.retry",
+    "forge.store.resume",
+    "forge.store.pause",
+]
+allowed_importers = [
+    "forge.engine.operator_actions",
+    "forge.engine.runner",
+    "forge.runtime.assembly",
+    "forge.store.delivery",
+    "forge.store.effects",
+    "forge.store.lane_work",
+    "forge.store.resume",
+    "forge.store.retry",
+    "forge.store.steps",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-native_occupancy"
+name = "canonical native subject and active capacity admission: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.admission",
+    "forge.store.initial_commands",
+    "forge.store.issue_lifecycle",
+]
+allowed_importers = [
+    "forge.engine.plan",
+    "forge.runtime.actions",
+    "forge.store.admission",
+    "forge.store.steps",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-verification_applicability"
+name = "independent native verification and evidence binding: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.verification.checks",
+    "forge.store.review_proof",
+]
+allowed_importers = [
+    "forge.engine.ready",
+    "forge.engine.verify",
+    "forge.store.delivery",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-operator_projection"
+name = "repository scoped operator projection: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.runtime.projection",
+    "forge.store.operator_evidence",
+]
+allowed_importers = [
+    "forge.runtime.assembly",
+    "forge.store.command_runs",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-execution_delivery_spec"
+name = "consume once approved bytes and exact execution input: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.approval",
+    "forge.store.lane_work",
+    "forge.engine.plan_values",
+    "forge.engine.lane_values",
+]
+allowed_importers = [
+    "forge.engine.approve",
+    "forge.engine.await_lane",
+    "forge.engine.dispatch",
+    "forge.engine.model_services",
+    "forge.engine.plan",
+    "forge.engine.publish",
+    "forge.engine.ready",
+    "forge.engine.review",
+    "forge.engine.verify",
+    "forge.runtime.actions",
+    "forge.runtime.handlers",
+    "forge.store.pause",
+    "forge.store.resume",
+    "forge.store.retry",
+    "forge.store.round_approval",
+    "forge.store.rounds",
+    "forge.store.steps",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-budget_amendment_application"
+name = "durable budget admission and amendments: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.budgets",
+    "forge.store.budget_commands",
+    "forge.engine.budget_actions",
+]
+allowed_importers = [
+    "forge.budget.service",
+    "forge.budget.settlement",
+    "forge.engine.budget_actions",
+    "forge.engine.verify",
+    "forge.runtime.assembly",
+    "forge.runtime.handlers",
+    "forge.store.budget_commands",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-feedback_admission"
+name = "signed native feedback and read only review admission: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.engine.rounds",
+    "forge.review.native",
+    "forge.store.native_review_admission",
+]
+allowed_importers = [
+    "forge.engine.approval_round",
+    "forge.review.native",
+    "forge.runtime.assembly",
+    "forge.runtime.reactive",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-command_acceptance_dedup"
+name = "native command deduplication and separate effect authority: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.commands",
+    "forge.store.command_effects",
+]
+allowed_importers = [
+    "forge.engine.budget_actions",
+    "forge.engine.commands",
+    "forge.engine.effects",
+    "forge.runtime.assembly",
+    "forge.store.admission",
+    "forge.store.budget_commands",
+    "forge.store.command_effects",
+    "forge.store.controls",
+    "forge.store.initial_commands",
+    "forge.store.operator",
+    "forge.store.resume",
+    "forge.store.retry",
+    "forge.store.rounds",
+    "forge.store.steps",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "authority-review_round_admission"
+name = "child round admission and fresh approval binding: exact current authority importers"
+type = "protected"
+protected_modules = [
+    "forge.store.rounds",
+    "forge.store.round_approval",
+]
+allowed_importers = [
+    "forge.engine.approval_round",
+    "forge.engine.approve",
+    "forge.engine.native_review",
+    "forge.engine.rounds",
+    "forge.review.native",
+    "forge.runtime.assembly",
+    "forge.store.native_review_admission",
+    "forge.store.native_reviews",
+    "forge.store.round_approval",
+    "forge.store.rounds",
+]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "fixture-isolation"
+name = "production modules never import test fixtures"
+type = "forbidden"
+source_modules = [
+    "forge",
+    "forge_protocol",
+    "forge_lane",
+]
+forbidden_modules = [
+    "tests",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "protocol-independent"
+name = "protocol imports neither server nor lane"
+type = "forbidden"
+source_modules = [
+    "forge_protocol",
+]
+forbidden_modules = [
+    "forge",
+    "forge_lane",
+]
+
+[[tool.importlinter.contracts]]
+id = "lane-server-independent"
 name = "lane never imports server"
 type = "forbidden"
-source_modules = ["forge_lane"]
-forbidden_modules = ["forge"]
+source_modules = [
+    "forge_lane",
+]
+forbidden_modules = [
+    "forge",
+]
 
 [[tool.importlinter.contracts]]
+id = "server-lane-independent"
 name = "server never imports lane"
 type = "forbidden"
-source_modules = ["forge"]
-forbidden_modules = ["forge_lane"]
+source_modules = [
+    "forge",
+]
+forbidden_modules = [
+    "forge_lane",
+]
 
 [[tool.importlinter.contracts]]
-name = "domain never imports server adapters or services"
+id = "domain-pure"
+name = "domain has no infrastructure or service dependency"
 type = "forbidden"
-source_modules = ["forge.domain"]
+source_modules = [
+    "forge.domain",
+]
 forbidden_modules = [
-    "forge.adaptive", "forge.api", "forge.config", "forge.database", "forge.doctor",
-    "forge.durable", "forge.execution", "forge.factory", "forge.gateway", "forge.gitlab",
-    "forge.harnesses", "forge.harness_entry", "forge.integrations", "forge.main", "forge.models",
-    "forge.project_config", "forge.reactive", "forge.repository", "forge.runs", "forge.utils",
-    "forge.worker",
+    "forge.store",
+    "forge.engine",
+    "forge.runtime",
+    "forge.providers",
+    "forge.planning",
+    "forge.review",
+    "forge.budget",
+    "forge.api",
+    "forge.ports",
+    "forge.port_values",
+    "forge.command_values",
+    "forge.ingress_values",
+    "forge.operator_values",
+    "httpx",
+    "sqlalchemy",
 ]
 
 [tool.deptry]

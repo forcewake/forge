@@ -1,4 +1,4 @@
-"""Explicit schema installation and a zero-DDL startup compatibility gate."""
+"""Explicit schema installation and an exact-baseline startup check without DDL."""
 
 from forge.store.schema.gate import SchemaMismatch, check_schema, initialize
 

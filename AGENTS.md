@@ -1,51 +1,16 @@
 # AGENTS.md
 
-Instructions for AI coding agents (Claude Code, opencode, Grok Build, Codex,
-Cursor, ...) working in this repository. Humans benefit too.
+Forge 1.0 turns an authorized issue into an approved plan, bounded CI execution,
+and a verified Draft PR/MR. The bot never merges. GitHub and GitLab CE share
+one lifecycle engine. Claude Code and Copilot CLI are the supported drivers.
 
-**Ready-to-use bootstrap prompt for your agent: [docs/reference/onboarding-prompt.md](docs/reference/onboarding-prompt.md).**
-Task-specific playbooks live in `.claude/skills/` (any agent can read them as
-markdown): [setup](.claude/skills/forge-setup/SKILL.md),
-[lab](.claude/skills/forge-lab/SKILL.md),
-[debug a run](.claude/skills/forge-debug-run/SKILL.md),
-[onboard a project](.claude/skills/forge-onboard-project/SKILL.md).
-
-## What forge is
-
-An agentic software factory for GitLab CE and GitHub: an
-authorized issue (`/implement`) becomes a factory branch with code, a green
-pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
-capabilities and platform permissions, never by prompts
-([ADR-0003](docs/adr/0003-no-merge-is-enforceable.md)).
-
-## Operator surface
-
-The provider-neutral operator commands are `/implement` `/go` `/cancel`
-`/retry` `/status` `/why-blocked` `/reconcile` `/security` — one table of
-effect × authorization × provider parity, the `forge` label semantics
-(on = plan, off = cancel-at-gate), auto-revive, and the honest gaps:
-[docs/operations/operator-commands.md](docs/operations/operator-commands.md).
-
-Config knobs added since the early milestones (all in `src/forge/config.py`,
-annotated in `.env.example`):
-
-- `FORGE_RUN_AUTO_REVIVE_LIMIT` / `FORGE_RUN_REVIVE_BACKOFF_SECONDS` —
-  Tier-1 auto-revive budget (default 2) and backoff-ladder base (60s).
-- `FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS` — bounds lost-dispatch discovery
-  before the run parks blocked.
-- `FORGE_DRIVER_VERSIONS` — JSON driver→CLI version pins; the lane falls
-  back to forge's baked-in known-good defaults when unset.
-- `FORGE_AVAILABLE_DRIVERS` — JSON manifest of onboarded drivers; caps the
-  selection chain, never extends it.
-- `FORGE_BUDGET_PROFILES` — JSON named numeric budget ceilings, resolved at
-  RunSpec freeze.
-- `FORGE_WRITE_PROFILES` / `FORGE_PIPELINE_ENTRYPOINTS` — custom write
-  profiles and per-project pipeline entrypoints (denied under every
-  profile).
-- `FORGE_VERIFICATION_GRACE_SECONDS` — grace before a fresh PR's missing
-  checks conclude "no CI configured".
-- `FORGE_MAX_THINKING_TOKENS` — lane-side: caps Claude thinking on repair
-  re-dispatches (consumed inside the harness job).
+Read [ADR-0035](docs/adr/0035-simplification-program.md),
+[DESIGN](docs/roadmap/2026-09-29-simplification/DESIGN.md) and
+[ROADMAP](docs/roadmap/2026-09-29-simplification/ROADMAP.md) for the target.
+[The installation guide](docs/onboarding/cold-install-runbook.md) describes
+actual current entry points. Configuration is closed TOML; secrets come only
+from explicitly named environment variables. There is no automatic `.env`
+loader, Redis worker, old-runtime routing flag or compatibility API.
 
 ## Non-negotiable rules for agents
 
@@ -87,150 +52,57 @@ annotated in `.env.example`):
    applies. A test file is deleted only when its row in
    [`test-ledger.csv`](docs/roadmap/2026-09-29-simplification/test-ledger.csv) says so.
 
-## Repo map
+## Source map
 
-```
-src/forge/
-  main.py, api_*.py  the FastAPI app and its operator, lane-control and checkpoint APIs
-  config.py    settings (see .env.example)
-  database.py, migrate.py, models/
-               engine and sessions, schema check, `python -m forge.migrate`, the
-               declarative Base and the legacy bot's tables
-  gateway/     webhook ingress (GitLab and GitHub), command parsing and routing
-  worker/      Redis task queue, worker loop, step claims, reconciler boot
-  durable/     controller: transitions, gates (consume-once), inbox, outbox, intents,
-               budgets
-  runs/        RunService per provider (service.py, github_service.py),
-               RunSpec, publisher (the only repository writer), CI verification, repair
-               loop, revival, reconciler
-  adaptive/    the largest package: discovery and planning, operator control,
-               checkpoints, credential broker, usage and budgets, publication saga,
-               SDK lane drivers
-  repository/  ChangeSet (ADR-0001) + ChangesetWriter (Commits API)
-  gitlab/, integrations/
-               provider clients: GitLab and GitHub App
-  execution/   lane executor on GitHub Actions
-  harnesses/   lane scripts, prompts and MCP config rendered for the target's CI
-  harness_entry.py, lane_driver.py
-               the lane side: CLI and SDK drivers inside the target's CI
-  factory/     LLM planner / reviewer (LiteLLM HTTP)
-  context/     context assembly, diff and log parsing, redaction
-  reactive/    durable reactive review on the step lane
-  project_config.py
-               the project's .forge.yml reader, shared by every RunService
-  orchestrator/, flows/, agents/, mcp_client/, stores/
-               legacy GitLab reactive bot: review, pipeline debug, chat; agents/ also
-               holds the LLM agents that reactive/ CI debug and findings/ triage use
-  doctor.py    environment verification (this is your setup oracle)
-agents/        YAML agent definitions (FORGE_AGENTS_DIR) and the legacy flows in flows/
-alembic/       schema migrations
-ci/templates/  lane CI templates (GitLab CI and GitHub Actions) + log filter
-scripts/       program guardrails (metrics, ratchet, prose lint, test ledger)
-tools/         development, lab and source release tools, outside the wheel
-tests/         tiered (docs/reference/testing.md); tests/invariants/registry.py lists the
-               Invariant Suite files; fixtures/fake_gitlab.py is the GitLab fake
-docs/adr/      architecture decisions (start with 0003, 0005, 0016, 0026, 0035)
-docs/roadmap/2026-09-29-simplification/
-               DESIGN, ROADMAP, metrics and the test ledger
-```
+- `src/forge/domain`: immutable policy, plans, approval, candidates and verdicts.
+- `ports.py`, `port_values.py`: typed provider contracts and outcomes.
+- `engine`: one lifecycle and its journaled external-effects boundary.
+- `store`: normalized SQL authority, fenced claims, commands, approvals,
+  controls, exact checkpoints and the single packaged schema baseline.
+- `providers/github`, `providers/gitlab`: native authentication, reads,
+  Git publication, CI, reviews and ingress.
+- `planning`, `review`, `verification`, `budget`: bounded model work,
+  independent evidence and enforced reservations.
+- `runtime`: closed configuration, composition, webhooks, operator API,
+  health, metrics, diagnostics and the worker loop.
+- `api`: signed lane sessions and the versioned execution API.
+- `packages/forge-protocol`: immutable lane wire contracts and schemas.
+- `packages/forge-lane`: independent runner, exact WIP capture/restore and
+  supported native drivers; never imports the server.
 
-## Environment setup (dev)
+The old runtime is removed. Its exact recoverable source is listed in
+[the retirement manifest](docs/archive/runtime-0.42.json).
 
-```bash
-uv sync                      # Python 3.13+, deps incl. dev
-set -o pipefail
-.venv/bin/python -m pytest -q -m "not slow"   # default tier; must be green before any commit
-.venv/bin/python -m pytest -q -m slow         # real processes (production_entry, fi_os)
-.venv/bin/ruff format . && .venv/bin/ruff check .
-uv run lint-imports && uv run python scripts/ratchet.py
-uv run python scripts/prose_lint.py --base origin/main
-```
+## Development and operation
 
-The default tier needs no database or services (fakes only); the slow tier
-needs `redis-server` on `PATH`. [docs/reference/testing.md](docs/reference/testing.md)
-explains the tiers and how to run the Invariant Suite.
+Use Python 3.13+ and `uv sync --all-packages --extra postgres --extra claude`.
+The current CLI is `forge --config forge.toml`: explicit `install` for an
+empty database, read-only `doctor`/`onboard`, then separate `serve` and
+`worker` processes. Startup checks the schema and performs no DDL.
+`forge-schema` owns explicit initialization, checks and offline history
+export/cutover. Never run a migration against the owner's lab implicitly.
 
-## Verification oracle
+Run Ruff, strict typing across all three distributions, all import contracts,
+`python scripts/check_authority_boundaries.py pyproject.toml`, the size
+ratchet and protocol-schema drift check. Run prose lint immediately after
+every commit. Keep every gate definition and threshold intact.
 
-After any setup or wiring change:
+## Current owner direction
 
-```bash
-uv run python -m forge.doctor --json   # add --project <id> for a target project
-```
+The owner authorized local 1.0 implementation before GitHub prerequisites,
+and reviewed all 129 flagged/drop ledger rows with existing dispositions
+unchanged. Do not wait for hosted required checks, a maintenance-branch push
+or a recovery tag to implement locally. This does not authorize pushing,
+merging, tagging, publishing or changing GitHub settings.
 
-Exit code 0 = environment is complete. `--json` is for agents; the human
-format prints PASS/WARN/FAIL lines. Never print CI variable *values*.
+The owner subsequently stopped repeated full test runs, and on 2026-10-24
+explicitly directed completion of the working product instead of continuing
+old-test ports. Finish the sole runtime and release artifacts. Use focused
+verification and one assembled invariant/working-scenario check. Preserve
+the Invariant Suite, edge-case register, curated ledger fields and historical
+test sources; report old corpus migration separately without masking failures.
+Do not reintroduce an old service to make a historical test import succeed.
 
-## Lab (GitLab CE + local stack)
-
-The integration lab runs forge in podman against a real GitLab CE. Bring-up,
-container recreation, and image rebuild are scripted in
-[.claude/skills/forge-lab/SKILL.md](.claude/skills/forge-lab/SKILL.md).
-Summary: `forge-postgres` (5433), `forge-redis` (6379), `forge-litellm`
-(4000), `forge-app` (8420), `forge-worker`; app/worker are recreated with
-explicit `-e` env from `.env` (never `--env-file`, the URLs differ:
-containers reach host services via `host.containers.internal`).
-Image rebuild after code changes:
-
-```bash
-printf 'FROM localhost/forge:dev\nCOPY --chown=forge:forge src /app/src\n' > /tmp/f.Containerfile
-podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
-```
-
-## Known gotchas (learned the hard way)
-
-The [edge-case register](docs/reference/edge-cases.md) records each known gotcha
-with the test or reference that pins it; the IDs below are its rows. Read a row
-before removing a guard that looks redundant, and add a row when you learn a
-new one.
-
-- **zsh does not word-split unquoted variables** (OP-04) — never
-  `for x in $VAR` over multi-line command output; use `while IFS= read -r`
-  loops.
-- **pytest piped to tail hides exit codes** (OP-05) — always
-  `set -o pipefail` first.
-- GitLab CE 18.x Commits API **400s if `start_branch` is present** and the
-  branch exists (EC-01) — `ensure_branch` owns creation; the writer never
-  passes it.
-- Claude Code on z.ai (OP-01): model ids need the `[1m]` suffix for the 1M
-  window (bare `glm-5.3-flash` is treated as 200k).
-- Harness CLIs in CI must install their **platform binary explicitly**,
-  pinned to the wrapper's version (EC-02, EC-03: npm optionalDependencies
-  flake → silent futex hang). See the grok template's before_script for the
-  pattern.
-- Long-lived AI streams from some runner networks crawl (OP-06: 226s vs 2s
-  via a proxy on a fast path). The grok template supports
-  `FORGE_HARNESS_HTTPS_PROXY`.
-- Redis `forge:worker:<id>` heartbeat keys persist ~30s after a worker
-  dies (OP-02) — `/metrics` `workers_active` lags; check logs, not just
-  metrics.
-- DLQ (`forge:tasks:dead`) holds exhausted *tasks*; run-level outcomes live
-  in Postgres `flow_runs` (OP-07). A DLQ entry is not a stuck run by itself.
-- Full run triage recipe: [.claude/skills/forge-debug-run/SKILL.md](.claude/skills/forge-debug-run/SKILL.md).
-
-## Where work stands
-
-The owner authorized local implementation toward 1.0.0 on 2026-10-23,
-explicitly allowing work before the GitHub prerequisites are satisfied.
-Do not block local implementation on publication, required hosted checks,
-the maintenance branch or the recovery tag. Local verification, invariant
-evidence, edge-case pins and the reviewed ledger remain binding. Internal
-task dependencies still apply. This authorization does not request remote
-pushes, merges, tags or settings changes. Current implementation progress:
-[IMPLEMENTATION-1.0.md](docs/roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md).
-
-Later the same day, the owner directed implementation to proceed without
-repeating full test runs at each step. Use focused checks during changes
-and verify the assembled version at the end. Preserve the existing tests
-and gate definitions; report the verification actually performed.
-
-The shipped factory and its history live in the [CHANGELOG](CHANGELOG.md)
-and [docs/README.md](docs/README.md). The current work is the simplification
-program ([ADR-0035](docs/adr/0035-simplification-program.md)):
-[DESIGN](docs/roadmap/2026-09-29-simplification/DESIGN.md) is the target,
-[ROADMAP](docs/roadmap/2026-09-29-simplification/ROADMAP.md) the phased task
-list and [metrics.md](docs/roadmap/2026-09-29-simplification/metrics.md) the
-measured progress. An agent picking up the program starts with the
-[handoff](docs/roadmap/2026-09-29-simplification/HANDOFF.md). The live lab
-(`/implement` → branch → green CI → Draft MR → `ready_for_human`) is the
-definition of done for any lifecycle change.
+Owner environment files, databases and running lab services are outside this
+local implementation. Use only explicitly owned disposable resources for
+verification. No paid model calls or target-provider writes are authorized.

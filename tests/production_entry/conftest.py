@@ -23,6 +23,13 @@ suppressed globally.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.config import Settings
+    from forge.runs.github_service import GitHubRunService
+    from forge.runs.service import RunService
+
 import asyncio
 import base64
 import json
@@ -42,13 +49,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 from uvicorn import Config, Server
 
-from forge.config import ForgeConfig, Settings
-from forge.integrations.github import GitHubClient
-from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
-from forge.models.base import Base
-from forge.runs.github_service import GitHubRunService
-from forge.runs.service import RunService
-from forge.runs.stubs import StubImplementer, StubPlanner
 
 # ----------------------------------------------------------------------
 # The layer's shared vocabulary
@@ -229,6 +229,8 @@ class PEDatabase:
         """The full schema, from scratch (the FI convention: a PG lab URL is
         DISPOSABLE — its rows are dropped so no test inherits another's
         leases, commands or checkpoints)."""
+        from forge.models.base import Base
+
         # Import every module owning tables BEFORE create_all — SQLAlchemy
         # only creates the tables whose modules have been imported.
         import forge.adaptive.mailbox_db  # noqa: F401 — control_commands
@@ -372,6 +374,7 @@ class _StaticTokens:
 @pytest.fixture()
 async def native_client(native: FakeNative):
     """The REAL GitHubClient, pointed at the fake native server."""
+    from forge.integrations.github import GitHubClient
     from forge.integrations.github import GitHubRepositoryReader
 
     client = GitHubClient(
@@ -386,6 +389,8 @@ async def native_client(native: FakeNative):
 
 
 def pe_settings(**overrides) -> Settings:
+    from forge.config import Settings
+
     values = dict(
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN=SecretStr("glpat-test"),
@@ -414,6 +419,11 @@ def make_service(
     settings: Settings | None = None,
 ) -> GitHubRunService:
     """A REAL GitHubRunService whose every provider I/O is real HTTP."""
+    from forge.config import ForgeConfig
+    from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
+    from forge.runs.github_service import GitHubRunService
+    from forge.runs.stubs import StubImplementer, StubPlanner
+
     stack = GitHubAgents(
         client=client,
         reader=reader,
@@ -645,6 +655,8 @@ async def gitlab_client(gitlab_native: FakeGitLabNative):
 
 def gl_settings(**overrides) -> Settings:
     """The CE profile's settings shape (the gitlab-ce-v1 profile document)."""
+    from forge.config import Settings
+
     values = dict(
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN=SecretStr("glpat-test"),
@@ -674,6 +686,9 @@ def make_gitlab_service(
     poll, artifact download, commit and MR travels the REAL GitLabClient
     over HTTP to the fake native server.
     """
+    from forge.config import ForgeConfig
+    from forge.runs.service import RunService
+    from forge.runs.stubs import StubImplementer, StubPlanner
     from forge.runs.stubs import StubReviewer
 
     return RunService(

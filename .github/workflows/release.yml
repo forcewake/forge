@@ -95,14 +95,13 @@ jobs:
           python3 tools/release/artifacts.py prepare --repo "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME" --rc "$rc" --commit "$GITHUB_SHA" --image "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-      - name: Boot the exact registry image and upgrade seeded previous-release data
+      - name: Boot the exact registry image with explicit schema installation
         env:
           IMAGE: ${{ steps.identity.outputs.image }}
         run: >-
           python3 tools/canary_smoke.py "$IMAGE" --runtime docker
           --expected-version "${GITHUB_REF_NAME#v}"
-          --previous-image "ghcr.io/${GITHUB_REPOSITORY,,}:latest"
-          --stages fresh,migrate --seed-real-data --results-json canary-results.json
+          --stages fresh --results-json canary-results.json
       - name: Stage immutable RC assets
         env:
           RC: ${{ steps.identity.outputs.rc }}

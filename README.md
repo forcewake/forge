@@ -30,19 +30,21 @@ They do not imply that this working tree has passed hosted or live checks.
 
 ## Status
 
-This is an unreleased source tree being simplified toward 1.0 under
-[ADR-0035](docs/adr/0035-simplification-program.md). The server,
-`forge-protocol` wire contracts and independent `forge-lane` runner now
-share a uv workspace. Current provider services still use the existing
-lane while the new HTTP lane and shared lifecycle are integrated. See the
-[implementation record](docs/roadmap/2026-09-29-simplification/IMPLEMENTATION-1.0.md)
-for completed source changes and outstanding verification. Source subtraction
-is local; global prose/dependency targets and assembled, hosted and live
-verification remain open.
+The local source candidate identifies as 1.0.0 under
+[ADR-0035](docs/adr/0035-simplification-program.md). The installed server uses
+one SQL engine and the HTTP execution lane. It has no Redis routing or old-runtime dependency. `forge` starts that
+runtime directly; `forge-schema` provides explicit installation checks and
+offline history export. Configuration is closed TOML with named environment
+secrets. Start with [the installation guide](docs/onboarding/cold-install-runbook.md)
+and [forge.example.toml](forge.example.toml).
 
-Claude Code and Copilot CLI are the first-class driver targets. Additional
-drivers are experimental. Azure DevOps remains on the
-[0.42.x maintenance line](docs/operations/maintenance-0.42.md).
+The old runtime and migration chain are removed from `src/forge`. The
+[retirement manifest](docs/archive/runtime-0.42.json) identifies their exact
+recoverable source. There are no routing flags, old-runtime fallbacks or
+compatibility API endpoints.
+
+Claude Code and Copilot CLI are the supported drivers. Azure DevOps remains
+on the [0.42.x maintenance line](docs/operations/maintenance-0.42.md).
 The builtin implementer, security triage, standalone CI-debug lane,
 server-side MCP and legacy chat are removed or deferred.
 

@@ -1,4 +1,4 @@
-"""New-engine worker composition, without a legacy queue or Redis adapter."""
+"""Fenced step-worker composition over the durable SQL journal."""
 
 import asyncio
 from dataclasses import dataclass

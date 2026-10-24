@@ -48,6 +48,9 @@ jobs:
       - name: Import contracts
         run: uv run lint-imports
 
+      - name: Exact authority owners and complete store boundary
+        run: uv run python scripts/check_authority_boundaries.py pyproject.toml
+
       - name: Protocol schema drift
         run: uv run python -m forge_protocol.schema --check
 
@@ -102,27 +105,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --all-packages --extra claude --extra postgres
 
-      # Blocking since F29: the core packages (durable state machine, runs
-      # services, repository, factory agents, execution, integrations) must
-      # pass mypy cleanly — a regression here fails the workflow.
-      - name: Mypy (core packages, blocking)
+      - name: Mypy (all production packages, strict and blocking)
         run: >-
-          uv run mypy src/forge/durable src/forge/runs src/forge/repository
-          src/forge/factory src/forge/execution src/forge/integrations
-          packages/forge-protocol/src/forge_protocol packages/forge-lane/src/forge_lane
-
-      - name: Mypy (domain, ports and engine store, strict and blocking)
-        run: uv run mypy --strict src/forge/domain src/forge/ports.py src/forge/port_values.py src/forge/store src/forge/planning src/forge/engine src/forge/providers src/forge/budget
-
-      # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
-      # gateway, agents, flows, stores, utils, harness_entry, main,
-      # mcp_client, database) still carries ~46 mypy errors. They are
-      # reported below but do NOT fail CI. Shrink this count to zero, then
-      # fold the legacy surface into the blocking step above and delete this
-      # job step.
-      - name: Mypy (legacy surface, non-blocking — tracked debt)
-        run: uv run mypy src/forge
-        continue-on-error: true
+          uv run mypy --strict src/forge
+          packages/forge-protocol/src/forge_protocol
+          packages/forge-lane/src/forge_lane
 
   test:
     runs-on: ubuntu-latest
@@ -376,16 +363,11 @@ jobs:
       - name: OS-process failure injection (SIGKILL drills on real workers)
         run: uv run pytest tests/test_failure_injection_os.py -q
 
-  # Release-artifact canary (review R30): builds the Containerfile from the
-  # pushed commit and runs tools/canary_smoke.py against the BUILT IMAGE —
-  # the real alembic chain on a fresh Postgres (R22: never create_all), the
-  # boot gate at head, /health ok, MCP mount fail-closed (401), doctor on the
-  # in-container env — plus the previous-release → this-tree schema upgrade
-  # when ghcr.io/forcewake/forge:latest is pullable (first release or a
-  # private registry: the stage self-skips). Nightly / manual only, next to
-  # integration-os: container build + pulls add minutes and must not sit on
-  # the PR gate. The tag-triggered release workflow runs the SAME script
-  # against the pushed digest before any mutable tag moves.
+  # Installed-image canary: explicit schema installation, zero-DDL startup,
+  # refusal of historical schemas, readiness and authenticated API boundary.
+  # Native/model peers are synthetic; offline history cutover and live
+  # release acceptance remain separate gates. The release workflow probes
+  # the same immutable registry image before moving mutable tags.
   release-canary:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -393,7 +375,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build the canary image
-        run: docker build -f Containerfile -t forge:canary .
+        run: docker build -f Dockerfile -t forge:canary .
 
       # Stdlib-only script: no uv sync needed, it only drives the runtime CLI.
       - name: Canary the built image
@@ -401,5 +383,4 @@ jobs:
           python3 tools/canary_smoke.py forge:canary \
             --allow-unpinned \
             --runtime docker \
-            --previous-image ghcr.io/forcewake/forge:latest \
-            --stages fresh,migrate
+            --stages fresh

@@ -108,7 +108,8 @@ async def test_native_database_unique_admission_remains_an_independent_arbiter(l
 
 
 @pytest.mark.parametrize(
-    "fault", ("builtin", "fallback", "neighbor", "approvers", "waiver", "provider", "closing_policy")
+    "fault",
+    ("builtin", "fallback", "neighbor", "approvers", "waiver", "provider", "closing_policy"),
 )
 async def test_closed_trusted_configuration_refuses_retired_or_unbound_authority(lifecycle, fault):
     document = lifecycle["config"].model_dump(mode="json", by_alias=True)

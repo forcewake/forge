@@ -1,5 +1,0 @@
-@@COMMENT@@
-@@MKDIR@@
-cat > @@DEST@@ <<'FORGE_MCP_EOF'
-@@JSON@@
-FORGE_MCP_EOF

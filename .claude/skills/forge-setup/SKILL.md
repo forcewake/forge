@@ -1,24 +1,28 @@
 ---
 name: forge-setup
-description: Set up the forge dev environment from a fresh clone and verify it with forge doctor. Use when the repo was just cloned, the venv is missing, or tests/lint must be validated before work.
+description: Set up the current Forge workspace and verify its sole runtime.
 ---
 
-# forge-setup: dev environment + verification
+# Forge development setup
 
-1. Check prerequisites: `python3 --version` (need 3.13+) and `uv --version`.
-   If missing, install uv via the official installer; use the system Python
-   3.13+ (pyenv/homebrew acceptable).
-2. `uv sync` from the repository root.
-3. Verify: `set -o pipefail && .venv/bin/python -m pytest -q -m "not slow"` — the
-   default tier must pass with zero failures (counts change as the
-   simplification program deletes code; `docs/reference/testing.md` explains
-   the tiers).
-4. Lint: `.venv/bin/ruff format . && .venv/bin/ruff check .`, then the
-   guardrails: `uv run lint-imports && uv run python scripts/ratchet.py`.
-5. Final gate: `uv run python -m forge.doctor`. With a `.env` it must exit 0
-   (`--project <id>` adds target-project checks). Without one, doctor prints a
-   single FAIL line for the missing settings (for example `GITLAB_URL`) and
-   exits 1; that is expected for a pure-dev clone, where what must pass is the
-   default tier, lint and the guardrails.
+1. Check Python 3.13+ and uv, then run `uv sync --all-packages --extra postgres --extra claude`.
+2. Follow the current owner direction in AGENTS.md for verification scope.
+   The default tier remains `python -m pytest -q -m "not slow"`; report its
+   actual status. Do not hide historical unported-test failures or restore
+   a deleted runtime to make them import.
+3. Run Ruff, `mypy --strict src/forge packages/forge-protocol/src packages/forge-lane/src`,
+   `lint-imports`, `python scripts/check_authority_boundaries.py pyproject.toml`,
+   `python scripts/ratchet.py` and `python -m forge_protocol.schema --check`.
+4. The current environment oracle is `forge --config forge.toml doctor`.
+   It checks the explicitly selected configuration, installed schema,
+   configured native repositories and prospective native gateway guards.
+   It performs no model request or provider write. A clean clone without
+   configured credentials has no live environment pass to report.
+5. Installation is explicit: `forge --config forge.toml install` is only
+   for an empty database. Startup checks the schema without DDL. Preserve
+   an owner's existing environment and lab. Use an owned disposable
+   database for installation and invariant checks.
 
-Report: test counts, lint status, doctor output. Do not commit anything.
+Report the checks actually performed and distinguish local artifact/synthetic
+workflow evidence from hosted CI and live provider acceptance. Setup itself
+does not authorize commits, pushes, tags, publication or operational changes.

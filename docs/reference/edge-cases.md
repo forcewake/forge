@@ -626,17 +626,19 @@ When a pin breaks:
 | EC-1189 | A driver accepts steering but its terminal ACK is lost, so restart repeats the native action | Require one durable delivery intent before driver I/O; duplicate begin refuses, inflight remains unknown, and only a matching delivery ID can settle the terminal receipt | `src/forge/store/lane_control_receipts.py`, `packages/forge-lane/src/forge_lane/supervisor.py` | `tests/test_lane_control_delivery.py::test_actual_primary_driver_never_repeats_unknown_delivery` |
 | EC-1192 | A native connection private CA works for repository reads but signed lane sessions fail at its HTTPS OIDC issuer, or one connection inherits another CA | Carry each explicit native connection CA through immutable OIDC authority into its own verified HTTPS JWKS client; never disable certificate verification or union connection roots | `src/forge/api/lane_jwks.py`, `src/forge/api/lane_settings.py`, `src/forge/runtime/assembly.py` | `tests/test_lane_oidc_tls.py::test_native_connection_ca_reaches_actual_https_jwks`, `tests/test_lane_oidc_tls.py::test_private_ca_never_leaks_to_another_connection_at_the_same_issuer` |
 | EC-1191 | A hung native recovery read pins the worker or timeout is mistaken for permission to create again | Bound the complete native probe, including credential/metadata/page reads; preserve durable unknown and original dispatch window on expiry, and propagate external cancellation without redispatch | `src/forge/engine/effects.py` | `tests/test_effect_probe_deadline.py::test_hung_native_probe_is_bounded_without_erasing_or_redispatching_unknown`, `tests/test_effect_probe_deadline.py::test_external_probe_cancellation_propagates_without_authorizing_a_retry` |
+| EC-1137 | A package silently ships an old runtime, needs checkout-only migrations or launches an obsolete server | Install the built wheel outside the checkout, use one explicit packaged baseline and direct runtime entry points, and exclude retired modules from the distribution | `pyproject.toml`, `src/forge/runtime/cli.py`, `Dockerfile` | `tests/test_wheel_migrations.py::test_installed_wheel_bootstraps_and_checks_its_own_schema` |
+| EC-1193 | A GitLab repair lane checks out the original approved base instead of its authorized published candidate | Select the explicit repair candidate SHA for repair dispatches and the approved base for initial dispatches; execute the shipped checkout against actual Git objects | `ci/lane.gitlab-ci.yml`, `.github/workflows/lane.yml` | `tests/test_lane_templates_v1.py::test_gitlab_checkout_executes_on_the_exact_authorized_source` |
 
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |
 | --- | --- | --- | --- |
-| OP-01 | Claude Code on z.ai treats a bare model id as a 200K context window | Use the `[1m]` suffix for the 1M window; the default `FORGE_HARNESS_MODEL` carries it | `src/forge/config.py` |
+| OP-01 | A vendor model route can select a smaller context window than intended | Configure the exact reviewed model identifier in immutable policy, including any required vendor context suffix; there is no ambient model fallback | `src/forge/domain/run_spec.py` |
 | OP-02 | Redis `forge:worker:<id>` heartbeat keys outlive a dead worker by about 30 seconds | Check worker logs, not only `/metrics` | `AGENTS.md` |
 
 | OP-04 | zsh does not word-split unquoted variables | Iterate with `while IFS= read -r` | `AGENTS.md` |
 | OP-05 | `pytest` piped to `tail` hides the exit code | Run `set -o pipefail` first | `AGENTS.md` |
-| OP-06 | Long-lived AI streams from some runner networks crawl (226 s instead of 2 s) | Route them through `FORGE_HARNESS_HTTPS_PROXY` | `ci/templates/grok.gitlab-ci.yml` |
+| OP-06 | Historical Grok streams from some runner networks crawled through the direct route | This driver and its proxy template are retired; preserve the measured network lesson in the exact historical source instead of adding a fallback execution path | `docs/archive/runtime-0.42.json` |
 | OP-07 | The dead-letter queue `forge:tasks:dead` looks like stuck runs | It holds exhausted tasks; read run outcomes from Postgres `flow_runs` | `AGENTS.md` |
 
 ## Retired

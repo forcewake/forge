@@ -1,95 +1,76 @@
-# Local 1.0.0 implementation
+# Local Forge 1.0.0
 
-Owner direction on 2026-10-23: proceed locally toward the ADR-0035 target,
-without waiting for GitHub prerequisites. The requested end state is the
-new 1.0.0 architecture, not only a plan or a renamed 0.42 release.
+The owner authorized completion of the local 1.0 rewrite on 2026-10-23,
+waived GitHub prerequisites for that work and required a clean break. On
+2026-10-24 the owner directed completion of the working product instead of
+continuing old-test ports. No remote publication or owner-lab migration was
+authorized. All129 flagged/drop ledger rows were reviewed with their
+existing dispositions unchanged.
 
-## Binding scope
+## Delivered runtime
 
-- Subtract obsolete/test-only qualification and legacy subsystems.
-- Separate `forge-protocol`, `forge-lane` and the control plane.
-- Replace three provider lifecycles with one engine over narrow ports and
-  journaled effects; keep provider-native concurrency/recovery semantics.
-- Preserve I1–I8, bot self-trigger protection, reviewed ledger decisions
-  and every applicable edge-case pin.
-- Implement and verify the local installation, configuration, operator and
-  release-artifact surfaces for version 1.0.0.
-- Report hosted/live/pilot acceptance separately; local tests are evidence
-  of their stated scope. No remote publication was requested.
+- One provider-neutral lifecycle, durable SQL journal and exact packaged
+  schema baseline. No Redis queue, old application entry point, dual-engine
+  flag, execution fallback or compatibility API remains.
+- Native GitHub App and GitLab project-bot adapters, exact frozen source
+  reads, one validated Git publisher, one Draft and read-only reviews.
+- Independent `forge-protocol` and `forge-lane` distributions; Claude Code
+  and Copilot CLI are the supported drivers. The server imports neither
+  the lane nor a vendor SDK. Extra drivers are removed.
+- Consume-once approval of the full frozen plan/policy, explicit native
+  verification, bounded repair and closing reserves, durable amendments,
+  cancellation, exact checkpoint resume and operator controls.
+- Native effects are committed before I/O. Complete recovery probes are
+  bounded. A lost control response remains durably inflight and cannot
+  replay after restart; terminal ACKs require the matching delivery ID.
+- Per-connection TLS trust reaches real HTTPS OIDC/JWKS without sharing
+  private roots between connections. No certificate bypass is used.
+- Closed TOML configuration, explicit installation, read-only schema
+  startup, diagnostics, authenticated operator API/metrics and separate
+  app/worker processes. Compose uses PostgreSQL and the explicitly
+  configured guarded HTTPS gateway.
 
-Use ROADMAP task boundaries and internal dependencies. GitHub publication,
-required hosted checks, maintenance-branch publication and recovery-tag
-creation do not block local work under the owner's explicit override.
-The owner's later instruction stops repeated full runs at each step:
-use focused checks while implementing, then verify the assembled version.
-Keep the existing gates and tests intact; record actual verification.
+The retired runtime's exact recoverable source is in
+[the manifest](../../archive/runtime-0.42.json). Historical tests and curated
+ledger decisions remain in the repository; they do not ship in the runtime.
+No deleted service is restored to satisfy an old test import.
 
-## Current work
+## Local evidence
 
-Working branch: `rewrite/1.0.0`, based on `0bf2a4e`.
+The assembled current runtime completed issue → plan → exact approval →
+signed lane artifact → native Git CAS → one Draft → independent native
+checks → posted review → `ready_for_human` for both GitHub and GitLab.
+These runs used owned Git/SQL resources and synthetic native/model HTTP
+peers. They establish local composition, not hosted or paid-provider acceptance.
 
-| Task | Current state |
-| --- | --- |
-| P1-01 shared project config | Implemented; 6 red relocation tests before the move, 145 focused passes, 9,575 default passes, 807 invariant passes with no skips; all local guards green |
-| P1-02 saga removal | Implemented; obsolete coordinator removed, retained tests ported, actual socket-loss recovery fixed; 289 focused passes and six live-credential skips |
-| P1-03 test-only modules | All five clusters implemented; 18 named modules removed; retained contracts use current product seams |
-| P1-04 reference twins | Implemented; all reference-only source removed and architecture checks reject reintroduction; real publisher and recovery contracts remain |
-| P1-05 boundary registry | Implemented; 901 source lines removed, 15 contracts added, 48 architecture checks retained; 186 focused passes |
-| P1-06 closure matrix | Implemented; grading module, generated publication and approved drop suite removed |
-| P1-07 qualification retirement | Implemented; grading modules and obsolete scripts removed, six dev tools moved out of the wheel; native release, credential, migration and dispatch contracts retained |
-| P1-08 release and CI flow | Source implemented; one build, mandatory provider smokes, signed reports and identical-digest promotion; hosted dry run remains unperformed |
-| P1-09 historical evidence archive | Implemented locally; 508 original files recover byte-for-byte from unpublished archive/evidence-0.42; active contract fixtures and dump guard retained |
-| P1-10 lane-only implementation | Source implemented; builtin execution removed and actual project CI checked before paid work; remaining lifecycle-test ports join engine integration |
-| P1-12 Codeward legacy | Implemented; legacy orchestrator, YAML agents/flows, context, chat, MCP client and unused stores/models removed; old queued tasks refuse and migration tables remain |
-| P1-17 documentation | Implemented; concise README/index and current runbooks, exact local documentation archive and path/heading checks; active-reader count below 60K, all-docs metric remains above target due preserved program/history |
-| P1-16 surviving-source prose | Implemented for 41 surviving modules with identical non-docstring AST and directive targets; label-gated CI checker added; global prose target remains open until old lifecycle/lane removal |
-| P1-15 operator surfaces | Implemented; list/detail retain authorization, scope and redaction, optional exports and report grades removed; list credential leakage fixed |
-| P1-14 dependency diet | Implemented source cleanup; Agno/LiteLLM/MCP/tiktoken and orphan dependencies removed, three distribution dependency checks pass; 13 direct server requirements remain, above the target of ten |
-| P1-13 deferred features | Implemented; MCP server, scanner/triage and standalone CI-debug removed; historical migration schema preserved and /security refuses explicitly |
-| P1-11 Azure removal | Implemented; runtime provider routes removed, shared contracts preserved, local `release/0.42.x` preserves `7ed64ba` |
-| P3-01 pure domain | Implemented: closed states, exact cumulative multi-axis budgets, immutable candidate/path validation, RunSpec v2, plans and one approved-input contract; 436 focused checks and strict domain typing pass; engine integration follows |
-| P3-02 engine ports | Implemented: immutable native references, read/write and collaborator protocols, full typed probe outcomes, deterministic strict fakes and generated reference; strict typing is blocking |
-| P3-03 engine store | Final store metadata implemented: one unprefixed engine schema, canonical admission, fenced leases, command ownership, atomic successors and monotonic effects; SQLite and owned PostgreSQL proofs pass. Old live-table coexistence is superseded by the clean cutover. |
-| P3-06 durable worker | Implemented: renewable fenced step execution, atomic outcome/state/successors, bounded retries, original-step reconciliation and PostgreSQL notification with polling; 61 runner/store cases pass on SQLite and disposable PostgreSQL |
-| P3-07 plan and approval | Implemented: capacity-bound admission, actual immutable plan, full displayed-input comment proof and fixed expiry; approval consumption, approved input, step completion and one dispatch successor commit together; duplicate, stale and unauthorized approval refuse |
-| P3-08 dispatch and await | Handler source implemented: one durable nonce and native handle, approved key admission before dispatch, original-step discovery, accepted candidate receipts and atomic bounded revival; native lane success never authorizes independent verification; current exact dispatch intent permits bounded503 startup retry |
-| P3-05 native provider fake | Implemented: immutable Git trees, native CAS/modes, Draft/feedback/CI/actor ports and explicit unknown/conflict/visibility faults; duplicate writes stay observable and both provider identities pass the shared contracts |
-| P3-04 effects | Implemented: committed intent and fenced dispatch before external I/O, unfenced typed receipts, all 12 mandatory probes reconstructed from persisted input and bounded negative-probe recovery; 21 SQL crash/recovery checks pass |
-| P3-11 planning on ports | Implemented: bounded read-only tools on exact frozen snapshots, explicit connection/native repository authorization, real blob/observed-line citations and gateway-scoped model interface; real model/provider calls unperformed |
-| P3-12 budget module | Implemented: cumulative exact pools, presealed scoped keys, amendments and retained unknown settlement. The pinned LiteLLM container enforces durable native holds before both supported text APIs; actual SDK-to-gateway proofs use an owned stub upstream, with no paid provider acceptance claimed. |
-| P3-16 GitHub adapter | Implemented: selected-repository App credentials, immutable native reads, exact leased Git writes and recovery, Draft/review/comment semantics, correlated CI and signed ingress. Owned Git/HTTP proofs pass; no hosted provider writes were requested. |
-| P3-09 publication through ready | Implemented: exact native bytes/modes and consumed approval, leased Git publication, one Draft, candidate-bound independent checks, bounded code-only repair and scoped closing review. Unknown outcomes and human head changes park without overwrites; both provider port scenarios pass. |
-| P3-10 commands and rounds | Implemented: durable native commands, per-repository actor resolution, cancellation before cleanup, original-step retry, atomic controls and exact checkpoint resume. Native correction children require fresh approval and preserve the original issue, branch and sole Draft. |
-| P3-13 review module | Closing review implemented with a lease-bound model client over the exact published raw diff and consumed approval. Incremental human-push review is being integrated separately with explicit read-only authority and its own bounded grant. |
-| P3-17 sole runtime | New runtime implemented with checked-schema startup, closed TOML configuration, concrete native adapters, trusted operator identity, command decision fencing and one engine. Owned TLS/ASGI proofs cover implement, planning, native comment, consumed approval and cancellation. Old public entry points and remaining retained-test imports still need final deletion. |
-| P3-19 GitLab adapter | Implemented: explicit per-project read/write bot credentials, immutable native reads, leased Git publication, native Draft/discussion/pipeline semantics, approver checks and authenticated ingress. Quick actions and unknown write policy refuse before mutation. |
-| P3-20 clean schema | Single packaged baseline and explicit offline cutover implemented. Exact private history export and native backup/restore verification precede fresh initialization; old schemas refuse startup. The focused SQLite/PostgreSQL schema suite passes without skips; final review/observability tables will be frozen before the assembled artifact. |
-| P2-01 distribution split | Implemented; server, protocol and lane build as separate wheels, install from wheels, and have enforced import boundaries |
-| P2-08 contrib drivers | Implemented as explicit opt-in experimental Codex/OpenCode/Grok ports; protocol fakes only, vendor sandbox and live acceptance unperformed |
-| P2-09 exact checkpoints | Implemented; binary/mode/symlink round trips, safe file/directory transitions, matched server limits and acknowledged blob deduplication; corrupt restore halts before writes |
-| P2-10 lane config/trace | Implemented: frozen driver/model/deadline/write policy enforced before grant, bounded redacted trace and explicit public HTTPS MCP for Claude; authenticated/stdio and Copilot MCP refuse explicitly; vendor smoke unperformed |
-| P2-11 CI templates | Implemented; GitHub reusable/target workflows and GitLab OIDC job, verified lane-only requirements, frozen checkout and read-only repository authority; local YAML/actionlint validation only |
-| P2-07 Copilot driver | Implemented; pinned native ACP process, explicit token auth, permission boundary and cancellation ledger; real paid smoke unperformed |
-| P2-06 Claude driver | Implemented; scoped gateway auth, confined file capabilities, process-group interruption and usage; real paid smoke unperformed |
-| P2-05 lane runner | Implemented; authenticated brief, deadline/control supervisor, exact-WIP checkpoint, independent binary/untracked candidate capture and acknowledged reports; focused checks only |
-| P2-04 lane HTTP API | Implemented; engine-owned sessions and normalized blob/candidate/checkpoint/control rows, no shadow old run; native repository identity, durable replay and cancellation fences; encrypted grants survive retry/restart and unknown mint stays reserved; metered service still awaits strict gateway integration |
-| P2-03 OIDC sessions | Implemented; trusted issuer/JWKS, exact workflow/job binding, durable global replay receipts and cancellation CAS; local JWT/SQLite and disposable PostgreSQL checks only |
-| P2-02 wire protocol | Implemented; immutable v1 bodies, bound approval/candidate/checkpoint identities, canonical serialization and exported schemas |
+The actual primary Runner also completed 47 verified HTTPS requests against
+the current app and a fresh owned PostgreSQL database, including real HTTPS
+JWKS, steering, pause/WIP checkpoint, report acceptance and lost-ACK restart
+refusal. Source and installed-wheel probes find no retired runtime modules.
 
-The final 1.0 package has one engine, one schema and the new lane API.
-Old services, compatibility shims and fallback execution paths are removed
-at integration; they are not part of the target public API. The owner
-subsequently required a clean break: no dual-engine rollout, routing flags
-or new coexistence tables/triggers. The final API/worker refuse old schemas;
-an existing installation needs an explicit offline migration with backup
-and export, with its old service stopped. No owner lab
-database is modified by source implementation.
+Strict typing covers all 236 production files; all 18 import contracts pass,
+with 10 exact protected authority groups and zero ignored imports. All three
+dependency graphs pass. Source size debt is zero: no production file exceeds
+600 lines and no function exceeds 80. Protocol schemas match their exports.
+The wheel installs and initializes/checks its schema outside the checkout.
 
-The owner completed review of all 129 required ledger rows on 2026-10-23,
-keeping existing dispositions. The source ledger hash and confirmation
-are recorded with the local prerequisite evidence.
+Final receipts, invariant XML, correction receipts and local artifacts are
+under `.forge/verification/rewrite-1.0.0/final-20261024/` and
+`.forge/artifacts/1.0.0/`. The original assembled invariant run passed 2172
+cases and exposed two outdated exception expectations: native plan-display
+validation now refuses earlier. The corrected proofs additionally exercise
+the independent atomic SQL gate and pass for both providers. No invariant
+or gate was skipped or weakened. The original run's failure record is retained.
 
-Evidence: `.forge/verification/rewrite-1.0.0/` for implementation and
-`.forge/verification/phase0-20261023/` for the fresh Phase 0 prerequisite
-checks, including 807 invariant passes without skips and 20 mutation proofs
-over all 18 registered files. These do not claim 1.0.0 completion.
+## Remaining acceptance boundary
+
+The owner stopped further migration of the historical test corpus. Its
+unported old-runtime imports remain visible; the full default/slow CI corpus
+is not qualified on this candidate and its gates have not been bypassed.
+This is a local working1.0 source/artifact delivery, not a published release,
+green hosted CI, an owner-lab deployment or a live provider pilot.
+
+Use [the installation guide](../../onboarding/cold-install-runbook.md) and
+[the configuration example](../../../forge.example.toml). Remote push,
+merge, tag, publication, GitHub settings and owner operational changes remain
+owner-controlled.

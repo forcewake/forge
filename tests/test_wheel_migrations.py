@@ -27,14 +27,22 @@ def test_installed_wheel_bootstraps_and_checks_its_own_schema(tmp_path):
     }
     env.update(UV_OFFLINE="1", PYTHONPATH="", NO_PROXY="*")
     dist = tmp_path / "dist"
-    run(["uv", "build", "--all", "--offline", "--out-dir", str(dist)], cwd=ROOT, env=env)
+    run(["uv", "build", "--all-packages", "--offline", "--out-dir", str(dist)], cwd=ROOT, env=env)
     wheel = next(dist.glob("forge-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
-        for original in sorted((ROOT / "alembic").rglob("*")):
-            if original.is_file() and "__pycache__" not in original.parts:
-                packaged = "forge/_migrations/" + original.relative_to(ROOT / "alembic").as_posix()
-                assert archive.read(packaged) == original.read_bytes(), packaged
-        assert archive.read("forge/_migrations/alembic.ini") == (ROOT / "alembic.ini").read_bytes()
+        assert (
+            archive.read("forge/store/schema/baseline.json")
+            == (ROOT / "src/forge/store/schema/baseline.json").read_bytes()
+        )
+        assert not any(name.startswith("forge/_migrations/") for name in archive.namelist())
+        assert not any(name.startswith("forge/adaptive/") for name in archive.namelist())
+    from tests.runtime_fixture import configuration
+
+    config, values = configuration(tmp_path)
+    probe_config = tmp_path / "probe-config.json"
+    probe_config.write_text(
+        json.dumps({"config": config.model_dump(mode="json", by_alias=True), "environment": values})
+    )
     outside = tmp_path / "outside-checkout"
     outside.mkdir()
     venv = tmp_path / "wheel-env"
@@ -48,16 +56,23 @@ def test_installed_wheel_bootstraps_and_checks_its_own_schema(tmp_path):
             "--offline",
             "--python",
             str(python),
-            *map(str, dist.glob("*.whl")),
+            str(wheel) + "[sqlite]",
+            *(str(path) for path in dist.glob("*.whl") if path != wheel),
         ],
         cwd=outside,
         env=env,
     )
     result = run(
-        [str(python), "-I", str(ROOT / "tests/fixtures/wheel_bootstrap_probe.py")],
+        [
+            str(python),
+            "-I",
+            str(ROOT / "tests/fixtures/wheel_bootstrap_probe.py"),
+            str(probe_config),
+        ],
         cwd=outside,
         env=env,
     )
     proof = json.loads(result.stdout.splitlines()[-1])
+    assert proof["version"] == "1.0.0" and proof["retired_runtime_files"] == 0
     assert proof["fresh_bootstrap"] and proof["zero_mutation_check"]
     assert proof["asgi_startup_and_health"] and proof["provider_writes"] == 0

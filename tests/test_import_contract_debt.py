@@ -7,7 +7,7 @@ from pathlib import Path
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 # Lower this when an entry is removed. Raising it needs an ADR.
-MAX_IGNORED_IMPORTS = 2
+MAX_IGNORED_IMPORTS = 0
 
 
 def test_ignored_imports_only_shrink():

@@ -184,7 +184,7 @@ tests/test_github_reactive_review.py,25,635,true,false,,edge-case pin,,github,po
 tests/test_github_reads.py,13,443,true,false,,edge-case pin,,github,keep,P3-16,"Frozen Git objects, native bot markers and approver authority"
 tests/test_github_reconciler_scope.py,5,374,true,false,,,,github,port-engine,P3,
 tests/test_github_rest.py,16,509,true,true,,edge-case pin,,github,keep,P3-16,"Native GitHub REST write, recovery and SHA-bound Actions fixtures"
-tests/test_github_runs.py,23,520,true,true,,invariant evidence; edge-case pin,,github,port-engine,P3,
+tests/test_github_runs.py,23,521,false,true,,invariant evidence; edge-case pin,,github,port-engine,P3,
 tests/test_github_webhook.py,46,429,true,true,,invariant evidence; edge-case pin,,github,keep,-,
 tests/test_gitlab_client.py,30,324,true,false,,,,gitlab,port-adapter,P3,
 tests/test_gitlab_client_commits.py,6,100,false,false,,,,gitlab,port-adapter,P3,
@@ -220,7 +220,7 @@ tests/test_lane_only_admission.py,10,237,true,false,,edge-case pin,,lane,port-en
 tests/test_lane_runner_v1.py,14,560,true,true,,edge-case pin,,lane,keep,-,
 tests/test_lane_sdk_terminal.py,3,89,false,false,,invariant evidence; edge-case pin,,lane,keep,P2-04,"Actual pinned SDK error, abort and background results cannot authorize a successful candidate; only the issued human prompt contributes terminal authority and usage."
 tests/test_lane_sdk_usage.py,3,131,false,false,,edge-case pin,,lane,keep,P2-04,Actual pinned SDK parser usage is validated before receipts; partial or invalid axes never become zero and wholly missing usage remains unknown.
-tests/test_lane_templates_v1.py,2,31,false,false,,edge-case pin,,lane,keep,-,
+tests/test_lane_templates_v1.py,3,74,false,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_trace.py,6,117,true,false,,edge-case pin,,lane,keep,-,
 tests/test_lane_v1.py,16,480,true,true,,edge-case pin,,lane,keep,-,
 tests/test_legacy_credential_deadline.py,24,479,true,false,,,,legacy,keep,-,
@@ -291,7 +291,7 @@ tests/test_runs_reconciler.py,14,432,true,false,,,,runs,port-engine,P3,
 tests/test_runs_repair.py,21,566,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_revival.py,36,860,true,false,,edge-case pin,,runs,port-engine,P3,
 tests/test_runs_service.py,63,1872,true,false,,,,runs,port-engine,P3,
-tests/test_runs_spec.py,31,352,true,true,,invariant evidence; edge-case pin,,runs,port-engine,P3,
+tests/test_runs_spec.py,31,394,false,true,,invariant evidence; edge-case pin,,runs,port-engine,P3,
 tests/test_runs_verification.py,10,168,true,false,,invariant evidence; edge-case pin,,runs,port-engine,P3,
 tests/test_runs_wiring.py,20,536,true,false,,,,runs,port-engine,P3,
 tests/test_runtime_app.py,7,349,true,false,,,,runtime,keep,P3-17,Production runtime composition against owned TLS native HTTP and scoped model fixtures.
@@ -333,6 +333,6 @@ tests/test_verification_deadline.py,1,65,true,false,,invariant evidence; edge-ca
 tests/test_verification_executor.py,7,133,true,false,P1-15,edge-case pin,partly deleted,verification,keep,-,
 tests/test_webhook_auth.py,4,37,false,false,,edge-case pin,,webhook,keep,-,
 tests/test_webhook_capture.py,3,43,true,false,,edge-case pin,,webhook,keep,-,
-tests/test_wheel_migrations.py,1,63,false,false,,edge-case pin,,wheel,keep,-,
+tests/test_wheel_migrations.py,1,78,false,false,,edge-case pin,,wheel,keep,-,
 tests/test_worker.py,4,54,true,false,,edge-case pin,,worker,keep,-,
 tests/test_write_profiles.py,30,257,true,false,,,,write,keep,-,
