@@ -80,7 +80,9 @@ class FakeWrites(FakeState):
             return Refused(reason="missing_comment", evidence="fake:missing_comment")
         if fault.http_5xx:
             return Unknown(evidence="fake:http_503")
-        native.body = body
+        native.body, native.marker_appended = body, False
+        if native.marker not in body.splitlines():
+            native.marker = ""
         body_digest = digest({"body": body})
         return self.finish(
             f"update:{ref_key(comment.subject)}:{comment.native_id}:{body_digest}",

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.domain.approved_input import ApprovedInput
 from forge.domain.run_spec import RunSpec2
 from forge.domain.states import State
-from forge.port_values import Applied, CommentOutcome, SubjectRef
+from forge.port_values import Applied, CommentOutcome, CommentRef, SubjectRef
 from forge.store.approval_values import (
     ApprovalCommit,
     ApprovalDecision,
@@ -53,6 +53,16 @@ class ApprovalStore:
     async def load(self, run_id: str) -> PreparedPlan | None:
         async with self.factory() as session:
             return await load_prepared(session, run_id)
+
+    async def comment_ref(self, run_id: str) -> CommentRef | None:
+        from forge.store.plan_comment import posted_plan
+
+        async with self.factory() as session:
+            run = await session.get(EngineRun, run_id)
+            prepared = await load_prepared(session, run_id)
+            if run is None or prepared is None:
+                return None
+            return await posted_plan(session, run, prepared)
 
     async def prepare(
         self, lease: Lease, spec: RunSpec2, *, ttl_seconds: int, now: datetime

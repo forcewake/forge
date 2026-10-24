@@ -97,10 +97,15 @@ class FakeReads(FakeState):
         )
         native = self.comments.get(f"{ref_key(comment.subject)}:{comment.native_id}")
         if (
-            result.kind == "definitely_absent"
-            and native is not None
-            and digest({"body": native.body}) == body_digest
+            native is None
+            or (native.ref.kind, native.ref.native_id, ref_key(native.ref.subject))
+            != (comment.kind, comment.native_id, ref_key(comment.subject))
+            or digest({"body": native.displayed_body}) != body_digest
         ):
+            return Inconclusive(
+                reason="comment body or target differs", evidence="fake:native_comment"
+            )
+        if result.kind in ("definitely_absent", "found"):
             return Found[CommentOutcome](
                 value=Applied[CommentRef](value=comment, evidence="fake:body_matches"),
                 evidence="fake:native_comment",

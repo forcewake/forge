@@ -298,7 +298,7 @@ async def test_missing_or_corrupt_durable_ownership_never_creates_correction(rou
             row = await session.scalar(
                 select(EngineStep).where(EngineStep.key == rounds["root"].id + ":plan")
             )
-            await session.delete(row)
+            row.key += ":corrupted"
         elif fault == "cancelled":
             row = await session.get(EngineRun, rounds["root"].id)
             row.cancel_requested = True

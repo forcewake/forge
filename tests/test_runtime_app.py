@@ -246,6 +246,7 @@ async def test_plan_and_go_use_actual_scoped_model_calls_native_effect_and_consu
             body = json.loads(request.content)["body"]
             row = native.note(ident=51, body=body)
             peer.routes["issues/7/notes"].append(row)
+            peer.routes["issues/7/notes/51"] = row
             return httpx.Response(201, json=row)
 
         peer.mutations[("POST", "issues/7/notes")] = post_note

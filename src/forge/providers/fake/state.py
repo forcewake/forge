@@ -87,6 +87,13 @@ class NativeComment:
     body: str
     marker: str
     reply_to: str | None = None
+    marker_appended: bool = True
+
+    @property
+    def displayed_body(self) -> str:
+        return (
+            self.body + "\n\n" + self.marker if self.marker_appended and self.marker else self.body
+        )
 
 
 @dataclass

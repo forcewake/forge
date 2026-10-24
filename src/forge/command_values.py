@@ -109,6 +109,7 @@ REFUSALS = {
     "checkpoint_unavailable": "No matching named checkpoint is available to resume.",
     "round_already_open": "A correction is already awaiting approval or running on this draft.",
     "revision_out_of_scope": "The proposed path is outside the frozen write authority.",
+    "revision_approval_required": "Use /approve-revision on the original Draft for this correction.",
     "review_window_closed": "This draft has no eligible completed candidate to revise.",
 }
 

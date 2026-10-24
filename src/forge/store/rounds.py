@@ -276,6 +276,14 @@ class RoundStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
 
+    async def approval_window(
+        self, run_id: str, step_id: str, claim: ApprovalClaim
+    ) -> tuple[RoundWindow, CommandEnvelope, CommandEnvelope]:
+        from forge.store.round_approval import approval_window
+
+        async with transaction(self.factory) as session:
+            return await approval_window(session, run_id, step_id, claim)
+
     async def feedback(self, run_id: str, review: ReviewRef) -> CommandEnvelope:
         async with self.factory() as session:
             slot = await session.scalar(

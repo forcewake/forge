@@ -412,6 +412,7 @@ async def test_repair_identity_and_successor_roll_back_together(delivery, monkey
     run, _, _, sha = await published(delivery)
     check(delivery, sha, status="failed", failure_kind="code")
     original = step_module.enqueue_in
+    env.runner.lease_seconds, env.runner.renew_seconds = 5, 1
 
     async def crash(session, row, request):
         result = await original(session, row, request)
@@ -426,7 +427,7 @@ async def test_repair_identity_and_successor_roll_back_together(delivery, monkey
     current = await env.runs.load(run.id)
     assert (current.state, current.attempt, current.generation) == (State.VERIFYING, 1, 1)
     assert await env.steps.get(f"{run.id}:2:2:repair") is None
-    advance(delivery, 61)
+    advance(delivery, 6)
     assert (await env.runner.tick()).completed == 1
     assert (await env.runs.load(run.id)).generation == 2
 

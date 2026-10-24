@@ -121,6 +121,8 @@ class InitialActions:
     ) -> CommandResult:
         if run is None:
             return refusal("run_not_found")
+        if run.root_run_id != run.id:
+            return refusal("revision_approval_required", run)
         frozen = await self.approvals.load(run.id)
         if frozen is None:
             return refusal("gate_not_open", run)

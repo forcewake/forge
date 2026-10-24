@@ -144,10 +144,18 @@ class GitLabSubject:
             return Inconclusive(reason="note read unavailable", evidence=error.evidence)
 
     async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
-        result = await self.probe_comment(subject, marker)
-        if isinstance(result, Found) and isinstance(result.value, Applied):
-            return result.value.value
-        raise ReadUnavailable("note visibility unknown", result.evidence)
+        rows = [
+            row
+            for row in await self.notes(subject)
+            if marker_line(text(row.get("body"), empty=True), marker)
+        ]
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ReadUnavailable("note marker is ambiguous", evidence("find_comment"))
+        if not self.owned(subject, rows[0]):
+            return None
+        return CommentRef(subject=subject, native_id=native_id(rows[0].get("id")))
 
     async def probe_comment_update(
         self, comment: CommentRef, body_digest: str
@@ -173,8 +181,8 @@ class GitLabSubject:
             return self.observation(
                 comment.subject, [row], "probe_comment_update", kind=comment.kind
             )
-        except ReadUnavailable as error:
-            return Inconclusive(reason="note update read unavailable", evidence=error.evidence)
+        except ReadUnavailable:
+            raise
 
     async def probe_label(
         self, subject: SubjectRef, label: str, present: bool

@@ -155,10 +155,18 @@ class GitHubSubject:
             return Inconclusive(reason="comment read unavailable", evidence=error.evidence)
 
     async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
-        result = await self.probe_comment(subject, marker)
-        if isinstance(result, Found) and isinstance(result.value, Applied):
-            return result.value.value
-        raise ReadUnavailable("comment visibility is unknown", result.evidence)
+        matches = [
+            row
+            for row in await self._comments(subject)
+            if marker_line(text(row.get("body"), empty=True), marker)
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ReadUnavailable("comment marker is ambiguous", evidence("find_comment"))
+        if not self._owned(matches[0]):
+            return None
+        return CommentRef(subject=subject, native_id=native_id(matches[0].get("id")))
 
     async def probe_comment_update(
         self, comment: CommentRef, body_digest: str
@@ -191,8 +199,8 @@ class GitHubSubject:
             return Found[CommentOutcome](
                 value=Applied[CommentRef](value=comment, evidence=proof), evidence=proof
             )
-        except ReadUnavailable as error:
-            return Inconclusive(reason="comment update read unavailable", evidence=error.evidence)
+        except ReadUnavailable:
+            raise
 
     async def probe_label(
         self, subject: SubjectRef, label: str, present: bool

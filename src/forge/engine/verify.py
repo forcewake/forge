@@ -42,6 +42,8 @@ class VerifyHandler:
         if work.review.repo.identity != approved.repo.identity:
             raise StoreConflict("verification draft differs from approved repository")
         age = (self.clock.now() - work.published_at).total_seconds()
+        if age >= work.settings.verification_seconds:
+            return stopped("verification_timeout")
         try:
             if (
                 await self.repo.head(approved.repo, f"forge/{approved.root_run_id}")
@@ -56,6 +58,9 @@ class VerifyHandler:
             ).total_seconds() >= work.settings.verification_seconds:
                 return stopped("verification_unavailable_timeout")
             raise Retryable("verification_unavailable") from None
+        age = (self.clock.now() - work.published_at).total_seconds()
+        if age >= work.settings.verification_seconds:
+            return stopped("verification_timeout")
         result = verdict(
             checks,
             work.candidate_sha,
@@ -95,8 +100,6 @@ class VerifyHandler:
             )
         if result.status in ("stale", "unknown", "not_configured"):
             return stopped("verification_" + result.status)
-        if age >= work.settings.verification_seconds:
-            return stopped("verification_timeout")
         return StepResult(
             result_json(waiting="independent_checks"),
             defer_until=self.clock.now() + timedelta(seconds=work.settings.poll_seconds),

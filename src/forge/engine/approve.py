@@ -3,20 +3,23 @@
 from forge.domain.states import Handler, State
 from forge.command_values import CommandLease
 from forge.engine.effects import Effects
+from forge.engine.approval_comment import displayed_plan
+from forge.engine.approval_round import original_round_task
 from forge.engine.plan import result_json, run_binding, subject_binding, task_binding
 from forge.engine.plan_values import PlanIntent
 from forge.engine.runner import Park, Retryable, StepContext, StepResult
 from forge.port_values import ReadUnavailable
-from forge.ports import ActorPort, Clock, RepoPort, SubjectPort
+from forge.ports import ActorPort, Clock, RepoPort, SubjectPort, ReviewPort
 from typing import Protocol
 from forge.store.approval import ApprovalStore
-from forge.store.approval_values import ApprovalClaim, ConsumeGate
-from forge.store.records import StepRecord, StepRequest, StoreConflict
+from forge.store.approval_values import ApprovalClaim, ConsumeGate, PreparedPlan
+from forge.store.records import RunRecord, StepRecord, StepRequest, StoreConflict
 from forge.store.runs import RunStore
+from forge.store.rounds import RoundStore
 from forge.store.steps import StepStore
 
 
-class ApprovalSources(RepoPort, SubjectPort, Protocol):
+class ApprovalSources(RepoPort, SubjectPort, ReviewPort, Protocol):
     pass
 
 
@@ -85,19 +88,18 @@ class ApproveHandler:
             return StepResult(result_json(refused="actor_not_authorized"))
         if run.state != State.AWAITING_APPROVAL:
             return StepResult(result_json(refused="gate_not_open"))
-        try:
-            task = await self.repositories.get_task(intent.task.subject)
-        except ReadUnavailable:
-            raise Retryable("approval_task_unavailable") from None
-        if task_binding(task) != task_binding(intent.task):
-            return StepResult(
-                result_json(refused="task_changed"),
-                park=Park("approval_task_changed"),
-            )
+        problem = await self.task_current(context, run, intent, claim)
+        if problem is not None:
+            return problem
         try:
             head = await self.repositories.head(intent.task.subject.repo, frozen.spec.target_branch)
         except ReadUnavailable:
             raise Retryable("approval_base_unavailable") from None
+        if not await self.comment_current(run.id, frozen):
+            return StepResult(
+                result_json(refused="plan_comment_changed"),
+                park=Park("approval_plan_comment_changed"),
+            )
         successor = StepRequest(
             run.id,
             Handler.DISPATCH,
@@ -113,3 +115,48 @@ class ApproveHandler:
             next_state=State.RUNNING,
             approval=ConsumeGate(claim, head),
         )
+
+    async def comment_current(self, run_id: str, frozen: PreparedPlan) -> bool:
+        comment = await self.approvals.comment_ref(run_id)
+        if comment is None:
+            return False
+        try:
+            return await displayed_plan(self.repositories, comment, frozen)
+        except ReadUnavailable:
+            raise Retryable("approval_plan_comment_unavailable") from None
+
+    async def task_current(
+        self,
+        context: StepContext[Effects],
+        run: RunRecord,
+        intent: PlanIntent,
+        claim: ApprovalClaim,
+    ) -> StepResult | None:
+        try:
+            original_task = (
+                intent.task
+                if run.root_run_id == run.id
+                else await original_round_task(
+                    RoundStore(self.approvals.factory),
+                    run,
+                    context.lease.step_id,
+                    claim,
+                    self.repositories,
+                    self.repositories,
+                    self.actors,
+                    self.clock,
+                )
+            )
+            task = await self.repositories.get_task(original_task.subject)
+        except ReadUnavailable:
+            raise Retryable("approval_task_unavailable") from None
+        except StoreConflict:
+            return StepResult(
+                result_json(refused="revision_changed"), park=Park("approval_revision_changed")
+            )
+        if task_binding(task) != task_binding(original_task):
+            return StepResult(
+                result_json(refused="task_changed"),
+                park=Park("approval_task_changed"),
+            )
+        return None

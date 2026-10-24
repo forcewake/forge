@@ -366,17 +366,22 @@ async def test_subject_snapshot_and_bot_comment_marker_have_exact_native_binding
 
 async def test_marker_spoof_duplicates_and_negative_visibility_never_authorize_replay(provider):
     _, subject, _, wire = provider
-    for rows in (
-        [comment(user={"id": 42, "login": "forge[bot]", "type": "User"})],
-        [comment(), comment(11)],
-        [comment(body="prefix " + MARKER)],
-        [comment(body=MARKER + "\n" + MARKER)],
-        [],
+    for index, rows in enumerate(
+        (
+            [comment(user={"id": 42, "login": "forge[bot]", "type": "User"})],
+            [comment(), comment(11)],
+            [comment(body="prefix " + MARKER)],
+            [comment(body=MARKER + "\n" + MARKER)],
+            [],
+        )
     ):
         wire.routes["issues/7/comments"] = rows
         assert isinstance(await subject.probe_comment(SUBJECT, MARKER), Inconclusive)
-        with pytest.raises(ReadUnavailable):
-            await subject.find_comment(SUBJECT, MARKER)
+        if index in (1, 3):
+            with pytest.raises(ReadUnavailable):
+                await subject.find_comment(SUBJECT, MARKER)
+        else:
+            assert await subject.find_comment(SUBJECT, MARKER) is None
 
 
 async def test_label_probe_requires_exact_current_state_and_issue_identity(provider):

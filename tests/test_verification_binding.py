@@ -337,7 +337,9 @@ async def test_transport_retries_are_bounded_by_verification_deadline_without_co
         monkeypatch.setattr(env.fake, "checks_for", crosses_deadline)
     assert (await env.runner.tick()).parked == 1
     current = await env.runs.load(run.id)
-    assert current.reason == "verification_unavailable_timeout"
+    assert current.reason == (
+        "verification_timeout" if phase == "before_read" else "verification_unavailable_timeout"
+    )
     assert (current.attempt, current.generation) == (1, 1)
     assert not delivery["reviewer"].calls and len(env.fake.lanes) == 1
 
