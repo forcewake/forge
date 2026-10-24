@@ -9,6 +9,7 @@ from forge_protocol import ControlAck, ControlCommand, Heartbeat, Usage
 
 from .checkpoint import Checkpoints
 from .client import LaneClient
+from .control_queue import ControlQueue
 from .driver import Driver, DriverEvent, Session
 from .errors import ExitCode, LaneFailure
 from .trace import Trace
@@ -21,7 +22,7 @@ class Timings:
     checkpoint: float = 600.0
     shutdown: float = 10.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if min(self.controls, self.heartbeat, self.checkpoint, self.shutdown) <= 0:
             raise ValueError("Supervisor intervals must be positive")
 
@@ -111,19 +112,66 @@ class Supervisor:
         )
 
     async def controls(self) -> Outcome:
-        after = 0
-        seen: set[str] = set()
+        queue = ControlQueue(self.client, self.timings.controls)
         while True:
-            for command in await self.client.controls(after):
-                if command.sequence <= after or command.command_id in seen:
+            command = await queue.next()
+            if command.action == "steer" and "steer" in self.driver.capabilities:
+                urgent = await self.steer(command, queue)
+                if urgent is None:
+                    continue
+                command = urgent
+            outcome = await self.apply(command)
+            if outcome is not None:
+                return outcome
+
+    async def steer(self, command: ControlCommand, queue: ControlQueue) -> ControlCommand | None:
+        work = asyncio.create_task(self.session.steer(command.text or ""))
+        try:
+            while True:
+                done, _ = await asyncio.wait({work}, timeout=self.timings.controls)
+                if work in done:
+                    try:
+                        work.result()
+                    except Exception:
+                        raise LaneFailure(
+                            ExitCode.TRANSPORT, "control_failed", "Driver steering failed"
+                        ) from None
+                    await self.ack(command, "applied")
+                    return None
+                await queue.poll()
+                urgent = queue.urgent()
+                if urgent is not None:
+                    await self.stop()
+                    await self.ack(command, "refused", "Steering interrupted by operator control")
+                    return urgent
+        finally:
+            if not work.done():
+                work.cancel()
+                done, _ = await asyncio.wait({work}, timeout=self.timings.shutdown)
+                if not done:
                     raise LaneFailure(
-                        ExitCode.TRANSPORT, "control_order", "Controls are not unique and ordered"
+                        ExitCode.DRIVER, "control_cleanup_failed", "Driver steering did not stop"
                     )
-                outcome = await self.apply(command)
-                after, seen = command.sequence, seen | {command.command_id}
-                if outcome is not None:
-                    return outcome
-            await asyncio.sleep(self.timings.controls)
+            if work.done() and not work.cancelled():
+                work.exception()
+
+    async def ack(
+        self,
+        command: ControlCommand,
+        status: Literal["applied", "refused"],
+        detail: str = "",
+        checkpoint_id: str | None = None,
+    ) -> None:
+        await self.client.ack(
+            ControlAck(
+                **self.client.identity,
+                command_id=command.command_id,
+                sequence=command.sequence,
+                status=status,
+                detail=detail,
+                checkpoint_id=checkpoint_id,
+            )
+        )
 
     async def apply(self, command: ControlCommand) -> Outcome | None:
         status: Literal["applied", "refused"] = "applied"
@@ -159,15 +207,7 @@ class Supervisor:
                 if command.action == "resume"
                 else "Driver cannot steer",
             )
-        ack = ControlAck(
-            **self.client.identity,
-            command_id=command.command_id,
-            sequence=command.sequence,
-            status=status,
-            detail=detail,
-            checkpoint_id=checkpoint_id,
-        )
-        await self.client.ack(ack)
+        await self.ack(command, status, detail, checkpoint_id)
         return outcome
 
     async def heartbeats(self) -> None:
