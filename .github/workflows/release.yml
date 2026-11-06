@@ -56,13 +56,13 @@ jobs:
           assert tag == 'v' + version
           assert f'__version__ = "{version}"' in pathlib.Path('src/forge/__init__.py').read_text()
           PY
-      - name: Build the complete distribution once
+      - name: Build and qualify the immutable release bundle once
         run: |
-          uv build --all --sdist --wheel --out-dir dist
-          uv export --frozen --all-packages --no-dev --extra postgres --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/runtime-requirements.txt
-          uv export --frozen --all-packages --no-dev --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/lane-dependencies.txt
+          set -euo pipefail
+          uv run --no-project --python 3.13 python -m tools.release.bundle --repo "$GITHUB_REPOSITORY" --rc "${GITHUB_REF_NAME}-rc.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" --output "$RUNNER_TEMP/release-bundle"
+          cp -R "$RUNNER_TEMP/release-bundle/dist" dist
+          cp "$RUNNER_TEMP/release-bundle/local-bundle.json" local-bundle.json
           uv export --frozen --all-packages --all-extras --no-emit-package forge --no-emit-package forge-protocol --no-emit-package forge-lane --output-file "$RUNNER_TEMP/test-requirements.txt"
-          uv export --frozen --package forge-lane --no-dev --all-extras --no-emit-package forge-protocol --no-emit-package forge-lane --output-file dist/lane-v1-dependencies.txt
       - name: Test installed wheels in a fresh environment
         run: |
           set -euo pipefail
@@ -117,6 +117,7 @@ jobs:
             default.xml
             invariants.xml
             canary-results.json
+            local-bundle.json
           if-no-files-found: error
 
   live-smoke:
@@ -142,7 +143,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-candidate
-      - name: Boot an isolated app, worker, database and queue from the RC digest
+      - name: Boot the RC digest with private 1.0 configuration and a fresh database
         run: |
           set -euo pipefail
           test -n "$SMOKE_ENV" && test -n "$ACTOR_TOKEN" && test -n "$TARGET"
@@ -151,43 +152,55 @@ jobs:
           mkdir -p "$DOCKER_CONFIG"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          scope="forge-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PROVIDER}"
+          private="$RUNNER_TEMP/$scope-private"
+          echo "SCOPE=$scope" >> "$GITHUB_ENV"
+          echo "PRIVATE=$private" >> "$GITHUB_ENV"
           python3 - <<'PYCONFIG'
           import json, os, pathlib
-          config = json.loads(os.environ['SMOKE_ENV'])
-          config['FORGE_RELEASE_SMOKE_ACTOR_TOKEN'] = os.environ['ACTOR_TOKEN']
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'forge-release.json').write_text(json.dumps(config))
+          bundles = json.loads(os.environ['SMOKE_ENV'])
+          if set(bundles) != {'github', 'gitlab'}:
+              raise ValueError('provide explicit closed sandbox bundles for both native providers')
+          path = pathlib.Path(os.environ['RUNNER_TEMP'], 'forge-release-bundle.json')
+          path.write_text(json.dumps(bundles[os.environ['PROVIDER']]))
           PYCONFIG
-          scope="forge-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PROVIDER}"
-          echo "SCOPE=$scope" >> "$GITHUB_ENV"
+          python3 -m tools.release.containers prepare --bundle "$RUNNER_TEMP/forge-release-bundle.json" --manifest dist/release-manifest.json --output "$private" --provider "$PROVIDER" --repository "$TARGET" --scope "$scope"
           docker network create "$scope"
-          docker run -d --name "$scope-pg" --network "$scope" --network-alias postgres -e POSTGRES_USER=forge -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=forge postgres:17-alpine
-          docker run -d --name "$scope-redis" --network "$scope" --network-alias redis redis:7-alpine
-          for i in $(seq 1 60); do docker exec "$scope-pg" pg_isready -U forge && break; sleep 1; done
-          for role in migrate app worker; do
-            python3 tools/release/containers.py "$IMAGE" "$scope" "$RUNNER_TEMP/forge-release.json" "$role"
+          docker run -d --name "$scope-pg" --network "$scope" -e POSTGRES_USER=forge -e POSTGRES_PASSWORD=forge -e POSTGRES_DB=forge postgres:17-alpine
+          for i in $(seq 1 60); do docker exec "$scope-pg" pg_isready -U forge -d forge && break; sleep 1; done
+          docker exec "$scope-pg" pg_isready -U forge -d forge
+          for role in install app worker; do
+            python3 -m tools.release.containers launch "$IMAGE" "$scope" "$private/control.json" "$role"
           done
-          for i in $(seq 1 60); do curl --fail --silent http://127.0.0.1:8420/health >/dev/null && break; sleep 2; done
-          curl --fail --silent http://127.0.0.1:8420/health >/dev/null
-      - name: Drive the actual issue to a verified Draft on this provider
+          for i in $(seq 1 60); do curl --fail --silent http://127.0.0.1:8420/healthz >/dev/null && break; sleep 2; done
+          curl --fail --silent http://127.0.0.1:8420/healthz >/dev/null
+          curl --fail --silent http://127.0.0.1:8420/readyz >/dev/null
+      - name: Require actual native happy and code-failure repair acceptance
         run: |
           set -euo pipefail
-          docker cp tools/release/live_smoke.py "$SCOPE-app:/tmp/release-smoke.py"
-          docker cp dist/release-manifest.json "$SCOPE-app:/tmp/release-manifest.json"
-          docker exec -e FORGE_RELEASE_SANDBOX=1 -e FORGE_RELEASE_SMOKE_TARGET="$TARGET" "$SCOPE-app" python /tmp/release-smoke.py "$PROVIDER" --manifest /tmp/release-manifest.json --out /tmp/provider-smoke.json
+          docker exec "$SCOPE-app" mkdir -p /tmp/forge-release-tools/tools
+          docker cp tools/release "$SCOPE-app:/tmp/forge-release-tools/tools/release"
+          docker cp dist "$SCOPE-app:/tmp/release-artifacts"
+          export FORGE_RELEASE_SMOKE_ACTOR_TOKEN="$ACTOR_TOKEN"
+          result=0
+          docker exec --env FORGE_RELEASE_SMOKE_ACTOR_TOKEN --env FORGE_RELEASE_SANDBOX=1 --env PYTHONPATH=/tmp/forge-release-tools "$SCOPE-app" python -m tools.release.live_smoke "$PROVIDER" --repository "$TARGET" --manifest /tmp/release-artifacts/release-manifest.json --artifacts /tmp/release-artifacts --out /tmp/provider-smoke.json || result=$?
           docker cp "$SCOPE-app:/tmp/provider-smoke.json" "$PROVIDER-smoke.json"
+          exit "$result"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: live-${{ matrix.provider }}
           path: ${{ matrix.provider }}-smoke.json
           if-no-files-found: error
-      - name: Remove only this job's disposable services and credential file
+      - name: Remove only this job's disposable services and private inputs
         if: always()
         run: |
           if [ -n "${SCOPE:-}" ]; then
-            docker rm -f "$SCOPE-worker" "$SCOPE-app" "$SCOPE-redis" "$SCOPE-pg" || true
+            docker rm -f "$SCOPE-worker" "$SCOPE-app" "$SCOPE-pg" || true
             docker network rm "$SCOPE" || true
           fi
-          rm -f "$RUNNER_TEMP/forge-release.json"
+          if [ -n "${PRIVATE:-}" ]; then rm -rf "$PRIVATE"; fi
+          rm -f "$RUNNER_TEMP/forge-release-bundle.json"
           rm -rf "$RUNNER_TEMP/release-docker-$PROVIDER"
 
   promote:

@@ -270,6 +270,7 @@ tests/test_real_construction_surfaces.py,36,657,false,false,,,,real,port-adapter
 tests/test_redactor.py,5,44,false,false,,edge-case pin,,redactor,keep,-,
 tests/test_release_flow.py,10,242,false,false,,edge-case pin,,release,keep,-,
 tests/test_release_lane_delivery.py,1,75,false,false,,edge-case pin,,release,keep,P4-06,"Real isolated lane/protocol/SDK wheel build and hashed install; server absence and refused mutable pin, server dependency injection or altered staged wheel. No provider or model sessions."
+tests/test_release_native_runtime.py,6,425,false,false,,invariant evidence; edge-case pin,,release,keep,P4-06,"Closed release bundle and exact oracle pins; real separate app/TLS/signed native hook/SQL receipts on owned SQLite; concrete native code-failure evidence and mandatory both-provider promotion. Local synthetic proof, not PG17 or hosted acceptance."
 tests/test_release_promotion.py,13,325,false,false,,edge-case pin,,release,keep,-,
 tests/test_report_inventory_strict.py,14,178,false,false,,invariant evidence; edge-case pin,,report,keep,-,
 tests/test_repository_changeset.py,60,478,false,true,,edge-case pin,,repository,keep,-,

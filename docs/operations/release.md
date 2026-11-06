@@ -1,70 +1,102 @@
 # Release pipeline
 
-The release workflow builds the server, protocol and lane distributions once.
-A fresh environment installs those wheels and runs the default suite and the
-Invariant Suite with PostgreSQL; invariant skips stop the release. The runtime
-image installs the same wheels and locked dependencies, without a source tree.
-The image is booted by digest against a disposable database, including the
-existing previous-release migration and seeded-data canary.
+The workflow builds the server, protocol and lane wheels once. It installs the
+artifacts outside the checkout, runs the required quality and invariant gates,
+and builds the server image from those same wheels. The server image contains
+native Git and CA certificates; the lane and vendor SDK run only in target CI.
+The fresh-schema canary checks explicit installation and startup refusal for an
+unsupported schema. Startup never creates or upgrades tables. Offline history
+cutover is a separate operator action, not an automatic previous-image upgrade.
 
-The workflow stages a unique GitHub prerelease before either live smoke starts.
-Its lane requirements file pins every built wheel and all resolved dependencies
-by sha256. Current GitHub and GitLab Claude SDK lanes verify that file and the
-server wheel, install the set, and export the verified install identity with
-the candidate artifacts. GitLab smoke sandboxes must use the current
-`ci/templates/claude-sdk-lane.gitlab-ci.yml`; GitHub sandboxes must use the
-current `ci/templates/forge-harness.github.yml`.
+The staged RC manifest (`forge.release-candidate/2`) binds the source commit,
+image digest, wheel hashes and independent install routes. `requirements_url`
+identifies the server dependencies. Only `lane_requirements_url` and
+`lane_requirements_sha256` authorize lane installation; that lock contains the
+protocol and lane wheels, the selected lane extra and their hashed dependencies.
+The manifest also hashes the generated GitHub wrapper, GitLab include and
+GitHub JUnit reporter. The GitHub reusable workflow and GitLab raw HTTPS include
+both use the full source commit. Promotion never rebuilds these artifacts.
 
-Both provider smokes are mandatory. Each creates a real issue, sends an
-API-issued human comment through signed production ingress, waits for the plan,
-approves that exact run, and waits for `ready_for_human`. It independently reads
-the provider's Draft PR/MR, current head, successful `release-smoke-oracle` CI
-job and lane artifact. The candidate must preserve the independent test file.
-The receipt states that ingress uses signed comment delivery: this smoke does
-not claim to verify provider webhook registration. No bot merge is attempted.
+Both native-provider live jobs are mandatory before promotion. Each creates
+two sandbox issues, submits an API-issued human command through the configured
+signed hook, waits for the displayed plan and sends `/go <full-run-id>` as the
+same authorized actor. This proves signed delivery, not provider webhook
+registration. The happy scenario must finish at attempt/generation 1/1. The
+repair issue explicitly authorizes an initial implementation returning 41,
+followed by correction to 42 after the independent `answer() == 42` test fails.
+The repair must finish at 2/2 with two distinct, parent-linked candidates. A
+driver that skips the first defect does not prove repair and stops promotion.
 
-Provision a dedicated Linux x64 runner labelled `forge-release-sandbox`, with
-Docker and a public HTTPS endpoint forwarded to its localhost port 8420. The
-endpoint must be reachable from target CI for lane-control calls. That port
-must be free before a release. The workflow creates uniquely named database,
-Redis, app and worker containers; it never uses an existing lab database or
-queue. It removes those containers and temporary credential files afterwards.
+Receipts independently read current normalized SQL and native evidence:
+consumed approval, immutable lane artifact and OIDC execution, exact native
+commit tree and parent, the same Draft, independent required CI, bounded closing
+review and unchanged target branch. Native code-failure evidence is required:
+GitHub uses the exact Actions job's CheckRun JUnit output; GitLab uses the exact
+pipeline's native test-report summary and build IDs. Generic failed status or
+runner/configuration failure cannot authorize repair. No bot merges or target
+settings changes occur. Created issues and Drafts remain for inspection.
 
-Repository configuration required before publishing:
+Provision a dedicated nonroot Linux x64 runner labelled
+`forge-release-sandbox`, with Docker and a public HTTPS endpoint forwarded to
+its free localhost port 8420. Target CI must reach that endpoint. The workflow
+starts only uniquely named PostgreSQL, app and worker containers. It mounts
+private configuration and CA files read-only, mounts owned blobs separately,
+runs `forge ... install` once, then starts separate `serve` and `worker`
+processes. `/healthz` and `/readyz` must pass against the real guarded HTTPS
+gateway. The release job supplies no guard stub or owner database.
 
-- Secret `FORGE_RELEASE_TOKEN`: release-asset and GHCR write access.
-- Secret `FORGE_RELEASE_SMOKE_ENV`: a JSON object of string settings for the
-  disposable app and worker. Include real provider bot/App credentials, bot
-  names, webhook secrets, approver usernames, real planner/model settings,
-  current harness selection, `FORGE_LANE_CONTROL_URL`, and
-  `FORGE_RELEASE_SMOKE_GATEWAY_URL`. The latter two point to the public sandbox
-  ingress. JSON preserves multiline GitHub PEM keys. Database and Redis URLs
-  are always replaced with the new isolated services.
-- Secrets `FORGE_RELEASE_GITHUB_ACTOR_TOKEN` and
-  `FORGE_RELEASE_GITLAB_ACTOR_TOKEN`: sandbox-only human actor credentials,
-  distinct from the bot. The actors must be configured approvers and may
-  create issues/comments and manage the sandbox's lane pin variables.
-- Variables `FORGE_RELEASE_GITHUB_SANDBOX` (`owner/repository`) and
-  `FORGE_RELEASE_GITLAB_SANDBOX` (numeric project ID or project path).
+Configure these repository inputs before authorizing a release:
 
-Each sandbox's default branch must contain exactly the independent oracle
-bytes defined by `ORACLE` in `tools/release/live_smoke.py`, and CI must run that
-test in a job called `release-smoke-oracle`. The issue asks the lane to create
-only `forge_release_smoke.py` with `answer()` returning 42. Sandbox CI retains
-its own provider/model credentials under the existing proposal-only policy.
-The smoke temporarily sets the wheel and requirements URL/hash variables and
-restores prior values; a restoration failure stops release promotion. Created
-issues and Drafts remain available for inspection. Existing wheel/ref/dev
-install overrides must not contradict the explicit RC route.
+- `FORGE_RELEASE_TOKEN`: release-asset and GHCR publication credential.
+- `FORGE_RELEASE_SMOKE_ENV`: JSON with exactly `github` and `gitlab` keys.
+  Each value is the private bundle below, containing one connection and one
+  repository. The TOML uses the current closed runtime schema and real guarded
+  gateway settings. The environment contains exactly the secret names declared
+  in that TOML; multiline App PEMs remain JSON strings.
+- `FORGE_RELEASE_GITHUB_ACTOR_TOKEN` and `FORGE_RELEASE_GITLAB_ACTOR_TOKEN`:
+  sandbox human credentials, distinct from the bot, with issue/comment access.
+  Each actor must be a current native approver and match exactly one configured
+  operator grant. Bot credentials retain their normal narrow scopes.
+- `FORGE_RELEASE_GITHUB_SANDBOX` and `FORGE_RELEASE_GITLAB_SANDBOX`: the
+  corresponding configured repository **key**, whose native numeric identity
+  is declared in its private TOML.
 
-Only after both live smokes pass does the workflow create the short release
-report, bind its SBOM hash, sign the image and report, and attest image and wheel
-provenance. It verifies the staged RC assets again, attaches those unchanged
-files to the final release and points final image tags at the tested digest.
-It never rebuilds during promotion and never overwrites an existing asset.
-A failed job leaves an unpromoted RC for inspection.
+```json
+{
+  "schema": "forge.release-sandbox/1",
+  "runtime_toml": "<complete current TOML>",
+  "policy_json": "<exact trusted pricing policy JSON>",
+  "certificates": {"native-ca.pem": "<PEM, when required>"},
+  "environment": {"EXPLICIT_SECRET_NAME": "<value>"}
+}
+```
 
-A local workflow/test pass does not prove hosted release success. Acceptance
-still requires the fork release dry run described in ROADMAP P1-08. Running
-this workflow, creating a tag or publishing a release requires the owner's
-explicit remote-publication authorization.
+Use `/data/blobs` for `blob_directory` and `/etc/forge/policy.json` for the
+gateway policy. Native `tls_ca_path`, when set, names a supplied
+`/etc/forge/*.pem`. The preparer pins the two explicit lane requirements fields
+to the staged RC and creates its own PostgreSQL URL; no ambient `.env`, Redis,
+target CI variables or existing services are used. Private files have mode
+0600 and are deleted with this job's containers after the smoke.
+
+Preprovision each target's default branch with the exact independent oracle
+bytes in `tools/release/live_pins.py`, without `forge_release_smoke.py`.
+Permit writes only to that implementation file and require
+`release-smoke-oracle` in both `verification.required_checks` and
+`verification_failure_jobs`. The oracle must run unchanged and emit native
+JUnit failure evidence. GitHub also declares its trusted
+`verification_workflows`, publishes JUnit with the hashed reporter and installs
+the exact generated wrapper at `lane_workflow`. GitLab stores the exact hashed
+include as `forge-lane.gitlab-include.yml`; its dedicated `.gitlab-ci.yml` uses
+JSON (a strict YAML subset), includes only that local file and defines the
+oracle job. Its complete document must equal `live_oracle.gitlab()`; the exact
+GitHub workflow is `live_oracle.github(manifest)` at
+`.github/workflows/forge-release-oracle.yml`. CI model credentials stay in
+target CI. Provisioning these files,
+credentials and hooks is an explicit owner operation; the smoke changes none
+of them.
+
+Only successful quality, canary and both-provider live jobs permit the final
+report, SBOM binding, signatures, attestations and promotion of the tested
+digest. Failure leaves the RC unpromoted. Local synthetic peers or a local
+bundle proof do not establish hosted/provider acceptance. Running the release
+workflow, publishing or tagging still requires explicit owner authorization.
