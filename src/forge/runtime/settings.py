@@ -42,7 +42,17 @@ class Repository(Value):
     write_token_env: EnvName | None = None
     lane_workflow: str = ".github/workflows/forge-lane.yml"
     verification_workflows: tuple[str, ...] = ()
+    verification_failure_jobs: tuple[str, ...] = ()
     ci_configuration: str = ".gitlab-ci.yml"
+
+    @model_validator(mode="after")
+    def failure_jobs(self) -> Self:
+        from forge.verification.failure_proof import trusted_jobs
+
+        jobs = trusted_jobs(self.verification_failure_jobs)
+        if not jobs <= set(self.policy.verification.required_checks):
+            raise ValueError("failure proof jobs must be frozen required checks")
+        return self
 
     @field_validator("full_name")
     @classmethod
@@ -77,6 +87,13 @@ class Connection(Value):
         if self.tls_ca_path is not None and not self.tls_ca_path.is_absolute():
             raise ValueError("native CA path must be an explicit absolute path")
         if self.provider == "github":
+            if any(
+                r.verification_failure_jobs and not r.verification_workflows
+                for r in self.repositories
+            ):
+                raise ValueError(
+                    "GitHub failure proof jobs require explicit verification workflows"
+                )
             if not self.app_issuer or not self.app_private_key_env:
                 raise ValueError("GitHub requires explicit App issuer and signing key")
             if any(

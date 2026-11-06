@@ -31,6 +31,8 @@ from forge.providers.gitlab.values import (
     unavailable,
 )
 
+from forge.verification.failure_proof import FailureProof, finished, gitlab_failure, trusted_jobs
+
 DispatchLookup = Callable[[RepoRef, str], Awaitable[LaneDispatch | None]]
 
 
@@ -102,6 +104,7 @@ class GitLabCI:
         dispatch_lookup: DispatchLookup,
         verification_sources: Collection[str] = ("push", "merge_request_event"),
         configuration_path: str = ".gitlab-ci.yml",
+        verification_failure_jobs: Collection[str] = (),
     ) -> None:
         if isinstance(verification_sources, (str, bytes)) or not set(verification_sources) <= {
             "push",
@@ -109,6 +112,7 @@ class GitLabCI:
         }:
             raise ValueError("independent CI sources must be explicitly trusted")
         self.api, self.clock, self.dispatch_lookup = api, clock, dispatch_lookup
+        self.failure_jobs = trusted_jobs(verification_failure_jobs)
         self.verification_sources, self.configuration_path = (
             frozenset(verification_sources),
             path(configuration_path),
@@ -160,7 +164,7 @@ class GitLabCI:
             native_id(row.get("project_id")) != repo.identity.repository_id
             or row.get("source") != "api"
             or row.get("ref") != dispatch.ref
-            or row.get("sha") != dispatch.base_sha
+            or row.get("sha") != dispatch.execution_base_sha
             or variables.get("FORGE_LANE_NONCE") != dispatch.nonce
             or native_id(user.get("id")) != bot.native_id
             or user.get("username") != bot.login
@@ -187,7 +191,7 @@ class GitLabCI:
             rows = await self.api.pages(
                 repo,
                 "pipelines",
-                params={"ref": dispatch.ref, "sha": dispatch.base_sha, "source": "api"},
+                params={"ref": dispatch.ref, "sha": dispatch.execution_base_sha, "source": "api"},
             )
             matches = []
             seen: set[str] = set()
@@ -298,6 +302,7 @@ class GitLabCI:
                 raise unavailable("job_execution_binding_mismatch")
             ids.add(job_id)
             names.add(name)
+            proof = await self._code_proof(repo, ident, row) if role == "verification" else None
             checks.append(
                 CheckResult(
                     name=name,
@@ -309,8 +314,31 @@ class GitLabCI:
                     status=check_status(row.get("status")),
                     observed_at=self.clock.now(),
                     workflow_path=self.configuration_path,
-                    failure_kind=failure_kind(row),
-                    evidence=evidence("check_job", pipeline_id=ident, job_id=job_id),
+                    failure_kind="code" if proof is not None else failure_kind(row),
+                    evidence=evidence(
+                        "check_job",
+                        pipeline_id=ident,
+                        job_id=job_id,
+                        **({"failure_proof": proof.encoded()} if proof else {}),
+                    ),
                 )
             )
         return checks
+
+    async def _code_proof(
+        self, repo: RepoRef, pipeline_id: str, job: dict[str, object]
+    ) -> FailureProof | None:
+        if (
+            job.get("name") not in self.failure_jobs
+            or job.get("status") != "failed"
+            or job.get("failure_reason") != "script_failure"
+            or finished(job.get("finished_at"), self.clock.now()) is None
+        ):
+            return None
+        try:
+            reply = await self.api.read(repo, "pipelines/" + pipeline_id + "/test_report_summary")
+            if reply.next_page is not None:
+                return None
+            return gitlab_failure(reply.document, native_id(job.get("id")))
+        except ReadUnavailable:
+            return None

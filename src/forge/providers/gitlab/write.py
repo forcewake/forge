@@ -356,7 +356,7 @@ class GitLabWrites:
             ):
                 raise PolicyRefused("dispatch_not_durably_bound")
             await self.writable(repo, dispatch.ref)
-            if await self.repositories.head(repo, dispatch.ref) != dispatch.base_sha:
+            if await self.repositories.head(repo, dispatch.ref) != dispatch.execution_base_sha:
                 raise PolicyRefused("dispatch_head_changed")
             variables = {
                 "FORGE_LANE_NONCE": dispatch.nonce,

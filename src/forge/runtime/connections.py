@@ -76,6 +76,7 @@ def github(
         dispatch_lookup=effects.dispatch_for_nonce,
         lane_workflow_path=repository.lane_workflow,
         verification_workflow_paths=repository.verification_workflows,
+        verification_failure_jobs=repository.verification_failure_jobs,
     )
     committer = GitHubCommitter(api, auth, repo, clock, bot=bot, ca_path=connection.tls_ca_path)
     writes = GitHubWrites(
@@ -123,6 +124,7 @@ def gitlab(
         clock,
         dispatch_lookup=effects.dispatch_for_nonce,
         configuration_path=repository.ci_configuration,
+        verification_failure_jobs=repository.verification_failure_jobs,
     )
     committer = GitLabCommitter(api, repo, clock, ca_path=connection.tls_ca_path)
     writes = GitLabWrites(

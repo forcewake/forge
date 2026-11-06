@@ -21,6 +21,7 @@ class API:
     def __init__(self, auth: AppAuth, transport: Transport):
         self._auth, self._transport = auth, transport
         self.git_url = transport.endpoint.git_url
+        self.api_url = transport.endpoint.api_url
 
     async def _request(
         self,

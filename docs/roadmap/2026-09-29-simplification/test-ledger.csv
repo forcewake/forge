@@ -233,6 +233,8 @@ tests/test_mcp_server.py,7,100,false,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,false,false,,,,mention,keep,-,
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
 tests/test_native_check_identity.py,6,167,false,false,,invariant evidence; edge-case pin,,native,keep,P3-08,Required native checks bind workflow path and native run identity before selecting their retry attempt; another workflow cannot mask failure.
+tests/test_native_ci_failure.py,11,286,false,false,,invariant evidence; edge-case pin,,native,keep,P3-09,"Concrete native CI reports, exact candidate binding and SQL repair admission; non-code or ambiguous failures never spend."
+tests/test_native_ci_repair_dispatch.py,1,102,false,false,,invariant evidence; edge-case pin,,native,keep,P3-09,Second concrete native lane and recovery bind the repair candidate and new nonce; human head movement refuses dispatch.
 tests/test_native_git_ca.py,2,108,false,false,,invariant evidence; edge-case pin,,native,keep,P3-16,Explicit trusted native Git CA with real TLS verification and ambient bypass refusal.
 tests/test_native_git_publication.py,9,278,false,false,,invariant evidence; edge-case pin,,native,keep,P3-16,Real native Git exact-ref publication and bounded owned process cleanup
 tests/test_native_issue_lifecycle.py,9,192,false,true,,invariant evidence; edge-case pin,,native,keep,P3-10,"Exact native task drift, authenticated gate-only issue refresh and label withdrawal with immutable history and atomic fresh admission."

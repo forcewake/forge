@@ -377,7 +377,7 @@ class GitHubWrites:
                     reason="dispatch_not_durably_bound", evidence=evidence("dispatch_lane")
                 )
             await self.writable(repo, dispatch.ref)
-            if await self.repositories.head(repo, dispatch.ref) != dispatch.base_sha:
+            if await self.repositories.head(repo, dispatch.ref) != dispatch.execution_base_sha:
                 return Refused(reason="dispatch_head_changed", evidence=evidence("dispatch_lane"))
             workflow_id = native_id((await self.ci.workflow(repo)).get("id"))
             await self._mutate(

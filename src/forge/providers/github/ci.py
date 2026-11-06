@@ -2,7 +2,7 @@
 
 from collections.abc import Awaitable, Callable, Collection
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from forge_protocol import LaneDispatch
 
@@ -19,6 +19,7 @@ from forge.port_values import (
     RepoRef,
 )
 from forge.ports import Clock
+from forge.providers.github.transport import TransportFailure
 from forge.providers.github.client import API
 from forge.providers.github.repo import (
     evidence,
@@ -31,6 +32,8 @@ from forge.providers.github.repo import (
     request,
     text,
 )
+
+from forge.verification.failure_proof import FailureProof, finished, junit_failure, trusted_jobs
 
 DispatchLookup = Callable[[RepoRef, str], Awaitable[LaneDispatch | None]]
 
@@ -91,10 +94,12 @@ class GitHubCI:
         dispatch_lookup: DispatchLookup,
         lane_workflow_path: str,
         verification_workflow_paths: Collection[str],
+        verification_failure_jobs: Collection[str] = (),
     ) -> None:
         if isinstance(verification_workflow_paths, (str, bytes)):
             raise ValueError("workflow paths must be an explicit collection")
         self.api, self.clock, self.dispatch_lookup = api, clock, dispatch_lookup
+        self.failure_jobs = trusted_jobs(verification_failure_jobs)
         self.lane_workflow_path = workflow_path(lane_workflow_path)
         self.verification_paths = frozenset(
             workflow_path(path) for path in verification_workflow_paths
@@ -169,7 +174,7 @@ class GitHubCI:
             or workflow_path(row.get("path")) != self.lane_workflow_path
             or row.get("event") != "workflow_dispatch"
             or row.get("head_branch") != dispatch.ref
-            or row.get("head_sha") != dispatch.base_sha
+            or row.get("head_sha") != dispatch.execution_base_sha
             or row.get("display_title") != run_title(dispatch)
         ):
             raise malformed("native_dispatch_binding_mismatch")
@@ -195,7 +200,7 @@ class GitHubCI:
                 {
                     "event": "workflow_dispatch",
                     "branch": dispatch.ref,
-                    "head_sha": dispatch.base_sha,
+                    "head_sha": dispatch.execution_base_sha,
                 },
             )
             matches = [row for row in rows if row.get("display_title") == run_title(dispatch)]
@@ -268,10 +273,15 @@ class GitHubCI:
             for job in jobs:
                 if (
                     native_id(job.get("run_id")) != run_id
-                    or native_id(job.get("run_attempt")) != attempt
+                    or ("run_attempt" in job and native_id(job["run_attempt"]) != attempt)
                     or job.get("head_sha") != sha
                 ):
                     raise malformed("check_job_attempt_mismatch")
+                proof = (
+                    await self._code_proof(repo, row, job, sha)
+                    if path in self.verification_paths
+                    else None
+                )
                 checks.append(
                     CheckResult(
                         name=text(job.get("name")),
@@ -283,13 +293,67 @@ class GitHubCI:
                         status=job_status(job),
                         observed_at=self.clock.now(),
                         workflow_path=path,
-                        failure_kind=failure_kind(job),
+                        failure_kind="code" if proof is not None else failure_kind(job),
                         evidence=evidence(
                             "check_job",
                             native_id=native_id(job.get("id")),
                             run_id=run_id,
                             attempt=attempt,
+                            **({"failure_proof": proof.encoded()} if proof else {}),
                         ),
                     )
                 )
         return tuple(checks)
+
+    async def _code_proof(
+        self, repo: RepoRef, run: dict[str, object], job: dict[str, object], sha: str
+    ) -> FailureProof | None:
+        if (
+            job.get("name") not in self.failure_jobs
+            or job.get("conclusion") != "failure"
+            or job.get("status") != "completed"
+        ):
+            return None
+        job_end = finished(job.get("completed_at"), self.clock.now())
+        if job_end is None:
+            return None
+        try:
+            url = urlsplit(text(job.get("check_run_url")))
+            prefix, check_id = url.path.rsplit("/check-runs/", 1)
+            metadata = object_doc((await self.api.metadata(repo)).document)
+            api_url = urlsplit(self.api.api_url)
+            if (
+                url.scheme != "https"
+                or not url.hostname
+                or url.username
+                or url.password
+                or url.query
+                or url.fragment
+                or not check_id.isascii()
+                or not check_id.isdecimal()
+                or str(int(check_id)) != check_id
+                or int(check_id) <= 0
+                or (url.hostname, url.port or 443) != (api_url.hostname, api_url.port or 443)
+                or prefix != api_url.path.rstrip("/") + "/repos/" + text(metadata.get("full_name"))
+            ):
+                return None
+            check = object_doc((await request(self.api, repo, "check-runs/" + check_id)).document)
+            suite = object_doc(check.get("check_suite"))
+            app = object_doc(check.get("app"))
+            check_end = finished(check.get("completed_at"), self.clock.now())
+            if (
+                native_id(check.get("id")) != check_id
+                or check.get("head_sha") != sha
+                or native_id(suite.get("id")) != native_id(run.get("check_suite_id"))
+                or app.get("slug") != "github-actions"
+                or not native_id(app.get("id"))
+                or check.get("name") != job.get("name")
+                or check.get("status") != "completed"
+                or check.get("conclusion") != "failure"
+                or check_end is None
+                or abs((check_end - job_end).total_seconds()) > 5
+            ):
+                return None
+            return junit_failure(object_doc(check.get("output")).get("text"))
+        except (ReadUnavailable, TransportFailure, ValueError):
+            return None

@@ -35,6 +35,7 @@ approver_ids = ["9876543"]
 installation_id = 12345678
 lane_workflow = ".github/workflows/forge-lane.yml"
 verification_workflows = [".github/workflows/ci.yml"]
+verification_failure_jobs = ["unit"]
 
 [connections.repositories.policy]
 driver = "claude_code"
