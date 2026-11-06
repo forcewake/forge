@@ -639,6 +639,9 @@ When a pin breaks:
 
 | EC-1205 | A documented native Actions job omits its optional attempt field and valid execution is refused | Bind membership through the exact run-attempt jobs endpoint and native run/job/SHA identity; when the optional job attempt is present, require it to agree | `src/forge/providers/github/ci.py`, `tools/ci/github_junit.py` | `tests/test_native_ci_failure.py::test_github_attempt_endpoint_binds_documented_job_without_optional_attempt` |
 
+| EC-1198 | The coding lane installs server wheels, database dependencies or an unbound checkout | Build and install only independent lane/protocol wheels with the explicit SDK extra and complete hashed dependency lock; prove the real isolated environment contains no server or database packages | `tools/release/artifacts.py`, `tools/release/bundle.py` | `tests/test_release_lane_delivery.py::test_actual_lane_bundle_installs_without_server_and_refuses_changed_authority` |
+| EC-1199 | Promotion or onboarding silently changes a wheel, workflow, lock or reporter identity | Seal actual wheel metadata and hashes, full source-commit workflow pins and standalone reporter bytes; refuse altered inventories, mutable references and changed staged artifacts | `tools/release/artifacts.py`, `tools/release/bundle.py`, `templates/github/forge-lane.yml` | `tests/test_release_lane_delivery.py::test_actual_lane_bundle_installs_without_server_and_refuses_changed_authority` |
+
 ## Operational entries (the knowledge lives in the row)
 
 | ID | Symptom | Rule | Reference |

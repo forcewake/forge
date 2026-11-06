@@ -1,8 +1,11 @@
 # Lane v1 onboarding
 
-For GitHub, copy `templates/github/forge-lane.yml` into the target's
-`.github/workflows/forge-lane.yml`. It calls the Forge reusable workflow.
-For GitLab, include `ci/lane.gitlab-ci.yml` from the pinned Forge release.
+For GitHub, verify the manifest's `github_wrapper_sha256` and copy its
+`github_wrapper_url` asset into `.github/workflows/forge-lane.yml` in the target.
+The generated wrapper calls the reusable workflow at the full `workflow_commit`
+SHA; no moving tag or branch is an immutable pin. The source wrapper template
+must be rendered before use. For GitLab, verify and include the exact
+`gitlab_include_url` asset, whose remote include uses the same full commit.
 The target runner needs an isolated checkout, HTTPS access to Forge and
 Python package downloads. The GitLab template currently uses a disposable
 Debian container with Node 22 and installs pinned uv to provision Python 3.13.

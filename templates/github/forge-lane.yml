@@ -17,7 +17,7 @@ permissions:
   id-token: write
 jobs:
   lane:
-    uses: forcewake/forge/.github/workflows/lane.yml@v1
+    uses: FORGE_WORKFLOW_REPOSITORY/.github/workflows/lane.yml@FORGE_WORKFLOW_COMMIT
     with:
       dispatch: ${{ inputs.dispatch }}
       requirements_url: ${{ inputs.requirements_url }}
