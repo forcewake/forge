@@ -1,0 +1,14 @@
+unit:
+  image: python:3.13-slim
+  timeout: 15m
+  rules:
+    - if: '$FORGE_LANE_DISPATCH'
+      when: never
+    - when: on_success
+  script:
+    - python -m pip install pytest==9.0.2
+    - python -m pytest tests --junitxml=forge-junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: forge-junit.xml

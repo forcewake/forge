@@ -1,0 +1,44 @@
+name: forge-independent-verification
+on:
+  push:
+    branches: ['forge/**']
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install this Python project's test dependencies
+        run: python -m pip install pytest==9.0.2
+      - name: Fetch the verified reporting asset
+        env:
+          REPORTER_URL: ${{ vars.FORGE_VERIFICATION_REPORTER_URL }}
+          REPORTER_SHA256: ${{ vars.FORGE_VERIFICATION_REPORTER_SHA256 }}
+        run: |
+          set -euo pipefail
+          case "$REPORTER_URL" in https://*) ;; *) exit 2 ;; esac
+          printf '%s' "$REPORTER_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 30 --max-filesize 262144 "$REPORTER_URL" -o "$RUNNER_TEMP/forge-ci-report.py"
+          printf '%s  %s\n' "$REPORTER_SHA256" "$RUNNER_TEMP/forge-ci-report.py" | sha256sum --check --status
+      - name: Run the independent unit oracle
+        id: tests
+        run: |
+          rm -f "$RUNNER_TEMP/forge-junit.xml"
+          python -m pytest tests --junitxml="$RUNNER_TEMP/forge-junit.xml"
+      - name: Report actual test failures on this native job
+        if: failure() && steps.tests.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python "$RUNNER_TEMP/forge-ci-report.py" --report "$RUNNER_TEMP/forge-junit.xml" --job-name unit

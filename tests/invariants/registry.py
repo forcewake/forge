@@ -164,6 +164,7 @@ INVARIANTS: tuple[Invariant, ...] = (
             "tests/test_adaptive_verification_sets.py",
             "tests/test_native_ci_failure.py",
             "tests/test_native_ci_repair_dispatch.py",
+            "tests/test_ci_junit_publisher.py",
         ),
     ),
     Invariant(

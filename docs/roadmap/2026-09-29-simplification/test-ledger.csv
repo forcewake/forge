@@ -102,6 +102,7 @@ tests/test_checkpoint_repository.py,29,655,false,false,,,,checkpoint,keep,-,
 tests/test_checkpoint_retry_authority.py,32,1010,false,false,,,,checkpoint,keep,-,
 tests/test_ci_contract.py,21,117,false,false,,,,ci,keep,-,
 tests/test_ci_debug.py,3,78,false,false,,edge-case pin,,ci,port-engine,P3,
+tests/test_ci_junit_publisher.py,2,159,false,false,,invariant evidence; edge-case pin,,ci,keep,P3-09,"Standalone verified HTTPS native JUnit output publisher preserves job status and refuses foreign, ambiguous or invalid evidence."
 tests/test_claim_slots.py,9,397,false,false,,,,claim,keep,-,
 tests/test_claims.py,25,563,false,false,,,,claims,keep,-,
 tests/test_closing_budget.py,27,376,false,true,,invariant evidence; edge-case pin,,closing,keep,-,
