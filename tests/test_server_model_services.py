@@ -34,10 +34,11 @@ from forge.store.budget_calls import ModelCallStore
 from forge.store.model_inputs import ModelInputStore
 from forge.store.models_budget import EngineBudgetPool, EngineGatewayKey, EngineUsage
 from forge.store.models_execution import EngineCandidate, EngineStep
+from forge.store.models_lane import EngineLaneSession
 from forge.store.models_runs import EngineApprovedInput, EngineRunSpec
 from forge.store.records import StepRequest, StoreConflict
 from forge.store.steps import StepStore
-from forge_protocol import CandidateBundle, canonical_json, digest
+from forge_protocol import CandidateBundle, LaneDispatch, RunIdentity, canonical_json, digest
 from tests.test_budget_engine import NativeAdmin, case as case, prepare
 from tests.test_domain_approved_input import spec
 from tests.test_server_models import wire
@@ -317,7 +318,43 @@ async def review_input(case):
                 published_sha=sha,
             )
         )
+        session.add(review_session(case, approved, frozen, wire_candidate))
     return approved, raw, sha
+
+
+def review_session(case, approved, frozen, candidate):
+    identity = RunIdentity(
+        forge_run_id=case["run"].id,
+        attempt=case["lease"].attempt,
+        generation=case["lease"].generation,
+    )
+    nonce = "synthetic-current-review-nonce-at-least32bytes"
+    dispatch = LaneDispatch(
+        **identity.model_dump(),
+        server_url="https://forge.example",
+        provider=case["run"].provider,
+        repository="owner/project",
+        ref="forge/" + case["run"].id,
+        base_sha=approved.base_sha,
+        approved_digest=approved.approved_digest,
+        driver=frozen.driver,
+        model=frozen.model,
+        timeout_seconds=600,
+        nonce=nonce,
+    )
+    return EngineLaneSession(
+        id=uuid4().hex,
+        run_id=case["run"].id,
+        attempt=identity.attempt,
+        generation=identity.generation,
+        cancellation_generation=case["lease"].cancellation_generation,
+        nonce_hash=hashlib.sha256(("lane-oidc-nonce:" + nonce).encode()).hexdigest(),
+        expires_at=case["clock"].now() + timedelta(minutes=10),
+        dispatch_json=dispatch.model_dump_json(),
+        brief_json=approved.to_brief(identity, frozen).model_dump_json(),
+        provider_binding_json=json.dumps({"repository_id": case["run"].repository_id}),
+        api_state_json=json.dumps({"candidate": candidate.model_dump(mode="json")}),
+    )
 
 
 async def test_review_input_store_returns_only_exact_published_diff_sha_and_consumed_approval(case):

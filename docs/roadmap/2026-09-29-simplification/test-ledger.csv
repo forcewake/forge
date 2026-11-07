@@ -232,6 +232,7 @@ tests/test_main.py,1,31,false,false,,edge-case pin,,main,keep,-,
 tests/test_mcp_runs_tools.py,7,101,false,false,,edge-case pin,,mcp,keep,-,
 tests/test_mcp_server.py,7,100,false,false,,edge-case pin,,mcp,port-adapter,P3,
 tests/test_mention.py,21,129,false,false,,,,mention,keep,-,
+tests/test_model_review_repair_inputs.py,2,140,false,false,,invariant evidence; edge-case pin,,model,keep,P3-13,"Exact closing-review repair execution base with original approval retained; refuse changed session, nonce, native source, prior receipt, candidate or immutable diff."
 tests/test_native_budget_policy.py,11,217,false,false,,edge-case pin,,native,keep,P3-12,Pinned native strict budget policy and durable artifact readiness
 tests/test_native_check_identity.py,6,167,false,false,,invariant evidence; edge-case pin,,native,keep,P3-08,Required native checks bind workflow path and native run identity before selecting their retry attempt; another workflow cannot mask failure.
 tests/test_native_ci_failure.py,11,286,false,false,,invariant evidence; edge-case pin,,native,keep,P3-09,"Concrete native CI reports, exact candidate binding and SQL repair admission; non-code or ambiguous failures never spend."
@@ -318,7 +319,7 @@ tests/test_script_metrics.py,8,93,false,false,,,,script,keep,-,
 tests/test_script_prose_lint.py,10,102,false,false,,,,script,keep,-,
 tests/test_script_ratchet.py,13,155,false,false,,,,script,keep,-,
 tests/test_script_rendering.py,4,156,false,false,,,,script,keep,-,
-tests/test_server_model_services.py,8,424,false,true,,invariant evidence; edge-case pin,,server,keep,P3-13,Lease-bound planner and reviewer grants over durable approved inputs.
+tests/test_server_model_services.py,8,461,false,true,,invariant evidence; edge-case pin,,server,keep,P3-13,Lease-bound planner and reviewer grants over durable approved inputs.
 tests/test_server_models.py,7,202,false,false,,invariant evidence; edge-case pin,,server,keep,P3-13,"Exact scoped model routing, native observations and retained unknown liabilities."
 tests/test_settings_gitlab_optional.py,7,72,false,false,,,,settings,keep,-,
 tests/test_setup_script.py,4,102,false,false,,,,setup,keep,-,
