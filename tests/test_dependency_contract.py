@@ -22,9 +22,20 @@ def test_retired_implementation_dependencies_are_absent():
     assert "mysql" not in document["project"].get("optional-dependencies", {})
 
 
-def test_default_server_still_has_sqlite_redis_runner_and_crypto():
+def test_default_server_has_the_runtime_stack_and_not_redis():
     declared = requirements("pyproject.toml")
-    assert {"aiosqlite", "redis", "uvicorn", "pydantic", "cryptography", "httpx"} <= declared.keys()
+    assert {
+        "fastapi",
+        "uvicorn",
+        "httpx",
+        "pydantic",
+        "sqlalchemy",
+        "alembic",
+        "cryptography",
+        "pyjwt",
+    } <= declared.keys()
+    assert "redis" not in declared
+    assert "aiosqlite" not in declared
     assert "crypto" in declared["pyjwt"].extras
 
 

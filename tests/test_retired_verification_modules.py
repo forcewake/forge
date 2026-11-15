@@ -15,4 +15,8 @@ import pytest
     ],
 )
 def test_retired_verifier_module_is_absent(name):
-    assert importlib.util.find_spec(f"forge.adaptive.{name}") is None
+    try:
+        found = importlib.util.find_spec(f"forge.adaptive.{name}")
+    except ModuleNotFoundError:
+        found = None
+    assert found is None

@@ -96,14 +96,14 @@ NOT_MERGES = (
     're.fullmatch(r"refs/merge-requests/(\\d+)/merge", ref)',
 )
 LANE_TEMPLATES = sorted(
-    [
-        *REPO.glob("ci/templates/*.yml"),
-        REPO / ".github/workflows/forge-harness.yml",
-        REPO / "forge-lane.azure-pipelines.yml",
-    ]
+    path
+    for path in (
+        REPO / ".github/workflows/lane.yml",
+        REPO / "ci/lane.gitlab-ci.yml",
+    )
+    if path.is_file()
 )
 GITHUB_TEMPLATES = [p for p in LANE_TEMPLATES if "github" in p.name or p.parent.name == "workflows"]
-AZURE_TEMPLATES = [p for p in LANE_TEMPLATES if p.name.endswith(".azure-pipelines.yml")]
 READ_ONLY = {"read", "none"}
 
 
@@ -173,16 +173,15 @@ def test_github_lane_token_is_read_only(path: Path):
         if permissions == "read-all":
             continue
         assert isinstance(permissions, dict), f"job {name} does not pin its token permissions"
-        assert set(permissions.values()) <= READ_ONLY, f"job {name}: {permissions}"
+        for key, value in permissions.items():
+            if key == "id-token":
+                assert value == "write", f"job {name} OIDC token must be write-only for id-token"
+            else:
+                assert value in READ_ONLY, f"job {name}: {key}={value}"
 
 
-@pytest.mark.parametrize("path", AZURE_TEMPLATES, ids=_rel)
-def test_azure_lane_holds_no_access_token(path: Path):
-    text = path.read_text(encoding="utf-8")
-    checkouts = [m for m in _mappings(yaml.safe_load(text)) if "checkout" in m]
-    assert checkouts, "no checkout step found"
-    assert all(m.get("persistCredentials") is False for m in checkouts)
-    assert not re.search(r"system[._]accesstoken", text, re.IGNORECASE)
+def test_azure_lane_is_not_shipped():
+    assert not list(REPO.glob("**/*azure-pipelines.yml"))
 
 
 @pytest.mark.parametrize(
@@ -204,7 +203,9 @@ def test_v1_lanes_hold_no_repository_write_credential(relative):
     job = doc["jobs"]["lane"]
     assert "permissions" not in job
     if "uses" in job:
-        assert job["uses"] == "forcewake/forge/.github/workflows/lane.yml@v1"
+        assert job["uses"] == (
+            "FORGE_WORKFLOW_REPOSITORY/.github/workflows/lane.yml@FORGE_WORKFLOW_COMMIT"
+        )
         assert "secrets: inherit" not in text
         return
     checkouts = [

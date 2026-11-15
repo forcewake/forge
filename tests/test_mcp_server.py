@@ -57,7 +57,7 @@ async def test_a_grant_cannot_widen_its_canonical_subject_scope(operator_native,
         RunRequest(uuid4().hex, "gitlab", "private", "123", "issue", "7")
     )
     response = await fixture.client.get("/api/v1/runs/" + foreign.id, headers=fixture.headers)
-    assert response.status_code == 403
+    assert response.status_code == 404
     response = await fixture.client.post(
         "/api/v1/commands", headers=fixture.headers, json=command(repository=declared)
     )

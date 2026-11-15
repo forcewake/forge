@@ -17,10 +17,10 @@ Read issue identity and recover comments or labels without writing.
 async def get_task(self, subject: SubjectRef) -> TaskSnapshot:
     ...
 
-async def find_comment(self, subject: SubjectRef, marker: str) -> CommentRef | None:
+async def find_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> CommentRef | None:
     ...
 
-async def probe_comment(self, subject: SubjectRef, marker: str) -> ProbeResult[CommentOutcome]:
+async def probe_comment(self, subject: SubjectRef | ReviewRef, marker: str) -> ProbeResult[CommentOutcome]:
     ...
 
 async def probe_comment_update(self, comment: CommentRef, body_digest: Digest) -> ProbeResult[CommentOutcome]:
@@ -50,7 +50,7 @@ async def find_commit_by_marker(self, repo: RepoRef, branch: str, marker: str) -
 async def probe_branch(self, repo: RepoRef, branch: str, base: Sha) -> ProbeResult[BranchOutcome]:
     ...
 
-async def probe_commit(self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha) -> ProbeResult[CommitOutcome]:
+async def probe_commit(self, repo: RepoRef, branch: str, marker: str, expected_parent: Sha, candidate: ValidatedCandidate) -> ProbeResult[CommitOutcome]:
     ...
 ```
 
@@ -117,7 +117,7 @@ including file modes, and performs native expected-head compare-and-swap.
 Timeouts return Unknown; they never imply success or permit a blind retry.
 
 ```python
-async def post_comment(self, subject: SubjectRef, body: str, marker: str) -> CommentOutcome:
+async def post_comment(self, subject: SubjectRef | ReviewRef, body: str, marker: str) -> CommentOutcome:
     ...
 
 async def update_comment(self, comment: CommentRef, body: str) -> CommentOutcome:
