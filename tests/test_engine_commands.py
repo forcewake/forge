@@ -1,5 +1,7 @@
 """Command replay, independent reply authority and cancellation revocation proofs."""
 
+import asyncio
+from datetime import datetime, timezone
 import json
 
 import pytest
@@ -53,6 +55,20 @@ def envelope(case, kind, *, native_id="note-1", argument="", actor=None, reply=F
         command=Command(kind=kind, argument=argument),
         native_reply=reply,
     )
+
+
+async def test_concurrent_identical_commands_land_once_and_a_changed_body_is_refused(commands):
+    value = envelope(commands, "implement", native_id="delivery-9", argument="ship the fix")
+    now = datetime.now(timezone.utc)
+    store = commands["command_store"]
+    results = await asyncio.gather(*(store.accept(value, now=now) for _ in range(8)))
+    assert len({item.id for item in results}) == 1
+    other = envelope(commands, "cancel", native_id="delivery-10")
+    second = await store.accept(other, now=now)
+    assert second.id != results[0].id
+    changed = value.model_copy(update={"command": Command(kind="cancel")})
+    with pytest.raises(StoreConflict, match="changed content"):
+        await store.accept(changed, now=now)
 
 
 async def test_native_reply_has_its_own_idempotent_owner_without_a_run(commands):

@@ -196,3 +196,52 @@ async def test_a_surviving_symlink_cannot_redirect_restore_writes(tmp_path):
 
 async def test_invalid_symlink_blob_is_typed_and_refused_before_any_write(tmp_path):
     await refuse_before_write(tmp_path, symlink_blob=b"\xff\xfe")
+
+
+async def test_a_checkpoint_read_timeout_writes_nothing_and_does_not_fetch_another(tmp_path):
+    target = tmp_path / "target"
+    base = checkout(target)
+    before = tree(target)
+    seen = []
+
+    def handle(request):
+        seen.append(request.url.path)
+        raise httpx.ReadTimeout("synthetic checkpoint timeout", request=request)
+
+    dispatch, _ = inputs(base)
+    resumed, _ = inputs(base, generation=1, checkpoint_id=digest_pin(dispatch))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(LaneFailure) as caught:
+            await Checkpoints(resumed, LaneClient(resumed, http), Workspace(target, base)).restore()
+    assert caught.value.classification == "transport_error"
+    assert seen == ["/lane/v1/checkpoints/latest"]
+    assert tree(target) == before
+
+
+async def test_a_newer_checkpoint_is_refused_before_any_workspace_write(tmp_path):
+    source, target = tmp_path / "source", tmp_path / "target"
+    base = checkout(source)
+    git(tmp_path, "clone", "-q", "--no-hardlinks", str(source), str(target))
+    (source / "base.txt").write_bytes(b"pinned generation")
+    dispatch, _ = inputs(base)
+    store = Blobs()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(store.handle)) as http:
+        pinned = await Checkpoints(
+            dispatch, LaneClient(dispatch, http), Workspace(source, base)
+        ).capture()
+    newer = pinned.model_copy(update={"generation": 1, "sequence": pinned.sequence + 1})
+    assert newer.checkpoint_id != pinned.checkpoint_id
+    store.manifest = newer
+    before = tree(target)
+    resumed, _ = inputs(base, generation=1, checkpoint_id=pinned.checkpoint_id)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(store.handle)) as http:
+        with pytest.raises(LaneFailure) as caught:
+            await Checkpoints(resumed, LaneClient(resumed, http), Workspace(target, base)).restore()
+    assert caught.value.classification == "checkpoint_mismatch"
+    assert tree(target) == before
+
+
+def digest_pin(dispatch):
+    from forge_protocol import digest
+
+    return digest({"pin": dispatch.approved_digest})
