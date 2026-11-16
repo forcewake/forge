@@ -1,6 +1,7 @@
 """Provider-neutral native command execution with one durable replay owner."""
 
 from collections.abc import Awaitable, Callable, Mapping
+import asyncio
 import json
 import re
 
@@ -93,6 +94,14 @@ class Commands:
             except StoreConflict as error:
                 code = str(error) if str(error) in REFUSALS else "command_conflict"
                 result = refusal(code)
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                if await self.store.release_for_retry(lease, now=self.clock.now()):
+                    return CommandResult(
+                        status="accepted", reason="command_retry", run_id=command.run_id
+                    )
+                result = refusal("command_failed")
             await self.store.resolve(lease, result, now=self.clock.now())
         finisher = self.finishers.get(command.envelope.command.kind)
         if finisher is not None and not await finisher(lease):
