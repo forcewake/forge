@@ -85,13 +85,16 @@ async def test_transient_provider_failure_retries_then_refuses_and_the_worker_st
     commands["commands"].decide = unavailable
     value = envelope(commands, "status", native_id="transient-1", reply=True)
     await commands["command_store"].accept(value, now=commands["env"].clock.now())
-    assert await commands["commands"].tick() == 1
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
     assert calls == 1
     assert await commands["commands"].tick() == 0
     commands["env"].clock.instant += timedelta(seconds=6)
-    assert await commands["commands"].tick() == 1
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
     commands["env"].clock.instant += timedelta(seconds=11)
-    assert await commands["commands"].tick() == 1
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
     assert calls == 3
     async with commands["env"].factory() as session:
         command = await session.scalar(select(EngineCommand))
