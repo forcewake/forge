@@ -104,12 +104,20 @@ async def test_renewal_updates_context_lease_for_effects_and_final_commit(store)
     observed = []
 
     async def handler(ctx):
+        original = ctx.lease.expires_at
+        observed.append(original)
+        # A loaded runner can miss a 120ms lease. Wait for the renewal, then
+        # stay past the original expiry so the commit has to use the new one.
+        deadline = asyncio.get_running_loop().time() + 5
+        while ctx.lease.expires_at == original and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
         observed.append(ctx.lease.expires_at)
-        await asyncio.sleep(0.14)
-        observed.append(ctx.lease.expires_at)
+        remaining = (original - clock.now()).total_seconds()
+        if remaining > 0:
+            await asyncio.sleep(remaining + 0.05)
         return StepResult("{}")
 
-    tick = await runner(store, clock, handler, lease_seconds=0.12, renew_seconds=0.02).tick()
+    tick = await runner(store, clock, handler, lease_seconds=3, renew_seconds=0.05).tick()
     assert tick.completed == 1 and observed[1] > observed[0]
     assert (await StepStore(store).load(step.id)).lease_epoch == 1
 
