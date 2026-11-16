@@ -61,13 +61,21 @@ async def execute(args: argparse.Namespace) -> None:
             await item.dispose()
 
 
+def _credential_on_command_line(url: str) -> bool:
+    if "://" not in url or "@" not in url:
+        return False
+    userinfo = url.split("://", 1)[1].split("/", 1)[0].split("@", 1)[0]
+    return ":" in userinfo
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="forge-schema", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for kind in ("init", "check", "export-history", "migrate"):
         command = commands.add_parser(kind)
         if kind in ("init", "check", "migrate"):
-            command.add_argument("--database-url", default=os.environ.get("DATABASE_URL", ""))
+            command.add_argument("--database-url", default="")
+            command.add_argument("--url-file", default="", help="file containing the database URL")
         if kind in ("export-history", "migrate"):
             command.add_argument(
                 "--source-url", default=os.environ.get("FORGE_LEGACY_DATABASE_URL", "")
@@ -79,6 +87,21 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--old-service-stopped", action="store_true")
             command.add_argument("--executions-stopped", action="store_true")
     args = parser.parse_args(argv)
+    supplied = getattr(args, "database_url", "")
+    if getattr(args, "url_file", ""):
+        try:
+            args.database_url = Path(args.url_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            print("forge-schema: database URL file is unreadable", file=sys.stderr)
+            return 1
+    elif not supplied:
+        args.database_url = os.environ.get("DATABASE_URL", "")
+    elif _credential_on_command_line(supplied):
+        print(
+            "forge-schema: operation refused; pass the database URL via DATABASE_URL or --url-file",
+            file=sys.stderr,
+        )
+        return 1
     try:
         asyncio.run(execute(args))
     except (SchemaMismatch, CutoverRefused) as error:

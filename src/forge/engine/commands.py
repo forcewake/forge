@@ -128,7 +128,9 @@ class Commands:
                 self.authority, lease, EffectKind.POST_COMMENT, key, payload
             )
             if isinstance(outcome, Unknown):
-                return result
+                latest = await self.effects.store.get(key)
+                if latest is None or latest.state != "failed":
+                    return result
         await self.store.complete(lease, now=self.clock.now())
         if transient is not None:
             raise transient

@@ -38,6 +38,13 @@ runtime environment variables. Image construction does not need them. Changing
 the config, policy or callback requires a new artifact and an explicit new pin.
 Existing running gateways are not changed by editing these source files.
 
+Set the gateway database to UTC (`ALTER DATABASE ... SET timezone = 'UTC'`).
+Key expiry is stored as UTC without a time zone; a session clock ahead of UTC
+makes a live key look expired. A non-Anthropic upstream is a `model_list`
+entry with `api_base` and `extra_headers`. Forge omits `temperature` so models
+that reject an explicit 0 still accept the request. A 400, 401, 403, 404 or
+422 that never reaches the provider releases its hold.
+
 The `LiteLLM budget contract` workflow builds the fixture artifact, starts an
 isolated HTTP upstream and disposable PostgreSQL, then runs the actual native
 HTTP/SDK/callback/database path. It checks both text APIs and streaming modes,

@@ -28,7 +28,19 @@ def lane_key(identity: RunIdentity) -> str:
 # Checkout and process start happen after the server records the dispatch.
 # The lane measures its wall clock from that later start, so the server waits
 # this long past the approved limit before parking a lane that has not reported.
-STARTUP_GRACE_SECONDS = 120
+def startup_grace_seconds() -> int:
+    """Lane install and checkout happen after the server records dispatch."""
+    import os
+
+    raw = os.environ.get("FORGE_LANE_STARTUP_GRACE_SECONDS", "600")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 600
+    return min(3600, max(30, value))
+
+
+STARTUP_GRACE_SECONDS = 600
 
 
 class DispatchHandler:
@@ -95,6 +107,14 @@ class DispatchHandler:
                 dispatch.ref,
                 approved.brief.base_sha,
             )
+            if isinstance(branch, Unknown):
+                if context.step.attempts >= work.settings.discovery_attempts:
+                    return await self.stop(context, approved, "lane_branch_unavailable")
+                return StepResult(
+                    result_json(waiting="lane_branch"),
+                    defer_until=self.clock.now()
+                    + timedelta(seconds=work.settings.poll_seconds),
+                )
             if not isinstance(branch, Applied):
                 reason = (
                     "branch_drift" if isinstance(branch, Conflict) else "lane_branch_unavailable"
@@ -137,17 +157,15 @@ class DispatchHandler:
             raise StoreConflict("native dispatch handle differs from its frozen request")
         if dispatch.provider == "gitlab":
             await self.register(dispatch, work, approved, pipeline_id=dispatched.value.native_id)
+        grace = startup_grace_seconds()
         deadline = self.clock.now() + timedelta(
-            seconds=approved.spec.limits.wallclock_seconds + STARTUP_GRACE_SECONDS
+            seconds=approved.spec.limits.wallclock_seconds + grace
         )
         waiting = AwaitLane(
             **{**work.model_dump(), "expires_at": deadline}, handle=dispatched.value
         )
         polls = (
-            math.ceil(
-                (approved.spec.limits.wallclock_seconds + STARTUP_GRACE_SECONDS)
-                / work.settings.poll_seconds
-            )
+            math.ceil((approved.spec.limits.wallclock_seconds + grace) / work.settings.poll_seconds)
             + 2
         )
         successor = StepRequest(

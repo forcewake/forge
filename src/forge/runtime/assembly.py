@@ -35,7 +35,7 @@ from forge.engine.worker import EngineWorker
 from forge.ports import Clock
 from forge.runtime.actions import InitialActions
 from forge.runtime.blobs import Blobs
-from forge.store.records import EffectRecord
+from forge.store.records import EffectRecord, Lease
 from pydantic import SecretStr
 from forge.runtime.authority import Operators
 from forge.runtime.connections import Connections, assemble_connections
@@ -365,6 +365,24 @@ def make_worker(
     wakeups: Wakeups,
 ) -> EngineWorker[Effects]:
     owner = "worker:" + uuid4().hex
+
+    async def announce_block(lease: Lease, reason: str) -> None:
+        from forge.command_values import blocked_comment
+        from forge.store.command_runs import CommandRuns
+        from forge.store.records import StoreConflict
+
+        try:
+            subject = await CommandRuns(factory).subject(lease.run_id)
+        except StoreConflict:
+            return
+        await effects.post_comment(
+            lease,
+            f"{lease.run_id}:blocked:{reason}"[:300],
+            subject,
+            blocked_comment(reason),
+            f"forge:block:{lease.run_id}",
+        )
+
     runner = StepRunner(
         StepStore(factory),
         handlers.mapping,
@@ -372,6 +390,7 @@ def make_worker(
         clock=current,
         owner=owner,
         lease_seconds=config.lease_seconds,
+        on_blocked=announce_block,
     )
 
     async def recover_effect(effect: EffectRecord) -> EffectRecord:

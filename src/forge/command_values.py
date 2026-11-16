@@ -120,4 +120,46 @@ REFUSALS = {
 def render(result: CommandResult) -> str:
     message = REFUSALS.get(result.reason, result.reason.replace("_", " "))
     run = f"\nRun: `{result.run_id}`" if result.run_id is not None else ""
-    return message + run + ("\n" + result.data_json if result.status == "observed" else "")
+    extra = ""
+    if result.status == "observed" and result.data_json not in ("", "{}"):
+        facts = json.loads(result.data_json)
+        state = facts.get("state") if isinstance(facts, dict) else None
+        # A blocked or failed run is explained in prose. Other snapshots keep
+        # the canonical evidence so a status comment can name the candidate.
+        extra = (
+            "\n" + human_status(result.data_json)
+            if state in {"blocked", "failed"}
+            else "\n" + result.data_json
+        )
+    return message + run + extra
+
+
+def human_status(raw: str) -> str:
+    """Operator-facing status. Raw snapshots stay out of the issue comment."""
+    import json
+
+    try:
+        facts = json.loads(raw)
+    except ValueError:
+        return "The current status could not be read."
+    if not isinstance(facts, dict):
+        return "The current status could not be read."
+    state = str(facts.get("state") or "unknown").replace("_", " ")
+    reason = facts.get("reason")
+    handler = facts.get("failed_handler")
+    lines = [f"State: {state}."]
+    if isinstance(reason, str) and reason:
+        lines.append("Reason: " + reason.replace("_", " ") + ".")
+    if isinstance(handler, str) and handler:
+        lines.append("Stopped during: " + handler.replace("_", " ") + ".")
+    lines.append("Use /retry when this work can continue, or /implement to start again.")
+    return "\n".join(lines)
+
+
+def blocked_comment(reason: str) -> str:
+    text = reason.replace("_", " ")
+    return (
+        "Forge stopped this run before it finished.\n"
+        f"Reason: {text}.\n"
+        "Comment /why-blocked for the current facts, or /retry if this work can continue."
+    )

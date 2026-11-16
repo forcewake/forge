@@ -46,9 +46,29 @@ async def command_fence(session: AsyncSession, lease: CommandLease, now: datetim
     return row
 
 
+def command_retry_budget() -> tuple[int, int, int]:
+    """Attempts, base seconds and cap. Defaults cover more than a 15s GitHub blip."""
+    import os
+
+    def bounded(name: str, default: int, low: int, high: int) -> int:
+        raw = os.environ.get(name, str(default))
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return min(high, max(low, value))
+
+    return (
+        bounded("FORGE_COMMAND_RETRY_ATTEMPTS", 8, 1, 30),
+        bounded("FORGE_COMMAND_RETRY_BASE_SECONDS", 5, 1, 300),
+        bounded("FORGE_COMMAND_RETRY_CAP_SECONDS", 120, 1, 900),
+    )
+
+
 class CommandStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
+        self.max_attempts, self.retry_base, self.retry_cap = command_retry_budget()
 
     async def accept(self, envelope: CommandEnvelope, *, now: datetime) -> CommandRecord:
         try:
@@ -70,6 +90,7 @@ class CommandStore:
                     kind=envelope.command.kind,
                     document_json=envelope.canonical_bytes.decode(),
                     due_at=aware(now),
+                    max_attempts=self.max_attempts,
                 )
                 session.add(row)
                 await session.flush()
@@ -133,7 +154,7 @@ class CommandStore:
             row = await command_fence(session, lease, now)
             if row.attempts >= row.max_attempts:
                 return False
-            delay = min(60, 5 * (2 ** (row.attempts - 1)))
+            delay = min(self.retry_cap, self.retry_base * (2 ** (row.attempts - 1)))
             row.due_at = aware(now) + timedelta(seconds=delay)
             row.lease_owner = None
             row.lease_expires_at = aware(now)

@@ -1,29 +1,25 @@
+# Forge 1.0 gateway. One explicit model, no tier aliases, no embedded secret.
+# Point model/api_base/extra_headers at the upstream you actually call.
+# Set the Postgres database TimeZone to UTC before relying on key expiry.
 model_list:
-  # Fast tier — quick, low-cost reasoning. Used for triage, mention parsing,
-  # short chat replies, and any agent step that doesn't need a frontier model.
-  - model_name: fast
+  - model_name: claude-haiku-4-5
     litellm_params:
-      model: openai/gpt-4.1-mini
-      api_key: os.environ/OPENAI_API_KEY
-      max_tokens: 4096
-
-  # Strong tier — complex reasoning, full code reviews, security triage.
-  - model_name: strong
-    litellm_params:
-      model: openrouter/anthropic/claude-sonnet-4
-      api_key: os.environ/OPENROUTER_API_KEY
-      max_tokens: 8192
-
-  # Code tier — code-focused tasks (diff review, code generation in flows).
-  # Qwen3.5-35B-A3B is a Mixture-of-Experts coder model served via OpenRouter.
-  - model_name: code
-    litellm_params:
-      model: openrouter/qwen/qwen3.5-35b-a3b
-      api_key: os.environ/OPENROUTER_API_KEY
-      max_tokens: 8192
-
-router_settings:
-  num_retries: 2
-
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+      max_retries: 0
+      num_retries: 0
+      # extra_headers:
+      #   x-opencode-session: os.environ/OPENCODE_SESSION
 general_settings:
-  master_key: sk-forge-master-key
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  fail_closed_budget_enforcement: true
+  disable_budget_reservation: false
+router_settings:
+  num_retries: 0
+litellm_settings:
+  callbacks: [forge_budget_guard.guard]
+  num_retries: 0
+  request_timeout: 60
+  set_verbose: false
+  drop_params: false

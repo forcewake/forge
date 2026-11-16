@@ -190,6 +190,21 @@ async def test_unknown_effect_is_a_terminal_park_not_an_automatic_retry(store):
     )
 
 
+async def test_a_park_announces_the_block_before_the_run_stops(store):
+    clock = RealClock()
+    run, _step = await seeded(store, clock)
+    seen: list[tuple[str, str]] = []
+
+    async def handler(ctx):
+        return StepResult("{}", park=Park("planning_deadline_expired"))
+
+    async def on_blocked(lease, reason):
+        seen.append((lease.run_id, reason))
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    assert seen == [(run.id, "planning_deadline_expired")]
+
+
 async def test_handler_errors_park_with_nonsecret_reason_and_never_retry(store):
     clock = RealClock()
     run, step = await seeded(store, clock)

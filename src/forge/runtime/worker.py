@@ -1,9 +1,12 @@
 """Drain durable commands and the sole engine with PostgreSQL wake-up hints."""
 
 import asyncio
+import logging
 import signal
 
 from forge.runtime.assembly import Runtime
+
+log = logging.getLogger("forge.worker")
 
 
 async def serve(runtime: Runtime, stop: asyncio.Event) -> None:
@@ -17,6 +20,10 @@ async def serve(runtime: Runtime, stop: asyncio.Event) -> None:
             except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
                 raise
             except Exception:
+                log.exception(
+                    "worker tick failed",
+                    extra={"component": "forge.worker"},
+                )
                 await asyncio.sleep(1)
                 continue
             await runtime.lane.reap_terminal_blobs()
@@ -24,7 +31,11 @@ async def serve(runtime: Runtime, stop: asyncio.Event) -> None:
                 waiter = asyncio.create_task(runtime.wakeups.wait())
                 stopped = asyncio.create_task(stop.wait())
                 try:
-                    await asyncio.wait((waiter, stopped), return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        (waiter, stopped),
+                        timeout=execution.recovery.next_delay,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                 finally:
                     for task in (waiter, stopped):
                         if not task.done():

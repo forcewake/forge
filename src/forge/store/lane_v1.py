@@ -1,11 +1,13 @@
 """Current engine lane API transactions and their cancellation/version fence."""
 
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 import inspect
 from typing import Any, TypeVar, cast
 
 from forge_protocol import ControlCommand, RunIdentity
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import and_, delete, exists, or_, select, update
+from sqlalchemy.sql.selectable import Select
 from sqlalchemy.engine import CursorResult
 
 from forge.api.lane_auth_values import PendingDispatch, identity_of
@@ -68,41 +70,62 @@ class EngineLaneV1Store:
                     raise LaneConflict("run changed during lane mutation")
             return result
 
-    async def terminal_only_digests(self, limit: int) -> list[str]:
-        terminal = tuple(item.value for item in TERMINAL)
-        live = (
-            select(EngineBlob.digest)
-            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-            .where(EngineRun.state.not_in(terminal))
+    def _reapable_runs(self, now: datetime, grace_seconds: int) -> Select[tuple[str]]:
+        cutoff = now - timedelta(seconds=grace_seconds)
+        unretryable = or_(
+            EngineRun.state.in_(("cancelled", "ready_for_human")),
+            and_(
+                EngineRun.state.in_(("blocked", "failed")),
+                EngineRun.failed_handler.is_(None),
+            ),
         )
+        return select(EngineRun.id).where(unretryable, EngineRun.updated_at <= cutoff)
+
+    async def terminal_only_digests(
+        self, limit: int, *, now: datetime | None = None, grace_seconds: int = 24 * 3600
+    ) -> list[str]:
+        moment = now or datetime.now(timezone.utc)
+        eligible = self._reapable_runs(moment, grace_seconds)
+        retained = select(EngineBlob.digest).where(EngineBlob.run_id.not_in(eligible))
         async with self.session_factory() as session:
             rows = await session.scalars(
                 select(EngineBlob.digest)
-                .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-                .where(EngineRun.state.in_(terminal), EngineBlob.digest.not_in(live))
+                .where(EngineBlob.run_id.in_(eligible), EngineBlob.digest.not_in(retained))
                 .limit(limit)
             )
         return list(dict.fromkeys(rows))
 
-    async def forget_terminal_digests(self, digests: list[str]) -> None:
+    async def forget_terminal_digests(
+        self,
+        digests: list[str],
+        *,
+        now: datetime | None = None,
+        grace_seconds: int = 24 * 3600,
+    ) -> list[str]:
         if not digests:
-            return
-        terminal = tuple(item.value for item in TERMINAL)
-        live = (
-            select(EngineBlob.digest)
-            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-            .where(EngineRun.state.not_in(terminal))
-        )
+            return []
+        moment = now or datetime.now(timezone.utc)
+        eligible = self._reapable_runs(moment, grace_seconds)
         async with transaction(self.session_factory) as session:
             await session.execute(
                 delete(EngineBlob).where(
                     EngineBlob.digest.in_(digests),
-                    EngineBlob.digest.not_in(live),
-                    EngineBlob.run_id.in_(
-                        select(EngineRun.id).where(EngineRun.state.in_(terminal))
-                    ),
+                    EngineBlob.run_id.in_(eligible),
                 )
             )
+            remaining = set(
+                await session.scalars(
+                    select(EngineBlob.digest).where(EngineBlob.digest.in_(digests))
+                )
+            )
+        return [digest for digest in digests if digest not in remaining]
+
+    async def digest_referenced(self, digest: str) -> bool:
+        async with self.session_factory() as session:
+            row = await session.scalar(
+                select(EngineBlob.digest).where(EngineBlob.digest == digest).limit(1)
+            )
+        return row is not None
 
     async def enqueue_control(self, command: ControlCommand) -> ControlCommand:
         def append(

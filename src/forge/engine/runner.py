@@ -138,6 +138,7 @@ class StepRunner(Generic[E]):
         renew_seconds: float | None = None,
         retry: RetryPolicy = RetryPolicy(),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_blocked: Callable[[Lease, str], Awaitable[None]] | None = None,
     ) -> None:
         renewal = renew_seconds if renew_seconds is not None else lease_seconds / 3
         if not 0 < renewal < lease_seconds <= 3600:
@@ -145,6 +146,7 @@ class StepRunner(Generic[E]):
         self.store, self.handlers, self.effects = store, dict(handlers), effects
         self.clock, self.owner, self.lease_seconds = clock, owner, lease_seconds
         self.renew_seconds, self.retry, self.sleep = renewal, retry, sleep
+        self.on_blocked = on_blocked
 
     async def tick(self, *, limit: int = 1) -> RunTick:
         leases = await self.store.claim_due(self.owner, self.clock.now(), self.lease_seconds, limit)
@@ -246,6 +248,16 @@ class StepRunner(Generic[E]):
                     observation_json=result.result_json,
                 )
                 return "rescheduled" if retried.state == "scheduled" else "parked"
+            if result.park is not None and self.on_blocked is not None:
+                try:
+                    await self.on_blocked(holder.current, result.park.reason)
+                except Exception:
+                    import logging
+
+                    logging.getLogger("forge.worker").exception(
+                        "blocked-run comment failed",
+                        extra={"run_id": holder.current.run_id, "reason": result.park.reason},
+                    )
             completed = await self.store.complete_and_enqueue(
                 holder.current,
                 result.result_json,
@@ -280,6 +292,15 @@ class StepRunner(Generic[E]):
     async def _park(
         self, lease: Lease, reason: str, *, execution_seconds: float | None = None
     ) -> str:
+        if self.on_blocked is not None:
+            try:
+                await self.on_blocked(lease, reason)
+            except Exception:
+                import logging
+
+                logging.getLogger("forge.worker").exception(
+                    "blocked-run comment failed", extra={"run_id": lease.run_id, "reason": reason}
+                )
         try:
             await self.store.complete_and_enqueue(
                 lease,

@@ -159,12 +159,31 @@ class LaneV1Service:
 
         await self.store.access(identity, record, write=True)
 
-    async def reap_terminal_blobs(self, *, limit: int = 32) -> int:
-        digests = await self.store.terminal_only_digests(limit)
+    async def reap_terminal_blobs(
+        self, *, limit: int = 32, grace_seconds: int = 24 * 3600, upload_grace_seconds: int = 120
+    ) -> int:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        digests = await self.store.terminal_only_digests(
+            limit, now=now, grace_seconds=grace_seconds
+        )
+        quiet = []
         for digest in digests:
+            path = self.blobs.root / digest
+            if path.is_file() and now.timestamp() - path.stat().st_mtime < upload_grace_seconds:
+                continue
+            quiet.append(digest)
+        forgotten = await self.store.forget_terminal_digests(
+            quiet, now=now, grace_seconds=grace_seconds
+        )
+        removed = 0
+        for digest in forgotten:
+            if await self.store.digest_referenced(digest):
+                continue
             await self.blobs.discard(digest)
-        await self.store.forget_terminal_digests(digests)
-        return len(digests)
+            removed += 1
+        return removed
 
     async def read_blob(self, identity: RunIdentity, digest: str) -> bytes:
         size = await self.store.access(identity, lambda p, s, n: blob_size(p, s, n, digest))

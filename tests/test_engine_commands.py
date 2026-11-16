@@ -85,6 +85,9 @@ async def test_transient_provider_failure_retries_then_refuses_and_the_worker_st
     commands["commands"].decide = unavailable
     value = envelope(commands, "status", native_id="transient-1", reply=True)
     await commands["command_store"].accept(value, now=commands["env"].clock.now())
+    async with commands["env"].factory() as session, session.begin():
+        stored = await session.scalar(select(EngineCommand))
+        stored.max_attempts = 3
     with pytest.raises(ReadUnavailable):
         await commands["commands"].tick()
     assert calls == 1

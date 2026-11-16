@@ -275,6 +275,11 @@ jobs:
       - name: Failure-injection exit bar (real Postgres)
         run: uv run pytest tests/test_failure_injection.py -q
 
+      - name: Budget guard expiry uses UTC under a non-UTC session
+        run: >-
+          uv run pytest -q
+          tests/test_reported_followups.py::test_guard_accepts_a_utc_expiry_when_the_session_zone_is_amsterdam
+
       # The qualification gate installs disposable databases with
       # `python -m forge.store.schema init` on the postgres-gate service.
       # It refuses when the URL is missing, a required id is absent, a

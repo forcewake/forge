@@ -201,12 +201,38 @@ async def test_declared_oversize_and_quota_refuse_before_keeping_bytes(api):
         await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
     ).status_code == 201
     assert (lane.blobs.root / first).is_file()
+    from datetime import datetime, timedelta, timezone
+    import os
+
+    old = datetime.now(timezone.utc) - timedelta(days=2)
     async with factory() as session, session.begin():
-        run = await session.get(EngineRun, pending.identity.forge_run_id)
-        run.state = "failed"
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(state="failed", failed_handler=None, updated_at=old)
+        )
+    os.utime(lane.blobs.root / first, (old.timestamp(), old.timestamp()))
     assert await lane.reap_terminal_blobs() == 1
     assert not (lane.blobs.root / first).exists()
     assert await lane.reap_terminal_blobs() == 0
+
+
+async def test_retryable_blocked_publish_keeps_its_blob(api):
+    from datetime import datetime, timedelta, timezone
+    import os
+
+    lane, factory, pending, client = api
+    first = await upload(client, b"keep")
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+    async with factory() as session, session.begin():
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(state="blocked", failed_handler="publish", updated_at=old)
+        )
+    os.utime(lane.blobs.root / first, (old.timestamp(), old.timestamp()))
+    assert await lane.reap_terminal_blobs() == 0
+    assert (lane.blobs.root / first).is_file()
 
 
 async def test_blob_digest_limits_corruption_and_symlinks_are_refused(api, tmp_path):
