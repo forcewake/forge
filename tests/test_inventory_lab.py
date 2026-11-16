@@ -152,14 +152,9 @@ def _repo_tree(tmp_path: Path) -> Path:
     older = tmp_path / "docs" / "releases" / "evidence" / "v0.35.0"
     older.mkdir(parents=True)
     (older / "promotion.json").write_text(json.dumps({**promotion, "version": "0.35.0"}))
-    versions = tmp_path / "alembic" / "versions"
-    versions.mkdir(parents=True)
-    (versions / "001_root.py").write_text(
-        'revision = "026"\ndown_revision = "025"\n', encoding="utf-8"
-    )
-    (versions / "002_head.py").write_text(
-        'revision = "027"\ndown_revision = "026"\n', encoding="utf-8"
-    )
+    baseline = tmp_path / "src/forge/store/schema"
+    baseline.mkdir(parents=True)
+    (baseline / "baseline.json").write_text(json.dumps({"revision": "10000001"}), encoding="utf-8")
     return tmp_path
 
 
@@ -195,16 +190,14 @@ def test_the_intended_profile_comes_from_the_latest_promotion_record(
     assert intended.release_version == "0.36.0"
     assert intended.image_digest == PROMOTED_DIGEST
     assert intended.wheel_sha256 == WHEEL_SHA
-    assert intended.schema_head == "027"
+    assert intended.schema_head == "10000001"
     assert intended.required_caps == ("FORGE_BUDGET_PROFILES", "FORGE_LANE_BUDGET_SECONDS")
 
 
-def test_a_branched_alembic_chain_refuses_instead_of_guessing(tmp_path: Path) -> None:
+def test_a_missing_schema_baseline_refuses_instead_of_guessing(tmp_path: Path) -> None:
     root = _repo_tree(tmp_path)
-    (root / "alembic/versions/003_branch.py").write_text(
-        'revision = "028"\ndown_revision = "026"\n', encoding="utf-8"
-    )
-    with pytest.raises(ProbeError, match="heads"):
+    (root / "src/forge/store/schema/baseline.json").unlink()
+    with pytest.raises(ProbeError, match="baseline"):
         repo_schema_head(root)
 
 
@@ -240,7 +233,7 @@ def test_schema_compares_the_deployed_head_to_the_repo_chain(tmp_path: Path) -> 
     observation = stage_schema(probe, root)  # type: ignore[arg-type]
     assert observation["status"] == "observed"
     assert observation["deployed_head"] == "026"
-    assert observation["repo_chain_head"] == "027"
+    assert observation["repo_chain_head"] == "10000001"
     assert "read-only SELECT" in observation["method"]
 
 
@@ -458,7 +451,7 @@ def test_a_fully_matched_lab_derives_aligned(
         health={"status": "ok", "version": "0.36.0"},
         template_content=TEMPLATE_AT_PROMOTED_REF,
         podman_outputs={
-            **_podman_stub(deployed_version_head="027", app_env=_aligned_lab_env()),
+            **_podman_stub(deployed_version_head="10000001", app_env=_aligned_lab_env()),
             ("inspect", APP_CONTAINER, "--format", "{{.ImageName}} {{.ImageDigest}}"): (
                 f"ghcr.io/forcewake/forge {PROMOTED_DIGEST}"
             ),

@@ -13,6 +13,10 @@ from zipfile import BadZipFile, ZipFile
 
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+BOUND_WHEEL = re.compile(
+    r"forge-(?:protocol|lane(?:\[claude\])?) @ https://github\.com/\S+"
+    r" --hash=sha256:[0-9a-f]{64}\Z"
+)
 SERVER_ONLY = frozenset({"forge", "fastapi", "sqlalchemy", "alembic", "asyncpg", "aiosqlite"})
 WORKSPACE = frozenset({"forge", "forge-lane", "forge-protocol"})
 WORKFLOW_PIN = "FORGE_WORKFLOW_REPOSITORY/.github/workflows/lane.yml@FORGE_WORKFLOW_COMMIT"
@@ -67,20 +71,28 @@ def locked_requirements(path: Path, *, lane: bool) -> tuple[str, set[str]]:
     if current or not entries:
         raise ValueError("dependency lock is incomplete")
     names = set()
+    pins = []
     for entry in entries:
+        if " @ " in entry:
+            if BOUND_WHEEL.fullmatch(entry) is None:
+                raise ValueError(
+                    "dependencies require exact versions and SHA256 hashes, without source checkouts"
+                )
+            continue
         hashes = re.findall(r" --hash=sha256:([0-9a-f]{64})(?=\s|$)", entry)
         requirement = re.sub(r" --hash=sha256:[0-9a-f]{64}(?=\s|$)", "", entry)
         match = re.fullmatch(
             r"([A-Za-z0-9][A-Za-z0-9_.-]*)==[^\s;]+(?:\s*;\s*[^\r\n]+)?", requirement
         )
-        if not hashes or match is None or " @ " in entry or "file:" in entry:
+        if not hashes or match is None or "file:" in entry:
             raise ValueError(
                 "dependencies require exact versions and SHA256 hashes, without source checkouts"
             )
+        pins.append(entry)
         names.add(normalized(match[1]))
-    if names & WORKSPACE or lane and names & SERVER_ONLY:
+    if not pins or names & WORKSPACE or lane and names & SERVER_ONLY:
         raise ValueError("lane dependencies cannot contain server or workspace packages")
-    return "\n".join(entries) + "\n", names
+    return "\n".join(pins) + "\n", names
 
 
 def release_base(repo: str, rc: str, commit: str) -> str:
@@ -102,6 +114,27 @@ def write_once(path: Path, content: str) -> None:
         path.write_bytes(raw)
 
 
+def bind_lock(path: Path, locked: str, wheel_lines: tuple[str, ...]) -> None:
+    """Bind a lock to exactly its previous bytes plus the named wheel lines."""
+    if any("\n" in line or " @ https://github.com/" not in line for line in wheel_lines):
+        raise ValueError("lock bind accepts only single-line release wheel requirements")
+    prefix = locked if locked.endswith("\n") else locked + "\n"
+    addition = "".join(line + "\n" for line in wheel_lines)
+    raw = (prefix + addition).encode()
+    if path.is_symlink():
+        raise ValueError("release artifact cannot be a symlink: " + path.name)
+    if not path.exists():
+        path.write_bytes(raw)
+        return
+    current = path.read_bytes()
+    if current == raw:
+        return
+    current_prefix = current if current.endswith(b"\n") else current + b"\n"
+    if raw != current_prefix + addition.encode():
+        raise ValueError("refusing to replace previously bound artifact bytes: " + path.name)
+    path.write_bytes(raw)
+
+
 def lane_requirements(dist: Path, base: str, extras: tuple[str, ...]) -> dict[str, dict[str, str]]:
     if extras not in ((), ("claude",)):
         raise ValueError("only the explicit Claude SDK extra is supported")
@@ -121,7 +154,7 @@ def lane_requirements(dist: Path, base: str, extras: tuple[str, ...]) -> dict[st
         item = lane[name]
         selection = name + ("[claude]" if name == "forge-lane" and extras else "")
         wheel_lines.append(f"{selection} @ {base}/{item['file']} --hash=sha256:{item['sha256']}")
-    write_once(dist / "lane-v1-requirements.txt", locked + "\n" + "\n".join(wheel_lines) + "\n")
+    bind_lock(dist / "lane-v1-requirements.txt", locked + "\n", tuple(wheel_lines))
     return lane
 
 

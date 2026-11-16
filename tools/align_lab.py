@@ -25,7 +25,7 @@ repo's own head BEFORE the paid run — scripted, idempotent, receipted:
    inventory — recorded, never hidden;
 4. **stop** — the consumers only (``forge-worker``, ``forge-app``); the
    shared Postgres/Redis/LiteLLM containers are never touched;
-5. **migrate** — ``python -m forge.migrate`` on the NEW image via
+5. **migrate** — ``python -m forge.store.schema init`` on the NEW image via
    ``podman run --rm``, BEFORE the consumers start (runbook §3 step 3);
 6. **recreate** — both consumers via ``podman run`` (NEVER
    docker-compose) with the SAME config observed by ``podman inspect``
@@ -610,8 +610,8 @@ def build_plan(
         Step(
             name="migrate",
             description=(
-                f"python -m forge.migrate on the NEW image before consumers start "
-                f"({head_deployed} -> {head_repo})"
+                f"forge install via python -m forge.store.schema init on the NEW image "
+                f"before consumers start ({head_deployed} -> {head_repo})"
             ),
             argv=[
                 [
@@ -624,7 +624,8 @@ def build_plan(
                     IMAGE_TAG,
                     "python",
                     "-m",
-                    "forge.migrate",
+                    "forge.store.schema",
+                    "init",
                 ]
             ],
         ),

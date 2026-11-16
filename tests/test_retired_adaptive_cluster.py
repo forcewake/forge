@@ -6,4 +6,8 @@ import pytest
 
 @pytest.mark.parametrize("name", ["workpackage_service", "runtime", "dedup", "snapshots"])
 def test_retired_test_only_module_is_absent(name):
-    assert importlib.util.find_spec(f"forge.adaptive.{name}") is None
+    try:
+        found = importlib.util.find_spec(f"forge.adaptive.{name}")
+    except ModuleNotFoundError:
+        found = None
+    assert found is None

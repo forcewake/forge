@@ -13,15 +13,17 @@ upgrade recommendation. Read the [changelog](../../CHANGELOG.md) and binding
    their durable intent; stopping a consumer does not prove a remote job stopped.
 3. Select the exact reviewed release image digest and wheel/template identity.
    Verify available signatures and provenance; never substitute a moving tag.
-4. Run `python -m forge.migrate` from that image against the intended database
-   before starting new consumers. No source mount or automatic schema bypass.
+4. Run `forge install` from that image against the intended database before
+   starting new consumers. That command is `python -m forge.store.schema init`.
+   No source mount or automatic schema bypass.
 5. Recreate both consumers on that same composition and preserved shared data.
-   Run doctor and health checks, then reconcile in-flight work before dispatch.
+   Run `forge doctor` and health checks, then reconcile in-flight work before
+   dispatch.
 
-Startup compares the live Alembic revision with the shipped chain. A stale,
-unknown or branched existing schema refuses; the gate does not auto-upgrade
-it. PostgreSQL fresh initialization runs the migration chain. SQLite's
-local create-and-stamp shortcut is not PostgreSQL migration evidence.
+Startup runs `python -m forge.store.schema check`. A stale, unknown or
+historical schema refuses; the gate does not auto-upgrade it. An empty
+database stays empty until `forge install`. SQLite uses the same explicit
+installer.
 
 ## Rollback
 

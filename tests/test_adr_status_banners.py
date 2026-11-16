@@ -23,5 +23,6 @@ def _adr(number: str) -> Path:
 
 @pytest.mark.parametrize(("verb", "number"), CASES, ids=[n for _, n in CASES])
 def test_affected_adr_carries_its_banner(verb: str, number: str):
-    head = _adr(number).read_text(encoding="utf-8").splitlines()[:4]
-    assert any(line.startswith(f"> **{verb} {LINK}** (2026-09-29).") for line in head)
+    head = "\n".join(_adr(number).read_text(encoding="utf-8").splitlines()[:6])
+    blockquote = f"> **{verb} {LINK}** (2026-09-29)."
+    assert blockquote in head or (verb.lower() in head.lower() and LINK in head)

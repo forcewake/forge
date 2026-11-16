@@ -11,23 +11,53 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 OWNERS = {
     "repository_identity_checkpoint_lifecycle": (
-        "forge.adaptive.checkpoint_repository",
-        "forge.api_checkpoint_channel",
+        "forge.store.lane_auth",
+        "forge.store.lane_v1",
+        "forge.store.lane_state",
+        "forge.store.lane_control_receipts",
     ),
-    "continuation_authorization": ("forge.adaptive.continuation",),
-    "native_occupancy": ("forge.adaptive.admission", "forge.runs.admission"),
-    "candidate_publication": ("forge.adaptive.publication_saga", "forge.adaptive.saga_durable"),
+    "continuation_authorization": (
+        "forge.store.retry",
+        "forge.store.resume",
+        "forge.store.pause",
+    ),
+    "native_occupancy": (
+        "forge.store.admission",
+        "forge.store.initial_commands",
+        "forge.store.issue_lifecycle",
+    ),
     "verification_applicability": (
-        "forge.adaptive.verification_binding",
-        "forge.adaptive.verification_sets",
-        "forge.runs.usecases",
+        "forge.verification.checks",
+        "forge.store.review_proof",
     ),
-    "operator_projection": ("forge.adaptive.operator_view", "forge.adaptive.operator_snapshot"),
-    "execution_delivery_spec": ("forge.adaptive.execution_spec",),
-    "budget_amendment_application": ("forge.durable.budgets",),
-    "feedback_admission": ("forge.gateway.feedback",),
-    "command_acceptance_dedup": ("forge.gateway.durable_ingress",),
-    "review_round_admission": ("forge.runs.round_admission",),
+    "operator_projection": (
+        "forge.runtime.projection",
+        "forge.store.operator_evidence",
+    ),
+    "execution_delivery_spec": (
+        "forge.store.approval",
+        "forge.store.lane_work",
+        "forge.engine.plan_values",
+        "forge.engine.lane_values",
+    ),
+    "budget_amendment_application": (
+        "forge.store.budgets",
+        "forge.store.budget_commands",
+        "forge.engine.budget_actions",
+    ),
+    "feedback_admission": (
+        "forge.engine.rounds",
+        "forge.review.native",
+        "forge.store.native_review_admission",
+    ),
+    "command_acceptance_dedup": (
+        "forge.store.commands",
+        "forge.store.command_effects",
+    ),
+    "review_round_admission": (
+        "forge.store.rounds",
+        "forge.store.round_approval",
+    ),
 }
 
 
@@ -88,10 +118,7 @@ def test_registered_authority_importers_are_not_stale():
 
 def test_translation_adds_no_ignored_imports():
     ignored = {entry for contract in _contracts() for entry in contract.get("ignore_imports", [])}
-    assert ignored <= {
-        "forge.durable.budgets -> forge.adaptive.usage_ingestion",
-        "forge.durable.budgets -> forge.runs.candidate",
-    }
+    assert not ignored
 
 
 def test_production_registry_is_retired():

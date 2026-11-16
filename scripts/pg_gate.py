@@ -3,11 +3,11 @@
 
 What this runner proves, and refuses to prove:
 
-- The PG-gated production-entry (PE-4), checkpoint-repository and GC traces
+- The current crash-recovery, schema-baseline and accounting-race traces
   EXECUTED on this exact source tree against a real PostgreSQL, provisioned
-  through the ALEMBIC MIGRATION CHAIN (never ``create_all`` — the gate's own
-  schema comes from ``python -m forge.migrate``; ``create_all`` appears only
-  inside tests that explicitly self-provision).
+  through the packaged schema installer (never ``create_all`` — the gate's own
+  schema comes from ``python -m forge.store.schema init``; ``create_all`` appears
+  only inside tests that explicitly self-provision).
 - Nothing skipped silently. A missing ``FORGE_PG_TEST_URL``, an unreachable
   fixture, a wrong schema revision or a removed test marker each REFUSE the
   gate with a distinct non-zero exit — a green run can never be built from
@@ -15,24 +15,14 @@ What this runner proves, and refuses to prove:
 
 Profiles (the required selection lives HERE, as data):
 
-- ``production-entry`` — ``tests/production_entry/`` on its OWN disposable
-  database. The suite's ``conftest`` resets the whole ``public`` schema per
-  test when ``FORGE_PG_TEST_URL`` is set (drop-all + create_all, by design),
-  so it MUST NOT share a database with the checkpoint traces below.
-- ``checkpoint-lifecycle`` — ``tests/test_checkpoint_gc.py``,
-  ``tests/test_checkpoint_repository.py`` and
-  ``tests/test_checkpoint_retry_authority.py`` on a second, fully
-  migration-provisioned database that no test resets underneath the others.
-- ``accounting-races`` (Q39-08 / #327) — the new accounting contracts on
-  REQUIRED PostgreSQL, tracked by executed critical ID, not by selected
-  file alone: ``tests/test_credential_audit.py`` (the #322 CAS
-  projection: concurrent redemption + evidence writers must BOTH survive)
-  and ``tests/test_usage_ingestion.py`` (the #324 partial→final
-  reconcile under real isolation) on a third disposable database. Their
-  PG-gated arms read ``FORGE_PG_TEST_URL`` directly — a missing
-  prerequisite is a REQUIRED skip and REFUSES the gate (never a green
-  skip); the files' sqlite unit arms run beside them on the same
-  selection, so the executed-ID manifest covers the critical ids.
+- ``crash-recovery`` — ``tests/test_failure_injection.py`` on its own
+  disposable database. The suite reads ``FORGE_ENGINE_TEST_DATABASE_URL``.
+- ``schema-baseline`` — ``tests/test_schema_baseline.py`` on a second
+  database. The suite reads ``FORGE_SCHEMA_TEST_DATABASE_URL`` and creates
+  its own empty databases from that server.
+- ``accounting-races`` — ``tests/test_budget_amendment.py`` on a third
+  database. The PostgreSQL arms read ``FORGE_PG_TEST_URL``. A missing
+  prerequisite is a required skip and refuses the gate.
 
 Skip accounting is honest, not blanket: a skip on a REQUIRED trace whose
 reason mentions ``FORGE_PG_TEST_URL`` is a ``prerequisite_missing`` skip —
@@ -141,61 +131,38 @@ class GateProfile:
     name: str
     selection: tuple[str, ...]
     database_suffix: str
+    # Environment variables set to this profile's disposable database URL.
+    url_env: tuple[str, ...] = ("FORGE_PG_TEST_URL",)
 
+
+TRACE_RECORD_DIR_ENV = "FORGE_TRACE_RECORD_DIR"
+RELEASE_ARTIFACT_SHA_ENV = "FORGE_RELEASE_ARTIFACT_SHA256"
 
 PROFILES: tuple[GateProfile, ...] = (
     GateProfile(
-        name="production-entry",
-        selection=("tests/production_entry/",),
-        database_suffix="pe",
+        name="crash-recovery",
+        selection=("tests/test_failure_injection.py",),
+        database_suffix="fi",
+        url_env=("FORGE_PG_TEST_URL", "FORGE_ENGINE_TEST_DATABASE_URL"),
     ),
     GateProfile(
-        name="checkpoint-lifecycle",
-        selection=(
-            "tests/test_checkpoint_gc.py",
-            "tests/test_checkpoint_repository.py",
-            # NOTE(#267): the sibling-owned retry-authority suite is a full
-            # member of the selection. Its AT-04 lab creates its disposable
-            # database through the local `forge-postgres` podman container;
-            # where that container does not exist (CI service containers) the
-            # lab records an *environment* skip — visible, never silent.
-            "tests/test_checkpoint_retry_authority.py",
-        ),
-        database_suffix="ck",
+        name="schema-baseline",
+        selection=("tests/test_schema_baseline.py",),
+        database_suffix="sc",
+        url_env=("FORGE_PG_TEST_URL", "FORGE_SCHEMA_TEST_DATABASE_URL"),
     ),
     GateProfile(
-        # Q39-08 (#327): the accounting races on required PostgreSQL —
-        # the executed-ID manifest must cover the two critical ids below,
-        # and the sqlite unit arms of the same files run beside them.
         name="accounting-races",
-        selection=(
-            "tests/test_credential_audit.py",
-            "tests/test_usage_ingestion.py",
-        ),
+        selection=("tests/test_budget_amendment.py",),
         database_suffix="ac",
+        url_env=("FORGE_PG_TEST_URL",),
     ),
 )
-
-#: R40-08 (#344): where the production-entry traces write their
-#: machine-readable execution records during the gate run (source sha +
-#: evidence class per trace; embedded into the report artifact below).
-#: Unset outside the gate — the traces stay fully hermetic then.
-TRACE_RECORD_DIR_ENV = "FORGE_TRACE_RECORD_DIR"
-#: R40-08 (#344): the release-artifact digest when the gate runs against
-#: a BUILT artifact (the canary's spelling) — the report distinguishes
-#: the source tree it executed on from the artifact it installed.
-RELEASE_ARTIFACT_SHA_ENV = "FORGE_RELEASE_ARTIFACT_SHA256"
 
 
 @dataclass(frozen=True)
 class RequiredTrace:
-    """A test identity the gate cannot qualify without.
-
-    ``profile`` scopes the trace to the profile whose selection must
-    collect it (each profile's manifest check demands its OWN traces —
-    the PE-4 trace belongs to ``production-entry``, the checkpoint
-    traces to ``checkpoint-lifecycle``).
-    """
+    """A test identity the gate cannot qualify without."""
 
     label: str
     pattern: re.Pattern[str]
@@ -204,180 +171,51 @@ class RequiredTrace:
 
 REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
     RequiredTrace(
-        label="PE-4 (AT-04) Postgres upload, restart, exact-spec resume",
+        label="crash recovery adopts one commit after worker death",
         pattern=re.compile(
-            r"tests/production_entry/test_production_entry\.py"
-            r"::TestPE4PostgresUploadRestartResume::"
+            r"tests/test_failure_injection\.py::TestS3CrashAfterCommit::"
+            r"test_s3_recovery_adopts_the_existing_commit_and_never_commits_twice"
         ),
-        profile="production-entry",
+        profile="crash-recovery",
     ),
     RequiredTrace(
-        label="GC first-upload quota barrier (real Postgres)",
+        label="fresh baseline install preserves exact values",
         pattern=re.compile(
-            r"tests/test_checkpoint_gc\.py::TestConcurrentFirstUploads"
-            r"::test_concurrent_first_uploads_respect_the_quota_real_postgres$"
+            r"tests/test_schema_baseline\.py::"
+            r"test_one_fresh_baseline_is_complete_unprefixed_and_preserves_exact_resource_values"
         ),
-        profile="checkpoint-lifecycle",
+        profile="schema-baseline",
     ),
     RequiredTrace(
-        label="P04 post-final-scan GC barrier (real Postgres, two engines)",
-        pattern=re.compile(r"tests/test_checkpoint_gc\.py::TestP04ScheduleRealPostgres::"),
-        profile="checkpoint-lifecycle",
-    ),
-    RequiredTrace(
-        label="Q35-03 checkpoint-repository authority (real Postgres)",
+        label="two amendments and a reservation race on PostgreSQL",
         pattern=re.compile(
-            r"tests/test_checkpoint_repository\.py::TestPostgresAuthorityOverRealPostgres::"
-        ),
-        profile="checkpoint-lifecycle",
-    ),
-    RequiredTrace(
-        label="Q39-03 (#322) concurrent redemptions + evidence writers survive (CAS projection)",
-        pattern=re.compile(
-            r"tests/test_credential_audit\.py::TestRealPostgres"
-            r"::test_concurrent_redemptions_and_evidence_writers_survive$"
+            r"tests/test_budget_amendment\.py::TestRealPostgresRaces::"
+            r"test_two_amendments_and_a_reservation_raced_across_sessions$"
         ),
         profile="accounting-races",
     ),
     RequiredTrace(
-        label="Q39-05 (#324) concurrent partial+final reconcile under real isolation",
+        label="one command raced from two sessions applies once",
         pattern=re.compile(
-            r"tests/test_usage_ingestion\.py::TestQ3905RealPostgres"
-            r"::test_concurrent_partial_and_final_reconcile_under_real_isolation$"
+            r"tests/test_budget_amendment\.py::TestRealPostgresRaces::"
+            r"test_one_command_raced_from_two_sessions_applies_once$"
         ),
         profile="accounting-races",
-    ),
-    # R40-08 (#344): the REQUIRED composed-trace set — one entry per
-    # high-risk invariant, each WITH its mutation arm (a removed arm is
-    # the same marker-removal mutation the manifest check detects).
-    RequiredTrace(
-        label="R40-01 (#337) FI-1 the wired /fix ingress trace (ASGI→inbox→worker→reconciler)",
-        pattern=re.compile(
-            r"tests/production_entry/test_feedback_ingress\.py"
-            r"::TestFI1TheWiredIngressTrace::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R40-01 (#337) FI-5 the registration-revert mutation arms",
-        pattern=re.compile(
-            r"tests/production_entry/test_feedback_ingress\.py"
-            r"::TestFI5TheRegistrationMutations::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R40-03 (#339) MG-1 partial-liability admission + the value-presence mutant",
-        pattern=re.compile(
-            r"tests/production_entry/test_mutation_gates\.py"
-            r"::TestMG1PartialLiabilityAdmission::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R40-04 (#340) MG-2 guarded review amendment + the evidence-only mutant",
-        pattern=re.compile(
-            r"tests/production_entry/test_mutation_gates\.py"
-            r"::TestMG2GuardedReviewAmendment::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R40-05 (#341) MG-3 grant persistence under concurrent evidence + the mutant",
-        pattern=re.compile(
-            r"tests/production_entry/test_mutation_gates\.py"
-            r"::TestMG3GrantPersistenceUnderConcurrentEvidence::"
-        ),
-        profile="production-entry",
-    ),
-    # R41-07 (#362): the production-path qualification matrix — the
-    # finite/unlimited × builtin/harness × initial/correction/retry ×
-    # Redis-present/absent arms, the four fault-window barriers (real
-    # process kills) and the four mutation pairings. A removed arm is the
-    # same marker-removal mutation the manifest check detects.
-    RequiredTrace(
-        label="R41-07 (#362) MX-1 the production matrix (24 composed arms)",
-        pattern=re.compile(
-            r"tests/production_entry/test_production_matrix\.py"
-            r"::TestMX1TheProductionMatrix::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R41-07 (#362) MX-2 the fault-window barriers (real process kills)",
-        pattern=re.compile(
-            r"tests/production_entry/test_production_matrix\.py::TestMX2TheFaultWindows::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R41-07 (#362) MX-3 the mutation pairings (each defect seeded)",
-        pattern=re.compile(
-            r"tests/production_entry/test_production_matrix\.py::TestMX3TheMutationArms::"
-        ),
-        profile="production-entry",
-    ),
-    # R42-05 (#378): the composed fault traces — the completion criterion.
-    # Each baseline is paired with its seeded-regression arm (a removed arm
-    # is the same marker-removal mutation the manifest check detects):
-    # CF-A composes the #374 retryable seam with a REAL worker kill at the
-    # observation boundary (durable states + native effect counts, never
-    # exception text); CF-B composes a REAL lost create response with the
-    # #375 mixed-occupancy verdict (the lease KEEPS while the lost start's
-    # own row is ambiguous-ACTIVE; only the correlated terminal releases,
-    # exactly once; the native start count stays one at capacity one).
-    RequiredTrace(
-        label="R42-05 (#378) CF-A the killed observation trace (real process kill at the #374 seam)",
-        pattern=re.compile(
-            r"tests/production_entry/test_composed_faults\.py"
-            r"::TestCFATheKilledObservationTrace::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R42-05 (#378) CF-M1 the #374 plain-return mutation arm",
-        pattern=re.compile(
-            r"tests/production_entry/test_composed_faults\.py"
-            r"::TestCFM1ThePlainReturnDeferArm::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)",
-        pattern=re.compile(
-            r"tests/production_entry/test_composed_faults\.py"
-            r"::TestCFBTheLostStartMixedOccupancyTrace::"
-        ),
-        profile="production-entry",
-    ),
-    RequiredTrace(
-        label="R42-05 (#378) CF-M2 the #375 ambiguous-guard-disabled mutation arm",
-        pattern=re.compile(
-            r"tests/production_entry/test_composed_faults\.py"
-            r"::TestCFM2TheAmbiguousGuardDisabledArm::"
-        ),
-        profile="production-entry",
     ),
 )
 
-#: Lab-environment-bound traces: executed wherever the local lab exists
-#: (the podman postgres container / the live GitLab credentials), an
-#: *environment* skip elsewhere (CI). The R37-14 native failpoint matrix
-#: needs BOTH the disposable real Postgres AND the live lab GitLab —
-#: executed in the lab and recorded in
-#: docs/evaluation/2026-09-24-two-writer-native/; CI reruns the sqlite
-#: reference arms (test_saga_native/test_saga_durable) and the recorded
-#: evidence stands for the native arm.
-ENVIRONMENT_SCOPED_TESTS = re.compile(
-    r"tests/test_checkpoint_retry_authority\.py::TestAT04PostgresRetryAuthority::"
-    r"|tests/production_entry/test_two_writer_native\.py::"
-)
+# A skip whose reason names a lab-only prerequisite stays visible and does
+# not fail the gate. Current profiles do not emit this class; the classifier
+# still distinguishes it from a missing PostgreSQL URL.
+ENVIRONMENT_SCOPED_TESTS = re.compile(r"tests/test_failure_injection\.py::TestLabOnly::")
 _LAB_SKIP = re.compile(
-    r"podman|disposable database cannot be created"
-    r"|FORGE_GITLAB_LIVE_URL/FORGE_GITLAB_LIVE_TOKEN",
+    r"podman|disposable database cannot be created|FORGE_GITLAB_LIVE_URL",
     re.IGNORECASE,
 )
-_PG_URL_SKIP = re.compile(r"FORGE_PG_TEST_URL", re.IGNORECASE)
+_PG_URL_SKIP = re.compile(
+    r"FORGE_PG_TEST_URL|FORGE_ENGINE_TEST_DATABASE_URL|FORGE_SCHEMA_TEST_DATABASE_URL",
+    re.IGNORECASE,
+)
 
 
 def check_selection_on_disk() -> None:
@@ -559,31 +397,26 @@ def check_schema_state(
 
 
 def alembic_head() -> str:
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
+    from forge.store.schema.baseline import REVISION
+    from forge.store.schema.migration import script
 
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    script = ScriptDirectory.from_config(config)
-    head = script.get_current_head()
-    if not head:
-        raise SchemaError("the alembic chain has no head revision")
-    return head
+    heads = script().get_heads()
+    if heads != [REVISION]:
+        raise SchemaError("the packaged schema must contain exactly one baseline revision")
+    return REVISION
 
 
 def migration_tables() -> set[str]:
-    """Tables the migration chain creates (parsed from the chain sources)."""
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
+    """Tables the packaged baseline creates."""
+    from forge.store.schema.baseline import document
 
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    script = ScriptDirectory.from_config(config)
-    tables: set[str] = set()
-    for revision in script.walk_revisions():
-        source = Path(revision.path).read_text(encoding="utf-8")
-        tables |= set(re.findall(r'op\.create_table\(\s*["\']([^"\']+)["\']', source))
-    return tables
+    ddl = "\n".join(document()["dialects"]["postgresql"]["ddl"])
+    return set(re.findall(r"CREATE TABLE (\w+)", ddl))
+
+
+def schema_install_command(database_url: str) -> list[str]:
+    """The shipped installer. Startup never creates tables."""
+    return [sys.executable, "-m", "forge.store.schema", "init", "--database-url", database_url]
 
 
 # ---------------------------------------------------------------------------
@@ -672,9 +505,9 @@ async def verify_schema(database_url: str, expected_head: str, expected_tables: 
 
 
 def run_migrations(database_url: str) -> None:
-    """Provision through the SHIPPED migration entrypoint — never create_all."""
+    """Provision through the shipped schema installer — never create_all."""
     process = subprocess.run(
-        [sys.executable, "-m", "forge.migrate", "--database-url", database_url],
+        schema_install_command(database_url),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -682,7 +515,7 @@ def run_migrations(database_url: str) -> None:
     )
     if process.returncode != 0:
         raise SchemaError(
-            "alembic upgrade head failed on the gate database "
+            "schema init failed on the gate database "
             f"({mask_url(database_url)}):\n{process.stdout}\n{process.stderr}"
         )
 
@@ -730,7 +563,7 @@ def run_profile(
 ) -> ProfileRun:
     run = ProfileRun(profile=profile, database_url=mask_url(gate_url))
     profile_traces = traces_for_profile(profile)
-    env = {**base_env, "FORGE_PG_TEST_URL": gate_url}
+    env = {**base_env, **dict.fromkeys(profile.url_env, gate_url)}
     if trace_record_dir is not None:
         # R40-08 (#344): the mutation-gate traces write their execution
         # records (source sha + evidence class) here during the run; the
@@ -1167,7 +1000,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     databases = {
         "created": sorted(created),
         "dropped": databases_dropped,
-        "provisioned_via": "alembic upgrade head (python -m forge.migrate)"
+        "provisioned_via": "python -m forge.store.schema init"
         if args.mode == "create"
         else "pre-existing (verified at head, not re-provisioned)",
     }

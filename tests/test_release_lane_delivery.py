@@ -25,7 +25,7 @@ def test_actual_lane_bundle_installs_without_server_and_refuses_changed_authorit
     output = Path(os.environ.get("FORGE_LOCAL_BUNDLE_PROOF_OUT", tmp_path / "candidate"))
     version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     manifest = build(
-        root, output, "forcewake/forge", f"v{version}-rc.local.20261106", ("claude",), offline=True
+        root, output, "forcewake/forge", f"v{version}-rc.local.20261106", ("claude",), offline=False
     )
     proof = manifest["install_proof"]
     assert proof["status"] == "passed" and proof["server_absent"]

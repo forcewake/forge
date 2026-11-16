@@ -275,6 +275,21 @@ async def test_scope_drift_never_activates_or_delivers_key(case, tamper):
     assert case["native"].writes == ["/key/generate"]
 
 
+@pytest.mark.parametrize("shift", ["later", "naive"])
+async def test_gateway_expiry_past_the_frozen_deadline_never_delivers_a_key(case, shift):
+    frozen = case["expires"]
+    claimed = (
+        (frozen + timedelta(seconds=60)).isoformat()
+        if shift == "later"
+        else frozen.replace(tzinfo=None).isoformat()
+    )
+    case["native"].tamper = {"expires": claimed}
+    assert isinstance(await prepare(case), Unknown)
+    with pytest.raises(CredentialUnavailable):
+        await case["keys"].grant(identity(case), "https://gateway.invalid", now=case["clock"].now())
+    assert case["native"].writes == ["/key/generate"]
+
+
 async def test_unreachable_gateway_keeps_hold_without_remint(case):
     case["native"].unavailable_write = True
     assert isinstance(await prepare(case), Unknown)
@@ -482,7 +497,9 @@ def test_vault_binds_every_identity_purpose_model_alias_expiry_and_authenticates
     for change in changes:
         with pytest.raises(CredentialUnavailable):
             vault.open(KeyScope(**{**scope.model_dump(), **change}), sealed)
-    for corrupt in (sealed[:-1], sealed[:15] + b"x" + sealed[16:], b"\x02" + sealed[1:]):
+    flipped = bytearray(sealed)
+    flipped[15] ^= 0x01
+    for corrupt in (sealed[:-1], bytes(flipped), b"\x02" + sealed[1:]):
         with pytest.raises(CredentialUnavailable):
             vault.open(scope, corrupt)
 

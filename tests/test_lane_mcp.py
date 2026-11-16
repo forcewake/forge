@@ -227,7 +227,9 @@ async def test_failed_http_metadata_refuses_before_model_grant_or_native_process
 )
 async def test_copilot_repository_config_is_refused_before_token_or_process(tmp_path, path):
     workspace = tmp_path / "work"
-    dispatch, brief = frozen_inputs(checkout(workspace), driver="copilot_cli")
+    dispatch, brief = frozen_inputs(
+        checkout(workspace), driver="copilot_cli", metering="copilot-scoped-unmetered"
+    )
     target = workspace / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"command":"unapproved"}')

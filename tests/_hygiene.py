@@ -41,7 +41,7 @@ def command_lines(pids: Collection[int]) -> dict[int, str]:
     if not pids:
         return {}
     result = subprocess.run(
-        ["ps", "-o", "pid=,args=", "-p", ",".join(str(p) for p in pids)],
+        ["ps", "-ww", "-o", "pid=,args=", "-p", ",".join(str(p) for p in pids)],
         capture_output=True,
         text=True,
         check=False,

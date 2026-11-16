@@ -241,6 +241,9 @@ def test_build_plan_backup_step_lands_in_private_storage(
     (versions / "027_head.py").write_text(
         'revision = "027"\ndown_revision = "026"\n', encoding="utf-8"
     )
+    baseline = repo / "src/forge/store/schema"
+    baseline.mkdir(parents=True)
+    (baseline / "baseline.json").write_text('{"revision": "027"}\n', encoding="utf-8")
     vault = tmp_path / "vault"
     monkeypatch.setenv("FORGE_PRIVATE_BACKUP_DIR", str(vault))
 

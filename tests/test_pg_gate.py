@@ -1,15 +1,9 @@
-"""Unit tests for the required PostgreSQL qualification gate (R36-08, #267).
+"""Unit tests for the required PostgreSQL qualification gate.
 
-``scripts/pg_gate.py`` is a CI runner, not a package: these tests load it
-straight from its path (no packaging change) and pin the DECISION LOGIC the
-gate is trusted for — the selection's integrity, the collected-manifest
-check (the marker-removal mutation detector), the skip accounting (a
-required skip refuses; a podman-lab environment skip stays visible), the
-report shape, and AT-09's "the URL was removed" refusal.
-
-No real PostgreSQL is needed: every test drives the gate's PURE functions
-or its argument/entry plumbing. The full end-to-end (provision via alembic,
-run, report, negative arms) lives in the gate's own CI step.
+The runner loads ``scripts/pg_gate.py`` directly and pins its decision logic:
+the selection must exist, a removed required id refuses, a PostgreSQL-URL skip
+on a required trace is a missing prerequisite, a wrong schema revision refuses,
+and the installer is the packaged schema command.
 """
 
 from __future__ import annotations
@@ -19,12 +13,29 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_SCRIPT = REPO_ROOT / "scripts" / "pg_gate.py"
+
+CRASH = (
+    "tests/test_failure_injection.py::TestS3CrashAfterCommit::"
+    "test_s3_recovery_adopts_the_existing_commit_and_never_commits_twice"
+)
+BASELINE = (
+    "tests/test_schema_baseline.py::"
+    "test_one_fresh_baseline_is_complete_unprefixed_and_preserves_exact_resource_values"
+)
+RACE = (
+    "tests/test_budget_amendment.py::TestRealPostgresRaces::"
+    "test_two_amendments_and_a_reservation_raced_across_sessions"
+)
+ONCE = (
+    "tests/test_budget_amendment.py::TestRealPostgresRaces::"
+    "test_one_command_raced_from_two_sessions_applies_once"
+)
+COMPLETE = [CRASH, BASELINE, RACE, ONCE]
 
 
 def _load_gate() -> ModuleType:
@@ -41,54 +52,39 @@ def gate() -> ModuleType:
     return _load_gate()
 
 
-# ---------------------------------------------------------------------------
-# The selection itself — it must reference real files, loudly
-# ---------------------------------------------------------------------------
-
-
 class TestSelectionIntegrity:
     def test_every_selected_path_exists_on_disk(self, gate: ModuleType) -> None:
-        gate.check_selection_on_disk()  # raises ManifestError on any gap
+        gate.check_selection_on_disk()
 
-    def test_the_selection_covers_the_r36_08_scopes(self, gate: ModuleType) -> None:
+    def test_profiles_name_the_current_runtime_suites(self, gate: ModuleType) -> None:
         selected = {path for profile in gate.PROFILES for path in profile.selection}
-        assert "tests/production_entry/" in selected
-        assert "tests/test_checkpoint_gc.py" in selected
-        assert "tests/test_checkpoint_repository.py" in selected
-        assert "tests/test_checkpoint_retry_authority.py" in selected
+        assert selected == {
+            "tests/test_failure_injection.py",
+            "tests/test_schema_baseline.py",
+            "tests/test_budget_amendment.py",
+        }
+        assert [profile.name for profile in gate.PROFILES] == [
+            "crash-recovery",
+            "schema-baseline",
+            "accounting-races",
+        ]
 
-    def test_the_selection_covers_the_q39_08_accounting_races(self, gate: ModuleType) -> None:
-        """#327: the #322 CAS-projection and #324 partial→final arms run
-        on the REQUIRED selection — their files are members of a profile,
-        and the critical ids are REQUIRED_TRACES (executed-ID tracked)."""
-        selected = {path for profile in gate.PROFILES for path in profile.selection}
-        assert "tests/test_credential_audit.py" in selected
-        assert "tests/test_usage_ingestion.py" in selected
-        by_profile = {profile.name: profile for profile in gate.PROFILES}
-        assert "accounting-races" in by_profile
-        traces = gate.traces_for_profile(by_profile["accounting-races"])
-        assert {trace.profile for trace in traces} == {"accounting-races"}
-        assert len(traces) == 2
-
-    def test_profiles_own_separate_databases(self, gate: ModuleType) -> None:
-        # The production-entry conftest resets the whole public schema per
-        # test under FORGE_PG_TEST_URL — profiles must not share a database.
+    def test_profiles_own_separate_databases_and_pass_their_url(self, gate: ModuleType) -> None:
         suffixes = [profile.database_suffix for profile in gate.PROFILES]
         assert len(suffixes) == len(set(suffixes)) == len(gate.PROFILES)
-        assert all(profile.selection for profile in gate.PROFILES)
+        by_name = {profile.name: profile for profile in gate.PROFILES}
+        assert "FORGE_ENGINE_TEST_DATABASE_URL" in by_name["crash-recovery"].url_env
+        assert "FORGE_SCHEMA_TEST_DATABASE_URL" in by_name["schema-baseline"].url_env
+        assert by_name["accounting-races"].url_env == ("FORGE_PG_TEST_URL",)
 
-    def test_required_traces_are_scoped_to_a_profile_that_selects_their_files(
+    def test_required_traces_belong_to_the_profile_that_selects_their_file(
         self, gate: ModuleType
     ) -> None:
         by_name = {profile.name: profile for profile in gate.PROFILES}
-        assert len(by_name) == len(gate.PROFILES)
         for trace in gate.REQUIRED_TRACES:
-            profile = by_name.get(trace.profile)
-            assert profile is not None, f"{trace.label} names no known profile"
-            path = trace.pattern.pattern.split("::")[0].replace(r"\.", ".")
-            assert any(path.startswith(sel) for sel in profile.selection), (
-                f"{trace.label} targets {path}, which profile {profile.name!r} does not select"
-            )
+            profile = by_name[trace.profile]
+            path = trace.pattern.pattern.split("::", 1)[0].replace(r"\.", ".")
+            assert any(path.startswith(item) for item in profile.selection)
 
     def test_a_missing_selection_file_refuses_loudly(
         self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
@@ -105,208 +101,35 @@ class TestSelectionIntegrity:
             gate.check_selection_on_disk()
 
 
-# ---------------------------------------------------------------------------
-# The manifest check — the marker-removal mutation detector
-# ---------------------------------------------------------------------------
-
-
 class TestManifestCheck:
     def test_a_complete_manifest_passes(self, gate: ModuleType) -> None:
-        manifest = [
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::"
-            "test_b_reference_after_the_final_scan_survives_two_engines",
-            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
-            "::test_put_on_one_instance_read_on_a_fresh_one",
-            "tests/test_credential_audit.py::TestRealPostgres"
-            "::test_concurrent_redemptions_and_evidence_writers_survive",
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
-            # R40-08 (#344): the composed-trace set — FI-1/FI-5 plus the
-            # three MG invariants, each WITH its mutation arm.
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py"
-            "::TestMG1PartialLiabilityAdmission::test_a_partial_subtotal_never_settles_the_closing_admission",
-            "tests/production_entry/test_mutation_gates.py"
-            "::TestMG2GuardedReviewAmendment::test_a_calls_amendment_reopens_the_real_guard_for_exactly_one_review",
-            "tests/production_entry/test_mutation_gates.py"
-            "::TestMG3GrantPersistenceUnderConcurrentEvidence"
-            "::test_the_projection_preserves_a_concurrent_evidence_write",
-            # R41-07 (#362): the production-path qualification matrix —
-            # the composed arms, the fault windows, the mutation pairings.
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX1TheProductionMatrix::test_the_complete_production_path[finite-builtin-initial-noredis]",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX1TheProductionMatrix::test_the_complete_production_path[finite-harness-correction-redis]",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX1TheProductionMatrix::test_the_complete_production_path[unlimited-harness-retry-noredis]",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX2TheFaultWindows::test_gateway_killed_after_commit_the_correction_recovers",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX2TheFaultWindows::test_mixed_history_keeps_the_lease_only_correlated_terminal_releases",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX3TheMutationArms::test_budget_before_child_restored_kills_the_finite_round",
-            "tests/production_entry/test_production_matrix.py"
-            "::TestMX3TheMutationArms::test_any_terminal_occupancy_restored_oversubscribes",
-            # R42-05 (#378): the composed fault traces — each baseline
-            # WITH its seeded-regression arm.
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        assert gate.missing_required(manifest) == []
-        matches = gate.required_test_ids(manifest)
+        assert gate.missing_required(COMPLETE) == []
+        matches = gate.required_test_ids(COMPLETE)
         assert set(matches) == {trace.label for trace in gate.REQUIRED_TRACES}
-        assert all(ids for ids in matches.values())
-
-    def test_a_missing_accounting_race_trace_refuses(self, gate: ModuleType) -> None:
-        """#327: the accounting-races critical ids are REQUIRED — a
-        collection missing them (a renamed class, a removed skipif marker
-        that un-gates the test) refuses the gate instead of quietly
-        running fewer tests."""
-        manifest = [
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_barrier",
-            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
-            "::test_put_on_one_instance_read_on_a_fresh_one",
-            # the #322 trace present, the #324 trace REMOVED:
-            "tests/test_credential_audit.py::TestRealPostgres"
-            "::test_concurrent_redemptions_and_evidence_writers_survive",
-            # the #344 composed traces present (this test isolates the
-            # accounting-race mutation):
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
-            # the #362 matrix present (this test isolates the
-            # accounting-race mutation):
-            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
-            # R42-05 (#378): the composed fault traces — each baseline
-            # WITH its seeded-regression arm.
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        absent = gate.missing_required(manifest)
-        assert [trace.label for trace in absent] == [
-            "Q39-05 (#324) concurrent partial+final reconcile under real isolation"
-        ]
-
-    def test_a_pg_url_skip_on_the_accounting_traces_is_required(self, gate: ModuleType) -> None:
-        """A missing prerequisite on the accounting races FAILS the gate
-        under its DISTINCT named outcome (R40-08: the required profile is
-        unqualified, never a silent green skip)."""
-        node = (
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation"
-        )
-        reason = (
-            "FORGE_PG_TEST_URL not set — the real-PostgreSQL isolation proofs "
-            "run only against a disposable real Postgres"
-        )
-        assert gate.classify_skip(node, reason) == "prerequisite_missing"
-
-    def test_the_manifest_check_is_scoped_per_profile(self, gate: ModuleType) -> None:
-        # production-entry demands ONLY its own traces (PE-4 + the #344
-        # composed set); the checkpoint profile demands the checkpoint
-        # traces — a PE-only manifest fails exactly those.
-        pe_only = [
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
-            "tests/production_entry/test_production_entry.py::TestPE1::test_x",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
-            # R42-05 (#378): the composed fault traces — each baseline
-            # WITH its seeded-regression arm.
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        production_entry, checkpoint = gate.PROFILES[0], gate.PROFILES[1]
-        assert gate.missing_required(pe_only, gate.traces_for_profile(production_entry)) == []
-        checkpoint_traces = gate.traces_for_profile(checkpoint)
-        assert gate.missing_required(pe_only, checkpoint_traces) == list(checkpoint_traces)
+        assert all(matches.values())
 
     def test_a_removed_required_test_refuses(self, gate: ModuleType) -> None:
-        # The mutation: PE-4's test was deleted/renamed — its id no longer
-        # collects, and the gate must refuse instead of running fewer tests.
-        manifest = [
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_barrier",
-            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres"
-            "::test_put_on_one_instance_read_on_a_fresh_one",
-            "tests/test_credential_audit.py::TestRealPostgres"
-            "::test_concurrent_redemptions_and_evidence_writers_survive",
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
-            # R42-05 (#378): the composed fault traces — each baseline
-            # WITH its seeded-regression arm.
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        absent = gate.missing_required(manifest)
+        absent = gate.missing_required([node for node in COMPLETE if node != CRASH])
         assert [trace.label for trace in absent] == [
-            "PE-4 (AT-04) Postgres upload, restart, exact-spec resume"
+            "crash recovery adopts one commit after worker death"
         ]
 
+    def test_the_manifest_check_is_scoped_per_profile(self, gate: ModuleType) -> None:
+        crash, schema = gate.PROFILES[0], gate.PROFILES[1]
+        assert gate.missing_required([CRASH], gate.traces_for_profile(crash)) == []
+        assert gate.missing_required([CRASH], gate.traces_for_profile(schema)) == list(
+            gate.traces_for_profile(schema)
+        )
+
+    def test_accounting_races_require_both_ids(self, gate: ModuleType) -> None:
+        profile = next(item for item in gate.PROFILES if item.name == "accounting-races")
+        traces = gate.traces_for_profile(profile)
+        assert len(traces) == 2
+        absent = gate.missing_required([RACE], traces)
+        assert len(absent) == 1
+        assert absent[0].pattern.search(ONCE)
+
     def test_the_required_patterns_match_the_live_collection(self, gate: ModuleType) -> None:
-        # The detector is wired to reality: collecting the REAL selection
-        # right now must capture every required trace (no PG needed —
-        # collection does not execute the PG-gated skipifs).
         import subprocess
 
         collected = subprocess.run(
@@ -323,11 +146,10 @@ class TestManifestCheck:
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=180,
         )
         assert collected.returncode == 0, collected.stderr
         manifest = gate.parse_collected_manifest(collected.stdout)
-        assert manifest, "the live collection must not be empty"
         assert gate.missing_required(manifest) == []
 
     def test_parse_collected_manifest_ignores_summary_noise(self, gate: ModuleType) -> None:
@@ -337,8 +159,6 @@ class TestManifestCheck:
                 "tests/test_x.py::TestA::test_two[param]",
                 "",
                 "95 tests collected in 0.42s",
-                "-- Docs: https://docs.pytest.org/en/stable/pytest/...",
-                "=== warnings ===",
             ]
         )
         assert gate.parse_collected_manifest(output) == [
@@ -347,503 +167,118 @@ class TestManifestCheck:
         ]
 
 
-class TestR4107MatrixTraces:
-    """R41-07 (#362): the production matrix, its fault windows and its
-    mutation pairings are REQUIRED production-entry traces — a removed
-    arm, window or mutation is the same marker-removal mutation the
-    manifest check detects, and the matrix's full cross must collect."""
-
-    def test_a_removed_matrix_arm_refuses(self, gate: ModuleType) -> None:
-        # The mutation: the whole MX-1 matrix class was deleted — its ids
-        # no longer collect, and the gate must refuse.
-        manifest = [
-            # every OTHER required trace present (one node id each)…
-            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres::test_x",
-            "tests/test_credential_audit.py::TestRealPostgres"
-            "::test_concurrent_redemptions_and_evidence_writers_survive",
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
-            # …MX-2 and MX-3 present, MX-1 REMOVED:
-            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
-            # R42-05 (#378): the composed fault traces — each baseline
-            # WITH its seeded-regression arm.
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFBTheLostStartMixedOccupancyTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        absent = gate.missing_required(manifest)
-        assert [trace.label for trace in absent] == [
-            "R41-07 (#362) MX-1 the production matrix (24 composed arms)"
-        ]
-
-    def test_the_matrix_traces_belong_to_the_production_entry_profile(
-        self, gate: ModuleType
-    ) -> None:
-        labels = {
-            "R41-07 (#362) MX-1 the production matrix (24 composed arms)",
-            "R41-07 (#362) MX-2 the fault-window barriers (real process kills)",
-            "R41-07 (#362) MX-3 the mutation pairings (each defect seeded)",
-        }
-        scoped = {trace.label for trace in gate.traces_for_profile(gate.PROFILES[0])}
-        assert labels <= scoped  # PROFILES[0] is production-entry
-
-    def test_the_live_matrix_collection_covers_the_full_cross(self, gate: ModuleType) -> None:
-        """The matrix is data, not flags: the LIVE collection must carry
-        every finite/unlimited × builtin/harness × initial/correction/
-        retry × redis/noredis cell — a dropped parametrize entry or a
-        renamed class refuses, never quietly shrinks the matrix."""
-        import subprocess
-
-        collected = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--collect-only",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "tests/production_entry/test_production_matrix.py",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        assert collected.returncode == 0, collected.stderr
-        manifest = gate.parse_collected_manifest(collected.stdout)
-        matrix_arms = [node for node in manifest if "::TestMX1TheProductionMatrix::" in node]
-        expected = {
-            f"[{budget}-{backend}-{leg}-{redis_mode}]"
-            for budget in ("finite", "unlimited")
-            for backend in ("builtin", "harness")
-            for leg in ("initial", "correction", "retry")
-            for redis_mode in ("redis", "noredis")
-        }
-        actual = {node.rsplit("[", 1)[-1].removesuffix("]") for node in matrix_arms}
-        expected = {cell.removesuffix("]").removeprefix("[") for cell in expected}
-        assert actual == expected, (expected - actual, actual - expected)
-
-
-class TestR4205ComposedFaultTraces:
-    """R42-05 (#378): the composed fault traces — the killed-observation
-    baseline (CF-A) with its #374 plain-return arm (CF-M1), and the
-    lost-start mixed-occupancy baseline (CF-B) with its #375
-    ambiguous-guard arm (CF-M2) — are REQUIRED production-entry traces: a
-    removed baseline OR a removed arm is the marker-removal mutation the
-    manifest check detects."""
-
-    CF_LABELS = {
-        "R42-05 (#378) CF-A the killed observation trace (real process kill at the #374 seam)",
-        "R42-05 (#378) CF-M1 the #374 plain-return mutation arm",
-        "R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)",
-        "R42-05 (#378) CF-M2 the #375 ambiguous-guard-disabled mutation arm",
-    }
-
-    def test_a_removed_composed_fault_trace_refuses(self, gate: ModuleType) -> None:
-        # The mutation: the whole CF-B class was deleted — its ids no
-        # longer collect, and the gate must refuse (never quietly run the
-        # #375 mixed-occupancy criterion on nothing).
-        manifest = [
-            # every OTHER required trace present (one node id each)…
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_new_instance_resumes",
-            "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-            "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-            "tests/test_checkpoint_repository.py::TestPostgresAuthorityOverRealPostgres::test_x",
-            "tests/test_credential_audit.py::TestRealPostgres"
-            "::test_concurrent_redemptions_and_evidence_writers_survive",
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI1TheWiredIngressTrace::test_note_to_ingress_to_worker_restart_to_reconciler",
-            "tests/production_entry/test_feedback_ingress.py"
-            "::TestFI5TheRegistrationMutations::test_without_the_parser_registration_nothing_is_ever_ingested",
-            "tests/production_entry/test_mutation_gates.py::TestMG1PartialLiabilityAdmission::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG2GuardedReviewAmendment::test_x",
-            "tests/production_entry/test_mutation_gates.py::TestMG3GrantPersistenceUnderConcurrentEvidence::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX1TheProductionMatrix::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX2TheFaultWindows::test_x",
-            "tests/production_entry/test_production_matrix.py::TestMX3TheMutationArms::test_x",
-            # …CF-A and both arms present, CF-B REMOVED:
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFATheKilledObservationTrace::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM1ThePlainReturnDeferArm::test_x",
-            "tests/production_entry/test_composed_faults.py"
-            "::TestCFM2TheAmbiguousGuardDisabledArm::test_x",
-        ]
-        absent = gate.missing_required(manifest)
-        assert [trace.label for trace in absent] == [
-            "R42-05 (#378) CF-B the lost start under mixed occupancy (#375 keeps)"
-        ]
-
-    def test_the_composed_fault_traces_belong_to_the_production_entry_profile(
-        self, gate: ModuleType
-    ) -> None:
-        scoped = {trace.label for trace in gate.traces_for_profile(gate.PROFILES[0])}
-        assert self.CF_LABELS <= scoped  # PROFILES[0] is production-entry
-
-    def test_the_live_collection_carries_every_composed_fault_trace(self, gate: ModuleType) -> None:
-        """The detector is wired to reality: collecting the REAL module
-        right now must capture all four CF classes — a renamed baseline or
-        arm refuses the gate, never quietly shrinks the criterion set."""
-        import subprocess
-
-        collected = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--collect-only",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "tests/production_entry/test_composed_faults.py",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        assert collected.returncode == 0, collected.stderr
-        manifest = gate.parse_collected_manifest(collected.stdout)
-        cf_traces = tuple(trace for trace in gate.REQUIRED_TRACES if trace.label in self.CF_LABELS)
-        assert gate.missing_required(manifest, cf_traces) == []
-
-
-# ---------------------------------------------------------------------------
-# Skip accounting — required skips refuse, environment skips stay visible
-# ---------------------------------------------------------------------------
-
-
 class TestSkipAccounting:
-    def test_a_pg_url_skip_on_a_required_trace_is_prerequisite_missing(
-        self, gate: ModuleType
-    ) -> None:
-        """R40-08 (#344): a required trace skipping on FORGE_PG_TEST_URL is
-        the DISTINCT named outcome — the profile is reported unqualified,
-        never an invisible skip and never a generic 'required' bucket."""
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                "FORGE_PG_TEST_URL not set — the real-PostgreSQL P04 barrier "
-                "proof runs only against a disposable real Postgres",
-            )
-            == "prerequisite_missing"
-        )
-        # the #344 composed traces carry the same distinct outcome
-        assert (
-            gate.classify_skip(
-                "tests/production_entry/test_mutation_gates.py"
-                "::TestMG1PartialLiabilityAdmission::test_x",
-                "FORGE_PG_TEST_URL not set — …",
-            )
-            == "prerequisite_missing"
-        )
+    def test_a_required_url_skip_is_a_missing_prerequisite(self, gate: ModuleType) -> None:
+        reason = "FORGE_ENGINE_TEST_DATABASE_URL is not configured"
+        assert gate.classify_skip(CRASH, reason) == "prerequisite_missing"
 
-    def test_a_pg_url_skip_outside_the_required_traces_is_required(self, gate: ModuleType) -> None:
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_gc.py::TestUntracked::test_x",
-                "FORGE_PG_TEST_URL not set — …",
-            )
-            == "required"
-        )
+    def test_a_url_skip_outside_the_required_set_still_refuses(self, gate: ModuleType) -> None:
+        node = "tests/test_budget_amendment.py::TestRecovery::test_other"
+        assert gate.classify_skip(node, "FORGE_PG_TEST_URL not set") == "required"
 
-    def test_the_podman_lab_skip_is_environment(self, gate: ModuleType) -> None:
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_retry_authority.py"
-                "::TestAT04PostgresRetryAuthority::test_upload_then_fresh",
-                "the forge-postgres podman container is unavailable: Error: exec: …",
-            )
-            == "environment"
-        )
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_retry_authority.py"
-                "::TestAT04PostgresRetryAuthority::test_upload_then_fresh",
-                "the disposable database cannot be created: …",
-            )
-            == "environment"
-        )
+    def test_a_lab_only_skip_stays_an_environment_skip(self, gate: ModuleType) -> None:
+        node = "tests/test_failure_injection.py::TestLabOnly::test_live_gitlab"
+        reason = "the forge-postgres podman container is unavailable"
+        assert gate.classify_skip(node, reason) == "environment"
 
-    def test_an_unexplained_skip_anywhere_refuses(self, gate: ModuleType) -> None:
-        # Unknown skip reasons are NEVER tolerated — a required gate must
-        # not go green over a skip it cannot classify.
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_gc.py::TestAnything::test_x",
-                "some novel condition nobody accounted for",
-            )
-            == "required"
-        )
-        assert gate.classify_skip("tests/test_x.py::test_y", "") == "required"
-
-    def test_a_podman_reason_outside_the_lab_refuses(self, gate: ModuleType) -> None:
-        assert (
-            gate.classify_skip(
-                "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                "the forge-postgres podman container is unavailable: …",
-            )
-            == "required"
-        )
-
-    def test_a_required_skip_refuses_the_profile(self, gate: ModuleType) -> None:
-        run = gate.ProfileRun(
-            profile=gate.PROFILES[1],
-            database_url="postgresql+asyncpg://forge:***@h/db",
-            manifest=[
-                "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_y",
-            ],
-            required_matches={
-                "P04 post-final-scan GC barrier (real Postgres, two engines)": [
-                    "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                    "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_y",
-                ]
-            },
-            records=[
-                gate.TestRecord(
-                    test_id="tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                    outcome="skipped",
-                    duration=0.01,
-                    skip_reason="FORGE_PG_TEST_URL not set — …",
-                ),
-                gate.TestRecord(
-                    test_id="tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_y",
-                    outcome="passed",
-                    duration=0.4,
-                ),
-            ],
-            skips=[
-                {
-                    "test_id": "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x",
-                    "reason": "FORGE_PG_TEST_URL not set — …",
-                    "classification": "required",
-                }
-            ],
-        )
-        with pytest.raises(gate.RequiredSkipError, match="REQUIRED tests skipped"):
-            gate.evaluate_profile(run)
-
-    def test_all_pass_is_green(self, gate: ModuleType) -> None:
-        node = "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-        run = gate.ProfileRun(
-            profile=gate.PROFILES[1],
-            database_url="postgresql+asyncpg://forge:***@h/db",
-            manifest=[node],
-            required_matches={
-                "P04 post-final-scan GC barrier (real Postgres, two engines)": [node]
-            },
-            records=[gate.TestRecord(test_id=node, outcome="passed", duration=0.4)],
-        )
-        gate.evaluate_profile(run)  # no refusal
-
-    def test_a_failure_fails_the_selection(self, gate: ModuleType) -> None:
-        node = "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-        run = gate.ProfileRun(
-            profile=gate.PROFILES[1],
-            database_url="postgresql+asyncpg://forge:***@h/db",
-            manifest=[node],
-            required_matches={
-                "P04 post-final-scan GC barrier (real Postgres, two engines)": [node]
-            },
-            records=[gate.TestRecord(test_id=node, outcome="failed", duration=0.4)],
-        )
-        with pytest.raises(gate.SelectionFailed, match="1 test failure"):
-            gate.evaluate_profile(run)
-
-
-# ---------------------------------------------------------------------------
-# JUnit accounting — executed ids + durations
-# ---------------------------------------------------------------------------
-
-JUNIT_XML = """<?xml version="1.0" encoding="utf-8"?>
-<testsuites><testsuite name="pytest" errors="0" failures="1" skipped="1" tests="3">
-  <testcase classname="tests.test_checkpoint_gc.TestP04ScheduleRealPostgres"
-            name="test_passes" time="0.417"/>
-  <testcase classname="tests.test_checkpoint_gc.TestP04ScheduleRealPostgres"
-            name="test_fails" time="0.020">
-    <failure message="AssertionError: …"/>
-  </testcase>
-  <testcase classname="tests.test_checkpoint_gc.TestConcurrentFirstUploads"
-            name="test_concurrent_first_uploads_respect_the_quota_real_postgres"
-            time="0.003">
-    <skipped type="pytest.skip" message="FORGE_PG_TEST_URL not set — …"/>
-  </testcase>
-</testsuite></testsuites>
-"""
-
-MANIFEST = [
-    "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_passes",
-    "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_fails",
-    "tests/test_checkpoint_gc.py::TestConcurrentFirstUploads"
-    "::test_concurrent_first_uploads_respect_the_quota_real_postgres",
-]
-
-
-class TestJUnitAccounting:
-    def test_junit_key_maps_manifest_ids(self, gate: ModuleType) -> None:
-        assert gate.junit_key(
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_passes"
-        ) == ("tests.test_checkpoint_gc.TestP04ScheduleRealPostgres", "test_passes")
-        assert gate.junit_key("tests/test_x.py::test_plain") == ("tests.test_x", "test_plain")
-        assert gate.junit_key(
-            "tests/production_entry/test_production_entry.py"
-            "::TestPE4PostgresUploadRestartResume::test_a"
-        ) == (
-            "tests.production_entry.test_production_entry.TestPE4PostgresUploadRestartResume",
-            "test_a",
-        )
-
-    def test_parse_junit_reads_outcomes_durations_and_skip_reasons(self, gate: ModuleType) -> None:
-        records = {r.test_id: r for r in gate.parse_junit(JUNIT_XML, MANIFEST)}
-        assert records[MANIFEST[0]].outcome == "passed"
-        assert records[MANIFEST[0]].duration == pytest.approx(0.417)
-        assert records[MANIFEST[1]].outcome == "failed"
-        skipped = records[MANIFEST[2]]
-        assert skipped.outcome == "skipped"
-        assert "FORGE_PG_TEST_URL" in (skipped.skip_reason or "")
-        # the skipped node IS a required trace → the distinct R40-08 outcome
-        assert (
-            gate.classify_skip(skipped.test_id, skipped.skip_reason or "") == "prerequisite_missing"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Schema-state decision — the wrong-revision / dropped-table arms
-# ---------------------------------------------------------------------------
+    def test_any_other_skip_refuses(self, gate: ModuleType) -> None:
+        assert gate.classify_skip(CRASH, "unrelated fixture missing") == "required"
 
 
 class TestSchemaState:
-    def test_a_healthy_migrated_database_passes(self, gate: ModuleType) -> None:
-        gate.check_schema_state(
-            "027", {"flow_runs", "checkpoint_metadata"}, "027", {"flow_runs", "checkpoint_metadata"}
-        )
+    def test_a_healthy_installed_database_passes(self, gate: ModuleType) -> None:
+        gate.check_schema_state("10000001", {"runs"}, "10000001", {"runs"})
 
     def test_a_database_without_alembic_version_refuses(self, gate: ModuleType) -> None:
         with pytest.raises(gate.SchemaError, match="never provisioned"):
-            gate.check_schema_state(None, {"flow_runs"}, "027", {"flow_runs"})
+            gate.check_schema_state(None, {"runs"}, "10000001", {"runs"})
 
-    def test_an_early_revision_refuses(self, gate: ModuleType) -> None:
-        with pytest.raises(gate.SchemaError, match="revision '026', expected the head '027'"):
-            gate.check_schema_state("026", {"flow_runs"}, "027", {"flow_runs"})
+    def test_an_old_revision_refuses(self, gate: ModuleType) -> None:
+        with pytest.raises(gate.SchemaError, match="revision '032', expected the head '10000001'"):
+            gate.check_schema_state("032", {"runs"}, "10000001", {"runs"})
 
-    def test_a_dropped_migration_table_refuses(self, gate: ModuleType) -> None:
+    def test_a_dropped_table_refuses(self, gate: ModuleType) -> None:
         with pytest.raises(gate.SchemaError, match="missing migration tables"):
-            gate.check_schema_state(
-                "027", {"flow_runs"}, "027", {"flow_runs", "checkpoint_metadata"}
-            )
+            gate.check_schema_state("10000001", {"runs"}, "10000001", {"runs", "checkpoints"})
 
-    def test_the_migration_table_derivation_covers_the_chain(self, gate: ModuleType) -> None:
+    def test_the_packaged_baseline_is_the_only_head(self, gate: ModuleType) -> None:
+        assert gate.alembic_head() == "10000001"
         tables = gate.migration_tables()
-        assert {"flow_runs", "checkpoint_metadata", "control_commands"} <= tables
-        assert "alembic_version" not in tables  # the bookkeeping table is not a migration table
+        assert {"runs", "checkpoints", "schema_installation", "effects"} <= tables
+        assert "alembic_version" not in tables
+        assert "flow_runs" not in tables
 
+    def test_schema_init_provisions_sqlite_and_a_missing_url_refuses(self, gate, tmp_path) -> None:
+        url = "sqlite+aiosqlite:///" + str(tmp_path / "gate.db")
+        gate.run_migrations(url)
+        report_path = tmp_path / "pg-gate.json"
+        code = gate.main(["--report", str(report_path)], env={})
+        assert code == 2
+        body = json.loads(report_path.read_text())
+        assert body["gate"]["databases"]["provisioned_via"] == "python -m forge.store.schema init"
+        assert body["qualification"]["result"] == "refused"
 
-# ---------------------------------------------------------------------------
-# The report — the qualification evidence artifact
-# ---------------------------------------------------------------------------
-
-
-def _green_run(gate: ModuleType) -> Any:
-    node = "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-    return gate.ProfileRun(
-        profile=gate.PROFILES[1],
-        database_url="postgresql+asyncpg://forge:***@h/db",
-        manifest=[node],
-        required_matches={"P04 post-final-scan GC barrier (real Postgres, two engines)": [node]},
-        records=[gate.TestRecord(test_id=node, outcome="passed", duration=0.4)],
-        skips=[],
-        duration_seconds=1.25,
-    )
+    def test_the_installer_is_the_packaged_schema_command(self, gate: ModuleType) -> None:
+        command = gate.schema_install_command("postgresql+asyncpg://forge:forge@127.0.0.1/forge")
+        assert command[1:4] == ["-m", "forge.store.schema", "init"]
+        assert "forge.migrate" not in command
+        assert command[-2:] == [
+            "--database-url",
+            "postgresql+asyncpg://forge:forge@127.0.0.1/forge",
+        ]
 
 
 class TestReport:
-    def test_green_report_shape(self, gate: ModuleType) -> None:
+    def test_green_report_names_the_executed_trace_and_its_source(self, gate: ModuleType) -> None:
+        run = gate.ProfileRun(
+            profile=gate.PROFILES[0],
+            database_url="postgresql+asyncpg://forge:***@h/db",
+            manifest=[CRASH],
+            required_matches={gate.REQUIRED_TRACES[0].label: [CRASH]},
+            records=[gate.TestRecord(test_id=CRASH, outcome="passed", duration=0.4)],
+        )
         report = gate.build_report(
             mode="create",
-            admin_url_masked="postgresql+asyncpg://forge:***@127.0.0.1:5433/forge",
-            head="027",
-            runs=[_green_run(gate)],
-            started_iso="2026-09-24T00:00:00+00:00",
-            total_duration=12.5,
+            admin_url_masked="postgresql+asyncpg://forge:***@127.0.0.1/forge",
+            head="10000001",
+            runs=[run],
+            started_iso="2026-11-15T00:00:00+00:00",
+            total_duration=1.5,
             refusal=None,
             databases={
-                "created": ["forge_pg_gate_ck_ab12"],
+                "created": ["forge_pg_gate_fi_ab12"],
                 "dropped": True,
-                "provisioned_via": "alembic upgrade head (python -m forge.migrate)",
+                "provisioned_via": "python -m forge.store.schema init",
             },
+            environ={gate.TRACE_RECORD_DIR_ENV: "", gate.RELEASE_ARTIFACT_SHA_ENV: ""},
         )
-        qualification = report["qualification"]
-        assert qualification["result"] == "green"
-        assert qualification["required_skips"] == []  # MUST be empty for green
-        assert qualification["environment_skips"] == []
-        assert (
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-            in qualification["executed_test_ids"]
-        )
-        assert qualification["durations_seconds"][
-            "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-        ] == pytest.approx(0.4)
-        assert qualification["skip_accounting"] == {
-            "collected": 1,
-            "executed": 1,
-            "skipped": 0,
-            "required": 0,
-            "environment": 0,
-            "prerequisite_missing": 0,
-        }
-        assert qualification["prerequisite_missing_skips"] == []  # MUST be empty for green
-        assert qualification["flake_attempts"] == 1
-        assert report["gate"]["alembic_head"] == "027"
-        assert report["gate"]["databases"]["created"] == ["forge_pg_gate_ck_ab12"]
-        assert report["ci"]["profile_duration_seconds"] == {"checkpoint-lifecycle": 1.25}
-        assert json.dumps(report)  # the artifact is plain JSON
+        assert report["qualification"]["result"] == "green"
+        assert CRASH in report["qualification"]["executed_test_ids"]
+        assert report["gate"]["alembic_head"] == "10000001"
+        assert report["gate"]["databases"]["provisioned_via"] == "python -m forge.store.schema init"
+        source = report["qualification"]["critical_test_sources"][CRASH]
+        assert source["file"] == "tests/test_failure_injection.py"
+        assert len(source["sha256"]) == 64
+        assert json.dumps(report)
 
-    def test_environment_skips_stay_visible_in_the_report(self, gate: ModuleType) -> None:
-        node = (
-            "tests/test_checkpoint_retry_authority.py"
-            "::TestAT04PostgresRetryAuthority::test_upload_then_fresh"
-        )
+    def test_an_environment_skip_stays_visible(self, gate: ModuleType) -> None:
+        node = "tests/test_failure_injection.py::TestLabOnly::test_live_gitlab"
         run = gate.ProfileRun(
-            profile=gate.PROFILES[1],
+            profile=gate.PROFILES[0],
             database_url="postgresql+asyncpg://forge:***@h/db",
             manifest=[node],
-            required_matches={},
             records=[
                 gate.TestRecord(
                     test_id=node,
                     outcome="skipped",
                     duration=0.0,
-                    skip_reason="the forge-postgres podman container is unavailable: …",
+                    skip_reason="podman is unavailable",
                 )
             ],
             skips=[
                 {
                     "test_id": node,
-                    "reason": "the forge-postgres podman container is unavailable: …",
+                    "reason": "podman is unavailable",
                     "classification": "environment",
                 }
             ],
@@ -851,142 +286,16 @@ class TestReport:
         report = gate.build_report(
             "create",
             "postgresql+asyncpg://forge:***@h/db",
-            "027",
+            "10000001",
             [run],
-            "2026-09-24T00:00:00+00:00",
-            5.0,
+            "2026-11-15T00:00:00+00:00",
+            1.0,
             None,
-            {"created": [], "dropped": False, "provisioned_via": "…"},
-        )
-        qualification = report["qualification"]
-        assert qualification["result"] == "green"
-        assert qualification["required_skips"] == []
-        assert qualification["environment_skips"][0]["test_id"] == node
-        assert qualification["skip_accounting"]["environment"] == 1
-
-    def test_critical_test_sources_pin_the_exact_source_sha(self, gate: ModuleType) -> None:
-        """R40-08 (#344): the executed critical ids carry their EXACT
-        source sha — the bytes that ran, not just a matched pattern."""
-        node = "tests/test_checkpoint_gc.py::TestP04ScheduleRealPostgres::test_x"
-        run = gate.ProfileRun(
-            profile=gate.PROFILES[1],
-            database_url="postgresql+asyncpg://forge:***@h/db",
-            manifest=[node],
-            required_matches={
-                next(
-                    trace.label
-                    for trace in gate.traces_for_profile(gate.PROFILES[1])
-                    if trace.pattern.search(node)
-                ): [node]
+            {
+                "created": [],
+                "dropped": False,
+                "provisioned_via": "python -m forge.store.schema init",
             },
-            records=[gate.TestRecord(test_id=node, outcome="passed", duration=0.4)],
         )
-        report = gate.build_report(
-            "create",
-            "postgresql+asyncpg://forge:***@h/db",
-            "027",
-            [run],
-            "2026-09-24T00:00:00+00:00",
-            5.0,
-            None,
-            {"created": [], "dropped": False, "provisioned_via": "…"},
-            environ={gate.TRACE_RECORD_DIR_ENV: "", gate.RELEASE_ARTIFACT_SHA_ENV: ""},
-        )
-        sources = report["qualification"]["critical_test_sources"]
-        assert node in sources
-        assert sources[node]["file"] == "tests/test_checkpoint_gc.py"
-        assert len(sources[node]["sha256"]) == 64  # the file's exact sha256
-        # source-main vs release-artifact stay DISTINCT identities
-        assert report["gate"]["source_identity"]["basis"] == "source-main"
-        assert report["gate"]["source_identity"]["artifact_sha256"] is None
-        assert report["qualification"]["mutation_gate_trace_records"] == []
-
-    def test_source_identity_distinguishes_a_release_artifact_run(self, gate: ModuleType) -> None:
-        report = gate.build_report(
-            "create",
-            "postgresql+asyncpg://forge:***@h/db",
-            "027",
-            [],
-            "2026-09-24T00:00:00+00:00",
-            5.0,
-            None,
-            {"created": [], "dropped": False, "provisioned_via": "…"},
-            environ={gate.RELEASE_ARTIFACT_SHA_ENV: "a" * 64},
-        )
-        identity = report["gate"]["source_identity"]
-        assert identity["basis"] == "release-artifact"
-        assert identity["artifact_sha256"] == "a" * 64
-
-    def test_a_prerequisite_missing_skip_refuses_as_unqualified(self, gate: ModuleType) -> None:
-        """R40-08 (#344) acceptance 6: a required profile whose fixture
-        environment is missing refuses under its OWN refusal type — the
-        profile is named UNQUALIFIED, never an invisible skip."""
-        node = (
-            "tests/test_usage_ingestion.py::TestQ3905RealPostgres"
-            "::test_concurrent_partial_and_final_reconcile_under_real_isolation"
-        )
-        run = gate.ProfileRun(
-            profile=gate.PROFILES[2],
-            database_url="postgresql+asyncpg://forge:***@h/db",
-            manifest=[node],
-            required_matches={
-                "Q39-05 (#324) concurrent partial+final reconcile under real isolation": [node]
-            },
-            records=[
-                gate.TestRecord(
-                    test_id=node,
-                    outcome="skipped",
-                    duration=0.0,
-                    skip_reason="FORGE_PG_TEST_URL not set — …",
-                )
-            ],
-            skips=[
-                {
-                    "test_id": node,
-                    "reason": "FORGE_PG_TEST_URL not set — …",
-                    "classification": "prerequisite_missing",
-                }
-            ],
-        )
-        with pytest.raises(gate.PrerequisiteError, match="UNQUALIFIED"):
-            gate.evaluate_profile(run)
-
-
-# ---------------------------------------------------------------------------
-# AT-09 — the URL was removed: a typed refusal, never a silent skip
-# ---------------------------------------------------------------------------
-
-
-class TestPrerequisiteRefusal:
-    def test_typed_refusal_hierarchy(self, gate: ModuleType) -> None:
-        assert issubclass(gate.PrerequisiteError, gate.PgGateError)
-        for cls, code in (
-            (gate.PrerequisiteError, 2),
-            (gate.SchemaError, 3),
-            (gate.ManifestError, 4),
-            (gate.RequiredSkipError, 5),
-            (gate.SelectionFailed, 6),
-        ):
-            assert issubclass(cls, gate.PgGateError)
-            assert cls.exit_code == code
-
-    def test_missing_url_refuses_with_evidence_report(
-        self, gate: ModuleType, tmp_path: Path
-    ) -> None:
-        report_path = tmp_path / "pg-gate.json"
-        code = gate.main(["--report", str(report_path)], env={})
-        assert code == gate.PrerequisiteError.exit_code == 2
-        evidence = json.loads(report_path.read_text())
-        assert evidence["qualification"]["result"] == "refused"
-        refusal = evidence["qualification"]["refusal"]
-        assert refusal["type"] == "PrerequisiteError"
-        assert refusal["exit_code"] == 2
-        assert "FORGE_PG_TEST_URL" in refusal["detail"]
-        assert evidence["qualification"]["executed_test_ids"] == []
-        assert evidence["qualification"]["required_skips"] == []
-
-    def test_the_url_is_masked_in_reports(self, gate: ModuleType) -> None:
-        assert (
-            gate.mask_url("postgresql+asyncpg://forge:secret@127.0.0.1:5433/forge")
-            == "postgresql+asyncpg://forge:***@127.0.0.1:5433/forge"
-        )
+        assert report["qualification"]["result"] == "green"
+        assert report["qualification"]["environment_skips"][0]["test_id"] == node

@@ -415,3 +415,22 @@ async def test_transport_never_retries_mutations_or_retains_credentials_in_failu
         )
     finally:
         await transport.close()
+
+
+async def test_a_read_timeout_is_a_typed_transport_failure_and_does_not_propagate():
+    """A hung GitLab stub used to surface as httpx.ReadTimeout and stall the run.
+
+    The current client bounds the call and returns a typed transport failure.
+    """
+
+    def timeout(request):
+        raise httpx.ReadTimeout("synthetic read timeout", request=request)
+
+    transport = Transport(Endpoint("https://ce.example"), transport=httpx.MockTransport(timeout))
+    try:
+        with pytest.raises(Failure) as caught:
+            await transport.request("GET", "/projects/123", "synthetic-token")
+        assert caught.value.reason == "transport_unavailable"
+        assert "synthetic read timeout" not in str(caught.value)
+    finally:
+        await transport.close()

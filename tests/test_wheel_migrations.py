@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import zipfile
 
 import pytest
@@ -46,7 +45,24 @@ def test_installed_wheel_bootstraps_and_checks_its_own_schema(tmp_path):
     outside = tmp_path / "outside-checkout"
     outside.mkdir()
     venv = tmp_path / "wheel-env"
-    run(["uv", "venv", "--python", sys.executable, str(venv)], cwd=outside, env=env)
+    install_env = {**env, "UV_PROJECT_ENVIRONMENT": str(venv)}
+    run(
+        [
+            "uv",
+            "sync",
+            "--directory",
+            str(ROOT),
+            "--frozen",
+            "--no-dev",
+            "--extra",
+            "sqlite",
+            "--no-install-project",
+            "--no-install-workspace",
+            "--offline",
+        ],
+        cwd=outside,
+        env=install_env,
+    )
     python = venv / "bin" / "python"
     run(
         [
@@ -54,9 +70,10 @@ def test_installed_wheel_bootstraps_and_checks_its_own_schema(tmp_path):
             "pip",
             "install",
             "--offline",
+            "--no-deps",
             "--python",
             str(python),
-            str(wheel) + "[sqlite]",
+            str(wheel),
             *(str(path) for path in dist.glob("*.whl") if path != wheel),
         ],
         cwd=outside,

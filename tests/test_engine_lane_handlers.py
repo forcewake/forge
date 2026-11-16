@@ -160,6 +160,27 @@ async def report(
     return value
 
 
+async def test_dispatch_past_its_bootstrap_deadline_parks_without_a_native_job(case):
+    env = case["env"]
+    run, _ = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    advance(case, 601)
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.state == State.BLOCKED and current.reason == "dispatch_expired"
+    assert not env.fake.lanes
+    assert sum(call[0] == "dispatch_lane" for call in env.fake.calls) == 0
+
+
+async def test_unreported_lane_past_its_deadline_parks_unquiesced(case):
+    env = case["env"]
+    run, _, _ = await started(case)
+    advance(case, 601)
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.state == State.BLOCKED and current.reason == "lane_timeout_unquiesced"
+
+
 async def test_dispatch_lost_response_recovers_same_nonce_and_native_job(case):
     env = case["env"]
     run, frozen = await approved(case)

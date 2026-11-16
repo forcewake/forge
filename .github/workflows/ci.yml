@@ -143,8 +143,6 @@ jobs:
       matrix:
         python-version: ["3.13", "3.14"]
     steps:
-      - name: Install redis-server (the durable-ingress matrix spawns the real binary)
-        run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
       - uses: actions/checkout@v4
 
       - name: Set up uv
@@ -178,6 +176,7 @@ jobs:
           --health-retries 10
     env:
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+      FORGE_ENGINE_TEST_DATABASE_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
       - uses: actions/checkout@v4
 
@@ -243,20 +242,8 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      # R36-08 (#267): a SECOND, dedicated PostgreSQL for the required
-      # qualification gate below — the gate provisions its own disposable
-      # databases (via the alembic chain) on a container nothing else in
-      # this job touches, mapped to a different host port so the
-      # failure-injection bar keeps 5432 to itself.
+      # A second PostgreSQL for the qualification gate. The gate installs
+      # its own disposable databases through the packaged schema command.
       postgres-gate:
         image: postgres:16
         env:
@@ -275,11 +262,8 @@ jobs:
       # reached via the mapped localhost ports (GitHub's documented pattern
       # for non-container jobs), not via the service label hostnames.
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+      FORGE_ENGINE_TEST_DATABASE_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
-      # R41-07 (#362): the durable-ingress matrix spawns a REAL redis-server
-      # process (the service container is network redis, not the binary).
-      - name: Install redis-server (the ingress kill-matrix prerequisite)
-        run: sudo apt-get update -q && sudo apt-get install -y -q redis-server
       - uses: actions/checkout@v4
 
       - name: Set up uv
@@ -291,16 +275,10 @@ jobs:
       - name: Failure-injection exit bar (real Postgres)
         run: uv run pytest tests/test_failure_injection.py -q
 
-      # R36-08 (#267, AT-09): the REQUIRED PostgreSQL qualification gate.
-      # The mandatory selection — tests/production_entry/ (PE-4) plus the
-      # checkpoint GC / repository / retry-authority traces — runs on this
-      # SHA against disposable databases PROVISIONED THROUGH THE ALEMBIC
-      # CHAIN on the postgres-gate service. The runner refuses (non-zero,
-      # with the report artifact still uploaded) when FORGE_PG_TEST_URL is
-      # missing or unreachable, when a required test id vanished from the
-      # collected manifest (marker-removal mutation), when a required test
-      # skipped, or when the schema is not at the migration head — a green
-      # gate can never be built from skipped tests.
+      # The qualification gate installs disposable databases with
+      # `python -m forge.store.schema init` on the postgres-gate service.
+      # It refuses when the URL is missing, a required id is absent, a
+      # required test skips, or the schema is not the packaged baseline.
       - name: Run the required PostgreSQL qualification gate
         env:
           FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5433/forge
@@ -313,13 +291,9 @@ jobs:
           name: pg-gate-qualification-report
           path: pg-gate.json
 
-  # Real-OS-process failure injection (review R20): tests/
-  # test_failure_injection_os.py drives REAL `python -m forge.worker`
-  # subprocesses to each checkpoint and SIGKILLs them, against the real
-  # Postgres lab (schema from `python -m forge.migrate`, R22). The worker
-  # requires Redis, so this job needs both services. Nightly / manual only:
-  # process spawns plus the worker's real 5s/15s/30s poll cadences put the
-  # suite around 10 minutes — kept OFF the PR gate.
+  # Nightly crash recovery. A real forge worker is SIGKILLed mid-command and
+  # mid-lane, then restarted. The in-process failure-injection suite stays
+  # beside that process test.
   integration-os:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -337,20 +311,9 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
-      # Same runner-VM pattern as the integration job above: the service
-      # containers are reached via their mapped localhost ports.
       FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
-      FORGE_OS_FI_REDIS_URL: redis://127.0.0.1:6379/5
+      FORGE_ENGINE_TEST_DATABASE_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
     steps:
       - uses: actions/checkout@v4
 
@@ -360,8 +323,10 @@ jobs:
       - name: Install dependencies (with the postgres extra)
         run: uv sync --all-packages --extra postgres
 
-      - name: OS-process failure injection (SIGKILL drills on real workers)
-        run: uv run pytest tests/test_failure_injection_os.py -q
+      - name: Crash recovery on PostgreSQL
+        run: >-
+          uv run pytest tests/test_failure_injection.py
+          tests/fi_os/test_worker_recovery.py -q
 
   # Installed-image canary: explicit schema installation, zero-DDL startup,
   # refusal of historical schemas, readiness and authenticated API boundary.
