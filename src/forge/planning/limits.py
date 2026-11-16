@@ -34,3 +34,10 @@ class PlanningRefused(Exception):
         super().__init__(reason)
         self.reason = reason
         self.detail = detail or reason
+
+    def surfaced(self) -> str:
+        """Operator text. A citation refusal keeps the path and line count."""
+        detail = " ".join(self.detail.split())
+        if not detail or detail == self.reason:
+            return self.reason[:300]
+        return f"{self.reason}: {detail}"[:300]

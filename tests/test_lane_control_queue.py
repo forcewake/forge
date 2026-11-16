@@ -1,9 +1,12 @@
-"""A single dropped controls poll does not end a lane that is otherwise healthy."""
+"""A controls poll uses the lane client's 15s retry window."""
 
+import httpx
 import pytest
 
+from forge_lane.client import LaneClient
 from forge_lane.control_queue import ControlQueue
 from forge_lane.errors import ExitCode, LaneFailure
+from forge_protocol import LaneDispatch
 
 
 class Controls:
@@ -17,57 +20,41 @@ class Controls:
         return self.commands
 
 
-def transport(detail):
-    return LaneFailure(ExitCode.TRANSPORT, "transport_error", detail)
+def dispatch() -> LaneDispatch:
+    return LaneDispatch(
+        forge_run_id="run-1",
+        attempt=1,
+        generation=1,
+        server_url="https://forge.example",
+        provider="gitlab",
+        repository="group/project",
+        ref="forge/run",
+        base_sha="b" * 40,
+        approved_digest="c" * 64,
+        driver="claude-code",
+        model="glm",
+        timeout_seconds=30,
+    )
 
 
-async def test_one_transient_controls_poll_is_retried():
-    slept = []
+def lane(statuses: list[int]) -> tuple[LaneClient, list[float], list[int]]:
+    seen: list[int] = []
+    slept: list[float] = []
 
-    async def sleep(seconds):
+    def respond(_request: httpx.Request) -> httpx.Response:
+        status = statuses[min(len(seen), len(statuses) - 1)]
+        seen.append(status)
+        if status != 200:
+            return httpx.Response(status)
+        return httpx.Response(200, json=[])
+
+    client = LaneClient(dispatch(), httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+
+    async def record(seconds: float) -> None:
         slept.append(seconds)
 
-    queue = ControlQueue(
-        Controls([transport("Lane request failed: GET /controls")], []),
-        1,
-        sleep=sleep,
-    )
-    await queue.poll()
-    assert queue.client.calls == 2 and slept == [1.0]
-
-
-async def test_a_persistent_controls_failure_is_not_hidden():
-    async def sleep(_seconds):
-        return None
-
-    queue = ControlQueue(Controls([transport("down")] * 3, []), 1, sleep=sleep)
-    with pytest.raises(LaneFailure, match="down"):
-        await queue.poll()
-    assert queue.client.calls == 3
-
-
-async def test_cloudflare_origin_errors_are_retried():
-    slept = []
-
-    async def sleep(seconds):
-        slept.append(seconds)
-
-    queue = ControlQueue(
-        Controls(
-            [
-                LaneFailure(
-                    ExitCode.TRANSPORT,
-                    "server_refused",
-                    "Lane server refused GET /controls: HTTP 522",
-                )
-            ],
-            [],
-        ),
-        1,
-        sleep=sleep,
-    )
-    await queue.poll()
-    assert queue.client.calls == 2 and slept == [1.0]
+    client._sleep = record
+    return client, slept, seen
 
 
 async def test_an_authentication_refusal_is_not_retried():
@@ -87,3 +74,22 @@ async def test_an_authentication_refusal_is_not_retried():
     with pytest.raises(LaneFailure, match="HTTP 401"):
         await queue.poll()
     assert queue.client.calls == 1
+
+
+async def test_controls_poll_survives_a_six_second_outage():
+    client, slept, seen = lane([520, 520, 520, 200])
+    await ControlQueue(client, 1).poll()
+    assert seen == [520, 520, 520, 200]
+    assert slept == [1.0, 2.0, 4.0]
+    assert sum(slept) >= 6
+    await client.http.aclose()
+
+
+async def test_a_persistent_controls_outage_stops_after_fifteen_seconds():
+    client, slept, seen = lane([520])
+    with pytest.raises(LaneFailure, match="HTTP 520"):
+        await ControlQueue(client, 1).poll()
+    assert slept == [1.0, 2.0, 4.0, 5.0, 3.0]
+    assert sum(slept) == 15 and max(slept) <= 5
+    assert len(seen) == len(slept) + 1
+    await client.http.aclose()

@@ -193,6 +193,24 @@ def test_why_blocked_is_prose_and_a_block_names_the_reason():
     assert "{" not in text
     comment = blocked_comment("invalid_planner_output")
     assert "invalid planner output" in comment and "/why-blocked" in comment and "/retry" in comment
+    from forge.planning.limits import PlanningRefused
+
+    citation = PlanningRefused("unresolved_citation", "path src/app.py has 12 lines").surfaced()
+    cited = human_status(
+        json.dumps({"state": "blocked", "reason": citation, "failed_handler": "plan"})
+    )
+    assert "src/app.py" in cited and "12 lines" in cited
+    assert "src/app.py" in blocked_comment(citation) and "12 lines" in blocked_comment(citation)
+    budget = blocked_comment("planning_budget_exhausted")
+    assert "Start a new /implement." in budget and "/retry cannot" in budget
+    assert "/retry if this work can continue" not in budget
+    exhausted = human_status(
+        json.dumps(
+            {"state": "blocked", "reason": "planning_budget_exhausted", "failed_handler": "plan"}
+        )
+    )
+    assert "Start a new /implement." in exhausted and "/retry cannot" in exhausted
+    assert "Use /retry when this work can continue" not in exhausted
     raw = canonical_json(json.loads(snapshot)).decode()
     body = render(
         CommandResult(

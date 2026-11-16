@@ -114,7 +114,10 @@ class PlanHandler:
                 planner = self.planner(lambda: context.lease, intent.policy)
                 plan = await planner.plan(intent.task, intent.snapshot)
             except PlanningRefused as error:
-                return StepResult(result_json(refused=error.reason), park=Park(error.reason))
+                return StepResult(
+                    result_json(refused=error.reason, detail=error.detail),
+                    park=Park(error.surfaced()),
+                )
             except ModelTransportError:
                 raise Retryable("planner_model_unavailable") from None
             except TimeoutError:

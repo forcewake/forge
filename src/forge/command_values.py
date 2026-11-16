@@ -159,17 +159,28 @@ def human_status(raw: str) -> str:
     handler = facts.get("failed_handler")
     lines = [f"State: {state}."]
     if isinstance(reason, str) and reason:
-        lines.append("Reason: " + reason.replace("_", " ") + ".")
+        lines.append("Reason: " + _display(reason) + ".")
     if isinstance(handler, str) and handler:
         lines.append("Stopped during: " + handler.replace("_", " ") + ".")
-    lines.append("Use /retry when this work can continue, or /implement to start again.")
+    lines.append(_next_step(reason if isinstance(reason, str) else ""))
     return "\n".join(lines)
 
 
+def _display(reason: str) -> str:
+    code, separator, detail = reason.partition(": ")
+    shown = code.replace("_", " ")
+    return shown if not separator else f"{shown}: {detail}"
+
+
+def _next_step(reason: str) -> str:
+    if reason.split(":", 1)[0].strip() == "planning_budget_exhausted":
+        return "Start a new /implement. /retry cannot raise this run's planning budget."
+    return "Use /retry when this work can continue, or /implement to start again."
+
+
 def blocked_comment(reason: str) -> str:
-    text = reason.replace("_", " ")
-    return (
-        "Forge stopped this run before it finished.\n"
-        f"Reason: {text}.\n"
-        "Comment /why-blocked for the current facts, or /retry if this work can continue."
-    )
+    if reason.split(":", 1)[0] == "planning_budget_exhausted":
+        follow = "Start a new /implement. /retry cannot raise this run's planning budget."
+    else:
+        follow = "Comment /why-blocked for the current facts, or /retry if this work can continue."
+    return f"Forge stopped this run before it finished.\nReason: {_display(reason)}.\n{follow}"

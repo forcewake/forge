@@ -189,7 +189,7 @@ class LaneClient:
         return brief
 
     async def controls(self, after: int) -> list[ControlCommand]:
-        response = await self.request("GET", "/controls", params={"after": after})
+        response = await self.call("GET", "/controls", retry=True, params={"after": after})
         try:
             documents = response.json()
             if not isinstance(documents, list):
