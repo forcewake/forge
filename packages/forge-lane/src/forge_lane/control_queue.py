@@ -6,16 +6,12 @@ from collections.abc import Awaitable, Callable
 
 from forge_protocol import ControlCommand
 
-from .client import LaneClient
+from .client import LaneClient, transient
 from .errors import ExitCode, LaneFailure
 
 
 def transient_poll(exc: LaneFailure) -> bool:
-    if exc.classification == "transport_error":
-        return True
-    return exc.classification == "server_refused" and any(
-        code in exc.detail for code in ("HTTP 429", "HTTP 502", "HTTP 503", "HTTP 504")
-    )
+    return transient(exc)
 
 
 class ControlQueue:

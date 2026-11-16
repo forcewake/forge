@@ -191,22 +191,7 @@ class StepRunner(Generic[E]):
             return "lost"
         except Retryable as error:
             await self._stop(renewal)
-            try:
-                retry = await self.store.reschedule(
-                    holder.current,
-                    due_at=self.clock.now() + timedelta(seconds=self.retry.delay(step.attempts)),
-                    now=self.clock.now(),
-                    reason=f"retry_exhausted:{error.reason}",
-                    execution_seconds=monotonic() - began,
-                    observation_json=json.dumps(
-                        {"reason": error.reason, "retryable": True},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                )
-                return "parked" if retry.state == "dead" else "rescheduled"
-            except StaleLease:
-                return "lost"
+            return await self._retry(holder, step, error, monotonic() - began)
         except asyncio.CancelledError:
             if (
                 renewal.done()
@@ -256,16 +241,8 @@ class StepRunner(Generic[E]):
                     observation_json=result.result_json,
                 )
                 return "rescheduled" if retried.state == "scheduled" else "parked"
-            if result.park is not None and self.on_blocked is not None:
-                try:
-                    await self.on_blocked(holder.current, result.park.reason)
-                except Exception:
-                    import logging
-
-                    logging.getLogger("forge.worker").exception(
-                        "blocked-run comment failed",
-                        extra={"run_id": holder.current.run_id, "reason": result.park.reason},
-                    )
+            if result.park is not None:
+                await self._announce(holder.current, result.park.reason)
             completed = await self.store.complete_and_enqueue(
                 holder.current,
                 result.result_json,
@@ -297,18 +274,45 @@ class StepRunner(Generic[E]):
             task.cancel()
             raise
 
+    async def _retry(
+        self, holder: LeaseHolder, step: StepRecord, error: Retryable, execution_seconds: float
+    ) -> str:
+        reason = f"retry_exhausted:{error.reason}"
+        try:
+            retry = await self.store.reschedule(
+                holder.current,
+                due_at=self.clock.now() + timedelta(seconds=self.retry.delay(step.attempts)),
+                now=self.clock.now(),
+                reason=reason,
+                execution_seconds=execution_seconds,
+                observation_json=json.dumps(
+                    {"reason": error.reason, "retryable": True},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        except StaleLease:
+            return "lost"
+        if retry.state != "dead":
+            return "rescheduled"
+        await self._announce(holder.current, reason)
+        return "parked"
+
+    async def _announce(self, lease: Lease, reason: str) -> None:
+        if self.on_blocked is None:
+            return
+        try:
+            await self.on_blocked(lease, reason)
+        except Exception:
+            logging.getLogger("forge.worker").exception(
+                "blocked-run comment failed",
+                extra={"run_id": lease.run_id, "reason": reason},
+            )
+
     async def _park(
         self, lease: Lease, reason: str, *, execution_seconds: float | None = None
     ) -> str:
-        if self.on_blocked is not None:
-            try:
-                await self.on_blocked(lease, reason)
-            except Exception:
-                import logging
-
-                logging.getLogger("forge.worker").exception(
-                    "blocked-run comment failed", extra={"run_id": lease.run_id, "reason": reason}
-                )
+        await self._announce(lease, reason)
         try:
             await self.store.complete_and_enqueue(
                 lease,

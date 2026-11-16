@@ -191,6 +191,24 @@ async def test_unknown_effect_is_a_terminal_park_not_an_automatic_retry(store):
     )
 
 
+async def test_exhausted_retry_posts_the_block_reason(store):
+    clock = ManualClock(datetime.now(timezone.utc))
+    run, _step = await seeded(store, clock, max_attempts=1)
+    seen: list[tuple[str, str]] = []
+
+    async def handler(ctx):
+        raise Retryable("planner_model_unavailable")
+
+    async def on_blocked(lease, reason):
+        seen.append((lease.run_id, reason))
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    parked = await RunStore(store).load(run.id)
+    assert parked.state == State.BLOCKED
+    assert parked.reason == "retry_exhausted:planner_model_unavailable"
+    assert seen == [(run.id, "retry_exhausted:planner_model_unavailable")]
+
+
 async def test_a_park_announces_the_block_before_the_run_stops(store):
     clock = RealClock()
     run, _step = await seeded(store, clock)

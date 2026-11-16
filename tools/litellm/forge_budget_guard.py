@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import Depends, HTTPException
 from litellm.integrations.custom_logger import CustomLogger
 
-from guard_ledger import NativeLedger
+from guard_ledger import NativeLedger, deleted_aliases
 from guard_policy import (
     BudgetDenied,
     LITELLM_VERSION,
@@ -387,3 +387,23 @@ async def usage(token: str, user_api_key_dict=Depends(_native().user_api_key_aut
 
 _native().app.add_api_route("/forge/budget/readiness", readiness, methods=["GET"])
 _native().app.add_api_route("/forge/budget/usage", usage, methods=["GET"])
+
+
+@_native().app.middleware("http")
+async def retire_deleted_keys(request, call_next):
+    """A deleted alias must leave the ledger before the same name is minted again."""
+    path = request.url.path.rstrip("/") or "/"
+    capture = request.method == "POST" and path == "/key/delete"
+    body = await request.body() if capture else b""
+    response = await call_next(request)
+    if not capture or response.status_code != 200 or not body:
+        return response
+    try:
+        aliases = deleted_aliases(json.loads(body))
+        if aliases:
+            ledger = await guard._ledger()
+            for alias in aliases:
+                await ledger.retire_alias(alias)
+    except Exception:
+        logging.getLogger("forge.strict_budget").warning("alias retirement failed", exc_info=True)
+    return response

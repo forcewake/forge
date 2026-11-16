@@ -8,7 +8,7 @@ import re
 
 LITELLM_VERSION = "1.106.2"
 # Updated with the packaged callback, and checked against its actual source files.
-GUARD_DIGEST = "48bf39c0c1e5fcade7627b9cbafacab38e9e0db8af922498491edd2eaade3c41"
+GUARD_DIGEST = "08ea5bc725cf331934c34ee90de9c3e9369d40f2e55a335e1180fd87a748328e"
 ALLOWED_ROUTES = ("/chat/completions", "/v1/chat/completions", "/messages", "/v1/messages")
 
 

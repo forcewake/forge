@@ -46,6 +46,30 @@ async def test_a_persistent_controls_failure_is_not_hidden():
     assert queue.client.calls == 3
 
 
+async def test_cloudflare_origin_errors_are_retried():
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    queue = ControlQueue(
+        Controls(
+            [
+                LaneFailure(
+                    ExitCode.TRANSPORT,
+                    "server_refused",
+                    "Lane server refused GET /controls: HTTP 522",
+                )
+            ],
+            [],
+        ),
+        1,
+        sleep=sleep,
+    )
+    await queue.poll()
+    assert queue.client.calls == 2 and slept == [1.0]
+
+
 async def test_an_authentication_refusal_is_not_retried():
     queue = ControlQueue(
         Controls(

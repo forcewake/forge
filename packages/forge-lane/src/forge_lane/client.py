@@ -42,12 +42,40 @@ class _SessionPending(LaneFailure):
     pass
 
 
+_TRANSIENT_HTTP = tuple(f"HTTP {code}" for code in (429, 502, 503, 504, 520, 521, 522, 523, 524))
+
+
+def transient(exc: LaneFailure) -> bool:
+    if exc.classification == "transport_error":
+        return True
+    return exc.classification == "server_refused" and any(
+        code in exc.detail for code in _TRANSIENT_HTTP
+    )
+
+
 class LaneClient:
     def __init__(self, dispatch: LaneDispatch, http: httpx.AsyncClient):
         self.dispatch = dispatch
         self.http = http
         self.token: SessionToken | None = None
+        self._sleep = asyncio.sleep
         self.prefix = str(dispatch.server_url).rstrip("/") + "/lane/v1"
+
+    async def call(
+        self, method: str, path: str, *, retry: bool = False, **kwargs: Any
+    ) -> httpx.Response:
+        delay = 0.2
+        for attempt in range(3):
+            try:
+                return await self.request(method, path, **kwargs)
+            except LaneFailure as exc:
+                if not retry or attempt == 2 or not transient(exc):
+                    raise
+                await self._sleep(delay)
+                delay = min(delay * 2, 5.0)
+        raise LaneFailure(
+            ExitCode.TRANSPORT, "transport_error", f"Lane request failed: {method} {path}"
+        )
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         limit = kwargs.pop("response_limit", 2 * 1024 * 1024)
@@ -175,8 +203,8 @@ class LaneClient:
             raise LaneFailure(ExitCode.TRANSPORT, "identity_mismatch", "Wrong control identity")
         return commands
 
-    async def send(self, path: str, value: T, *, method: str = "POST") -> T:
-        response = await self.request(method, path, json=value.model_dump(mode="json"))
+    async def send(self, path: str, value: T, *, method: str = "POST", retry: bool = False) -> T:
+        response = await self.call(method, path, retry=retry, json=value.model_dump(mode="json"))
         result = self.parse(type(value), response)
         if result != value:
             raise LaneFailure(
@@ -198,9 +226,10 @@ class LaneClient:
 
     async def put_blob(self, data: bytes) -> str:
         identity = sha256(data).hexdigest()
-        response = await self.request(
+        response = await self.call(
             "PUT",
             f"/blobs/{identity}",
+            retry=True,
             content=data,
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -229,16 +258,18 @@ class LaneClient:
             ) from None
 
     async def checkpoint(self, manifest: CheckpointManifest) -> None:
-        await self.send(f"/checkpoints/{manifest.checkpoint_id}", manifest, method="PUT")
+        await self.send(
+            f"/checkpoints/{manifest.checkpoint_id}", manifest, method="PUT", retry=True
+        )
 
     async def candidate(self, value: CandidateBundle) -> None:
         await self.send("/candidate", value)
 
     async def report(self, value: LaneReport) -> None:
-        await self.send("/report", value)
+        await self.send("/report", value, retry=True)
 
     async def heartbeat(self, value: Heartbeat) -> None:
-        await self.send("/heartbeat", value)
+        await self.send("/heartbeat", value, retry=True)
 
     async def model_key(self) -> ModelKeyGrant:
         response = await self.request("POST", "/model-key")
