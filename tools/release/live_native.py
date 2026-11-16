@@ -43,6 +43,7 @@ class Sandbox:
             verify=context,
         )
         self.environment = environ
+        self.provider = connection.provider
         self.root = ""
         self.repo = self.call(
             "GET",
@@ -64,6 +65,45 @@ class Sandbox:
             login=self.user["login" if connection.provider == "github" else "username"],
             is_bot=self.user.get("type") == "Bot" or self.user.get("bot") is True,
         )
+
+    def download(self, path: str):
+        response = self.client.get(path)
+        if response.is_redirect:
+            location = response.headers["location"]
+            if not location.startswith("https://"):
+                raise ValueError("artifact redirect requires HTTPS")
+            # Object storage receives no provider credential.
+            response = httpx.get(location, timeout=60, follow_redirects=True)
+        response.raise_for_status()
+        return response
+
+    def variable(self, key: str, value: str | None = None, *, delete: bool = False):
+        path = (
+            f"{self.root}/actions/variables"
+            if self.provider == "github"
+            else f"{self.root}/variables"
+        )
+        current = self.client.get(f"{path}/{key}")
+        if current.status_code != 404:
+            current.raise_for_status()
+        old = current.json() if current.status_code == 200 else None
+        if delete:
+            if old is not None:
+                self.call("DELETE", f"{path}/{key}")
+        elif value is not None:
+            payload = (
+                {"name": key, "value": value}
+                if self.provider == "github"
+                else {"value": value}
+                if old
+                else {"key": key, "value": value, "raw": True}
+            )
+            self.call(
+                "PATCH" if old and self.provider == "github" else "PUT" if old else "POST",
+                f"{path}/{key}" if old else path,
+                json=payload,
+            )
+        return old
 
     def call(self, method: str, path: str, **kwargs):
         response = self.client.request(method, path, **kwargs)
@@ -183,3 +223,21 @@ class Sandbox:
     async def close(self):
         self.client.close()
         await self.server.aclose()
+
+
+def verify_install(
+    identity: dict, version: str, digest: str, requirements_digest: str | None = None
+) -> None:
+    if not (
+        identity.get("pin") == "wheel"
+        and identity.get("route") == "explicit-wheel"
+        and identity.get("version") == version
+        and identity.get("qualified") is True
+        and identity.get("expected_sha256") == digest
+        and identity.get("actual_sha256") == digest
+        and (
+            requirements_digest is None
+            or identity.get("requirements_sha256") == requirements_digest
+        )
+    ):
+        raise ValueError("live lane did not install the exact RC wheel")
