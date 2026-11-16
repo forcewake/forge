@@ -161,7 +161,7 @@ async def main():
         httpx.AsyncClient(base_url=upstream, timeout=15, trust_env=False) as peer,
     ):
         proof = Proof(client, peer, admin, policy, artifact)
-        for _ in range(60):
+        for _ in range(120):
             try:
                 ready = await client.get(
                     "/forge/budget/readiness", headers=admin, params={"nonce": uuid4().hex}

@@ -218,9 +218,7 @@ class ClaudeSession:
                     if message.is_error or message.subtype != "success":
                         raise LaneFailure(
                             ExitCode.DRIVER,
-                            "tool_policy_refused"
-                            if self.policy.denials
-                            else "driver_result_error",
+                            "tool_policy_refused" if self.policy.denials else "driver_result_error",
                             "Claude could not complete the approved request",
                         )
                     if message.terminal_reason not in (None, "completed"):

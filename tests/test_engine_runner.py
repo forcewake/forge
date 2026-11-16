@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass, replace
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -266,6 +267,71 @@ async def test_crash_during_successor_insert_rolls_back_result_and_all_children(
     persisted = await StepStore(store).load(step.id)
     assert persisted.state == "running" and persisted.result_json is None
     assert await StepStore(store).get("crash-child") is None
+
+
+async def test_reconciler_waits_and_does_not_poll_a_blocked_gateway_key(store):
+    from forge.engine.reconciler import probe_due_delay
+
+    clock = ManualClock(datetime.now(timezone.utc))
+    run, _step = await seeded(store, clock)
+    (lease,) = await StepStore(store).claim_due("one", clock.now(), 60)
+    gateway = await intent(store, lease, key="gw", kind="gw_block", payload="{}")
+    dispatched = await EffectStore(store).mark_dispatched(
+        gateway.id, lease, expected_version=gateway.version
+    )
+    later = clock.now() + timedelta(seconds=40)
+    evidence = json.dumps({"next_probe_at": later.isoformat()}, separators=(",", ":"))
+    outcome = json.dumps(
+        {"evidence": evidence, "kind": "unknown"}, separators=(",", ":"), sort_keys=True
+    )
+    await EffectStore(store).record_observation(
+        dispatched.id,
+        state="unknown",
+        outcome_json=outcome,
+    )
+    waiting = await intent(store, lease, key="comment", kind="post_comment", payload="{}")
+    waiting = await EffectStore(store).mark_dispatched(
+        waiting.id, lease, expected_version=waiting.version
+    )
+    await EffectStore(store).record_observation(
+        waiting.id,
+        state="unknown",
+        outcome_json=outcome,
+    )
+    await RunStore(store).transition(
+        run.id,
+        expected_version=run.version,
+        target=State.BLOCKED,
+        failed_handler=Handler.PLAN,
+        reason="stopped",
+    )
+    saved = await EffectStore(store).get(gateway.key)
+    assert probe_due_delay(saved, clock.now()) > 0
+    assert probe_due_delay(saved, "now") is None
+    assert probe_due_delay(replace(saved, outcome_json="not-json"), clock.now()) is None
+    assert probe_due_delay(replace(saved, outcome_json='{"evidence":"nope"}'), clock.now()) is None
+
+    async def probe(record):
+        raise AssertionError(record.key)
+
+    result = await Reconciler(
+        EffectStore(store), RecoveryStore(store), probe=probe, clock=clock
+    ).pass_once()
+    assert result.recovered == 0 and result.next_delay is not None and result.next_delay > 0
+
+
+async def test_a_failed_block_comment_still_parks_the_run(store):
+    clock = RealClock()
+    run, _step = await seeded(store, clock)
+
+    async def handler(ctx):
+        return StepResult("{}", park=Park("planning_deadline_expired"))
+
+    async def on_blocked(lease, reason):
+        raise RuntimeError("comment transport failed")
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    assert (await RunStore(store).load(run.id)).state == State.BLOCKED
 
 
 async def test_reconciler_recovers_original_requested_step_after_t1_crash(store):

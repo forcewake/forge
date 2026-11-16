@@ -127,6 +127,8 @@ def test_why_blocked_is_prose_and_a_block_names_the_reason():
     )
     text = human_status(snapshot)
     assert "State: blocked." in text
+    assert human_status("not-json") == "The current status could not be read."
+    assert human_status("[]") == "The current status could not be read."
     assert "planning deadline expired" in text
     assert "run_version" not in text
     assert "{" not in text
@@ -152,6 +154,11 @@ def test_command_retry_budget_outlasts_a_fifteen_second_blip(monkeypatch):
     assert attempts >= 8 and base >= 5 and cap >= 60
     waits = [min(cap, base * (2 ** (n - 1))) for n in range(1, attempts)]
     assert sum(waits) > 15
+
+
+def test_lane_startup_grace_rejects_a_non_numeric_value(monkeypatch):
+    monkeypatch.setenv("FORGE_LANE_STARTUP_GRACE_SECONDS", "nope")
+    assert startup_grace_seconds() == 600
 
 
 def test_lane_startup_grace_defaults_above_two_minutes(monkeypatch):

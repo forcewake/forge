@@ -83,4 +83,4 @@ def test_canary_installs_through_the_packaged_schema_command() -> None:
     assert "forge-schema" in PROBE
     assert "forge.migrate" not in PROBE
     assert "cli('forge','--config',str(root/'forge.toml'),'install')" in PROBE
-    assert "cli('forge-schema','check'" in PROBE
+    assert "cli('forge-schema','check'" in PROBE and "--database-url" not in PROBE

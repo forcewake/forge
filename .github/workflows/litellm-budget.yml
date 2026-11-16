@@ -46,7 +46,11 @@ jobs:
           FORGE_LITELLM_TEST_MASTER_KEY: sk-synthetic-ci-admin-key
           FORGE_LITELLM_RESTART_PROOF: /tmp/forge-native-unknown-token
           FORGE_LITELLM_TEST_ARTIFACT: /tmp/forge-native-artifact.json
-        run: uv run python tools/verify_litellm_budget.py
+        run: |
+          set +e
+          uv run python tools/verify_litellm_budget.py
+          code=$?
+          if [ "$code" -ne 0 ]; then docker logs forge-budget-gateway || true; exit "$code"; fi
       - name: Verify durable unknown liability after native process restart
         env:
           FORGE_LITELLM_TEST_URL: http://127.0.0.1:4000

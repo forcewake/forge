@@ -112,8 +112,7 @@ class DispatchHandler:
                     return await self.stop(context, approved, "lane_branch_unavailable")
                 return StepResult(
                     result_json(waiting="lane_branch"),
-                    defer_until=self.clock.now()
-                    + timedelta(seconds=work.settings.poll_seconds),
+                    defer_until=self.clock.now() + timedelta(seconds=work.settings.poll_seconds),
                 )
             if not isinstance(branch, Applied):
                 reason = (
