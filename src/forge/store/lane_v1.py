@@ -9,17 +9,39 @@ from forge_protocol import ControlCommand, RunIdentity
 from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.sql.selectable import Select
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.lane_auth_values import PendingDispatch, identity_of
 from forge.api.lane_v1_values import LaneConflict
 from forge.domain.states import TERMINAL
 from forge.store.lane_auth import locked_current
 from forge.store.lane_state import load_namespace, persist_namespace
+from forge.store.models_execution import EngineStep
 from forge.store.models_lane import EngineBlob, EngineLaneSession
 from forge.store.models_runs import EngineRun
-from forge.store.transactions import SessionFactory, transaction
+from forge.store.transactions import SessionFactory, notify_steps, transaction
 
 T = TypeVar("T")
+
+
+async def release_await_step(session: AsyncSession, row: EngineLaneSession) -> None:
+    """A stored lane report should not wait out the await poll interval."""
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(EngineStep)
+        .where(
+            EngineStep.run_id == row.run_id,
+            EngineStep.attempt == row.attempt,
+            EngineStep.generation == row.generation,
+            EngineStep.handler == "await_lane",
+            EngineStep.state == "scheduled",
+            EngineStep.due_at > now,
+        )
+        .values(due_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if cast(CursorResult[Any], result).rowcount:
+        await notify_steps(session)
 
 
 class EngineLaneV1Store:
@@ -68,6 +90,8 @@ class EngineLaneV1Store:
                 )
                 if cast(CursorResult[Any], result_row).rowcount != 1:
                     raise LaneConflict("run changed during lane mutation")
+                if isinstance(state.get("report"), dict):
+                    await release_await_step(session, row)
             return result
 
     def _reapable_runs(self, now: datetime, grace_seconds: int) -> Select[tuple[str]]:

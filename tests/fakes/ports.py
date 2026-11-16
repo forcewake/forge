@@ -225,6 +225,9 @@ class ScriptedPorts:
     async def block(self, alias: str) -> GatewayOutcome:
         return cast(GatewayOutcome, self.take("block", alias))
 
+    async def delete_alias(self, alias: str) -> None:
+        self.take("delete_alias", alias)
+
     async def read_spend(self, alias: str) -> Observation:
         return cast(Observation, self.take("read_spend", alias))
 

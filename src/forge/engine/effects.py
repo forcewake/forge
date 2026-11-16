@@ -498,6 +498,9 @@ class Effects:
             )
         )
 
+    async def delete_alias(self, alias: str) -> None:
+        await self._gateway.delete_alias(alias)
+
     async def gw_mint(
         self,
         lease: Lease,

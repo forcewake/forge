@@ -348,6 +348,15 @@ class LiteLLMGateway:
             allowance,
         )
 
+    async def delete_alias(self, alias: str) -> None:
+        """Drop a blocked alias so a later mint is not rejected as a duplicate."""
+        try:
+            status, _ = await self._request("POST", "/key/delete", json={"key_aliases": [alias]})
+        except GatewayUnavailable:
+            raise
+        if status not in (200, 404):
+            raise GatewayUnavailable("gateway alias delete failed")
+
     async def block(self, alias: str) -> GatewayOutcome:
         record = await self.keys.get(alias)
         if record is None:

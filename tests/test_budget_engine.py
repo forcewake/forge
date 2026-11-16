@@ -111,6 +111,8 @@ class NativeAdmin:
             assert data["max_parallel_requests"] == parallel_request_limit()
             token = hashlib.sha256(data["key"].encode()).hexdigest()
             assert token not in self.keys
+            if any(row["key_alias"] == data["key_alias"] for row in self.keys.values()):
+                return httpx.Response(400, json={"error": "key_alias already exists"})
             self.keys[token] = {
                 **{
                     key: value
@@ -129,6 +131,12 @@ class NativeAdmin:
                 self.drop_mint = False
                 raise httpx.ReadTimeout("synthetic dropped response", request=request)
             return httpx.Response(200, json={"key": data["key"]})
+        if path == "/key/delete":
+            aliases = set(data.get("key_aliases") or [])
+            removed = [token for token, row in self.keys.items() if row["key_alias"] in aliases]
+            for token in removed:
+                del self.keys[token]
+            return httpx.Response(200, json={"deleted_keys": removed})
         row = self.keys[data["key"]]
         if path == "/key/update":
             row["max_budget"], row["metadata"] = data["max_budget"], data["metadata"]
@@ -336,6 +344,10 @@ async def test_a_later_planning_deadline_mints_again_while_the_hold_is_unknown(c
     renewed = await prepare(case, purpose="planning", requested=requested)
     assert isinstance(renewed, Applied)
     assert case["native"].writes.count("/key/generate") == 2
+    assert "/key/delete" in case["native"].writes
+    aliases = [row["key_alias"] for row in case["native"].keys.values()]
+    assert len(aliases) == len(set(aliases))
+    assert all(not row["blocked"] for row in case["native"].keys.values())
 
 
 async def test_a_purged_planning_key_can_be_minted_again_after_the_hold_is_known(case):

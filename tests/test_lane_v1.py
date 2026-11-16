@@ -134,6 +134,53 @@ async def test_blob_checkpoint_candidate_and_terminal_report_are_durable_idempot
     assert "access_token" not in json.dumps(state)
 
 
+async def test_terminal_report_pulls_a_deferred_await_step_forward(api):
+    from forge.domain.states import Handler
+    from forge.store.models_execution import EngineStep
+    from forge.store.records import StepRequest
+    from forge.store.steps import StepStore
+
+    _lane, factory, pending, client = api
+    later = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await StepStore(factory).enqueue(
+        StepRequest(
+            pending.identity.forge_run_id,
+            Handler.AWAIT_LANE,
+            pending.identity.forge_run_id + ":await-report",
+            "{}",
+            later,
+        )
+    )
+    digest = await upload(client)
+    candidate = bundle(pending, digest)
+    assert (
+        await client.post("/lane/v1/candidate", json=candidate.model_dump(mode="json"))
+    ).status_code == 201
+    terminal = LaneReport(
+        **pending.identity.model_dump(),
+        approved_digest=pending.dispatch.approved_digest,
+        status="completed",
+        classification="success",
+        driver=pending.dispatch.driver,
+        model=pending.dispatch.model,
+        terminal_reason="completed",
+        candidate_diff_sha256=digest,
+    )
+    assert (
+        await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
+    ).status_code == 201
+    async with factory() as session:
+        step = await session.scalar(
+            select(EngineStep).where(
+                EngineStep.key == pending.identity.forge_run_id + ":await-report"
+            )
+        )
+    due = step.due_at
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    assert due <= datetime.now(timezone.utc) + timedelta(seconds=5)
+
+
 @pytest.mark.parametrize(
     "change",
     [

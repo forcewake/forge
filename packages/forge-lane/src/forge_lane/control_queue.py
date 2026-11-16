@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import deque
+from collections.abc import Awaitable, Callable
 
 from forge_protocol import ControlCommand
 
@@ -9,15 +10,30 @@ from .client import LaneClient
 from .errors import ExitCode, LaneFailure
 
 
+def transient_poll(exc: LaneFailure) -> bool:
+    if exc.classification == "transport_error":
+        return True
+    return exc.classification == "server_refused" and any(
+        code in exc.detail for code in ("HTTP 429", "HTTP 502", "HTTP 503", "HTTP 504")
+    )
+
+
 class ControlQueue:
-    def __init__(self, client: LaneClient, interval: float) -> None:
+    def __init__(
+        self,
+        client: LaneClient,
+        interval: float,
+        *,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
         self.client, self.interval = client, interval
+        self._sleep = sleep or asyncio.sleep
         self.after = 0
         self.seen: set[str] = set()
         self.pending: deque[ControlCommand] = deque()
 
     async def poll(self) -> None:
-        for command in await self.client.controls(self.after):
+        for command in await self._controls():
             if command.sequence <= self.after or command.command_id in self.seen:
                 raise LaneFailure(
                     ExitCode.TRANSPORT, "control_order", "Controls are not unique and ordered"
@@ -29,6 +45,18 @@ class ControlQueue:
             self.after = command.sequence
             self.seen.add(command.command_id)
             self.pending.append(command)
+
+    async def _controls(self) -> list[ControlCommand]:
+        delay = min(self.interval, 1.0)
+        for attempt in range(3):
+            try:
+                return await self.client.controls(self.after)
+            except LaneFailure as exc:
+                if attempt == 2 or not transient_poll(exc):
+                    raise
+                await self._sleep(delay)
+                delay = min(delay * 2, 5.0)
+        raise LaneFailure(ExitCode.TRANSPORT, "transport_error", "Control poll failed")
 
     async def next(self) -> ControlCommand:
         while not self.pending:

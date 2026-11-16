@@ -110,7 +110,11 @@ class BudgetService:
         await self.keys.prepare(lease, purpose, reference, now=self.clock.now())
         mint_key = f"{alias}:mint"
         if stored is not None and stored.state == "purged":
-            mint_key = f"{alias}:mint:{int(expires_at.timestamp())}"
+            try:
+                await self.effects.delete_alias(alias)
+            except Exception:
+                return Unknown(evidence='{"reason":"alias_delete_failed"}')
+            mint_key = f"{mint_key}:{int(expires_at.timestamp())}"
         prior = await self.effects.store.get(mint_key)
         original = reservation.allowance
         if prior is not None:

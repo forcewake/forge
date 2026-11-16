@@ -1,6 +1,7 @@
 """One retry refusal table and a fenced, bounded original-handler revival."""
 
 from datetime import datetime, timedelta
+import json
 from uuid import uuid4
 
 from forge_protocol import RepairContext
@@ -27,6 +28,24 @@ from forge.store.transactions import (
     transaction,
     notify_steps,
 )
+
+
+async def retained_failure_context(session: AsyncSession, run: EngineRun) -> str:
+    """Keep the check evidence that started a repair, not the latest lane error."""
+    rows = await session.scalars(
+        select(EngineStep)
+        .where(
+            EngineStep.run_id == run.id,
+            EngineStep.handler == Handler.DISPATCH.value,
+        )
+        .order_by(EngineStep.created_at.desc(), EngineStep.id.desc())
+    )
+    for row in rows:
+        raw = json.loads(row.payload_json).get("repair")
+        text = raw.get("failure_context") if isinstance(raw, dict) else None
+        if isinstance(text, str) and text.strip():
+            return text
+    return run.reason or "Operator-authorized retry"
 
 
 async def release_unknown_holds(session: AsyncSession, run_id: str) -> None:
@@ -242,7 +261,7 @@ class RetryStore:
                 candidate_sha=base,
                 prior_attempt=candidate.attempt,
                 prior_generation=candidate.generation,
-                failure_context=run.reason or "Operator-authorized retry",
+                failure_context=await retained_failure_context(session, run),
             )
             if candidate is not None
             else None

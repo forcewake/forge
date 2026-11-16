@@ -354,3 +354,43 @@ async def test_resume_recovery_refuses_a_missing_checkpoint_binding(operator):
     advance(operator, 61)
     assert (await env.runner.tick()).parked == 1
     assert sum(name == "dispatch_lane" for name, _ in env.fake.calls) == 1
+
+
+async def test_retry_after_a_failed_repair_keeps_the_check_evidence(operator, delivery):
+    import json
+
+    from forge.store.models_runs import EngineRun
+
+    env = operator["env"]
+    run, _, _pending, _sha = await published(delivery)
+    evidence = "unit failed: parser assertion"
+    async with env.factory() as session, session.begin():
+        current = await session.get(EngineRun, run.id)
+        current.state, current.failed_handler, current.reason = (
+            "blocked",
+            "await_lane",
+            "empty_diff",
+        )
+        step = await session.scalar(
+            select(EngineStep).where(EngineStep.run_id == run.id, EngineStep.handler == "dispatch")
+        )
+        payload = json.loads(step.payload_json)
+        payload["repair"] = {"failure_context": evidence}
+        step.payload_json = json.dumps(payload)
+    assert (await operator["commands"].submit(envelope(operator, "retry"))).reason == (
+        "retry_scheduled"
+    )
+    async with env.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(EngineStep).where(
+                    EngineStep.run_id == run.id, EngineStep.handler == "dispatch"
+                )
+            )
+        )
+    contexts = []
+    for row in rows:
+        repair = json.loads(row.payload_json).get("repair") or {}
+        contexts.append(repair.get("failure_context"))
+    assert evidence in contexts
+    assert "empty_diff" not in contexts

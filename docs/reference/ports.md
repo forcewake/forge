@@ -180,6 +180,9 @@ async def update(self, alias: str, allowance: Resources) -> GatewayOutcome:
 async def block(self, alias: str) -> GatewayOutcome:
     ...
 
+async def delete_alias(self, alias: str) -> None:
+    ...
+
 async def read_spend(self, alias: str) -> Observation:
     ...
 
