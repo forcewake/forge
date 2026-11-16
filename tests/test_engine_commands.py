@@ -140,6 +140,10 @@ async def test_worker_loop_survives_a_failed_command_tick():
         async def wait(self):
             await asyncio.Event().wait()
 
+    class Lane:
+        async def reap_terminal_blobs(self):
+            return 0
+
     stop = asyncio.Event()
     commands = Commands()
     runtime = SimpleNamespace(
@@ -150,6 +154,7 @@ async def test_worker_loop_survives_a_failed_command_tick():
         reactive=Reactive(),
         commands=commands,
         worker=Engine(commands),
+        lane=Lane(),
     )
     await serve(runtime, stop)
     assert commands.calls >= 2 and stop.is_set()

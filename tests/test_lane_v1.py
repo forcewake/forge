@@ -171,7 +171,7 @@ async def test_different_second_candidate_is_conflict_and_missing_blob_is_not_ac
 
 
 async def test_declared_oversize_and_quota_refuse_before_keeping_bytes(api):
-    lane, _, pending, client = api
+    lane, factory, pending, client = api
     digest = hashlib.sha256(b"x").hexdigest()
     before = set(lane.blobs.root.iterdir())
     refused = await client.put(
@@ -200,7 +200,13 @@ async def test_declared_oversize_and_quota_refuse_before_keeping_bytes(api):
     assert (
         await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
     ).status_code == 201
+    assert (lane.blobs.root / first).is_file()
+    async with factory() as session, session.begin():
+        run = await session.get(EngineRun, pending.identity.forge_run_id)
+        run.state = "failed"
+    assert await lane.reap_terminal_blobs() == 1
     assert not (lane.blobs.root / first).exists()
+    assert await lane.reap_terminal_blobs() == 0
 
 
 async def test_blob_digest_limits_corruption_and_symlinks_are_refused(api, tmp_path):

@@ -159,18 +159,12 @@ class LaneV1Service:
 
         await self.store.access(identity, record, write=True)
 
-    async def reap_terminal_blobs(self, identity: RunIdentity, *, limit: int = 32) -> int:
-        own = await self.store.access(
-            identity, lambda pending, state, namespace: dict(state.get("blobs", {}))
-        )
-        foreign = await self.store.foreign_blob_digests(identity)
-        removed = 0
-        for digest in own:
-            if removed >= limit or digest in foreign:
-                continue
+    async def reap_terminal_blobs(self, *, limit: int = 32) -> int:
+        digests = await self.store.terminal_only_digests(limit)
+        for digest in digests:
             await self.blobs.discard(digest)
-            removed += 1
-        return removed
+        await self.store.forget_terminal_digests(digests)
+        return len(digests)
 
     async def read_blob(self, identity: RunIdentity, digest: str) -> bytes:
         size = await self.store.access(identity, lambda p, s, n: blob_size(p, s, n, digest))
@@ -271,10 +265,7 @@ class LaneV1Service:
                 )
             return accept_once(state, "report", report.model_dump(mode="json"))
 
-        first = await self.store.access(identity, record, write=True)
-        if first and report.status in {"completed", "failed", "timed_out", "cancelled", "paused"}:
-            await self.reap_terminal_blobs(identity)
-        return first
+        return await self.store.access(identity, record, write=True)
 
     async def heartbeat(self, identity: RunIdentity, heartbeat: Heartbeat) -> Heartbeat:
         self.body_identity(identity, heartbeat)

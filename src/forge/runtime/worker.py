@@ -19,6 +19,7 @@ async def serve(runtime: Runtime, stop: asyncio.Event) -> None:
             except Exception:
                 await asyncio.sleep(1)
                 continue
+            await runtime.lane.reap_terminal_blobs()
             if reactive == commands == 0 and execution.execution.claimed == 0:
                 waiter = asyncio.create_task(runtime.wakeups.wait())
                 stopped = asyncio.create_task(stop.wait())
