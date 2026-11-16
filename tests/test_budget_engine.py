@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import forge.store.models  # noqa: F401
 from forge.budget.credentials import CredentialUnavailable, CredentialVault, KeyScope
-from forge.budget.gateway import LiteLLMGateway
+from forge.budget.gateway import LiteLLMGateway, parallel_request_limit
 from forge.budget.strict import ALLOWED_ROUTES, GUARD_DIGEST, TrustedPolicy
 from forge.budget.model_client import BudgetedModelClient
 from forge.budget.service import BudgetService, alias_for
@@ -108,6 +108,7 @@ class NativeAdmin:
         if path == "/key/generate":
             assert data["key_type"] == "default" and data["budget_duration"] is None
             assert data["blocked"] is False
+            assert data["max_parallel_requests"] == parallel_request_limit()
             token = hashlib.sha256(data["key"].encode()).hexdigest()
             assert token not in self.keys
             self.keys[token] = {
@@ -322,15 +323,38 @@ async def test_new_generation_blocks_old_before_mint_and_uses_remaining_pool(cas
         await case["keys"].grant(old, "https://gateway.invalid", now=case["clock"].now())
 
 
+async def test_a_purged_planning_key_can_be_minted_again_after_the_hold_is_known(case):
+    from forge.port_values import Refused
+    from forge.store.retry import release_unknown_holds
+    from forge.store.transactions import transaction
+
+    requested = Resources(usd=Decimal("1"), calls=3, tokens=1000)
+
+    async def unavailable(alias):
+        raise RuntimeError("usage unavailable")
+
+    case["gateway"].read_spend = unavailable
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert await case["service"].finish(case["lease"], "planning") == "unknown"
+    refused = await prepare(case, purpose="planning", requested=requested)
+    assert isinstance(refused, Refused) and refused.reason == "unproven_planning_hold"
+    assert case["native"].writes == ["/key/generate", "/key/block"]
+    async with transaction(case["factory"]) as session:
+        await release_unknown_holds(session, case["run"].id)
+    case["expires"] = case["clock"].now() + timedelta(seconds=4000)
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert case["native"].writes.count("/key/generate") == 2
+
+
 async def test_settlement_native_partial_axes_stay_fully_held_and_purge(case):
     await prepare(case)
-    assert await case["service"].finish(case["lease"], "implementation") == "accrued"
+    assert await case["service"].finish(case["lease"], "implementation") == "settled"
     alias = alias_for(identity(case), "implementation")
     record = await case["keys"].get(alias)
     assert record.state == "purged" and record.ciphertext is None
     pool = await case["store"].load(case["run"].id, "implementation")
-    assert pool.reservations[0].observed == Observation(usd=Decimal(0), calls=None, tokens=None)
-    assert pool.balance.held.usd == Decimal("2")
+    assert pool.reservations[0].observed == Observation(usd=Decimal(0), calls=0, tokens=0)
+    assert pool.balance.held.usd == Decimal(0)
     with pytest.raises(CredentialUnavailable):
         await case["keys"].grant(identity(case), "https://gateway.invalid", now=case["clock"].now())
 

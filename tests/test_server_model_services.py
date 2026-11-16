@@ -214,7 +214,8 @@ async def test_production_planner_reserves_before_research_and_blocks_after_exac
         assert pool.balance.held == Resources()
         assert pool.balance.settled == Resources(usd=Decimal("0.00006"), calls=2, tokens=28)
     else:
-        assert pool.balance.held.usd == Decimal("1")
+        assert pool.balance.held.usd == Decimal("0")
+        assert pool.reservations[0].status == "settled"
 
 
 async def test_planner_input_mismatch_refuses_before_any_grant_or_paid_request(case):
@@ -252,7 +253,8 @@ async def test_planner_lost_response_is_unknown_and_retry_cannot_reset_or_extend
             await planner.plan(intent.task, intent.snapshot)
     assert len(requests) == 1 and case["native"].writes == ["/key/generate", "/key/block"]
     pool = await case["store"].load(case["run"].id, "implementation")
-    assert len(pool.reservations) == 1 and pool.balance.held.usd == Decimal("1")
+    assert len(pool.reservations) == 1 and pool.balance.held.usd == Decimal("0")
+    assert pool.reservations[0].status == "settled"
     async with case["factory"]() as session:
         usage = await session.scalar(select(EngineUsage))
         assert not usage.final and usage.usd is usage.calls is usage.tokens is None

@@ -363,7 +363,7 @@ def test_the_r40_04_observability_names_exist():
 
 async def test_durable_receipts_fold_into_the_report(budget_case):
     await prepare(budget_case)
-    assert await budget_case["service"].finish(budget_case["lease"], "implementation") == "accrued"
+    assert await budget_case["service"].finish(budget_case["lease"], "implementation") == "settled"
     pool = await budget_case["store"].load(budget_case["run"].id, "implementation")
     snapshot = json.loads(
         await CommandRuns(budget_case["factory"]).snapshot(
@@ -371,6 +371,6 @@ async def test_durable_receipts_fold_into_the_report(budget_case):
         )
     )
     view = snapshot["budgets"]["implementation"]
-    assert view["held"]["usd"] == "2" and view["unknown_axes"] == {"calls": 1, "tokens": 1}
-    assert view["reservations"][0]["observed"] == {"usd": "0", "calls": None, "tokens": None}
+    assert view["held"]["usd"] == "0" and view["unknown_axes"] == {}
+    assert view["reservations"][0]["observed"] == {"usd": "0", "calls": 0, "tokens": 0}
     assert view == pool_projection(pool)

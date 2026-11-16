@@ -42,7 +42,7 @@ class Reviewer:
         self.decision = "approve"
         self.wrong_sha = None
 
-    async def review(self, diff, approved, *, candidate_sha):
+    async def review(self, diff, approved, *, candidate_sha, checks_passed=()):
         self.calls.append((diff, approved, candidate_sha))
         return ReviewVerdict(
             candidate_sha=self.wrong_sha or candidate_sha,
@@ -194,9 +194,9 @@ async def test_green_ci_closes_under_separate_reserve_and_reaches_ready(delivery
     assert delivery["reviewer"].calls[0][1] == frozen.approved
     assert delivery["reviewer"].calls[0][2] == sha
     assert (await delivery["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal(
-        "2"
+        "0"
     )
-    assert (await delivery["budgets"].load(run.id, "closing")).balance.held.usd == Decimal("2")
+    assert (await delivery["budgets"].load(run.id, "closing")).balance.held.usd == Decimal("0")
     assert delivery["native"].writes.count("/key/generate") == 2
     assert sum(name == "commit" for name, _ in env.fake.calls) == 1
 
@@ -249,6 +249,13 @@ async def test_exhausted_shared_pool_blocks_code_repair(delivery):
     env.runner.handlers[Handler.DISPATCH].settings = delivery["policy"].model_copy(
         update={"requested": Resources(usd=Decimal("8"), calls=8, tokens=9000)}
     )
+
+    async def spent(alias):
+        usage = await original(alias)
+        return usage.model_copy(update={"usd": Decimal("8")})
+
+    original = delivery["budget"].settlement.gateway.read_spend
+    delivery["budget"].settlement.gateway.read_spend = spent
     run, _, _, sha = await published(delivery)
     check(delivery, sha, status="failed", failure_kind="code")
     assert (await env.runner.tick()).parked == 1

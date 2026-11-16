@@ -18,6 +18,52 @@ from forge.store.commands import command_retry_budget
 from forge.store.records import EffectRecord
 
 
+def test_reconcile_reply_names_effects_in_prose():
+    result = CommandResult(
+        status="observed",
+        reason="effects_observed",
+        run_id="a" * 32,
+        data_json=canonical_json({"effects": [{"key": "run:commit", "state": "unknown"}]}).decode(),
+    )
+    text = render(result)
+    assert "run:commit" in text and "unknown" in text
+    assert "{" not in text and "effects_observed" not in text
+
+
+def test_correction_headline_differs_from_the_original_implementation():
+    from forge.engine.publish import commit_headline
+
+    assert commit_headline("Parser", correction=False) == "Implement Parser"
+    assert commit_headline("Parser", correction=True) == "Correct Parser"
+
+
+def test_provider_credential_env_and_lane_parallelism_are_configurable(monkeypatch):
+    from forge.budget.gateway import parallel_request_limit
+    from tools.litellm.bootstrap import provider_credential_env
+
+    assert provider_credential_env({}) == "ANTHROPIC_API_KEY"
+    assert provider_credential_env({"FORGE_GATEWAY_PROVIDER_KEY_ENV": "ZAI_API_KEY"}) == (
+        "ZAI_API_KEY"
+    )
+    with pytest.raises(ValueError):
+        provider_credential_env({"FORGE_GATEWAY_PROVIDER_KEY_ENV": "lower"})
+    monkeypatch.delenv("FORGE_GATEWAY_MAX_PARALLEL_REQUESTS", raising=False)
+    assert parallel_request_limit() > 1
+    monkeypatch.setenv("FORGE_GATEWAY_MAX_PARALLEL_REQUESTS", "8")
+    assert parallel_request_limit() == 8
+
+
+def test_planner_call_budget_follows_the_allowance_and_reasks_are_configurable(monkeypatch):
+    from forge.engine.model_services import planner_reasks, planning_model_calls
+
+    assert planning_model_calls(6, 4) == 6
+    assert planning_model_calls(0, 4) == 4
+    assert planning_model_calls(100, 4) == 32
+    assert planner_reasks(2) == 2
+    monkeypatch.setenv("FORGE_PLANNER_REASKS", "5")
+    assert planner_reasks(2) == 5
+
+
 def test_planner_accepts_fences_trailing_text_and_a_slash_path():
     from forge.domain.plan import _repo_path
     from forge.planning.planner import decode_reply, extract_model_json
@@ -26,7 +72,9 @@ def test_planner_accepts_fences_trailing_text_and_a_slash_path():
     assert extract_model_json(fenced).startswith("{")
     assert decode_reply(fenced, 100_000).kind == "blocked"
     assert _repo_path("src/") == "src"
-    assert "pytest" in SYSTEM and "git" in SYSTEM
+    assert "pytest and ruff are not installed" in SYSTEM
+    assert "may run pytest" not in SYSTEM
+    assert "git" in SYSTEM
 
 
 def test_usd_quantizes_float_noise_and_renders_plainly():

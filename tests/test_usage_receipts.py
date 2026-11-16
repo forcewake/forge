@@ -199,7 +199,7 @@ class TestIngestReceipt:
         await lane_case["api"].report(pending.identity, report(pending))
         assert (await env.runner.tick()).parked == 1
         first = await lane_case["budgets"].load(run.id, "implementation")
-        assert first.balance.held == resources(4, 2000, "2")
+        assert first.balance.held == Resources()
         service = operator_commands(lane_case)
         assert (await service.submit(envelope(lane_case, "retry"))).reason == "retry_scheduled"
         assert (await env.runner.tick()).completed == 1
@@ -207,7 +207,7 @@ class TestIngestReceipt:
         renewed = await env.runs.load(run.id)
         assert (renewed.attempt, renewed.generation) == (2, 2)
         after = await lane_case["budgets"].load(run.id, "implementation")
-        assert len(after.reservations) == 2 and after.balance.held == resources(8, 4000, "4")
+        assert len(after.reservations) == 2 and after.balance.held == resources(4, 2000, "2")
         async with env.factory() as session:
             rows = list((await session.scalars(select(EngineLaneSession))).all())
         assert {(row.attempt, row.generation) for row in rows} == {(1, 1), (2, 2)}

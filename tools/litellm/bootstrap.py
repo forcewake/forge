@@ -6,6 +6,7 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 
 ROOT = Path(__file__).resolve().parent
@@ -34,6 +35,15 @@ def verify_artifact(root: Path = ROOT) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def provider_credential_env(environ: dict[str, str] | None = None) -> str:
+    """Which environment variable carries the upstream model credential."""
+    source = os.environ if environ is None else environ
+    name = source.get("FORGE_GATEWAY_PROVIDER_KEY_ENV", "ANTHROPIC_API_KEY")
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name):
+        raise ValueError("provider credential environment name is invalid")
+    return name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
@@ -42,6 +52,7 @@ def main() -> None:
     if not 0 < args.port < 65536:
         raise ValueError("invalid listening port")
     verify_artifact()
+    provider_env = provider_credential_env()
     # No inherited provider/config/Python variables can add a second paid route.
     names = (
         "PATH",
@@ -49,7 +60,7 @@ def main() -> None:
         "LANG",
         "DATABASE_URL",
         "LITELLM_MASTER_KEY",
-        "ANTHROPIC_API_KEY",
+        provider_env,
         "PRISMA_BINARY_CACHE_DIR",
         "PRISMA_CLI_PATH",
         "PRISMA_CLI_QUERY_ENGINE_TYPE",
@@ -57,8 +68,7 @@ def main() -> None:
     )
     environment = {name: os.environ[name] for name in names if name in os.environ}
     if not all(
-        environment.get(name)
-        for name in ("DATABASE_URL", "LITELLM_MASTER_KEY", "ANTHROPIC_API_KEY")
+        environment.get(name) for name in ("DATABASE_URL", "LITELLM_MASTER_KEY", provider_env)
     ):
         raise ValueError("explicit database, administrator and provider credentials are required")
     environment.update(

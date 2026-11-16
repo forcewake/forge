@@ -244,7 +244,7 @@ async def test_never_started_lane_is_bounded_without_a_second_native_dispatch(ca
     assert not env.fake.lanes
     assert (await case["keys"].get(f"forge:{run.id}:1:1")).state == "purged"
     assert sum(call[0] == "dispatch_lane" for call in env.fake.calls) == 1
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("2")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
 
 
 async def test_budget_refusal_never_dispatches_or_serves_a_credential(case):
@@ -296,7 +296,7 @@ async def test_completed_report_consumes_only_the_current_accepted_candidate(cas
     step = await env.steps.get(lane_key(pending.identity) + ":publish")
     assert candidate.diff_sha256 in step.payload_json and step.handler == Handler.PUBLISH
     assert not any(call[0] == "commit" for call in env.fake.calls)
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("2")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
 
 
 async def test_transient_failure_atomically_advances_identity_and_reserves_again(case):
@@ -314,7 +314,7 @@ async def test_transient_failure_atomically_advances_identity_and_reserves_again
     assert second.dispatch.nonce != old_nonce
     assert len(env.fake.lanes) == 2 and case["native"].writes.count("/key/generate") == 2
     pool = await case["budgets"].load(run.id, "implementation")
-    assert len(pool.reservations) == 2 and pool.balance.held.usd == Decimal("4")
+    assert len(pool.reservations) == 2 and pool.balance.held.usd == Decimal("2")
 
 
 async def test_fatal_failure_preserves_reason_without_revival(case):
@@ -337,6 +337,8 @@ async def test_pool_too_small_for_another_attempt_is_budget_exhausted(case):
         update={"requested": Resources(usd=Decimal("8"), calls=8, tokens=9000)}
     )
     run, _, pending = await started(case)
+    for row in case["native"].keys.values():
+        row["spend"] = 8
     await report(case, pending)
     assert (await env.runner.tick()).completed == 1
     advance(case)
@@ -345,7 +347,9 @@ async def test_pool_too_small_for_another_attempt_is_budget_exhausted(case):
     current = await env.runs.load(run.id)
     assert current.reason == "budget_exhausted" and current.state == State.BLOCKED
     assert len(env.fake.lanes) == 1
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("8")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.settled.usd == Decimal(
+        "8"
+    )
 
 
 async def test_native_success_without_candidate_remains_waiting(case):

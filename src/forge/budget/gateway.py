@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, localcontext
 import json
 import math
+import os
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -35,6 +36,17 @@ MAX_RESPONSE_BYTES = 1048576
 
 class GatewayUnavailable(ValueError):
     pass
+
+
+def parallel_request_limit() -> int:
+    """Lane calls share one key. One in-flight request produces 429s."""
+    raw = os.environ.get("FORGE_GATEWAY_MAX_PARALLEL_REQUESTS", "4")
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError("gateway parallel request limit must be an integer")
+    value = int(raw)
+    if not 1 <= value <= 32:
+        raise ValueError("gateway parallel request limit is outside 1..32")
+    return value
 
 
 def quantize_usd(value: Decimal) -> Decimal:
@@ -144,12 +156,21 @@ class LiteLLMGateway:
         rows, count = data.get("keys"), data.get("total_count")
         if count == 0 and rows == []:
             return None
-        if type(count) is not int or count != 1 or not isinstance(rows, list) or len(rows) != 1:
+        if (
+            type(count) is not int
+            or not isinstance(rows, list)
+            or count != len(rows)
+            or not 1 <= count <= 2
+        ):
             raise GatewayUnavailable("gateway alias is not unique")
-        row = rows[0]
-        if not isinstance(row, dict) or row.get("token") != record.token_digest:
+        matched = [
+            row for row in rows if isinstance(row, dict) and row.get("token") == record.token_digest
+        ]
+        if len(matched) != 1:
             raise GatewayUnavailable("gateway alias resolves to different material")
-        return row
+        if any(row.get("blocked") is not True for row in rows if row is not matched[0]):
+            raise GatewayUnavailable("gateway alias is not unique")
+        return matched[0]
 
     def _metadata(self, record: KeyRecord, allowance: Resources) -> dict[str, Any]:
         return {
@@ -180,7 +201,7 @@ class LiteLLMGateway:
             or quantize_usd(Decimal(cap)) != quantize_usd(Decimal(str(_usd(allowance.usd))))
             or row.get("metadata") != self._metadata(record, allowance)
             or row.get("allowed_routes") != list(ALLOWED_ROUTES)
-            or row.get("max_parallel_requests") != 1
+            or row.get("max_parallel_requests") != parallel_request_limit()
             or row.get("config") not in (None, {})
             or row.get("aliases") not in (None, {})
             or row.get("budget_duration") is not None
@@ -299,7 +320,7 @@ class LiteLLMGateway:
                 "budget_duration": None,
                 "key_type": "default",
                 "allowed_routes": list(ALLOWED_ROUTES),
-                "max_parallel_requests": 1,
+                "max_parallel_requests": parallel_request_limit(),
                 "blocked": False,
             },
             alias,

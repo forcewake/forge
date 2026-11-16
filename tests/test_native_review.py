@@ -218,7 +218,7 @@ async def test_unknown_model_is_held_and_never_called_again(native):
     assert (await native["env"].runner.tick()).parked == 1
     row = await request_row(native, event.head_sha)
     assert row.state == "model_requested" and row.result_json is None
-    assert (await native["budgets"].load(row.run_id, "closing")).balance.held.usd == 1
+    assert (await native["budgets"].load(row.run_id, "closing")).balance.held.usd == 0
     await native["reactive"].submit(event)
     await native["native_reconciler"].tick()
     assert len(native["native_reviewer"].calls) == 1

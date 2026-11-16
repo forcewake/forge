@@ -72,6 +72,19 @@ class GatewayKeyStore:
                 select(EngineGatewayKey).where(EngineGatewayKey.alias == scope.alias)
             )
             if row is not None:
+                if row.state == "purged":
+                    secret = self.vault.generate()
+                    row.attempt = lease.attempt
+                    row.generation = lease.generation
+                    row.purpose = purpose
+                    row.reference_json = reference.model_dump_json()
+                    row.token_digest = hashlib.sha256(secret.encode()).hexdigest()
+                    row.aad_digest = scope.aad_digest
+                    row.expires_at = scope.expires_at
+                    row.state = "reserved"
+                    row.ciphertext = self.vault.seal(scope, secret)
+                    await session.flush()
+                    return _record(row)
                 record = _record(row)
                 if record.scope != scope or record.reference != reference:
                     raise StoreConflict("gateway alias was reused with different input")

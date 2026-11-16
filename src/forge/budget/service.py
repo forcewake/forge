@@ -29,6 +29,10 @@ def reservation_for(identity: RunIdentity, purpose: Purpose) -> str:
     return f"{purpose}:{identity.attempt}:{identity.generation}"
 
 
+def _renewing(stored: KeyRecord | None, expires_at: datetime) -> bool:
+    return stored is not None and stored.state == "purged" and stored.scope.expires_at != expires_at
+
+
 class BudgetService:
     def __init__(
         self,
@@ -78,6 +82,8 @@ class BudgetService:
                 if not isinstance(outcome, Applied) or not outcome.value.blocked:
                     return Unknown(evidence='{"reason":"previous_key_not_blocked"}')
                 await self.keys.purge(old.scope.alias)
+        stored = await self.keys.get(alias)
+        renewing = _renewing(stored, expires_at)
         reservation = await self.store.reserve(
             lease,
             pool,
@@ -85,8 +91,18 @@ class BudgetService:
             requested,
             minimum,
             planning=purpose == "planning",
+            replace_settled=renewing,
             now=self.clock.now(),
         )
+        if (
+            stored is not None
+            and stored.state == "purged"
+            and (reservation.status == "unknown" or not renewing)
+        ):
+            return Refused(
+                reason="unproven_planning_hold",
+                evidence='{"reason":"unproven_planning_hold"}',
+            )
         reference = GatewayKeyRef(
             alias=alias,
             model=spec.model,
@@ -95,14 +111,17 @@ class BudgetService:
             blocked=False,
         )
         await self.keys.prepare(lease, purpose, reference, now=self.clock.now())
-        prior = await self.effects.store.get(f"{alias}:mint")
+        mint_key = f"{alias}:mint"
+        if stored is not None and stored.state == "purged":
+            mint_key = f"{alias}:mint:{int(expires_at.timestamp())}"
+        prior = await self.effects.store.get(mint_key)
         original = reservation.allowance
         if prior is not None:
             original = Resources.model_validate_json(
                 json.loads(prior.payload_json)["allowance_json"]
             )
         outcome = await self.effects.gw_mint(
-            lease, f"{alias}:mint", identity, alias, spec.model, original, expires_at
+            lease, mint_key, identity, alias, spec.model, original, expires_at
         )
         latest = await self.keys.get(alias)
         return self._admitted(outcome, latest, identity, spec, expires_at, reservation.allowance)

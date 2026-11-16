@@ -175,6 +175,8 @@ class RetryStore:
         row.state, row.due_at = "scheduled", now
         row.lease_owner, row.lease_expires_at = None, None
         row.max_attempts = max(row.max_attempts, row.attempts + 1)
+        if handler == Handler.PLAN:
+            await release_unknown_holds(session, run.id)
         if handler == Handler.PLAN and (
             row.deadline_at is None or stored_time(row.deadline_at) <= now
         ):
