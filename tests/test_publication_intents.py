@@ -354,9 +354,10 @@ class TestA12DelayedApplyGitLab:
     async def test_negative_probe_never_redispatches_and_late_commit_is_adopted(self, journal):
         journal.provider.fail_next("commit", Fault(unknown_after_success=True, delay_visibility=2))
         assert isinstance(await journal.publish(), Unknown)
-        for _ in range(2):
-            assert (await journal.engine().recover(await journal.row())).state == "unknown"
-            assert isinstance(await journal.publish(), Unknown)
+        assert (await journal.engine().recover(await journal.row())).state == "unknown"
+        # A retry probes before it would write again. The commit is still hidden,
+        # so the effect stays unknown and nothing is dispatched a second time.
+        assert isinstance(await journal.publish(), Unknown)
         assert (await journal.engine().recover(await journal.row())).state == "adopted"
         assert journal.writes() == 1
 

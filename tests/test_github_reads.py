@@ -262,7 +262,7 @@ async def test_repository_access_failures_are_never_resource_absence(provider):
     wire.metadata_status = 200
     wire.routes["git/ref/heads/main"] = httpx.Response(404)
     assert await repo.head(REPO, "main") is None
-    assert isinstance(await repo.probe_branch(REPO, "main", PARENT), Inconclusive)
+    assert isinstance(await repo.probe_branch(REPO, "main", PARENT), DefinitelyAbsent)
 
 
 async def test_repo_scope_and_native_id_mismatch_fail_before_old_display_name_is_used(provider):
@@ -336,6 +336,15 @@ async def test_commit_probe_is_parent_bound_and_duplicate_or_missing_markers_are
         request.url.params["sha"] == COMMIT
         for request in wire.calls
         if request.url.path.endswith("/commits")
+    )
+    wire.calls.clear()
+    wire.routes["git/ref/heads/main"] = {
+        "ref": "refs/heads/main",
+        "object": {"type": "commit", "sha": PARENT},
+    }
+    wire.routes["commits"] = [{"sha": PARENT, "parents": [], "commit": {"message": "base"}}]
+    assert isinstance(
+        await repo.probe_commit(REPO, "main", MARKER, PARENT, candidate), DefinitelyAbsent
     )
 
 

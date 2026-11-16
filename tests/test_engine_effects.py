@@ -140,10 +140,8 @@ async def test_unknown_requires_explicit_reconcile_and_preserves_native_outcome(
     engine = effects(factory, provider, clock)
     assert isinstance(await engine.post_comment(lease, "note", SUBJECT, "plan", "marker"), Unknown)
     assert isinstance(await engine.post_comment(lease, "note", SUBJECT, "plan", "marker"), Unknown)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     row = await EffectStore(factory).get("note")
-    row = await engine.recover(row)
-    assert row.state == "unknown"
     row = await engine.recover(row)
     assert row.state == "adopted"
     assert await engine.post_comment(lease, "note", SUBJECT, "plan", "marker") == applied()

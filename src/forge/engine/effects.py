@@ -183,7 +183,7 @@ class Effects:
             head_branch=head_branch,
         )
         self._point("after_t1", row)
-        if row.state == "dispatched":
+        if row.state in ("dispatched", "unknown"):
             row = await self.recover(row)
         if row.state in KNOWN_OUTCOMES or row.state == "unknown":
             return self._receipt(row)

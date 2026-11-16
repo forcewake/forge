@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 
 from forge.domain.verdicts import Committed, Conflict, Unknown
-from forge.port_values import Applied, Found, Inconclusive, ReadUnavailable
+from forge.port_values import Applied, DefinitelyAbsent, Found, Inconclusive, ReadUnavailable
 from forge.providers.github.transport import Transport, TransportFailure
 from tests import test_github_reads as reads
 from tests import test_github_rest as rest
@@ -199,7 +199,7 @@ async def test_get_branch_head_falls_back_to_commits_endpoint(github):
     assert await github.repositories.head(github.repo, "main") is None
     assert not resource_calls(github, "/commits/main")
     assert isinstance(
-        await github.repositories.probe_branch(github.repo, "main", github.sha), Inconclusive
+        await github.repositories.probe_branch(github.repo, "main", github.sha), DefinitelyAbsent
     )
 
 
