@@ -1,6 +1,7 @@
 """Operator retries retain original authority; paused WIP resumes a new generation."""
 
 import hashlib
+from datetime import datetime, timezone
 
 import pytest
 from forge_protocol import CheckpointEntry, CheckpointManifest, LaneReport
@@ -13,6 +14,7 @@ from forge.store.controls import ControlStore
 from forge.store.models_execution import EngineStep
 from forge.store.resume import ResumeStore
 from forge.store.retry import RetryStore
+from forge.store.transactions import stored_time
 from tests.test_engine_commands import commands as commands, envelope
 from tests.test_engine_delivery import delivery as delivery, completed, published, check
 from tests.test_engine_lane_handlers import (
@@ -56,6 +58,9 @@ async def test_retry_planning_reclaims_original_step_with_same_payload_and_ident
         )
         before = (step.id, step.payload_json, step.attempt, step.generation, step.result_json)
     env.runner.handlers[Handler.PLAN] = original
+    async with env.factory() as session, session.begin():
+        expired = await session.get(EngineStep, before[0])
+        expired.deadline_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
     value = envelope(operator, "retry")
     result = await operator["commands"].submit(value)
     assert result.reason == "retry_scheduled"
@@ -72,6 +77,7 @@ async def test_retry_planning_reclaims_original_step_with_same_payload_and_ident
             step.result_json,
         ) == before
         assert step.state == "scheduled" and step.lease_epoch == 1
+        assert step.deadline_at is not None and stored_time(step.deadline_at) > env.clock.now()
     assert (await env.runner.tick()).completed == 1
     assert (await env.runs.load(run.id)).state == State.AWAITING_APPROVAL
 

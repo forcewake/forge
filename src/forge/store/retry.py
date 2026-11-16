@@ -1,6 +1,6 @@
 """One retry refusal table and a fenced, bounded original-handler revival."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from forge_protocol import RepairContext
 from sqlalchemy import select
@@ -132,7 +132,22 @@ class RetryStore:
         row.state, row.due_at = "scheduled", now
         row.lease_owner, row.lease_expires_at = None, None
         row.max_attempts = max(row.max_attempts, row.attempts + 1)
-        if row.deadline_at is not None and stored_time(row.deadline_at) <= now:
+        if handler == Handler.PLAN and (
+            row.deadline_at is None or stored_time(row.deadline_at) <= now
+        ):
+            frozen = await session.scalar(
+                select(EngineRunSpec).where(EngineRunSpec.run_id == run.id)
+            )
+            seconds = 90
+            if frozen is not None:
+                seconds = int(
+                    RunSpec2.model_validate_json(frozen.document_json).limits.wallclock_seconds
+                )
+            # The model grant stays the planning wall clock. The step deadline
+            # also has to outlive one bounded handler retry, whose delay can
+            # exceed that grant.
+            row.deadline_at = now + timedelta(seconds=max(seconds, 3600))
+        elif row.deadline_at is not None and stored_time(row.deadline_at) <= now:
             row.deadline_at = None
         run.state, run.failed_handler, run.reason = target.value, None, "operator_retry"
         run.version += 1
@@ -170,6 +185,20 @@ class RetryStore:
             raise StoreConflict("published retry candidate has no native head")
         if head is not None and head != base:
             raise StoreConflict("branch_drift")
+        from forge.domain.budget import Pool
+        from forge.store.budgets import BudgetStore
+        from forge.store.models_budget import EngineBudgetPool
+
+        pools = (
+            await session.scalars(
+                select(EngineBudgetPool).where(EngineBudgetPool.run_id == run.id).with_for_update()
+            )
+        ).all()
+        for pool_row in pools:
+            pool = Pool.model_validate_json(pool_row.state_json)
+            resolved = pool.resolve_unknown()
+            if resolved != pool:
+                await BudgetStore._save(session, pool_row, resolved)
         attempt, generation = run.attempt + 1, run.generation + 1
         repair = (
             RepairContext(

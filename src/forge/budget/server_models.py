@@ -172,7 +172,6 @@ class _ScopedText:
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": max_output_tokens,
-            "temperature": 0,
             "stream": False,
             "num_retries": 0,
             "max_retries": 0,

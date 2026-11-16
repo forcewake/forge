@@ -13,7 +13,7 @@ from decimal import (
 )
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import AfterValidator, Field, field_serializer, model_validator
 
 from .value import Value
 
@@ -90,6 +90,13 @@ class Resources(Value):
             calls=max(self.calls, other.calls),
             tokens=max(self.tokens, other.tokens),
         )
+
+    @field_serializer("usd", when_used="json")
+    def plain_usd(self, value: Decimal) -> str:
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
 
 
 class BudgetLimits(Resources):
@@ -289,4 +296,33 @@ class Pool(Value):
             capacity=self.capacity,
             reservations=self.reservations,
             amendments=(*self.amendments, Amendment(command_id=command_id, amount=amount)),
+        )
+
+    def resolve_unknown(self) -> "Pool":
+        """Settle an unproven hold at its known lower bound so retry can reserve again."""
+        resolved: list[Reservation] = []
+        changed = False
+        for row in self.reservations:
+            if row.status != "unknown":
+                resolved.append(row)
+                continue
+            bound = row.observed.lower_bound if row.observed is not None else Resources()
+            resolved.append(
+                Reservation(
+                    identity=row.identity,
+                    requested=row.requested,
+                    allowance=row.allowance,
+                    minimum=row.minimum,
+                    status="settled",
+                    observed=Observation(usd=bound.usd, calls=bound.calls, tokens=bound.tokens),
+                )
+            )
+            changed = True
+        if not changed:
+            return self
+        return Pool(
+            identity=self.identity,
+            capacity=self.capacity,
+            amendments=self.amendments,
+            reservations=tuple(resolved),
         )

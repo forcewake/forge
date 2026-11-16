@@ -48,7 +48,7 @@ class NativeLedger:
             native = await tx.query_raw(
                 """SELECT key_alias FROM "LiteLLM_VerificationToken"
                 WHERE token=$1 AND (blocked IS NULL OR blocked=FALSE)
-                AND expires>CURRENT_TIMESTAMP AND max_budget>=CAST(CAST($2 AS TEXT) AS DOUBLE PRECISION)
+                AND expires>(CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AND max_budget>=CAST(CAST($2 AS TEXT) AS DOUBLE PRECISION)
                 FOR UPDATE""",
                 token,
                 str(ceiling),
@@ -94,6 +94,10 @@ class NativeLedger:
                 token,
                 str(amount),
             )
+
+    async def release(self, token: str, request_id: str) -> None:
+        """A call refused before the provider sees it spends nothing."""
+        await self.settle(token, request_id, Decimal(0), 0, 0)
 
     async def settle(
         self, token: str, request_id: str, cost: Decimal, calls: int | None, tokens: int | None

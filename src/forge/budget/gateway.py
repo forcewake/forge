@@ -1,7 +1,7 @@
 """Pinned LiteLLM admin contract; all gateway writes are called through Effects."""
 
 from datetime import datetime
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_DOWN, localcontext
 import json
 import math
 from typing import Any
@@ -37,10 +37,19 @@ class GatewayUnavailable(ValueError):
     pass
 
 
+def quantize_usd(value: Decimal) -> Decimal:
+    """Shared 1e-6 USD scale. Float storage keeps about 15 significant digits."""
+    quantum = Decimal("0.000001")
+    floored = value.quantize(quantum, rounding=ROUND_DOWN)
+    snapped = Decimal(format(float(floored), "f")).quantize(quantum, rounding=ROUND_DOWN)
+    if snapped < 0 or not snapped.is_finite():
+        raise ValueError("USD budget cannot be represented at micro-dollar precision")
+    return snapped
+
+
 def _usd(value: Decimal) -> float:
-    result = float(value)
-    if Decimal.from_float(result) > value:
-        result = math.nextafter(result, 0)
+    snapped = quantize_usd(value)
+    result = float(snapped)
     if not math.isfinite(result) or result <= 0:
         raise ValueError("positive USD budget cannot be represented by gateway")
     return result
@@ -168,7 +177,7 @@ class LiteLLMGateway:
         if (
             row.get("key_alias") != record.scope.alias
             or row.get("models") != [record.scope.model]
-            or Decimal(cap) != Decimal(str(_usd(allowance.usd)))
+            or quantize_usd(Decimal(cap)) != quantize_usd(Decimal(str(_usd(allowance.usd))))
             or row.get("metadata") != self._metadata(record, allowance)
             or row.get("allowed_routes") != list(ALLOWED_ROUTES)
             or row.get("max_parallel_requests") != 1
@@ -351,12 +360,15 @@ class LiteLLMGateway:
             or usage.get("policy_digest") != self.policy.digest
         ):
             raise GatewayUnavailable("durable gateway usage is unavailable")
-        settled, held = Decimal(usage["settled_usd"]), Decimal(usage["held_usd"])
+        settled, held = (
+            quantize_usd(Decimal(usage["settled_usd"])),
+            quantize_usd(Decimal(usage["held_usd"])),
+        )
         if min(settled, held) < 0 or not settled.is_finite() or not held.is_finite():
             raise GatewayUnavailable("durable gateway money is invalid")
         with localcontext() as context:
             context.prec = 80
-            total = settled + held
+            total = quantize_usd(settled + held)
         if usage.get("complete") is True and held != 0:
             raise GatewayUnavailable("complete usage still has an unresolved hold")
         return Observation(

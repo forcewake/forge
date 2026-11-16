@@ -54,7 +54,11 @@ class BudgetCommands:
                     EngineBudgetAmendment.state.in_(("authorized", "unknown")),
                 )
             )
-            if reservation is None or reservation.status != "open" or pending is not None:
+            if (
+                reservation is None
+                or reservation.status not in ("open", "unknown")
+                or pending is not None
+            ):
                 raise StoreConflict("amendment_grant_inactive")
             assert key.reference_json is not None
             if (

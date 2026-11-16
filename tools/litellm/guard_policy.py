@@ -1,7 +1,7 @@
 """Trusted text-model cost ceilings for the pinned native callback."""
 
 from dataclasses import dataclass
-from decimal import Decimal, localcontext, ROUND_CEILING
+from decimal import Decimal, localcontext, ROUND_CEILING, ROUND_DOWN
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +25,16 @@ def money(value: object) -> Decimal:
     if not isinstance(exponent, int) or max(-exponent, 0) > 18 or len(digits) + exponent > 20:
         raise BudgetDenied("cost exceeds exact storage bounds")
     return parsed
+
+
+def wire_usd(value: Decimal) -> Decimal:
+    """Round down to 1e-6 USD so a float-stored cap matches the approved allowance."""
+    quantum = Decimal("0.000001")
+    floored = value.quantize(quantum, rounding=ROUND_DOWN)
+    snapped = Decimal(format(float(floored), "f")).quantize(quantum, rounding=ROUND_DOWN)
+    if snapped < 0 or not snapped.is_finite():
+        raise BudgetDenied("cost must be finite and nonnegative")
+    return snapped
 
 
 def observed_cost(value: object) -> Decimal:
