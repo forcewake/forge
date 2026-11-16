@@ -74,6 +74,11 @@ def toml_dump(document, prefix=""):
 class Hold(BaseHTTPRequestHandler):
     hold = threading.Event()
     seen = []
+    saw_branch = False
+    # After the base branch is served, the command's last read is the approver
+    # membership check. Close the gate on that response so the plan step blocks
+    # in flight instead of reaching the gateway and parking before the kill.
+    close_after_command = False
 
     def log_message(self, *args):
         return None
@@ -89,6 +94,14 @@ class Hold(BaseHTTPRequestHandler):
 
     def finish_json(self):
         Hold.seen.append(self.path)
+        if "/repository/branches/" in self.path:
+            Hold.saw_branch = True
+        close = (
+            Hold.close_after_command
+            and Hold.hold.is_set()
+            and Hold.saw_branch
+            and "members/all/" in self.path
+        )
         if not Hold.hold.is_set():
             Hold.hold.wait(20)
         path = self.path
@@ -116,6 +129,10 @@ class Hold(BaseHTTPRequestHandler):
                 "bot": True,
             }
         body = json.dumps(payload).encode()
+        if close:
+            # Close before the bytes land so the client's next request blocks.
+            Hold.close_after_command = False
+            Hold.hold.clear()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -196,6 +213,8 @@ async def test_sigkill_mid_command_and_mid_lane_recovers_on_restart(tmp_path):
     key, cert = certificate(tmp_path)
     Hold.hold.clear()
     Hold.seen.clear()
+    Hold.saw_branch = False
+    Hold.close_after_command = False
     server, port = serve(cert, key)
     native = f"https://127.0.0.1:{port}"
     config, values = configuration(tmp_path, native_url=native, ca=cert)
@@ -232,6 +251,7 @@ async def test_sigkill_mid_command_and_mid_lane_recovers_on_restart(tmp_path):
         worker.sigkill()
         assert worker.exit_code == -9 or worker.exit_code == 137 or not worker.alive
         await expire(database)
+        Hold.close_after_command = True
         Hold.hold.set()
         restarted.start()
         await wait_until(lambda: command_settled(database), 20, restarted.tail)
