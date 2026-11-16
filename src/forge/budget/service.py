@@ -8,6 +8,7 @@ from forge_protocol import RunIdentity, ModelKeyGrant
 
 from forge.budget.credentials import Purpose, CredentialUnavailable
 from forge.budget.admission import StrictGatewayAdmission
+from forge.budget.gateway import GatewayUnavailable
 from forge.budget.settlement import Settlement
 from forge.domain.budget import Resources
 from forge.domain.run_spec import RunPolicy
@@ -55,17 +56,7 @@ class BudgetService:
         minimum: Resources,
         expires_at: datetime,
     ) -> GatewayOutcome:
-        if requested.usd <= 0 or minimum.usd <= 0:
-            return Refused(
-                reason="positive_metered_usd_required",
-                evidence='{"reason":"positive_metered_usd_required"}',
-            )
-        if purpose == "implementation" and spec.metering != "metered":
-            return Refused(
-                reason="unmetered_driver_has_no_gateway_key",
-                evidence='{"reason":"unmetered_driver"}',
-            )
-        refused = await self.admission.readiness(spec.model)
+        refused = await self._preflight(spec, purpose, requested, minimum)
         if refused is not None:
             return refused
         await self.store.initialize(lease, spec, now=self.clock.now())
@@ -126,6 +117,24 @@ class BudgetService:
         )
         latest = await self.keys.get(alias)
         return self._admitted(outcome, latest, identity, spec, expires_at, reservation.allowance)
+
+    async def _preflight(
+        self, spec: RunPolicy, purpose: Purpose, requested: Resources, minimum: Resources
+    ) -> GatewayOutcome | None:
+        if requested.usd <= 0 or minimum.usd <= 0:
+            return Refused(
+                reason="positive_metered_usd_required",
+                evidence='{"reason":"positive_metered_usd_required"}',
+            )
+        if purpose == "implementation" and spec.metering != "metered":
+            return Refused(
+                reason="unmetered_driver_has_no_gateway_key",
+                evidence='{"reason":"unmetered_driver"}',
+            )
+        try:
+            return await self.admission.readiness(spec.model)
+        except GatewayUnavailable:
+            return Unknown(evidence='{"reason":"gateway_readiness_unavailable"}')
 
     @staticmethod
     def _admitted(

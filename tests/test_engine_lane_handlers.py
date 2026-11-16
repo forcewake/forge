@@ -108,6 +108,7 @@ async def case(env, settings, tmp_path):
             api=api,
             admission=admission,
             policy=policy,
+            gateway=gateway,
         )
     finally:
         await gateway.aclose()
@@ -244,6 +245,77 @@ async def test_never_started_lane_is_bounded_without_a_second_native_dispatch(ca
     assert not env.fake.lanes
     assert (await case["keys"].get(f"forge:{run.id}:1:1")).state == "purged"
     assert sum(call[0] == "dispatch_lane" for call in env.fake.calls) == 1
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
+
+
+async def test_dispatch_resume_keeps_going_when_the_gateway_blips(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    env = case["env"]
+    run, _frozen = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    env.fake.fail_next("ensure_branch", Fault(http_5xx=True))
+    assert (await env.runner.tick()).rescheduled == 1
+    assert (await case["keys"].get(f"forge:{run.id}:1:1")).state == "active"
+
+    class Outage:
+        def __init__(self):
+            self.calls = 0
+
+        async def readiness(self, model):
+            self.calls += 1
+            raise GatewayUnavailable("gateway readiness HTTP 520")
+
+    outage = Outage()
+    case["budget"].admission = outage
+    advance(case)
+    tick = await env.runner.tick()
+    assert tick.parked == 0 and outage.calls == 0
+    current = await env.runs.load(run.id)
+    assert current.state != State.BLOCKED
+    assert current.reason != "strict_budget_enforcement_unavailable"
+
+
+async def test_gateway_outage_before_a_key_defers_instead_of_blocking(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    env = case["env"]
+
+    class Outage:
+        async def readiness(self, model):
+            raise GatewayUnavailable("gateway readiness HTTP 520")
+
+    case["budget"].admission = Outage()
+    run, _ = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    assert (await env.runner.tick()).rescheduled == 1
+    current = await env.runs.load(run.id)
+    assert current.state != State.BLOCKED
+    assert await case["keys"].get(f"forge:{run.id}:1:1") is None
+
+
+async def test_blocking_dispatch_releases_the_implementation_hold(case):
+    env = case["env"]
+    run, _, _pending = await started(case)
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd > 0
+    advance(case, 601)
+    # Only the original dispatch step should observe its own deadline.
+    from forge.store.models_execution import EngineStep
+    from sqlalchemy import select
+
+    async with env.factory() as session, session.begin():
+        rows = (await session.scalars(select(EngineStep).where(EngineStep.run_id == run.id))).all()
+        for row in rows:
+            if row.handler == "await_lane":
+                row.due_at = env.clock.now() + timedelta(hours=2)
+            elif row.handler == "dispatch" and "settings" in (row.payload_json or ""):
+                row.state = "scheduled"
+                row.due_at = env.clock.now()
+                row.lease_owner = None
+                row.lease_expires_at = None
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.state == State.BLOCKED and current.reason == "dispatch_expired"
     assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
 
 

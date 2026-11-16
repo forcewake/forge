@@ -109,15 +109,22 @@ class LiteLLMGateway:
 
     async def readiness(self, model: str) -> Refused | None:
         nonce = uuid4().hex
-        if self.policy is not None:
-            try:
-                status, body = await self._request(
-                    "GET", "/forge/budget/readiness", params={"nonce": nonce}
-                )
-                if status == 200 and self.policy.accepts(body, nonce, model, self.artifact_digest):
-                    return None
-            except GatewayUnavailable:
-                pass
+        if self.policy is None:
+            return Refused(
+                reason="strict_budget_enforcement_unavailable",
+                evidence=_evidence("trusted_guard_or_pricing_not_verified"),
+            )
+        try:
+            status, body = await self._request(
+                "GET", "/forge/budget/readiness", params={"nonce": nonce}
+            )
+        except GatewayUnavailable:
+            raise
+        if status == 200 and self.policy.accepts(body, nonce, model, self.artifact_digest):
+            return None
+        # A blip is not proof that the guard is unconfigured.
+        if status == 429 or status >= 500:
+            raise GatewayUnavailable(f"gateway readiness HTTP {status}")
         return Refused(
             reason="strict_budget_enforcement_unavailable",
             evidence=_evidence("trusted_guard_or_pricing_not_verified"),
@@ -284,7 +291,10 @@ class LiteLLMGateway:
         allowance: Resources,
         expires_at: datetime,
     ) -> GatewayOutcome:
-        readiness = await self.readiness(model)
+        try:
+            readiness = await self.readiness(model)
+        except GatewayUnavailable:
+            return Unknown(evidence=_evidence("gateway_readiness_unavailable"))
         if readiness is not None:
             return readiness
         record = await self.keys.get(alias)

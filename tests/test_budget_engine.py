@@ -42,6 +42,7 @@ class NativeAdmin:
     def __init__(self, clock):
         self.clock, self.keys, self.writes = clock, {}, []
         self.drop_mint, self.unavailable, self.tamper = False, False, None
+        self.readiness_status = None
         self.unavailable_write = False
         self.policy = json.dumps(
             {
@@ -65,6 +66,8 @@ class NativeAdmin:
             raise httpx.ConnectError("synthetic unreachable", request=request)
         path = request.url.path
         if path == "/forge/budget/readiness":
+            if self.readiness_status is not None:
+                return httpx.Response(self.readiness_status, json={"error": "unavailable"})
             return httpx.Response(
                 200,
                 json={
@@ -553,6 +556,26 @@ def test_vault_binds_every_identity_purpose_model_alias_expiry_and_authenticates
     for corrupt in (sealed[:-1], bytes(flipped), b"\x02" + sealed[1:]):
         with pytest.raises(CredentialUnavailable):
             vault.open(scope, corrupt)
+
+
+async def test_gateway_readiness_5xx_is_unavailable_not_a_refusal(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    case["native"].readiness_status = 520
+    with pytest.raises(GatewayUnavailable, match="HTTP 520"):
+        await case["gateway"].readiness("test-model")
+
+
+async def test_prepare_keeps_a_gateway_blip_unknown(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    class Outage:
+        async def readiness(self, model):
+            raise GatewayUnavailable("gateway readiness HTTP 503")
+
+    case["service"].admission = Outage()
+    result = await prepare(case)
+    assert result.kind == "unknown" and "gateway_readiness_unavailable" in result.evidence
 
 
 async def test_real_adapter_refuses_strict_budget_before_any_pool_key_or_model_request(case):
