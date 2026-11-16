@@ -44,6 +44,38 @@ def client(handler) -> tuple[LaneClient, list[str]]:
     return lane, seen
 
 
+async def test_a_persistent_blip_retries_for_about_fifteen_seconds():
+    slept: list[float] = []
+    beat = Heartbeat(
+        forge_run_id="run-1",
+        attempt=1,
+        generation=1,
+        sequence=1,
+        observed_at=datetime.now(timezone.utc),
+        phase="running",
+    )
+
+    def handler(_count, _request):
+        return httpx.Response(503)
+
+    lane, seen = client(handler)
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    lane._sleep = record
+    try:
+        await lane.heartbeat(beat)
+    except LaneFailure as exc:
+        assert "HTTP 503" in exc.detail
+    else:
+        raise AssertionError("a persistent refusal eventually succeeded")
+    assert slept == [1.0, 2.0, 4.0, 5.0, 3.0]
+    assert sum(slept) == 15 and max(slept) <= 5
+    await lane.http.aclose()
+    assert len(seen) == len(slept) + 1
+
+
 async def test_heartbeat_retries_a_cloudflare_520():
     beat = Heartbeat(
         forge_run_id="run-1",

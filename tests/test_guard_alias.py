@@ -3,7 +3,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from tools.litellm.guard_ledger import NativeLedger, deleted_aliases
+from tools.litellm.guard_ledger import NativeLedger
+from tools.litellm.guard_policy import BudgetDenied
 
 
 class Memory:
@@ -33,6 +34,9 @@ class Memory:
     def _apply(self, sql: str, args: tuple[object, ...]) -> list[dict[str, object]]:
         if sql.startswith("CREATE TABLE"):
             return []
+        if sql.startswith('SELECT blocked FROM "LiteLLM_VerificationToken"'):
+            row = self.native.get(str(args[0]))
+            return [] if row is None else [{"blocked": row["blocked"]}]
         if "LiteLLM_VerificationToken" in sql:
             token, ceiling = str(args[0]), Decimal(str(args[1]))
             row = self.native.get(token)
@@ -92,16 +96,17 @@ class Memory:
         raise AssertionError(sql)
 
 
-async def test_delete_then_remint_keeps_one_live_alias():
+def test_guard_does_not_register_middleware_after_startup():
     from pathlib import Path
 
     guard = Path("tools/litellm/forge_budget_guard.py").read_text()
-    assert "/key/delete" in guard and "retire_alias" in guard
-    aliases = deleted_aliases({"key_aliases": ["forge:run:1:1:planning"]})
-    assert aliases == ("forge:run:1:1:planning",)
+    assert "middleware" not in guard and "add_middleware" not in guard
+
+
+async def test_delete_then_remint_keeps_one_live_alias():
     memory = Memory()
     ledger = NativeLedger(memory)
-    alias = aliases[0]
+    alias = "forge:run:1:1:planning"
     old, new = "a" * 64, "b" * 64
     expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
     memory.native[old] = {"key_alias": alias, "blocked": False, "expires": expiry, "max_budget": 10}
@@ -129,3 +134,21 @@ async def test_remint_replaces_the_alias_when_delete_did_not_run():
     await ledger.reserve(new, alias, "f" * 32, Decimal("10"), Decimal("1"))
     assert memory.by_alias[alias] == new
     assert memory.accounts[old]["alias"] == f"{alias}:retired:{old}"
+
+
+async def test_a_live_key_keeps_its_alias():
+    memory = Memory()
+    ledger = NativeLedger(memory)
+    alias = "forge:run:1:1:planning"
+    old, new = "3" * 64, "4" * 64
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+    memory.native[old] = {"key_alias": alias, "blocked": False, "expires": expiry, "max_budget": 10}
+    memory.native[new] = {"key_alias": alias, "blocked": False, "expires": expiry, "max_budget": 10}
+    await ledger.reserve(old, alias, "a" * 32, Decimal("10"), Decimal("1"))
+    try:
+        await ledger.reserve(new, alias, "b" * 32, Decimal("10"), Decimal("1"))
+    except BudgetDenied as exc:
+        assert "live key" in str(exc)
+    else:
+        raise AssertionError("a live alias was replaced")
+    assert memory.by_alias[alias] == old

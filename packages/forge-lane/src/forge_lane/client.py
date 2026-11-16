@@ -64,18 +64,18 @@ class LaneClient:
     async def call(
         self, method: str, path: str, *, retry: bool = False, **kwargs: Any
     ) -> httpx.Response:
-        delay = 0.2
-        for attempt in range(3):
+        """Retry a transient blip for about 15s. Each pause doubles and stops at 5s."""
+        waited, delay = 0.0, 1.0
+        while True:
             try:
                 return await self.request(method, path, **kwargs)
             except LaneFailure as exc:
-                if not retry or attempt == 2 or not transient(exc):
+                pause = min(delay, 5.0, 15.0 - waited)
+                if not retry or not transient(exc) or pause <= 0:
                     raise
-                await self._sleep(delay)
+                await self._sleep(pause)
+                waited += pause
                 delay = min(delay * 2, 5.0)
-        raise LaneFailure(
-            ExitCode.TRANSPORT, "transport_error", f"Lane request failed: {method} {path}"
-        )
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         limit = kwargs.pop("response_limit", 2 * 1024 * 1024)

@@ -27,7 +27,7 @@ SCHEMA = (
 
 
 async def release_alias(tx: Any, alias: str, *, keep: str | None) -> None:
-    """A blocked key keeps its holds, but no longer owns the live alias."""
+    """A blocked or deleted key keeps its holds, but no longer owns the live alias."""
     rows = await tx.query_raw(
         "SELECT token_digest FROM forge_budget_guard_accounts WHERE alias=$1 FOR UPDATE",
         alias,
@@ -36,22 +36,17 @@ async def release_alias(tx: Any, alias: str, *, keep: str | None) -> None:
         token = row["token_digest"]
         if token == keep:
             continue
+        native = await tx.query_raw(
+            'SELECT blocked FROM "LiteLLM_VerificationToken" WHERE token=$1',
+            token,
+        )
+        if len(native) == 1 and native[0]["blocked"] is not True:
+            raise BudgetDenied("alias is still owned by a live key")
         await tx.execute_raw(
             "UPDATE forge_budget_guard_accounts SET blocked=TRUE, alias=$2 WHERE token_digest=$1",
             token,
             f"{alias}:retired:{token}",
         )
-
-
-def deleted_aliases(body: object) -> tuple[str, ...]:
-    if not isinstance(body, dict):
-        return ()
-    raw = body.get("key_aliases")
-    if not isinstance(raw, list) or any(
-        type(item) is not str or not item or len(item) > 200 for item in raw
-    ):
-        return ()
-    return tuple(raw)
 
 
 class NativeLedger:
