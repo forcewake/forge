@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 import json
+import logging
 import math
 from time import monotonic
 from typing import Generic, Protocol, TypeVar
@@ -221,6 +222,13 @@ class StepRunner(Generic[E]):
             )
         except Exception as error:
             await self._stop(renewal)
+            logging.getLogger("forge.worker").exception(
+                "step handler failed run_id=%s step_id=%s handler=%s error_type=%s",
+                holder.current.run_id,
+                holder.current.step_id,
+                holder.current.handler.value,
+                type(error).__name__,
+            )
             return await self._park(
                 holder.current,
                 f"handler_error:{type(error).__name__}",

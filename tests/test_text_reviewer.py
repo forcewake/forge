@@ -55,6 +55,14 @@ async def test_reviewer_receives_complete_frozen_spec_approval_diff_and_sha_with
     assert prompt["frozen_specification"] == frozen.model_dump(mode="json")
     assert prompt["approved_input"] == approved.model_dump(mode="json")
     assert "tools" not in call and "candidate_sha" in verdict.evidence
+    checked = Model()
+    await TextReviewer(frozen, checked, credential_alias="closing-key").review(
+        DIFF, approved, candidate_sha=SHA, checks_passed=("unit", "lint")
+    )
+    recorded = json.loads(checked.calls[0]["prompt"])
+    assert recorded["required_checks_passed"] == ["unit", "lint"]
+    assert "still open" in checked.calls[0]["system"]
+    assert "remain separate" not in checked.calls[0]["system"]
 
 
 @pytest.mark.parametrize(

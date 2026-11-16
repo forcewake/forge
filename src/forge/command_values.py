@@ -126,11 +126,21 @@ def render(result: CommandResult) -> str:
         state = facts.get("state") if isinstance(facts, dict) else None
         # A blocked or failed run is explained in prose. Other snapshots keep
         # the canonical evidence so a status comment can name the candidate.
-        extra = (
-            "\n" + human_status(result.data_json)
-            if state in {"blocked", "failed"}
-            else "\n" + result.data_json
-        )
+        if result.reason == "effects_observed" and isinstance(facts, dict):
+            lines = [
+                f"`{item['key']}` is {item['state'].replace('_', ' ')}"
+                for item in facts.get("effects") or []
+                if isinstance(item, dict)
+                and isinstance(item.get("key"), str)
+                and isinstance(item.get("state"), str)
+            ]
+            extra = ("\nObserved effects: " + "; ".join(lines) + ".") if lines else ""
+        else:
+            extra = (
+                "\n" + human_status(result.data_json)
+                if state in {"blocked", "failed"}
+                else "\n" + result.data_json
+            )
     return message + run + extra
 
 

@@ -38,6 +38,10 @@ def stopped(reason: str) -> StepResult:
     return StepResult(result_json(reason=reason), park=Park(reason))
 
 
+def commit_headline(title: str, *, correction: bool) -> str:
+    return f"{'Correct' if correction else 'Implement'} {title}"
+
+
 class PublishHandler:
     def __init__(
         self,
@@ -202,7 +206,9 @@ class PublishHandler:
             base_contents=base,
             base_modes=modes,
             branch=scope.branch,
-            commit_message=f"Implement {approved.spec.task_title}",
+            commit_message=commit_headline(
+                approved.spec.task_title, correction=approved.brief.repair is not None
+            ),
             allowed_paths=approved.spec.write_policy.allowed_globs,
             policy=approved.spec.write_policy,
         )

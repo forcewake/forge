@@ -22,7 +22,9 @@ Check the requested behavior, regressions, validation, security and the frozen w
 Return exactly one JSON object with candidate_sha, approved_digest, decision and body.
 decision is approve, changes_requested or inconclusive. Give concrete findings with file/line evidence.
 If evidence is missing, incomplete or cannot support a decision, return inconclusive; never invent proof.
-Your verdict is a read-only assessment. Independent required CI and human acceptance remain separate."""
+Your verdict is a read-only assessment. Human acceptance remains a separate decision.
+When required_checks_passed lists checks, those checks already passed for this candidate
+SHA. Do not describe CI as a gate that is still open."""
 
 
 class ReviewLimits(Value):
@@ -67,7 +69,12 @@ class TextReviewer:
         self.spec, self.model, self.alias, self.limits = spec, model, credential_alias, limits
 
     async def review(
-        self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha
+        self,
+        candidate_diff: bytes,
+        approved_input: ApprovedInput,
+        *,
+        candidate_sha: Sha,
+        checks_passed: tuple[str, ...] = (),
     ) -> ReviewVerdict:
         TypeAdapter(Sha).validate_python(candidate_sha)
         evidence = {
@@ -89,6 +96,7 @@ class TextReviewer:
                     "approved_input": approved_input.model_dump(mode="json"),
                     "frozen_specification": self.spec.model_dump(mode="json"),
                     "candidate_diff": diff,
+                    "required_checks_passed": list(checks_passed),
                 }
             ).decode()
             if len(prompt.encode("utf-8")) > self.limits.prompt_bytes:

@@ -7,7 +7,7 @@ import re
 from fnmatch import fnmatchcase
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from forge_protocol import canonical_json
 
@@ -28,6 +28,14 @@ class ToolCall(Value):
     repo: Annotated[str, Field(min_length=1, max_length=32)]
     path: RepoPath | None = None
     prefix: RepoPath | Literal[""] = ""
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def empty_path_is_the_repository_root(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
+
     query: Annotated[str, Field(max_length=256)] = ""
     start_line: Annotated[int, Field(gt=0)] = 1
     line_count: Annotated[int, Field(gt=0, le=10_000)] = MAX_READ_LINES

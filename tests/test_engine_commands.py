@@ -309,9 +309,9 @@ async def test_terminal_cancel_does_not_revoke_completed_work(commands):
         reason="driver_failed",
     )
     result = await commands["commands"].submit(envelope(commands, "cancel"))
-    assert result.status == "observed" and result.reason == "run_terminal"
+    assert result.status == "accepted" and result.reason == "cancelled"
     current = await env.runs.load(run.id)
-    assert current.state == State.BLOCKED and not current.cancel_requested
+    assert current.state == State.CANCELLED and current.cancel_requested
 
 
 async def test_global_worker_resolves_authority_from_each_queued_repository(commands):

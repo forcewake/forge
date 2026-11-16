@@ -154,7 +154,12 @@ class Reviewer(Protocol):
     """Review the exact candidate; an unknown review cannot authorize readiness."""
 
     async def review(
-        self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha
+        self,
+        candidate_diff: bytes,
+        approved_input: ApprovedInput,
+        *,
+        candidate_sha: Sha,
+        checks_passed: tuple[str, ...] = (),
     ) -> ReviewVerdict: ...
 
 

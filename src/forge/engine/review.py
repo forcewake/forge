@@ -93,6 +93,7 @@ class ReviewHandler:
                         diff,
                         ApprovedInput.from_spec(approved.spec),
                         candidate_sha=work.candidate_sha,
+                        checks_passed=verification.successful,
                     )
             except Exception:
                 await self.budget.finish(context.lease, "closing")

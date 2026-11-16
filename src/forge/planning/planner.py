@@ -28,8 +28,9 @@ find_symbol and find_references (query). No regex, shell, URLs, writes or altern
 Citations require repository:{provider,connection_id,repository_id}, source_sha, path,
 start_line and end_line. Cite only supplied frozen snapshots; every reference is resolved.
 The implementing lane may Read, Write, Edit, Grep and Glob inside the frozen
-write scope, and may run pytest or ruff. It cannot run git, use the network,
-or call any other shell command. Plan only work those tools can finish.
+write scope. Its shell is not a test runner: pytest and ruff are not installed,
+and git, the network, and any other shell command are refused. Plan only work
+those tools can finish.
 Paths are repository-relative without a trailing slash.
 Retain every complete step. Do not replace required unknown facts with guesses."""
 
@@ -85,8 +86,11 @@ def decode_reply(reply: str, limit: int) -> ToolRound | PlanRound | BlockedRound
             raise ValueError("model output exceeds bound")
         json.loads(payload, object_pairs_hook=_unique_object)
         return ROUND.validate_json(payload)
-    except (ValueError, ValidationError, RecursionError):
-        raise PlanningRefused("invalid_planner_output") from None
+    except (ValueError, ValidationError, RecursionError) as exc:
+        detail = " ".join(str(exc).split())
+        if len(detail) > 500:
+            detail = detail[:500]
+        raise PlanningRefused("invalid_planner_output", detail) from None
 
 
 class ResearchPlanner:
@@ -119,8 +123,20 @@ class ResearchPlanner:
         except TimeoutError:
             raise PlanningRefused("planning_wallclock_limit") from None
 
+    def _repair(self, document: dict[str, Any], repairs: int, refusal: PlanningRefused) -> int:
+        if repairs >= self.limits.reasks:
+            raise refusal
+        document["observations"].append(
+            {
+                "error": refusal.reason,
+                "detail": refusal.detail,
+                "repair": "Fix this validation error and return one JSON object.",
+            }
+        )
+        return repairs + 1
+
     async def _research(self, document: dict[str, Any], tools: ReadTools) -> Plan:
-        reasked = False
+        repairs = 0
         for _ in range(self.limits.model_calls):
             prompt = canonical_json(document).decode("utf-8")
             if len(prompt.encode("utf-8")) > self.limits.prompt_bytes:
@@ -137,32 +153,22 @@ class ResearchPlanner:
                 raise ModelTransportError("planner_model_unavailable") from None
             try:
                 result = decode_reply(reply.text, self.limits.response_bytes)
-            except PlanningRefused:
-                if reasked:
-                    raise
-                reasked = True
-                document["observations"].append(
-                    {
-                        "error": "invalid_planner_output",
-                        "repair": "Return one JSON object. No fences or trailing text.",
-                    }
-                )
+            except PlanningRefused as refusal:
+                repairs = self._repair(document, repairs, refusal)
                 continue
             if isinstance(result, BlockedRound):
                 raise PlanningRefused("planner_requires_clarification")
             if isinstance(result, PlanRound):
                 if any(not step.citations for step in result.plan.steps):
-                    if reasked:
-                        raise PlanningRefused("plan_has_no_citation")
-                    reasked = True
-                    document["observations"].append(
-                        {
-                            "error": "plan_has_no_citation",
-                            "repair": "Every step needs one citation of a frozen snapshot.",
-                        }
+                    repairs = self._repair(
+                        document, repairs, PlanningRefused("plan_has_no_citation")
                     )
                     continue
-                await tools.validate_citations(result.plan)
+                try:
+                    await tools.validate_citations(result.plan)
+                except PlanningRefused as refusal:
+                    repairs = self._repair(document, repairs, refusal)
+                    continue
                 return result.plan
             if tools.calls + len(result.calls) > self.limits.tool_calls:
                 raise PlanningRefused("planning_tool_limit")

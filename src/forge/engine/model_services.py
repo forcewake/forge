@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable
 from datetime import datetime, timedelta
+import os
 
 from forge.budget.server_models import ServerModels
 from forge.budget.service import BudgetService, alias_for
@@ -22,6 +23,24 @@ from forge.store.records import Lease, StoreConflict
 from forge_protocol import RunIdentity
 
 LeaseSource = Callable[[], Lease]
+
+
+def planning_model_calls(allowance_calls: int, configured: int) -> int:
+    """The planning allowance's call ceiling replaces the hardcoded planner default."""
+    if (
+        isinstance(allowance_calls, bool)
+        or not isinstance(allowance_calls, int)
+        or allowance_calls <= 0
+    ):
+        return configured
+    return min(allowance_calls, 32)
+
+
+def planner_reasks(configured: int) -> int:
+    raw = os.environ.get("FORGE_PLANNER_REASKS")
+    if raw is not None and raw.isdecimal() and 1 <= int(raw) <= 8:
+        return int(raw)
+    return configured
 
 
 class ServerPlanners:
@@ -95,7 +114,14 @@ class _PlanningStep:
             model,
             model=self.policy.model,
             credential_alias=alias,
-            limits=service.limits,
+            limits=service.limits.model_copy(
+                update={
+                    "model_calls": planning_model_calls(
+                        self.policy.planning_allowance.calls, service.limits.model_calls
+                    ),
+                    "reasks": planner_reasks(service.limits.reasks),
+                }
+            ),
         )
         try:
             remaining = (expires - service.clock.now()).total_seconds()
@@ -143,7 +169,12 @@ class _ReviewStep:
         self.current, self.alias, self.limits = current, alias, limits
 
     async def review(
-        self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha
+        self,
+        candidate_diff: bytes,
+        approved_input: ApprovedInput,
+        *,
+        candidate_sha: Sha,
+        checks_passed: tuple[str, ...] = (),
     ) -> ReviewVerdict:
         spec = await self.inputs.review(
             self.current(), approved_input, candidate_diff, candidate_sha, now=self.clock.now()
@@ -153,4 +184,9 @@ class _ReviewStep:
         )
         return await TextReviewer(
             spec, model, credential_alias=self.alias, limits=self.limits
-        ).review(candidate_diff, approved_input, candidate_sha=candidate_sha)
+        ).review(
+            candidate_diff,
+            approved_input,
+            candidate_sha=candidate_sha,
+            checks_passed=checks_passed,
+        )

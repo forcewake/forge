@@ -11,6 +11,7 @@ Positive = Annotated[int, Field(gt=0)]
 
 class PlanningLimits(Value):
     model_calls: Positive = 4
+    reasks: Positive = 2
     tool_calls: Positive = 16
     output_tokens: Positive = 4096
     wallclock_seconds: Positive = 90
@@ -29,6 +30,7 @@ class ModelTransportError(Exception):
 class PlanningRefused(Exception):
     """A precise refusal, never a guessed plan after a failed read or model call."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, detail: str = ""):
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail or reason

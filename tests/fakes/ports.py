@@ -195,7 +195,12 @@ class ScriptedPorts:
         return cast(Plan, self.take("plan", task, snapshot))
 
     async def review(
-        self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha
+        self,
+        candidate_diff: bytes,
+        approved_input: ApprovedInput,
+        *,
+        candidate_sha: Sha,
+        checks_passed: tuple[str, ...] = (),
     ) -> ReviewVerdict:
         return cast(
             ReviewVerdict, self.take("review", candidate_diff, approved_input, candidate_sha)

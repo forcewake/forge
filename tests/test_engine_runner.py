@@ -206,18 +206,22 @@ async def test_a_park_announces_the_block_before_the_run_stops(store):
     assert seen == [(run.id, "planning_deadline_expired")]
 
 
-async def test_handler_errors_park_with_nonsecret_reason_and_never_retry(store):
+async def test_handler_errors_park_with_nonsecret_reason_and_never_retry(store, caplog):
+    import logging
+
     clock = RealClock()
     run, step = await seeded(store, clock)
 
     async def handler(ctx):
         raise ValueError("secret-sentinel-never-persist")
 
-    assert (await runner(store, clock, handler).tick()).parked == 1
+    with caplog.at_level(logging.ERROR, logger="forge.worker"):
+        assert (await runner(store, clock, handler).tick()).parked == 1
     receipt = await StepStore(store).load(step.id)
     parked = await RunStore(store).load(run.id)
     assert receipt.state == "failed" and "secret-sentinel" not in receipt.result_json
     assert parked.reason == "handler_error:ValueError"
+    assert run.id in caplog.text and "ValueError" in caplog.text and "Traceback" in caplog.text
 
 
 async def test_worker_cancellation_leaves_reclaimable_step_without_false_result(store):

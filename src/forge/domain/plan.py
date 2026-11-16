@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import AfterValidator, Field, model_validator
+from pydantic import AfterValidator, BeforeValidator, Field, model_validator
 
 from .value import Value
 from .verdicts import Sha
@@ -32,10 +32,22 @@ def _repo_path(value: str) -> str:
     return value
 
 
+def _step_id(value: object) -> object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value)
+    return value
+
+
 ShortText = Annotated[str, Field(min_length=1, max_length=1024), AfterValidator(_nonblank)]
 Text = Annotated[str, Field(min_length=1, max_length=32768), AfterValidator(_nonblank)]
 RepoPath = Annotated[str, Field(min_length=1, max_length=4096), AfterValidator(_repo_path)]
-StepId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")]
+StepId = Annotated[
+    str,
+    BeforeValidator(_step_id),
+    Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"),
+]
 Line = Annotated[int, Field(gt=0, le=1_000_000_000)]
 
 
