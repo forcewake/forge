@@ -24,6 +24,10 @@ CommandKind = Literal[
 ]
 
 
+class WebhookUnauthenticated(ValueError):
+    """The hook secret or signature did not match. Callers answer 401."""
+
+
 class Command(Value):
     kind: CommandKind
     argument: str = ""

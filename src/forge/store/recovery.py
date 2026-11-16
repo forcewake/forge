@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from forge.domain.states import TERMINAL, State
 from forge.store.models_execution import EngineEffect, EngineStep
+from forge.store.models_runs import EngineRun
 from forge.store.records import EffectRecord, StoreConflict
 from forge.store.transactions import (
     SessionFactory,
@@ -20,6 +21,13 @@ from forge.store.transactions import (
 class RecoveryStore:
     def __init__(self, factory: SessionFactory) -> None:
         self.factory = factory
+
+    async def terminal_run(self, run_id: str | None) -> bool:
+        if run_id is None:
+            return False
+        async with self.factory() as session:
+            state = await session.scalar(select(EngineRun.state).where(EngineRun.id == run_id))
+        return state in {item.value for item in TERMINAL}
 
     async def requeue_original(self, effect: EffectRecord, *, now: datetime) -> bool:
         """Only a current requested intent may reclaim its expired or ended step.

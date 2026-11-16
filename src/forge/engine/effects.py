@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from typing import Any
 
@@ -74,6 +74,59 @@ def _decode(kind: EffectKind, value: object) -> Outcome:
 
 def _encoded(value: object) -> str:
     return canonical_json(TypeAdapter(object).dump_python(value, mode="json")).decode()
+
+
+PROBE_LIMIT = 8
+
+
+def probe_delay(count: int, retry_after: int | None, effect_id: str) -> int:
+    base = min(300, 5 * (2 ** min(max(count - 1, 0), 6)))
+    jitter = int.from_bytes(effect_id.encode()[:2], "big") % max(1, base // 5)
+    delay = base + jitter
+    if isinstance(retry_after, int) and retry_after > 0:
+        delay = max(delay, min(retry_after, 3600))
+    return int(min(delay, 900))
+
+
+def probe_due(record: EffectRecord, now: datetime) -> bool:
+    if record.outcome_json is None:
+        return True
+    try:
+        body = json.loads(record.outcome_json)
+        evidence = body.get("evidence")
+        if isinstance(evidence, str):
+            evidence = json.loads(evidence)
+        stamp = evidence.get("next_probe_at") if isinstance(evidence, dict) else None
+        if not isinstance(stamp, str):
+            return True
+        return now >= datetime.fromisoformat(stamp)
+    except (ValueError, TypeError):
+        return True
+
+
+def _schedule_unknown(row: EffectRecord, result: object, now: datetime) -> str | None:
+    count = len(row.observations) + 1
+    if count >= PROBE_LIMIT:
+        return None
+    retry_after = None
+    evidence = getattr(result, "evidence", None)
+    if isinstance(evidence, str):
+        try:
+            parsed = json.loads(evidence)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("retry_after"), int):
+            retry_after = parsed["retry_after"]
+    delay = probe_delay(count, retry_after, row.id)
+    body: dict[str, object] = {
+        "next_probe_at": (now + timedelta(seconds=delay)).isoformat(),
+        "probe_count": count,
+        "retry_after": retry_after,
+    }
+    evidence = getattr(result, "evidence", None)
+    if isinstance(evidence, str):
+        body["probe_evidence"] = evidence
+    return _encoded(body)
 
 
 def _observed_state(value: Outcome) -> ObservationState:
@@ -190,9 +243,11 @@ class Effects:
                     await self._probe(kind, json.loads(row.payload_json))
                 )
         except Exception as exc:
-            result = Inconclusive(
-                reason="probe_unavailable", evidence=_encoded({"error_type": type(exc).__name__})
-            )
+            detail: dict[str, object] = {"error_type": type(exc).__name__}
+            retry_after = getattr(exc, "retry_after", None)
+            if isinstance(retry_after, int) and retry_after >= 0:
+                detail["retry_after"] = min(retry_after, 3600)
+            result = Inconclusive(reason="probe_unavailable", evidence=_encoded(detail))
         if isinstance(result, Found):
             outcome = _decode(kind, result.value)
             if not isinstance(outcome, Unknown):
@@ -214,7 +269,16 @@ class Effects:
                 state="requested",
                 evidence_json=_encoded(result),
             )
-        unknown = Unknown(evidence=_encoded(result))
+        scheduled = _schedule_unknown(row, result, self.clock.now())
+        if scheduled is None:
+            return await self.store.resolve_probe(
+                row.id,
+                expected_version=row.version,
+                state="failed",
+                evidence_json=_encoded(result),
+                outcome_json=_encoded(Unknown(evidence="probe budget exhausted")),
+            )
+        unknown = Unknown(evidence=scheduled)
         return await self.store.resolve_probe(
             row.id,
             expected_version=row.version,

@@ -9,7 +9,7 @@ async def test_webhook_rejects_missing_token(operator_native):
     env = operator_native
     headers, _ = signed(payload())
     del headers["X-Gitlab-Token"]
-    assert (await post(env, headers=headers)).status_code == 400
+    assert (await post(env, headers=headers)).status_code == 401
     assert not env.peer.calls and not env.gateway.writes
 
 
@@ -17,7 +17,7 @@ async def test_webhook_rejects_wrong_token(operator_native):
     env = operator_native
     headers, _ = signed(payload())
     headers["X-Gitlab-Token"] = "wrong-secret"
-    assert (await post(env, headers=headers)).status_code == 400
+    assert (await post(env, headers=headers)).status_code == 401
     assert not env.peer.calls and not env.gateway.writes
 
 

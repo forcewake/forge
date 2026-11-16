@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from forge.engine.effects import probe_due
 from forge.ports import Clock
 from forge.store.effects import EffectStore
 from forge.store.records import EffectRecord, StoreConflict
@@ -24,6 +25,7 @@ class ReconcilePass:
     conflicts: int
     unavailable: int
     polled: int
+    next_delay: float | None = None
 
 
 class Reconciler:
@@ -44,7 +46,20 @@ class Reconciler:
     async def pass_once(self, *, limit: int = 100) -> ReconcilePass:
         records = await self.effects.unresolved(limit)
         recovered = requeued = conflicts = unavailable = polled = 0
+        deferred: list[float] = []
+        now = self.clock.now()
         for record in records:
+            if (
+                record.kind in {"gw_mint", "gw_update", "gw_block"}
+                and record.state in {"dispatched", "unknown"}
+                and await self.recovery.terminal_run(record.run_id)
+            ):
+                continue
+            if record.state in {"dispatched", "unknown"} and not probe_due(record, now):
+                evidence = probe_due_delay(record, now)
+                if evidence is not None:
+                    deferred.append(evidence)
+                continue
             try:
                 resolved = (
                     await self.probe(record)
@@ -66,4 +81,31 @@ class Reconciler:
                 polled += 1
             except Exception:
                 unavailable += 1
-        return ReconcilePass(len(records), recovered, requeued, conflicts, unavailable, polled)
+        return ReconcilePass(
+            len(records),
+            recovered,
+            requeued,
+            conflicts,
+            unavailable,
+            polled,
+            next_delay=min(deferred) if deferred else None,
+        )
+
+
+def probe_due_delay(record: EffectRecord, now: object) -> float | None:
+    from datetime import datetime
+    import json
+
+    if not isinstance(now, datetime) or record.outcome_json is None:
+        return None
+    try:
+        body = json.loads(record.outcome_json)
+        evidence = body.get("evidence")
+        if isinstance(evidence, str):
+            evidence = json.loads(evidence)
+        stamp = evidence.get("next_probe_at") if isinstance(evidence, dict) else None
+        if not isinstance(stamp, str):
+            return None
+        return max(0.0, (datetime.fromisoformat(stamp) - now).total_seconds())
+    except (ValueError, TypeError):
+        return None

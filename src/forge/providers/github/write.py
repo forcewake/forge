@@ -1,6 +1,7 @@
 """Effects-only REST mutations with bot ownership and branch safety preflights."""
 
 from typing import Any, Literal, Protocol
+import json
 from urllib.parse import quote, urlsplit
 
 from forge_protocol import LaneDispatch
@@ -47,6 +48,15 @@ from forge.providers.github.review import GitHubReview, feedback_kind, reply_mar
 from forge.providers.github.subject import GitHubSubject
 from forge.providers.github.transport import TransportFailure
 from forge.port_values import ReadUnavailable
+
+
+def rules_endpoint_absent(evidence: str) -> bool:
+    """GitHub's rules API is unavailable on free private repositories."""
+    try:
+        body = json.loads(evidence)
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("status") in (403, 404)
 
 
 class PolicyRefused(ReadUnavailable):
@@ -112,8 +122,14 @@ class GitHubWrites:
             raise malformed("repository_write_policy_unavailable")
         if branch == default or not branch.startswith("forge/"):
             raise PolicyRefused("default_or_nonfactory_branch_refused")
-        # Effective rules apply to prospective branches too; a missing/forbidden rules read is not permission.
-        rules = list_doc((await request(self.api, repo, "rules/branches/" + encoded)).document)
+        # A free private repository answers 403 or 404 for this read. That is
+        # "no rules", not a protected branch. Any other failure stays closed.
+        try:
+            rules = list_doc((await request(self.api, repo, "rules/branches/" + encoded)).document)
+        except ReadUnavailable as error:
+            if not rules_endpoint_absent(error.evidence):
+                raise
+            rules = []
         if rules:
             raise PolicyRefused("protected_branch_refused")
         try:

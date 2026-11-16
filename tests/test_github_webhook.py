@@ -79,14 +79,14 @@ class TestSignature:
         headers, body = signed(payload())
         del headers["X-Hub-Signature-256"]
         response = await hooks.client.post("/hooks/github", content=body, headers=headers)
-        assert response.status_code == 400
+        assert response.status_code == 401
         await no_work(hooks)
 
     async def test_wrong_signature_rejected(self, hooks):
         headers, body = signed(payload(), secret=b"different-synthetic-key-at-least-32bytes")
         assert (
             await hooks.client.post("/hooks/github", content=body, headers=headers)
-        ).status_code == 400
+        ).status_code == 401
         await no_work(hooks)
 
     async def test_tampered_body_rejected(self, hooks):
@@ -95,7 +95,7 @@ class TestSignature:
         assert changed != body
         assert (
             await hooks.client.post("/hooks/github", content=changed, headers=headers)
-        ).status_code == 400
+        ).status_code == 401
         await no_work(hooks)
 
     async def test_ping_answers_pong(self, hooks):

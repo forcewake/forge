@@ -69,8 +69,13 @@ class GitHubCommitter:
                     actual_head=await self.repositories.head(repo, branch),
                     evidence=evidence("commit", reply.request_id, reason="expected_head_mismatch"),
                 )
-            rules = await self.api.request(repo, "GET", "rules/branches/" + branch_path(branch))
-            if list_doc(rules.document):
+            try:
+                rules = await self.api.request(repo, "GET", "rules/branches/" + branch_path(branch))
+            except TransportFailure as error:
+                if error.status not in (403, 404):
+                    return Unknown(evidence=error.evidence)
+                rules = None
+            if rules is not None and list_doc(rules.document):
                 return Unknown(evidence=evidence("commit", reason="branch_rules_present"))
             token = await self.auth.token(repo, write=True)
             credential = base64.b64encode(("x-access-token:" + token.value).encode()).decode()

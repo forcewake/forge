@@ -169,7 +169,7 @@ async def test_signed_bot_hook_returns202_without_command_or_effect_and_bad_sign
                 headers={**headers, "X-Gitlab-Token": "bad"},
                 content=json.dumps(document),
             )
-            assert refused.status_code == 400
+            assert refused.status_code == 401
             assert (await client.post("/hooks/unknown", content=b"{}")).status_code == 404
             assert not wire.calls and not gateway.writes
             async with app.state.runtime.factory() as session:

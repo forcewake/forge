@@ -1,9 +1,11 @@
 """Signed native events become durable scoped commands; other facts only wake polling."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 
 from forge.command_values import CommandEnvelope
-from forge.ingress_values import IngressEvent
+from forge.ingress_values import IngressEvent, WebhookUnauthenticated
 from forge.runtime.operator_api import RuntimeDep
 
 router = APIRouter(tags=["native-hooks"])
@@ -50,12 +52,14 @@ async def hook(connection: str, request: Request, service: RuntimeDep) -> dict[s
             raise HTTPException(413, "webhook body exceeds its bound")
     try:
         event = parser.parse(dict(request.headers), bytes(body))
+    except WebhookUnauthenticated:
+        raise HTTPException(401, "webhook signature refused") from None
     except ValueError:
-        raise HTTPException(400, "native event authentication or shape refused") from None
+        raise HTTPException(400, "native event shape refused") from None
     if event is None:
         return {"accepted": False, "commands": []}
     service.connections.registry.for_repo(event.repo)
-    results = []
+    tasks = []
     if event.target is not None:
         for action in event.commands:
             envelope = CommandEnvelope(
@@ -67,7 +71,18 @@ async def hook(connection: str, request: Request, service: RuntimeDep) -> dict[s
                 native_reply=event.issue_action is None,
                 issue_action=event.issue_action,
             )
-            results.append((await service.commands.submit(envelope)).model_dump(mode="json"))
+            tasks.append(asyncio.create_task(service.commands.submit(envelope)))
+    results: list[object] = []
+    if tasks:
+        done, _pending = await asyncio.wait(tasks, timeout=8)
+        for task in tasks:
+            if task not in done:
+                results.append({"status": "accepted", "reason": "command_pending"})
+                continue
+            error = task.exception()
+            if error is not None:
+                raise error
+            results.append(task.result().model_dump(mode="json"))
     review = (
         (await service.reactive.reviews.submit(event)).model_dump(mode="json")
         if event.head_sha is not None

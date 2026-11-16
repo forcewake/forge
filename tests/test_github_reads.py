@@ -17,6 +17,7 @@ from forge.port_values import (
     Actor,
     Applied,
     CommentRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     ReadUnavailable,
@@ -193,7 +194,7 @@ async def test_frozen_tree_keeps_commit_identity_and_native_repo_resolution(prov
     assert (await repo.read_tree(REPO, COMMIT)).entries[-1].kind == "commit"
     paths = [request.url.path for request in wire.calls if request.method == "GET"]
     assert all("old/name" not in value for value in paths)
-    assert paths.count("/installation/repositories") == 4
+    assert paths.count("/installation/repositories") == 1
     assert all(
         request.url.params.get("recursive") == "1"
         for request in wire.calls
@@ -376,7 +377,8 @@ async def test_marker_spoof_duplicates_and_negative_visibility_never_authorize_r
         )
     ):
         wire.routes["issues/7/comments"] = rows
-        assert isinstance(await subject.probe_comment(SUBJECT, MARKER), Inconclusive)
+        expected = DefinitelyAbsent if index in (2, 4) else Inconclusive
+        assert isinstance(await subject.probe_comment(SUBJECT, MARKER), expected)
         if index in (1, 3):
             with pytest.raises(ReadUnavailable):
                 await subject.find_comment(SUBJECT, MARKER)

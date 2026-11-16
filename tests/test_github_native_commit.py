@@ -31,7 +31,7 @@ class Wire:
             "archived": False,
             "disabled": False,
         }
-        self.protected, self.rules_status = False, 200
+        self.protected, self.rules_status, self.rules_body = False, 200, []
 
     def head(self):
         return git(self.server, "rev-parse", "refs/heads/" + BRANCH).decode()
@@ -59,7 +59,7 @@ class Wire:
         if resource == "branches/" + BRANCH:
             value = {"name": BRANCH, "commit": {"sha": self.head()}, "protected": self.protected}
         elif resource == "rules/branches/" + BRANCH:
-            return httpx.Response(self.rules_status, json=[])
+            return httpx.Response(self.rules_status, json=self.rules_body)
         elif resource == "git/ref/heads/" + BRANCH:
             value = {
                 "ref": "refs/heads/" + BRANCH,
@@ -145,13 +145,20 @@ async def test_native_publication_refuses_policy_before_git(connected, policy):
     elif policy == "default":
         wire.metadata["default_branch"] = BRANCH
     elif policy == "rules":
-        wire.rules_status = 403
+        wire.rules_body = [{"type": "pull_request"}]
     else:
         wire.metadata[policy] = True
     assert isinstance(
         await writer.commit(reads.REPO, native_git.candidate(base), base, "native"), Unknown
     )
     assert wire.head() == base and not calls
+
+
+async def test_free_private_rules_403_still_publishes(connected):
+    writer, _, wire, _, _, base, calls = connected
+    wire.rules_status = 403
+    result = await writer.commit(reads.REPO, native_git.candidate(base), base, "native")
+    assert isinstance(result, Committed) and calls
 
 
 async def test_native_publication_stale_head_preserves_human(connected):

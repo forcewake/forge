@@ -108,6 +108,7 @@ async def test_client_re_mints_once_on_401(github):
     assert (await github.api.metadata(github.repo)).document["id"] == 123
     assert len(attempts) == len(github.wire.mints) == 2
     assert attempts[0].headers["authorization"] != attempts[1].headers["authorization"]
+    github.api._metadata_cache.clear()
     github.wire.metadata_response = httpx.Response(401)
     with pytest.raises(TransportFailure):
         await github.api.metadata(github.repo)

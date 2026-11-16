@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+import time
 from typing import Any
 from urllib.parse import unquote
 
@@ -22,6 +23,8 @@ class API:
         self._auth, self._transport = auth, transport
         self.git_url = transport.endpoint.git_url
         self.api_url = transport.endpoint.api_url
+        self._metadata_cache: dict[str, tuple[float, Reply]] = {}
+        self.metadata_ttl = 60.0
 
     async def _request(
         self,
@@ -53,6 +56,14 @@ class API:
         raise AssertionError("bounded credential retry exhausted")
 
     async def metadata(self, repo: RepoRef) -> Reply:
+        cached = self._metadata_cache.get(repo.identity.repository_id)
+        if cached is not None and time.monotonic() - cached[0] < self.metadata_ttl:
+            return cached[1]
+        reply = await self._metadata(repo)
+        self._metadata_cache[repo.identity.repository_id] = (time.monotonic(), reply)
+        return reply
+
+    async def _metadata(self, repo: RepoRef) -> Reply:
         try:
             reply = await self._request(
                 repo, "GET", "/installation/repositories", params={"per_page": 1}

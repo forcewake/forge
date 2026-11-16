@@ -9,6 +9,7 @@ from forge.port_values import (
     Applied,
     CommentOutcome,
     CommentRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     LabelOutcome,
@@ -139,6 +140,8 @@ class GitLabSubject:
                 for row in await self.notes(subject)
                 if marker_line(text(row.get("body"), empty=True), marker)
             ]
+            if not rows:
+                return DefinitelyAbsent(evidence=evidence("probe_comment"))
             return self.observation(subject, rows, "probe_comment")
         except ReadUnavailable as error:
             return Inconclusive(reason="note read unavailable", evidence=error.evidence)

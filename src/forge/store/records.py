@@ -11,7 +11,7 @@ EffectState = Literal[
     "requested", "dispatched", "committed", "adopted", "conflict", "failed", "unknown"
 ]
 ObservationState = Literal["committed", "conflict", "failed", "unknown"]
-ProbeState = Literal["adopted", "unknown", "requested"]
+ProbeState = Literal["adopted", "unknown", "requested", "failed"]
 EFFECT_STATES = frozenset(
     {"requested", "dispatched", "committed", "adopted", "conflict", "failed", "unknown"}
 )

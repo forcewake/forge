@@ -163,6 +163,25 @@ async def test_early_negative_probe_cannot_redispatch_inflight_call(case):
     assert (await EffectStore(factory).get("note")).state == "unknown"
 
 
+async def test_absent_comment_after_the_dispatch_window_is_posted_again(case):
+    factory, _, lease, clock = case
+    provider = ScriptedPorts(
+        (
+            ("probe_comment", DefinitelyAbsent(evidence="complete scan found no marker")),
+            ("post_comment", applied()),
+        )
+    )
+    engine = effects(factory, provider, clock)
+    with pytest.raises(SystemExit):
+        await effects(factory, provider, clock, killed_at("after_t2")).post_comment(
+            lease, "note", SUBJECT, "plan", "marker"
+        )
+    lease = await reclaim(factory, lease, clock)
+    result = await engine.post_comment(lease, "note", SUBJECT, "plan", "marker")
+    assert result == applied()
+    assert [name for name, _ in provider.calls] == ["probe_comment", "post_comment"]
+
+
 async def test_lost_fence_after_intent_prevents_any_write(case):
     factory, run, lease, clock = case
     provider = ScriptedPorts()

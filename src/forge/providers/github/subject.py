@@ -10,6 +10,7 @@ from forge.port_values import (
     Applied,
     CommentOutcome,
     CommentRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     LabelOutcome,
@@ -141,9 +142,11 @@ class GitHubSubject:
                 for row in await self._comments(subject)
                 if marker_line(text(row.get("body"), empty=True), marker)
             ]
+            if not matches:
+                return DefinitelyAbsent(evidence=evidence("probe_comment"))
             if len(matches) != 1 or not self._owned(matches[0]):
                 return Inconclusive(
-                    reason="comment marker missing, foreign or ambiguous",
+                    reason="comment marker foreign or ambiguous",
                     evidence=evidence("probe_comment"),
                 )
             ref = CommentRef(subject=subject, native_id=native_id(matches[0].get("id")))
