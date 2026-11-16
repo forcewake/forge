@@ -170,6 +170,39 @@ async def test_different_second_candidate_is_conflict_and_missing_blob_is_not_ac
     ).status_code == 409
 
 
+async def test_declared_oversize_and_quota_refuse_before_keeping_bytes(api):
+    lane, _, pending, client = api
+    digest = hashlib.sha256(b"x").hexdigest()
+    before = set(lane.blobs.root.iterdir())
+    refused = await client.put(
+        "/lane/v1/blobs/" + digest,
+        content=b"x",
+        headers={"content-length": str(lane.blobs.max_bytes + 1)},
+    )
+    assert refused.status_code == 413
+    assert set(lane.blobs.root.iterdir()) == before
+    lane.blob_quota = 4
+    first = await upload(client, b"abc")
+    assert (lane.blobs.root / first).is_file()
+    second = hashlib.sha256(b"def").hexdigest()
+    quota = await client.put("/lane/v1/blobs/" + second, content=b"def")
+    assert quota.status_code == 409
+    assert not (lane.blobs.root / second).exists()
+    terminal = LaneReport(
+        **pending.identity.model_dump(),
+        approved_digest=pending.dispatch.approved_digest,
+        status="failed",
+        classification="driver_error",
+        driver=pending.dispatch.driver,
+        model=pending.dispatch.model,
+        terminal_reason="failed",
+    )
+    assert (
+        await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
+    ).status_code == 201
+    assert not (lane.blobs.root / first).exists()
+
+
 async def test_blob_digest_limits_corruption_and_symlinks_are_refused(api, tmp_path):
     lane, _, _, client = api
     digest = hashlib.sha256(b"wrong").hexdigest()

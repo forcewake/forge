@@ -135,8 +135,17 @@ async def acknowledge(
 
 @router.put("/blobs/{digest}", status_code=204)
 async def put_blob(digest: str, request: Request, who: Identity, lane: Service) -> Response:
-    size = await lane.blobs.put(digest, request.stream())
-    await lane.record_blob(who, digest, size)
+    declared = request.headers.get("content-length")
+    hinted = int(declared) if declared is not None and declared.isdigit() else None
+    await lane.prepare_blob(who, digest, hinted)
+    existed = (lane.blobs.root / digest).is_file()
+    try:
+        size = await lane.blobs.put(digest, request.stream())
+        await lane.record_blob(who, digest, size)
+    except Exception:
+        if not existed:
+            await lane.blobs.discard(digest)
+        raise
     return Response(status_code=204)
 
 

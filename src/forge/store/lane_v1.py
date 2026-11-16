@@ -13,7 +13,7 @@ from forge.api.lane_v1_values import LaneConflict
 from forge.domain.states import TERMINAL
 from forge.store.lane_auth import locked_current
 from forge.store.lane_state import load_namespace, persist_namespace
-from forge.store.models_lane import EngineLaneSession
+from forge.store.models_lane import EngineBlob, EngineLaneSession
 from forge.store.models_runs import EngineRun
 from forge.store.transactions import SessionFactory, transaction
 
@@ -67,6 +67,20 @@ class EngineLaneV1Store:
                 if cast(CursorResult[Any], result_row).rowcount != 1:
                     raise LaneConflict("run changed during lane mutation")
             return result
+
+    async def foreign_blob_digests(self, identity: RunIdentity) -> set[str]:
+        identity = identity_of(identity)
+        async with self.session_factory() as session:
+            rows = await session.scalars(
+                select(EngineBlob.digest)
+                .where(
+                    (EngineBlob.run_id != identity.forge_run_id)
+                    | (EngineBlob.attempt != identity.attempt)
+                    | (EngineBlob.generation != identity.generation)
+                )
+                .limit(200)
+            )
+        return {row for row in rows if isinstance(row, str)}
 
     async def enqueue_control(self, command: ControlCommand) -> ControlCommand:
         def append(
