@@ -175,10 +175,21 @@ async def test_dispatch_past_its_bootstrap_deadline_parks_without_a_native_job(c
 async def test_unreported_lane_past_its_deadline_parks_unquiesced(case):
     env = case["env"]
     run, _, _ = await started(case)
-    advance(case, 601)
+    advance(case, 721)
     assert (await env.runner.tick()).parked == 1
     current = await env.runs.load(run.id)
     assert current.state == State.BLOCKED and current.reason == "lane_timeout_unquiesced"
+
+
+async def test_server_waits_through_startup_grace_before_parking_a_working_lane(case):
+    env = case["env"]
+    run, _, _ = await started(case)
+    advance(case, 601)
+    assert (await env.runner.tick()).parked == 0
+    assert (await env.runs.load(run.id)).state == State.RUNNING
+    advance(case, 130)
+    assert (await env.runner.tick()).parked == 1
+    assert (await env.runs.load(run.id)).reason == "lane_timeout_unquiesced"
 
 
 async def test_dispatch_lost_response_recovers_same_nonce_and_native_job(case):

@@ -25,6 +25,12 @@ def lane_key(identity: RunIdentity) -> str:
     return f"{identity.forge_run_id}:{identity.attempt}:{identity.generation}:lane"
 
 
+# Checkout and process start happen after the server records the dispatch.
+# The lane measures its wall clock from that later start, so the server waits
+# this long past the approved limit before parking a lane that has not reported.
+STARTUP_GRACE_SECONDS = 120
+
+
 class DispatchHandler:
     def __init__(
         self,
@@ -131,8 +137,19 @@ class DispatchHandler:
             raise StoreConflict("native dispatch handle differs from its frozen request")
         if dispatch.provider == "gitlab":
             await self.register(dispatch, work, approved, pipeline_id=dispatched.value.native_id)
-        waiting = AwaitLane(**work.model_dump(), handle=dispatched.value)
-        polls = math.ceil(approved.spec.limits.wallclock_seconds / work.settings.poll_seconds) + 2
+        deadline = self.clock.now() + timedelta(
+            seconds=approved.spec.limits.wallclock_seconds + STARTUP_GRACE_SECONDS
+        )
+        waiting = AwaitLane(
+            **{**work.model_dump(), "expires_at": deadline}, handle=dispatched.value
+        )
+        polls = (
+            math.ceil(
+                (approved.spec.limits.wallclock_seconds + STARTUP_GRACE_SECONDS)
+                / work.settings.poll_seconds
+            )
+            + 2
+        )
         successor = StepRequest(
             context.lease.run_id,
             Handler.AWAIT_LANE,
