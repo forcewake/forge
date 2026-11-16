@@ -91,8 +91,8 @@ async def test_codex_handshake_file_tools_completion_and_steer(tmp_path):
     assert result[-1].kind == "completed" and result[-1].usage is None
     assert client.disconnected and not config_path(session).exists()
     assert (
-        client.options.tools == ["Read", "Write", "Edit"]
-        and "Bash" in client.options.disallowed_tools
+        client.options.tools == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+        and "WebFetch" in client.options.disallowed_tools
     )
 
 

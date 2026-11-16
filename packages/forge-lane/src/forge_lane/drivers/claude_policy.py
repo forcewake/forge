@@ -11,8 +11,9 @@ from forge_protocol.spec import FrozenWriteScope
 from ..mcp import claude_tools
 from ..write_scope import writable
 
-TOOLS = ("Read", "Write", "Edit")
-DENIED = ("Bash", "Glob", "Grep", "Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit", "Skill")
+TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Bash")
+DENIED = ("Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit", "Skill")
+_BASH = re.compile(r"^(?:(?:uv|python|python3)(?: -m| run) )?(?:pytest|ruff)(?: [\w./:=@+-]+)*$")
 PRIVATE_PARTS = frozenset(
     {".git", ".forge", ".github", ".claude", ".copilot", ".ssh", ".aws", ".kube"}
 )
@@ -53,6 +54,10 @@ class FilePolicy:
     def permitted(self, name: str, arguments: dict[str, Any]) -> bool:
         if name in self.mcp_tools and isinstance(arguments, dict):
             return True
+        if name in {"Grep", "Glob"}:
+            return self._search_permitted(arguments)
+        if name == "Bash":
+            return self._bash_permitted(arguments)
         if name not in TOOLS or not isinstance(arguments.get("file_path"), str):
             return False
         raw = Path(arguments["file_path"])
@@ -78,6 +83,21 @@ class FilePolicy:
             ):
                 return False
         return bool(lexical.parts)
+
+    def _inside(self, raw: str) -> bool:
+        return self.permitted("Read", {"file_path": raw or "."})
+
+    def _search_permitted(self, arguments: dict[str, Any]) -> bool:
+        path = arguments.get("path", arguments.get("file_path", "."))
+        if path in ("", "."):
+            return True
+        return isinstance(path, str) and self._inside(path)
+
+    def _bash_permitted(self, arguments: dict[str, Any]) -> bool:
+        command = arguments.get("command")
+        if not isinstance(command, str) or any(char in command for char in "\n;&|`$<>\\"):
+            return False
+        return _BASH.fullmatch(command) is not None
 
     async def permission(self, name: str, arguments: dict[str, Any], context: Any) -> Any:
         if not self.permitted(name, arguments):
