@@ -243,7 +243,9 @@ async def test_planner_lost_response_is_unknown_and_retry_cannot_reset_or_extend
         planner = ServerPlanners(
             fake, models, case["service"], ModelInputStore(case["factory"]), case["clock"]
         )(lambda: case["lease"], intent.policy)
-        with pytest.raises(PlanningRefused, match="planner_model_unavailable"):
+        from forge.planning.limits import ModelTransportError
+
+        with pytest.raises(ModelTransportError, match="planner_model_unavailable"):
             await planner.plan(intent.task, intent.snapshot)
         case["clock"].instant += timedelta(seconds=1)
         with pytest.raises((PlanningRefused, StoreConflict)):

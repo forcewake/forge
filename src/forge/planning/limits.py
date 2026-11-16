@@ -22,6 +22,10 @@ class PlanningLimits(Value):
     scan_files: Positive = 32
 
 
+class ModelTransportError(Exception):
+    """The model was not reached. The planning step may retry with backoff."""
+
+
 class PlanningRefused(Exception):
     """A precise refusal, never a guessed plan after a failed read or model call."""
 

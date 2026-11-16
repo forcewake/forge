@@ -17,6 +17,10 @@ def _nonblank(value: str) -> str:
 
 
 def _repo_path(value: str) -> str:
+    value = value.strip()
+    while value.startswith("./"):
+        value = value[2:]
+    value = value.rstrip("/")
     if (
         "\\" in value
         or any(ord(char) < 32 for char in value)

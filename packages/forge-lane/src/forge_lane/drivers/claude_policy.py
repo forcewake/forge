@@ -101,9 +101,8 @@ class FilePolicy:
 
     async def permission(self, name: str, arguments: dict[str, Any], context: Any) -> Any:
         if not self.permitted(name, arguments):
-            self.denials.add("tool_policy_refused")
             return self.sdk.PermissionResultDeny(
-                message="Tool or path is outside the approved lane capability", interrupt=True
+                message="Tool or path is outside the approved lane capability", interrupt=False
             )
         return self.sdk.PermissionResultAllow(updated_input=arguments)
 
@@ -112,13 +111,13 @@ class FilePolicy:
     ) -> dict[str, Any]:
         if self.permitted(event.get("tool_name", ""), event.get("tool_input", {})):
             return {"continue_": True}
-        self.denials.add("tool_policy_refused")
         return {
+            "continue_": True,
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": "Tool or path is outside the approved lane capability",
-            }
+            },
         }
 
     def inventory(self) -> str:

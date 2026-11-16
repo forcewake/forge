@@ -20,6 +20,7 @@ from forge.ports import RepoPort
 from .limits import PlanningLimits, PlanningRefused
 
 DECLARATION = re.compile(r"\b(?:async\s+def|def|class)\s+([A-Za-z_]\w*)")
+MAX_READ_LINES = 100
 
 
 class ToolCall(Value):
@@ -29,7 +30,7 @@ class ToolCall(Value):
     prefix: RepoPath | Literal[""] = ""
     query: Annotated[str, Field(max_length=256)] = ""
     start_line: Annotated[int, Field(gt=0)] = 1
-    line_count: Annotated[int, Field(gt=0, le=100)] = 100
+    line_count: Annotated[int, Field(gt=0, le=10_000)] = MAX_READ_LINES
 
 
 def lf_lines(text: str) -> tuple[str, ...]:
@@ -177,7 +178,8 @@ class ReadTools:
             "next_line": None,
         }
         kept = 0
-        for line in lines[start : start + request.line_count]:
+        limit = min(request.line_count, MAX_READ_LINES)
+        for line in lines[start : start + limit]:
             previous = result["content"]
             result["content"] += line
             result["next_line"] = start + kept + 2 if start + kept + 1 < len(lines) else None
@@ -187,6 +189,8 @@ class ReadTools:
                 result["truncated"] = True
                 break
             kept += 1
+        if request.line_count > limit and start + kept < len(lines):
+            result["truncated"] = True
         result["complete"] = not result["truncated"] and start + kept >= len(lines)
         if not self.fits(result):
             raise PlanningRefused("tool_output_limit")

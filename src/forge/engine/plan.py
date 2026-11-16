@@ -12,7 +12,7 @@ from forge.engine.runner import Park, Retryable, StepContext, StepResult
 from forge.port_values import Applied, SubjectRef, TaskSnapshot
 from forge.domain.verdicts import Unknown
 from forge.ports import ActorPort, Clock, Planner
-from forge.planning.limits import PlanningRefused
+from forge.planning.limits import ModelTransportError, PlanningRefused
 from forge.store.admission import AdmissionStore
 from forge.store.approval import ApprovalStore
 from forge.store.approval_values import OpenGate
@@ -115,6 +115,8 @@ class PlanHandler:
                 plan = await planner.plan(intent.task, intent.snapshot)
             except PlanningRefused as error:
                 return StepResult(result_json(refused=error.reason), park=Park(error.reason))
+            except ModelTransportError:
+                raise Retryable("planner_model_unavailable") from None
             except TimeoutError:
                 raise Retryable("planner_unavailable") from None
             spec = intent.freeze(plan)
