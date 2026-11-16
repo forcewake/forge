@@ -17,8 +17,8 @@ inference from source HEAD:
 - ``--stage lane`` — the PINNED lane wheel from the latest promotion
   record under ``docs/releases/evidence/``, and the INSTALLED target
   template state (the GitLab project's ``.gitlab-ci.yml`` via the API,
-  credentials read ONLY through ``forge.config.Settings`` — never parsed
-  out of ``.env`` by hand). Unreachable prerequisites are recorded
+  credentials read ONLY from ``GITLAB_URL`` and ``GITLAB_TOKEN``).
+  Unreachable prerequisites are recorded
   refused-with-reason, never guessed.
 - ``--stage runner`` — image identities of the worker/runner containers
   via ``podman inspect``, plus the GitLab runner availability the lane
@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -171,32 +172,17 @@ def latest_promotion_record(root: Path) -> Path | None:
 
 
 def repo_schema_head(root: Path) -> str:
-    """The migration chain head parsed from ``alembic/versions/`` (read-only).
-
-    The head is the revision no other migration names as its down_revision.
-    """
-    revisions: dict[str, str] = {}
-    down_revisions: set[str] = set()
-    pattern = re.compile(r"^revision(?::\s*str)?\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE)
-    down_pattern = re.compile(
-        r"^down_revision(?::[^=]*)?\s*=\s*(?:[\"']([^\"']+)[\"']|None)", re.MULTILINE
-    )
-    for path in sorted((root / "alembic" / "versions").glob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        match = pattern.search(text)
-        if not match:
-            continue
-        revisions[match.group(1)] = path.name
-        down = down_pattern.search(text)
-        if down and down.group(1):
-            down_revisions.add(down.group(1))
-    heads = [revision for revision in revisions if revision not in down_revisions]
-    if len(heads) != 1:
-        raise ProbeError(
-            f"alembic/versions has {len(heads)} heads ({heads}) — a branched chain is "
-            "not an intended profile"
-        )
-    return heads[0]
+    """The packaged schema revision from ``src/forge/store/schema/baseline.json``."""
+    path = root / "src/forge/store/schema/baseline.json"
+    if not path.is_file():
+        raise ProbeError("packaged schema baseline is missing")
+    try:
+        revision = json.loads(path.read_text(encoding="utf-8")).get("revision")
+    except json.JSONDecodeError as exc:
+        raise ProbeError("packaged schema baseline is not JSON") from exc
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]+", revision):
+        raise ProbeError("packaged schema baseline has no revision")
+    return revision
 
 
 def load_intended_profile(root: Path) -> IntendedProfile:
@@ -293,17 +279,16 @@ def stage_schema(probe: LabProbe, root: Path) -> dict[str, Any]:
 
 
 def _gitlab_settings() -> tuple[str, str, str]:
-    """GitLab base URL + token + webhook host via the EXISTING settings loader.
+    """GitLab base URL, token and bot name from the process environment.
 
-    ``forge.config.Settings`` is the only reader of ``.env`` here — the
-    token never leaves the API call header and is never written to output.
+    The token is used only as the API header and is never written to output.
     """
-    from forge.config import Settings
-
-    settings = Settings()
-    url = str(settings.GITLAB_URL).rstrip("/")
-    token = settings.GITLAB_TOKEN.get_secret_value()
-    return url, token, str(settings.FORGE_BOT_USERNAME)
+    url = os.environ["GITLAB_URL"].rstrip("/")
+    token = os.environ["GITLAB_TOKEN"]
+    bot = os.environ.get("FORGE_BOT_USERNAME", "forge")
+    if not url or not token:
+        raise KeyError("GITLAB_URL and GITLAB_TOKEN are required")
+    return url, token, bot
 
 
 def _gitlab_file(
@@ -531,8 +516,7 @@ RESOLUTIONS: Mapping[str, str] = {
         "runbook §3 step 2 — pin ghcr.io/forcewake/forge@<promoted digest>, not localhost/forge:dev"
     ),
     "schema at repo chain head": (
-        "runbook §3 step 3 — python -m forge.migrate on the new image BEFORE the "
-        "consumers start (026 -> 027)"
+        "runbook §3 step 3 — forge install on the new image BEFORE the consumers start (026 -> 027)"
     ),
     "lane template pinned to the promoted release": (
         "runbook §5 — refresh the project's .gitlab-ci.yml remote includes to the "

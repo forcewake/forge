@@ -263,7 +263,7 @@ async def test_planner_expired_frozen_deadline_never_mints(case):
         planner = ServerPlanners(
             fake, models, case["service"], ModelInputStore(case["factory"]), case["clock"]
         )(lambda: case["lease"], intent.policy)
-        with pytest.raises((PlanningRefused, ValueError), match="expir|future"):
+        with pytest.raises(PlanningRefused, match="planning_deadline_expired"):
             await planner.plan(intent.task, intent.snapshot)
     assert not case["native"].writes
 

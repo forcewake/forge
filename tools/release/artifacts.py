@@ -114,17 +114,23 @@ def write_once(path: Path, content: str) -> None:
         path.write_bytes(raw)
 
 
-def bind_lock(path: Path, content: str) -> None:
-    """Append release wheel lines to a lock once; a later identical bind is a no-op."""
-    raw = content.encode()
+def bind_lock(path: Path, locked: str, wheel_lines: tuple[str, ...]) -> None:
+    """Bind a lock to exactly its previous bytes plus the named wheel lines."""
+    if any("\n" in line or " @ https://github.com/" not in line for line in wheel_lines):
+        raise ValueError("lock bind accepts only single-line release wheel requirements")
+    prefix = locked if locked.endswith("\n") else locked + "\n"
+    addition = "".join(line + "\n" for line in wheel_lines)
+    raw = (prefix + addition).encode()
     if path.is_symlink():
         raise ValueError("release artifact cannot be a symlink: " + path.name)
     if not path.exists():
         path.write_bytes(raw)
         return
     current = path.read_bytes()
-    prefix = current if current.endswith(b"\n") else current + b"\n"
-    if current != raw and not (raw.startswith(prefix) and b" @ https://github.com/" in raw):
+    if current == raw:
+        return
+    current_prefix = current if current.endswith(b"\n") else current + b"\n"
+    if raw != current_prefix + addition.encode():
         raise ValueError("refusing to replace previously bound artifact bytes: " + path.name)
     path.write_bytes(raw)
 
@@ -148,7 +154,7 @@ def lane_requirements(dist: Path, base: str, extras: tuple[str, ...]) -> dict[st
         item = lane[name]
         selection = name + ("[claude]" if name == "forge-lane" and extras else "")
         wheel_lines.append(f"{selection} @ {base}/{item['file']} --hash=sha256:{item['sha256']}")
-    bind_lock(dist / "lane-v1-requirements.txt", locked + "\n" + "\n".join(wheel_lines) + "\n")
+    bind_lock(dist / "lane-v1-requirements.txt", locked + "\n", tuple(wheel_lines))
     return lane
 
 

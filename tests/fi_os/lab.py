@@ -1,9 +1,7 @@
-"""The disposable Postgres lab behind the OS-process FI suite.
+"""Disposable database lab for the OS-process worker suite.
 
-Schema comes from the REAL migration chain (R22: ``python -m forge.migrate``
-is run once per session — ``create_all`` is never a second schema factory);
-per test the lab truncates every table and hands the control plane its own
-asyncpg pool, separate from every worker subprocess's pool.
+Schema comes from ``python -m forge.store.schema init``. ``create_all`` is
+not a second schema factory.
 """
 
 from __future__ import annotations
@@ -13,55 +11,52 @@ import sys
 from pathlib import Path
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+INIT_TIMEOUT_SECONDS = 120.0
 
-MIGRATE_TIMEOUT_SECONDS = 120.0
 
-
-def run_migrations(database_url: str) -> None:
-    """Apply the shipped alembic chain via ``python -m forge.migrate`` (R22)."""
+def install_schema(database_url: str) -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "forge.migrate", "--database-url", database_url],
+        [sys.executable, "-m", "forge.store.schema", "init", "--database-url", database_url],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
-        timeout=MIGRATE_TIMEOUT_SECONDS,
+        timeout=INIT_TIMEOUT_SECONDS,
         check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            "python -m forge.migrate failed "
+            "python -m forge.store.schema init failed "
             f"(rc={result.returncode}):\n{result.stdout}\n{result.stderr}"
         )
 
 
 async def truncate_all(engine: AsyncEngine) -> None:
-    """Fresh durable state per test — tables kept, rows and sequences reset.
-
-    ``alembic_version`` is deliberately kept: the R22 gate must keep seeing a
-    database at the migration head, exactly like production.
-    """
-    async with engine.begin() as conn:
-        names = (
-            (
-                await conn.execute(
+    async with engine.begin() as connection:
+        names = [
+            row[0]
+            for row in (
+                await connection.execute(
                     text(
-                        "select tablename from pg_tables "
-                        "where schemaname = 'public' and tablename <> 'alembic_version'"
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name NOT LIKE 'sqlite_%' AND name != 'alembic_version'"
                     )
                 )
-            )
-            .scalars()
-            .all()
-        )
-        if names:
-            listing = ", ".join(f'"{name}"' for name in names)
-            await conn.execute(text(f"truncate table {listing} restart identity cascade"))
-
-
-def new_session_factory(database_url: str) -> async_sessionmaker:
-    """A control-plane pool, separate from every worker's pool."""
-    engine = create_async_engine(database_url)
-    return async_sessionmaker(engine, expire_on_commit=False)
+            ).all()
+        ]
+        if engine.dialect.name == "postgresql":
+            names = [
+                row[0]
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                            "AND tablename != 'alembic_version'"
+                        )
+                    )
+                ).all()
+            ]
+        for name in names:
+            await connection.execute(text(f'DELETE FROM "{name}"'))

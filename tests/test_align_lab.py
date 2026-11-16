@@ -104,9 +104,9 @@ class FakeLabRunner:
             else {}
         )
         cmd = (
-            ["uvicorn", "forge.main:app", "--host", "0.0.0.0", "--port", "8420"]
+            ["forge", "serve", "--host", "0.0.0.0", "--port", "8420"]
             if container == APP_CONTAINER
-            else ["python", "-m", "forge.worker"]
+            else ["forge", "worker"]
         )
         return {
             "Config": {
@@ -169,14 +169,9 @@ def repo_root(tmp_path: Path) -> Path:
     (root / "src" / "forge" / "__init__.py").write_text(
         f'__version__ = "{REPO_VERSION}"\n', encoding="utf-8"
     )
-    versions = root / "alembic" / "versions"
-    versions.mkdir(parents=True)
-    (versions / "026_previous.py").write_text(
-        'revision = "026"\ndown_revision = "025"\n', encoding="utf-8"
-    )
-    (versions / "027_head.py").write_text(
-        'revision = "027"\ndown_revision = "026"\n', encoding="utf-8"
-    )
+    baseline = root / "src/forge/store/schema"
+    baseline.mkdir(parents=True)
+    (baseline / "baseline.json").write_text(json.dumps({"revision": "027"}), encoding="utf-8")
     return root
 
 
@@ -207,18 +202,18 @@ def test_plan_orders_steps_and_preserves_observed_config(repo_root: Path) -> Non
     assert "-v /repo/data:/app/data" in text
     assert "-p 0.0.0.0:8420:8420" in text
     assert "--network podman" in text
-    assert "uvicorn forge.main:app --host 0.0.0.0 --port 8420" in text
+    assert "forge serve --host 0.0.0.0 --port 8420" in text
     # the caps block appended
     assert "-e FORGE_LANE_BUDGET_SECONDS=1800" in text
     assert "-e FORGE_BUDGET_PROFILES=" in text
     worker_argv = next(s for s in plan.steps if s.name == f"recreate-{WORKER_CONTAINER}").argv[-1]
     worker_text = " ".join(worker_argv)
-    assert "python -m forge.worker" in worker_text
+    assert "forge worker" in worker_text
     assert "-e FORGE_LANE_CONTROL_URL=http://host.containers.internal:8420" in worker_text
     assert "-e FORGE_LANE_BUDGET_SECONDS=1800" in worker_text
     # the migrate step runs on the NEW image before the consumers start
     migrate = next(s for s in plan.steps if s.name == "migrate").argv[0]
-    assert "python -m forge.migrate" in " ".join(migrate)
+    assert "python -m forge.store.schema init" in " ".join(migrate)
     stop = next(s for s in plan.steps if s.name == "stop").argv[0]
     assert list(stop) == ["stop", WORKER_CONTAINER, APP_CONTAINER]
 

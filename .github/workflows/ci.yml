@@ -291,10 +291,9 @@ jobs:
           name: pg-gate-qualification-report
           path: pg-gate.json
 
-  # Nightly crash recovery on PostgreSQL. The 0.42 worker and GitLab stub
-  # are gone, so this job runs the current failure-injection suite. A
-  # ReadTimeout from a native peer is a typed transport failure and cannot
-  # leave a run waiting on the removed waiting_ci state.
+  # Nightly crash recovery. A real forge worker is SIGKILLed mid-command and
+  # mid-lane, then restarted. The in-process failure-injection suite stays
+  # beside that process test.
   integration-os:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -325,7 +324,9 @@ jobs:
         run: uv sync --all-packages --extra postgres
 
       - name: Crash recovery on PostgreSQL
-        run: uv run pytest tests/test_failure_injection.py -q
+        run: >-
+          uv run pytest tests/test_failure_injection.py
+          tests/fi_os/test_worker_recovery.py -q
 
   # Installed-image canary: explicit schema installation, zero-DDL startup,
   # refusal of historical schemas, readiness and authenticated API boundary.

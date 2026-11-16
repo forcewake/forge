@@ -8,11 +8,10 @@ Usage:
 
 from __future__ import annotations
 import argparse
+import os
 import sys
 
 import httpx
-
-from forge.config import Settings
 
 WEBHOOK_EVENTS = {
     "push_events": True,
@@ -34,10 +33,10 @@ FORGE_LABELS = [
 ]
 
 
-def _api_client(settings: Settings) -> httpx.Client:
+def _api_client(url: str, token: str) -> httpx.Client:
     return httpx.Client(
-        base_url=f"{settings.GITLAB_URL.rstrip('/')}/api/v4",
-        headers={"PRIVATE-TOKEN": settings.GITLAB_TOKEN.get_secret_value()},
+        base_url=f"{url.rstrip('/')}/api/v4",
+        headers={"PRIVATE-TOKEN": token},
         timeout=30.0,
     )
 
@@ -151,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.project_id and not args.group_id:
         parser.error("At least one --project-id or --group-id is required")
 
-    settings = Settings()  # type: ignore[call-arg]
+    url = os.environ.get("GITLAB_URL", "").rstrip("/")
+    token = os.environ.get("GITLAB_TOKEN", "")
+    if not url or not token:
+        print("GITLAB_URL and GITLAB_TOKEN are required", file=sys.stderr)
+        return 1
 
     webhook_url = args.webhook_url or "http://localhost:8420/webhook"
 
@@ -159,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         print("DRY RUN — no changes will be made\n")
 
     print("Connecting to GitLab...")
-    client = _api_client(settings)
+    client = _api_client(url, token)
     try:
         _check_connectivity(client)
     except httpx.HTTPError as exc:
@@ -184,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Deduplicate
     project_ids = sorted(set(project_ids))
-    secret = settings.GITLAB_WEBHOOK_SECRET.get_secret_value()
+    secret = os.environ.get("GITLAB_WEBHOOK_SECRET", "")
 
     print(f"\nConfiguring {len(project_ids)} project(s)...\n")
 
