@@ -35,7 +35,10 @@ jobs:
           docker build -f tools/litellm/Dockerfile --build-arg FORGE_GATEWAY_POLICY=tests/fixtures/litellm/forge-budget-policy.json --build-arg FORGE_GATEWAY_CONFIG=tests/fixtures/litellm/budget-proxy.yaml -t forge-native-budget-proof .
       - name: Start isolated native gateway
         run: |
-          docker network create --internal forge-budget
+          # Published host ports are not reachable on an --internal network with
+          # the current Docker port publisher. Masquerade stays off so the
+          # fixture still cannot reach a provider.
+          docker network create --opt com.docker.network.bridge.enable_ip_masquerade=false forge-budget
           docker run -d --name forge-budget-db --network forge-budget -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=synthetic -e POSTGRES_DB=litellm postgres:16-alpine
           docker run -d --name forge-budget-upstream --network forge-budget -p 127.0.0.1:41882:41882 -v "$PWD/tests/fixtures/litellm/upstream.py:/stub.py:ro" python:3.13-alpine python -I /stub.py
           docker run -d --name forge-budget-gateway --network forge-budget -p 127.0.0.1:4000:4000 -e LITELLM_MASTER_KEY=sk-synthetic-ci-admin-key -e ANTHROPIC_API_KEY=synthetic-no-provider-credential -e DATABASE_URL=postgresql://litellm:synthetic@forge-budget-db:5432/litellm forge-native-budget-proof
