@@ -21,7 +21,7 @@ from forge_protocol import (
 from forge.api.lane_auth import LaneAuthService
 from forge.api.lane_auth_values import PendingDispatch, identity_of
 from forge.api.lane_model_key_vault import ModelKeyVault, VaultError
-from forge.api.lane_v1_blobs import LaneBlobStore
+from forge.api.lane_v1_blobs import BlobTooLarge, LaneBlobStore
 from forge.api.lane_v1_values import (
     LaneConflict,
     LaneNotFound,
@@ -120,6 +120,27 @@ class LaneV1Service:
 
         return await self.store.access(identity, apply, write=True)
 
+    blob_quota = 64 * 1024 * 1024
+
+    async def prepare_blob(self, identity: RunIdentity, digest: str, declared: int | None) -> None:
+        if declared is not None and declared > self.blobs.max_bytes:
+            raise BlobTooLarge("lane blob exceeds the upload limit")
+
+        def check(
+            pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
+        ) -> None:
+            blobs = state.get("blobs", {})
+            if state.get("report") is not None and digest not in blobs:
+                raise LaneConflict("dispatch already has a terminal report")
+            used = sum(
+                value for key, value in blobs.items() if key != digest and type(value) is int
+            )
+            incoming = 0 if declared is None else declared
+            if used + incoming > self.blob_quota:
+                raise LaneConflict("run blob quota exceeded")
+
+        await self.store.access(identity, check)
+
     async def record_blob(self, identity: RunIdentity, digest: str, size: int) -> None:
         def record(
             pending: PendingDispatch, state: dict[str, Any], namespace: dict[str, Any]
@@ -129,9 +150,21 @@ class LaneV1Service:
                 raise LaneConflict("dispatch already has a terminal report")
             if digest not in blobs and len(blobs) >= 4096:
                 raise LaneConflict("dispatch blob reference limit reached")
+            used = sum(
+                value for key, value in blobs.items() if key != digest and type(value) is int
+            )
+            if used + size > self.blob_quota:
+                raise LaneConflict("run blob quota exceeded")
             blobs[digest] = size
 
         await self.store.access(identity, record, write=True)
+
+    async def reap_terminal_blobs(self, *, limit: int = 32) -> int:
+        digests = await self.store.terminal_only_digests(limit)
+        for digest in digests:
+            await self.blobs.discard(digest)
+        await self.store.forget_terminal_digests(digests)
+        return len(digests)
 
     async def read_blob(self, identity: RunIdentity, digest: str) -> bytes:
         size = await self.store.access(identity, lambda p, s, n: blob_size(p, s, n, digest))

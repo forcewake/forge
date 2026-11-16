@@ -50,9 +50,11 @@ class TestRenderClaudeCode:
     async def test_script_follows_the_unattended_contract(self, finished):
         options = finished.sdk.clients[0].options
         assert options.permission_mode == "default" and options.setting_sources == []
-        assert options.tools == ["Read", "Write", "Edit"] and options.allowed_tools == []
+        assert options.tools == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+        assert options.allowed_tools == []
         assert (
-            options.model == finished.brief.frozen_spec.model and "Bash" in options.disallowed_tools
+            options.model == finished.brief.frozen_spec.model
+            and "WebFetch" in options.disallowed_tools
         )
 
     async def test_empty_model_omits_the_model_flag(self, tmp_path):
@@ -498,7 +500,7 @@ class TestDriverVersionWiring:
 class TestQualityGateAllowlist:
     async def test_claude_allowlist_carries_the_full_gate_set(self, finished):
         options = finished.sdk.clients[0].options
-        assert "Bash" in options.disallowed_tools and options.allowed_tools == []
+        assert "WebFetch" in options.disallowed_tools and options.allowed_tools == []
         assert options.permission_mode == "default"
 
     def test_grok_grants_carry_the_full_gate_set(self):
@@ -516,7 +518,8 @@ class TestQualityGateAllowlist:
 class TestPermissionListsAreTokenized:
     async def test_claude_allowed_tools_is_a_comma_list_of_standalone_rules(self, finished):
         options = finished.sdk.clients[0].options
-        assert options.tools == ["Read", "Write", "Edit"] and len(set(options.tools)) == 3
+        assert options.tools == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+        assert len(set(options.tools)) == 6
         assert not any("," in tool or "Bash(" in tool for tool in options.tools)
 
     async def test_claude_mcp_grants_join_as_plain_comma_tokens(self, finished):

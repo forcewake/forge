@@ -1,8 +1,9 @@
 """Command replay, independent reply authority and cancellation revocation proofs."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -69,6 +70,97 @@ async def test_concurrent_identical_commands_land_once_and_a_changed_body_is_ref
     changed = value.model_copy(update={"command": Command(kind="cancel")})
     with pytest.raises(StoreConflict, match="changed content"):
         await store.accept(changed, now=now)
+
+
+async def test_transient_provider_failure_retries_then_refuses_and_the_worker_stays_up(commands):
+    from forge.port_values import ReadUnavailable
+
+    calls = 0
+
+    async def unavailable(lease, envelope):
+        nonlocal calls
+        calls += 1
+        raise ReadUnavailable("project_unavailable", "synthetic transport")
+
+    commands["commands"].decide = unavailable
+    value = envelope(commands, "status", native_id="transient-1", reply=True)
+    await commands["command_store"].accept(value, now=commands["env"].clock.now())
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
+    assert calls == 1
+    assert await commands["commands"].tick() == 0
+    commands["env"].clock.instant += timedelta(seconds=6)
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
+    commands["env"].clock.instant += timedelta(seconds=11)
+    with pytest.raises(ReadUnavailable):
+        await commands["commands"].tick()
+    assert calls == 3
+    async with commands["env"].factory() as session:
+        command = await session.scalar(select(EngineCommand))
+    assert command.state == "completed"
+    assert "could not be completed" in command.reply_json
+    assert await commands["commands"].tick() == 0
+
+
+async def test_worker_loop_survives_a_failed_command_tick():
+    from forge.runtime.worker import serve
+
+    class Commands:
+        def __init__(self):
+            self.calls = 0
+
+        async def tick(self, limit=20):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("github read failed")
+            return 0
+
+    class Reactive:
+        async def tick(self):
+            return 0
+
+    class Engine:
+        def __init__(self, commands):
+            self.commands = commands
+
+        async def tick(self):
+            if self.commands.calls >= 2:
+                stop.set()
+            return SimpleNamespace(execution=SimpleNamespace(claimed=1))
+
+    class Listen:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class Wakeups:
+        def listen(self, url):
+            return Listen()
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+    class Lane:
+        async def reap_terminal_blobs(self):
+            return 0
+
+    stop = asyncio.Event()
+    commands = Commands()
+    runtime = SimpleNamespace(
+        engine=SimpleNamespace(
+            url=SimpleNamespace(render_as_string=lambda hide_password: "sqlite://")
+        ),
+        wakeups=Wakeups(),
+        reactive=Reactive(),
+        commands=commands,
+        worker=Engine(commands),
+        lane=Lane(),
+    )
+    await serve(runtime, stop)
+    assert commands.calls >= 2 and stop.is_set()
 
 
 async def test_native_reply_has_its_own_idempotent_owner_without_a_run(commands):

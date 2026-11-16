@@ -144,7 +144,8 @@ class TestMainCompleted:
 
     async def test_the_lane_adds_no_capability_beyond_the_driver(self, finished):
         options = finished.sdk.clients[0].options
-        assert options.tools == ["Read", "Write", "Edit"] and "Bash" in options.disallowed_tools
+        assert options.tools == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+        assert "WebFetch" in options.disallowed_tools
         assert options.env.get("GITHUB_TOKEN", "") == "" and options.setting_sources == []
 
     async def test_turn_without_usage_leaves_the_receipt_unknown(self, tmp_path):
@@ -505,7 +506,7 @@ class TestSdkLaneTemplates:
 
     async def test_the_agent_is_told_not_to_commit_or_push(self, finished):
         options = finished.sdk.clients[0].options
-        assert "Bash" in options.disallowed_tools
+        assert "WebFetch" in options.disallowed_tools
         assert (
             "repository writes and authority files are denied" in finished.sdk.clients[0].prompts[0]
         )

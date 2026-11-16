@@ -128,8 +128,9 @@ async def test_options_use_only_scoped_gateway_and_fixed_file_capabilities(tmp_p
     driver, session, workspace = await start(tmp_path, sdk)
     events = [event async for event in session.events()]
     options = sdk.clients[0].options
-    assert options.tools == ["Read", "Write", "Edit"] and options.allowed_tools == []
-    assert "Bash" in options.disallowed_tools and options.permission_mode == "default"
+    assert options.tools == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    assert options.allowed_tools == []
+    assert "Bash" not in options.disallowed_tools and options.permission_mode == "default"
     assert options.strict_mcp_config and options.mcp_servers == {}
     assert options.setting_sources == [] and options.skills == [] and options.plugins == []
     assert options.env["ANTHROPIC_AUTH_TOKEN"] == grant().key
@@ -179,10 +180,18 @@ async def test_shell_unknown_tools_and_symlink_escape_are_refused(tmp_path):
     workspace.mkdir()
     (workspace / "outside").symlink_to(tmp_path)
     policy = FilePolicy(workspace, sdk)
-    for tool in ("Bash", "WebFetch", "mcp__server__write", "Grep"):
-        assert (
-            await policy.permission(tool, {"file_path": "a.py", "command": "git push"}, None)
-        ).behavior == "deny"
+    for tool, arguments in (
+        ("Bash", {"command": "git push"}),
+        ("Bash", {"command": "pytest; curl https://example.invalid"}),
+        ("WebFetch", {"file_path": "a.py"}),
+        ("Grep", {"path": "../outside.txt"}),
+    ):
+        assert (await policy.permission(tool, arguments, None)).behavior == "deny"
+    assert (await policy.permission("Grep", {"path": "a.py"}, None)).behavior == "allow"
+    assert (await policy.permission("Bash", {"command": "pytest -q"}, None)).behavior == "allow"
+    assert (
+        await policy.permission("Bash", {"command": "uv run ruff check src"}, None)
+    ).behavior == "allow"
     assert not policy.permitted("Write", {"file_path": "outside/escaped.py"})
     assert (await policy.permission("Write", {"file_path": "src/new.py"}, None)).behavior == "allow"
 

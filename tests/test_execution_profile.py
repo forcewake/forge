@@ -570,4 +570,4 @@ class TestLaneEntryValidatesProfileCoherence:
         case = await completed_case(tmp_path)
         options = case.sdk.clients[0].options
         assert options.setting_sources == options.skills == options.plugins == []
-        assert not options.allowed_tools and "Bash" in options.disallowed_tools
+        assert not options.allowed_tools and "WebFetch" in options.disallowed_tools

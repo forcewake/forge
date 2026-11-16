@@ -40,9 +40,9 @@ class LaneBlobStore:
         try:
             with os.fdopen(fd, "wb") as stream:
                 async for chunk in chunks:
-                    count += len(chunk)
-                    if count > self.max_bytes:
+                    if count + len(chunk) > self.max_bytes:
                         raise BlobTooLarge("lane blob exceeds the upload limit")
+                    count += len(chunk)
                     hasher.update(chunk)
                     await asyncio.to_thread(stream.write, chunk)
                 await asyncio.to_thread(stream.flush)
@@ -62,6 +62,9 @@ class LaneBlobStore:
             return count
         finally:
             Path(temporary).unlink(missing_ok=True)
+
+    async def discard(self, digest: str) -> None:
+        await asyncio.to_thread(self._path(digest).unlink, missing_ok=True)
 
     async def read(self, digest: str) -> bytes:
         return await asyncio.to_thread(self._read, self._path(digest), digest)

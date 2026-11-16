@@ -113,6 +113,7 @@ REFUSALS = {
     "revision_approval_required": "Use /approve-revision on the original Draft for this correction.",
     "review_window_closed": "This draft has no eligible completed candidate to revise.",
     "amendment_grant_inactive": "Only a current open implementation or closing grant can be increased.",
+    "command_failed": "The command could not be completed after its retry budget.",
 }
 
 

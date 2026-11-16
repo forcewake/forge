@@ -41,4 +41,11 @@ def test_project_checks_refuse_when_gitlab_is_disabled(tmp_path, monkeypatch, ca
     monkeypatch.setenv("FORGE_GITLAB_ENABLED", "false")
     assert cli.main(["onboard", "unconfigured"]) == 1
     output = capsys.readouterr().err
-    assert "operation refused" in output and "Traceback" not in output
+    assert output.startswith("forge: FileNotFoundError:") and "Traceback" not in output
+
+
+def test_cli_redacts_secret_material_in_the_typed_error(capsys):
+    message = cli.public_error(RuntimeError("refused token=sk-forge-supersecret password=hunter2"))
+    assert message.startswith("RuntimeError:")
+    assert "supersecret" not in message and "hunter2" not in message
+    assert "[redacted]" in message

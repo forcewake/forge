@@ -1,6 +1,7 @@
 """Provider-neutral native command execution with one durable replay owner."""
 
 from collections.abc import Awaitable, Callable, Mapping
+import asyncio
 import json
 import re
 
@@ -87,12 +88,23 @@ class Commands:
     async def execute(self, lease: CommandLease) -> CommandResult:
         command = await self.store.load(lease.command_id)
         result = command.result
+        transient: Exception | None = None
         if result is None:
             try:
                 result = await self.decide(lease, command.envelope)
             except StoreConflict as error:
                 code = str(error) if str(error) in REFUSALS else "command_conflict"
                 result = refusal(code)
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as error:
+                # The command is durable either way. Callers, including the
+                # webhook process, still see the failure so they do not report
+                # acceptance. The worker loop is what keeps the process up.
+                if await self.store.release_for_retry(lease, now=self.clock.now()):
+                    raise
+                transient = error
+                result = refusal("command_failed")
             await self.store.resolve(lease, result, now=self.clock.now())
         finisher = self.finishers.get(command.envelope.command.kind)
         if finisher is not None and not await finisher(lease):
@@ -118,6 +130,8 @@ class Commands:
             if isinstance(outcome, Unknown):
                 return result
         await self.store.complete(lease, now=self.clock.now())
+        if transient is not None:
+            raise transient
         return result
 
     async def decide(self, lease: CommandLease, envelope: CommandEnvelope) -> CommandResult:

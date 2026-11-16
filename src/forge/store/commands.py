@@ -127,6 +127,18 @@ class CommandStore:
             await session.flush()
             return record(row)
 
+    async def release_for_retry(self, lease: CommandLease, *, now: datetime) -> bool:
+        """Defer a transient failure. False means the attempt budget is spent."""
+        async with transaction(self.factory) as session:
+            row = await command_fence(session, lease, now)
+            if row.attempts >= row.max_attempts:
+                return False
+            delay = min(60, 5 * (2 ** (row.attempts - 1)))
+            row.due_at = aware(now) + timedelta(seconds=delay)
+            row.lease_owner = None
+            row.lease_expires_at = aware(now)
+            return True
+
     async def complete(self, lease: CommandLease, *, now: datetime) -> None:
         async with transaction(self.factory) as session:
             row = await command_fence(session, lease, now)

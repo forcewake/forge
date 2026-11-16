@@ -262,14 +262,14 @@ def verify(manifest: dict, directory: Path) -> None:
     if any(manifest.get(key) != value for key, value in pins.items()):
         raise ValueError("workflow must use the exact full source commit, never a tag or branch")
     base = release_base(manifest["workflow_repository"], manifest["rc_tag"], manifest["commit"])
-    actual = {p.name for p in artifact_files(directory)}
-    if actual != set(manifest["artifacts"]):
-        raise ValueError("release artifact inventory changed")
     for name, expected in manifest["artifacts"].items():
         if Path(name).name != name or not DIGEST.fullmatch(expected):
             raise ValueError("invalid release artifact identity")
         if sha256(directory / name) != expected:
             raise ValueError(f"release artifact changed: {name}")
+    actual = {p.name for p in artifact_files(directory)}
+    if actual != set(manifest["artifacts"]):
+        raise ValueError("release artifact inventory changed")
     lane = lane_requirements(directory, base, tuple(manifest["lane_extras"]))
     if lane != manifest["lane_wheels"]:
         raise ValueError("lane wheel identity changed")

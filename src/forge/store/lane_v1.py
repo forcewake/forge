@@ -5,7 +5,7 @@ import inspect
 from typing import Any, TypeVar, cast
 
 from forge_protocol import ControlCommand, RunIdentity
-from sqlalchemy import exists, select, update
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.engine import CursorResult
 
 from forge.api.lane_auth_values import PendingDispatch, identity_of
@@ -13,7 +13,7 @@ from forge.api.lane_v1_values import LaneConflict
 from forge.domain.states import TERMINAL
 from forge.store.lane_auth import locked_current
 from forge.store.lane_state import load_namespace, persist_namespace
-from forge.store.models_lane import EngineLaneSession
+from forge.store.models_lane import EngineBlob, EngineLaneSession
 from forge.store.models_runs import EngineRun
 from forge.store.transactions import SessionFactory, transaction
 
@@ -67,6 +67,42 @@ class EngineLaneV1Store:
                 if cast(CursorResult[Any], result_row).rowcount != 1:
                     raise LaneConflict("run changed during lane mutation")
             return result
+
+    async def terminal_only_digests(self, limit: int) -> list[str]:
+        terminal = tuple(item.value for item in TERMINAL)
+        live = (
+            select(EngineBlob.digest)
+            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
+            .where(EngineRun.state.not_in(terminal))
+        )
+        async with self.session_factory() as session:
+            rows = await session.scalars(
+                select(EngineBlob.digest)
+                .join(EngineRun, EngineRun.id == EngineBlob.run_id)
+                .where(EngineRun.state.in_(terminal), EngineBlob.digest.not_in(live))
+                .limit(limit)
+            )
+        return list(dict.fromkeys(rows))
+
+    async def forget_terminal_digests(self, digests: list[str]) -> None:
+        if not digests:
+            return
+        terminal = tuple(item.value for item in TERMINAL)
+        live = (
+            select(EngineBlob.digest)
+            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
+            .where(EngineRun.state.not_in(terminal))
+        )
+        async with transaction(self.session_factory) as session:
+            await session.execute(
+                delete(EngineBlob).where(
+                    EngineBlob.digest.in_(digests),
+                    EngineBlob.digest.not_in(live),
+                    EngineBlob.run_id.in_(
+                        select(EngineRun.id).where(EngineRun.state.in_(terminal))
+                    ),
+                )
+            )
 
     async def enqueue_control(self, command: ControlCommand) -> ControlCommand:
         def append(

@@ -129,12 +129,17 @@ async def test_actual_worker_recovers_review_receipts_before_activating_new_head
         async def listen(self, url):
             yield
 
+    class Lane:
+        async def reap_terminal_blobs(self):
+            return 0
+
     runtime = SimpleNamespace(
         engine=SimpleNamespace(url=SimpleNamespace(render_as_string=lambda **kw: "owned")),
         wakeups=Wakeups(),
         reactive=ReactiveServices(Reviews(), Reconciler()),
         commands=Commands(),
         worker=Worker(),
+        lane=Lane(),
     )
     await serve(runtime, stop)
     assert events == ["recover", "activate", "commands", "engine"]
