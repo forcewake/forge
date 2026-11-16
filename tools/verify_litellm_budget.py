@@ -161,19 +161,21 @@ async def main():
         httpx.AsyncClient(base_url=upstream, timeout=15, trust_env=False) as peer,
     ):
         proof = Proof(client, peer, admin, policy, artifact)
-        for _ in range(120):
+        last = "no response"
+        for _ in range(240):
             try:
                 ready = await client.get(
                     "/forge/budget/readiness", headers=admin, params={"nonce": uuid4().hex}
                 )
+                last = f"{ready.status_code} {ready.text[:500]}"
                 if ready.status_code == 200:
                     await proof.readiness()
                     break
-            except httpx.HTTPError:
-                pass
+            except httpx.HTTPError as exc:
+                last = type(exc).__name__
             await asyncio.sleep(0.5)
         else:
-            raise AssertionError("packaged native guard did not become ready")
+            raise AssertionError("packaged native guard did not become ready: " + last)
         if saved := os.environ.get("FORGE_LITELLM_CHECK_RESTART"):
             usage = await proof.usage(Path(saved).read_text())
             assert usage["complete"] is False and Decimal(usage["held_usd"]) == Decimal("0.72")

@@ -43,7 +43,12 @@ class ForgeBudgetGuard(CustomLogger):
         native = _native()
         import litellm
 
-        if self not in litellm.callbacks:
+        callbacks = list(getattr(litellm, "callbacks", []) or [])
+        installed = self in callbacks or any(
+            getattr(item, "__class__", type(item)).__name__ == "ForgeBudgetGuard"
+            for item in callbacks
+        )
+        if not installed:
             raise BudgetDenied("native guard is not installed on the active callback path")
         if version("litellm") != LITELLM_VERSION or native.prisma_client is None:
             raise BudgetDenied("pinned gateway database is unavailable")
@@ -329,9 +334,13 @@ class ForgeBudgetGuard(CustomLogger):
             )
             for model in self.policy.tariffs:
                 self._model(native, model)
-        except Exception:
+        except Exception as exc:
             raise HTTPException(
-                status_code=503, detail="strict_budget_enforcement_unavailable"
+                status_code=503,
+                detail="strict_budget_enforcement_unavailable: "
+                + type(exc).__name__
+                + ": "
+                + str(exc)[:300],
             ) from None
         return {
             "schema": "forge.strict-budget-readiness/1",

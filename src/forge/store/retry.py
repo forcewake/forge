@@ -1,17 +1,20 @@
 """One retry refusal table and a fenced, bounded original-handler revival."""
 
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from forge_protocol import RepairContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.command_values import CommandEnvelope, CommandLease, CommandResult
+from forge.domain.budget import Pool
 from forge.domain.run_spec import RunSpec2
 from forge.domain.states import TERMINAL, Handler, State, revive
 from forge.engine.lane_values import DispatchInput
 from forge.store.commands import command_fence, resolve_in
 from forge.store.command_runs import target_runs
+from forge.store.models_budget import EngineBudgetPool, EngineBudgetReservation
 from forge.store.models_execution import EngineCandidate, EngineStep
 from forge.store.pause import PublicationPaused, require_unpaused
 from forge.store.models_runs import EngineApprovedInput, EngineRun, EngineRunSpec
@@ -24,6 +27,46 @@ from forge.store.transactions import (
     transaction,
     notify_steps,
 )
+
+
+async def release_unknown_holds(session: AsyncSession, run_id: str) -> None:
+    """Settle unproven holds at their known lower bound inside the retry transaction."""
+    pools = (
+        await session.scalars(
+            select(EngineBudgetPool).where(EngineBudgetPool.run_id == run_id).with_for_update()
+        )
+    ).all()
+    for row in pools:
+        pool = Pool.model_validate_json(row.state_json)
+        resolved = pool.resolve_unknown()
+        if resolved == pool:
+            continue
+        row.state_json, row.version = resolved.model_dump_json(), row.version + 1
+        for reservation in resolved.reservations:
+            item = await session.scalar(
+                select(EngineBudgetReservation).where(
+                    EngineBudgetReservation.pool_id == row.id,
+                    EngineBudgetReservation.reservation_key == reservation.identity,
+                )
+            )
+            if item is None:
+                item = EngineBudgetReservation(
+                    id=uuid4().hex,
+                    pool_id=row.id,
+                    reservation_key=reservation.identity,
+                    version=1,
+                )
+                session.add(item)
+            else:
+                item.version += 1
+            item.requested_json = reservation.requested.model_dump_json()
+            item.minimum_json = reservation.minimum.model_dump_json()
+            item.allowance_json = reservation.allowance.model_dump_json()
+            item.state = "reserved" if reservation.status == "open" else reservation.status
+            seen = reservation.observed
+            item.observed_usd = None if seen is None else seen.usd
+            item.observed_calls = None if seen is None else seen.calls
+            item.observed_tokens = None if seen is None else seen.tokens
 
 
 async def retry_reason(session: AsyncSession, run: EngineRun) -> str | None:
@@ -185,20 +228,7 @@ class RetryStore:
             raise StoreConflict("published retry candidate has no native head")
         if head is not None and head != base:
             raise StoreConflict("branch_drift")
-        from forge.domain.budget import Pool
-        from forge.store.budgets import BudgetStore
-        from forge.store.models_budget import EngineBudgetPool
-
-        pools = (
-            await session.scalars(
-                select(EngineBudgetPool).where(EngineBudgetPool.run_id == run.id).with_for_update()
-            )
-        ).all()
-        for pool_row in pools:
-            pool = Pool.model_validate_json(pool_row.state_json)
-            resolved = pool.resolve_unknown()
-            if resolved != pool:
-                await BudgetStore._save(session, pool_row, resolved)
+        await release_unknown_holds(session, run.id)
         attempt, generation = run.attempt + 1, run.generation + 1
         repair = (
             RepairContext(
