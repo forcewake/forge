@@ -113,6 +113,53 @@ def candidate(base):
     )
 
 
+async def test_publication_keeps_untouched_blobs_without_a_promisor_filter(tmp_path, monkeypatch):
+    server = tmp_path / "partial.git"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git(tmp_path, "init", "--bare", "--quiet", str(server))
+    git(server, "config", "uploadpack.allowFilter", "true")
+    git(server, "config", "uploadpack.allowAnySHA1InWant", "true")
+    git(seed, "init", "--quiet", "--template=")
+    (seed / "src").mkdir()
+    (seed / "src/file.txt").write_text("old\n")
+    (seed / "keep.dat").write_bytes(b"\x00untouched\xff\n")
+    git(seed, "add", ".")
+    git(seed, "commit", "--quiet", "-m", "Initial")
+    base = git(seed, "rev-parse", "HEAD").decode()
+    git(seed, "push", "--quiet", str(server), "HEAD:refs/heads/" + BRANCH)
+    original = GitProcess.run
+    fetches = []
+
+    async def file_transport(self, *args, **kwargs):
+        fetches.append(args)
+        replacement = tuple(("file://" + str(server)) if arg == URL else arg for arg in args)
+        saved = self.env
+        self.env = dict(saved)
+        slot = next(
+            n
+            for n in range(int(saved["GIT_CONFIG_COUNT"]))
+            if saved[f"GIT_CONFIG_KEY_{n}"] == "protocol.file.allow"
+        )
+        self.env[f"GIT_CONFIG_VALUE_{slot}"] = "always"
+        try:
+            return await original(self, *replacement, **kwargs)
+        finally:
+            self.env = saved
+
+    monkeypatch.setattr(GitProcess, "run", file_transport)
+    sha = await publish(
+        GitTarget(URL, "Basic synthetic-credential"),
+        candidate(base),
+        base,
+        "<!-- partial-clone -->",
+        stamp=STAMP,
+    )
+    assert not any("--filter=blob:none" in arg for args in fetches for arg in args)
+    assert git(server, "show", sha + ":keep.dat", raw=True) == b"\x00untouched\xff\n"
+    assert git(server, "show", sha + ":src/file.txt", raw=True) == b"approved\n"
+
+
 async def test_native_publication_preserves_manifest_modes_bytes_and_parent(native):
     server, _, base, calls = native
     sha = await publish(
