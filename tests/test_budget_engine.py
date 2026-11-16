@@ -497,7 +497,9 @@ def test_vault_binds_every_identity_purpose_model_alias_expiry_and_authenticates
     for change in changes:
         with pytest.raises(CredentialUnavailable):
             vault.open(KeyScope(**{**scope.model_dump(), **change}), sealed)
-    for corrupt in (sealed[:-1], sealed[:15] + b"x" + sealed[16:], b"\x02" + sealed[1:]):
+    flipped = bytearray(sealed)
+    flipped[15] ^= 0x01
+    for corrupt in (sealed[:-1], bytes(flipped), b"\x02" + sealed[1:]):
         with pytest.raises(CredentialUnavailable):
             vault.open(scope, corrupt)
 
