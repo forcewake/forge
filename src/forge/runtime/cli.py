@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import re
 import sys
 
 from forge import __version__
@@ -73,6 +74,17 @@ async def execute(args: argparse.Namespace) -> int:
     return 0
 
 
+def public_error(error: BaseException) -> str:
+    text = f"{type(error).__name__}: {error}"
+    text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[redacted]", text)
+    text = re.sub(
+        r"(?i)(authorization|bearer|token|secret|password|api[_-]?key)([^\s,;]{0,16})",
+        lambda match: match.group(1) + " [redacted]",
+        text,
+    )
+    return text[:500]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -88,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(execute(args))
     except KeyboardInterrupt:
         return 130
-    except Exception:
+    except Exception as error:
         if args.command == "doctor":
             print(
                 json.dumps(
@@ -98,17 +110,14 @@ def main(argv: list[str] | None = None) -> int:
                             {
                                 "name": "installation",
                                 "status": "fail",
-                                "detail": "selected configuration, schema or native service is unavailable",
+                                "detail": public_error(error),
                             }
                         ],
                     }
                 )
             )
             return 1
-        print(
-            "forge: operation refused; check the selected configuration, schema and native service availability",
-            file=sys.stderr,
-        )
+        print("forge: " + public_error(error), file=sys.stderr)
         return 1
 
 
