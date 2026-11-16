@@ -18,7 +18,7 @@ from forge.api.lane_v1_blobs import LaneBlobStore
 from forge.api.lane_v1_service import LaneV1Service
 from forge.budget.credentials import CredentialVault
 from forge.budget.gateway import LiteLLMGateway
-from forge.budget.server_models import ServerModels
+from forge.budget.server_models import ServerModels, server_model_timeout
 from forge.budget.service import BudgetService
 from forge.budget.settlement import Settlement
 from forge.budget.strict import TrustedPolicy
@@ -319,6 +319,7 @@ def budget_services(
         policy,
         current,
         transport=transport,
+        timeout=server_model_timeout(),
     )
     resources.push_async_callback(models.aclose)
     return budget, models, effects, keys

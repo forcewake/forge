@@ -36,7 +36,9 @@ App signing key and webhook secret (at least 32 bytes) under
 Set `tls_ca_path` to an absolute PEM file when the GitHub or GitLab API uses
 a private CA. The model gateway is separate: it must be `https`, except the
 hostnames `127.0.0.1`, `localhost` and `litellm`, which may use `http`. The
-gateway URL cannot embed a user, password, path or query.
+gateway URL cannot embed a user, password, path or query. Planner and
+closing-review calls wait `FORGE_SERVER_MODEL_TIMEOUT_SECONDS` (default 120,
+maximum 600) so a long reply is not cut off at 30 seconds.
 
 ## 3. Configure forge and the target
 

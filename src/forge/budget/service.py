@@ -84,6 +84,7 @@ class BudgetService:
                 await self.keys.purge(old.scope.alias)
         stored = await self.keys.get(alias)
         renewing = _renewing(stored, expires_at)
+        purged = stored is not None and stored.state == "purged"
         reservation = await self.store.reserve(
             lease,
             pool,
@@ -91,14 +92,10 @@ class BudgetService:
             requested,
             minimum,
             planning=purpose == "planning",
-            replace_settled=renewing,
+            replace_settled=renewing or (purpose == "closing" and purged),
             now=self.clock.now(),
         )
-        if (
-            stored is not None
-            and stored.state == "purged"
-            and (reservation.status == "unknown" or not renewing)
-        ):
+        if purged and not renewing and purpose != "closing":
             return Refused(
                 reason="unproven_planning_hold",
                 evidence='{"reason":"unproven_planning_hold"}',
@@ -173,7 +170,13 @@ class BudgetService:
             forge_run_id=lease.run_id, attempt=lease.attempt, generation=lease.generation
         )
         alias, key = alias_for(identity, purpose), reservation_for(identity, purpose)
-        outcome = await self.effects.gw_block(lease, f"{alias}:block", alias)
+        current = await self.keys.get(alias)
+        block_key = f"{alias}:block"
+        if current is not None and current.state not in ("blocked", "purged"):
+            prior = await self.effects.store.get(block_key)
+            if prior is not None and prior.state in ("committed", "adopted"):
+                block_key = f"{block_key}:{current.token_digest[:16]}"
+        outcome = await self.effects.gw_block(lease, block_key, alias)
         pool: PoolPurpose = "closing" if purpose == "closing" else "implementation"
         if not isinstance(outcome, Applied) or not outcome.value.blocked:
             await self.store.observe(lease.run_id, pool, key, None, final=False)

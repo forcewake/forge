@@ -93,12 +93,17 @@ class Trace:
         elif event.kind not in ("completed", "failed"):
             self.hidden += 1
 
-    def finish(self, classification: str, usage: Usage | None = None) -> None:
+    def finish(self, classification: str, usage: Usage | None = None, *, detail: str = "") -> None:
         if self.closed:
             return
         self.closed = True
         self.close_group()
-        self.line("■", f"{classification} · hidden {self.hidden}")
+        summary = (
+            classification
+            if not detail or detail == classification
+            else f"{classification}: {detail}"
+        )
+        self.line("■", f"{summary} · hidden {self.hidden}")
         if usage is not None:
             self.emit(
                 "FORGE_USAGE:"

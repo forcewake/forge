@@ -237,11 +237,15 @@ class ReadTools:
         for step in plan.steps:
             for citation in step.citations:
                 key = by_identity.get(citation.repository.digest)
-                if key is None or citation.source_sha != self.scopes[key].sha:
-                    raise PlanningRefused("unresolved_citation")
+                if key is None:
+                    raise PlanningRefused(
+                        "unresolved_citation",
+                        f"path {citation.path} is not in an authorized snapshot; line count unavailable",
+                    )
                 lines = await self.lines(key, citation.path)
-                if citation.end_line > len(lines):
-                    raise PlanningRefused("unresolved_citation")
+                detail = f"path {citation.path} has {len(lines)} lines"
+                if citation.source_sha != self.scopes[key].sha or citation.end_line > len(lines):
+                    raise PlanningRefused("unresolved_citation", detail)
                 seen = self.observed.get((key, citation.path), set())
                 if any(
                     line not in seen for line in range(citation.start_line, citation.end_line + 1)

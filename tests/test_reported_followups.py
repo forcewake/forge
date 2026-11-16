@@ -53,6 +53,17 @@ def test_provider_credential_env_and_lane_parallelism_are_configurable(monkeypat
     assert parallel_request_limit() == 8
 
 
+def test_server_model_timeout_defaults_to_two_minutes(monkeypatch):
+    from forge.budget.server_models import server_model_timeout
+
+    monkeypatch.delenv("FORGE_SERVER_MODEL_TIMEOUT_SECONDS", raising=False)
+    assert server_model_timeout() == 120
+    monkeypatch.setenv("FORGE_SERVER_MODEL_TIMEOUT_SECONDS", "45")
+    assert server_model_timeout() == 45
+    with pytest.raises(ValueError):
+        server_model_timeout("0")
+
+
 def test_planner_call_budget_follows_the_allowance_and_reasks_are_configurable(monkeypatch):
     from forge.engine.model_services import planner_reasks, planning_model_calls
 

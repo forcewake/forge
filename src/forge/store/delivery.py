@@ -125,7 +125,13 @@ class DeliveryStore:
                 raise StoreConflict("closing evidence requires this published candidate")
             document = json.loads(row.validation_json or "{}")
             encoded = value.model_dump(mode="json")
-            if name == "review" and document.get(name, encoded) != encoded:
+            previous = document.get(name)
+            if (
+                name == "review"
+                and isinstance(previous, dict)
+                and previous != encoded
+                and previous.get("decision") != "inconclusive"
+            ):
                 raise StoreConflict("a durable model review cannot be repeated or replaced")
             document[name] = encoded
             row.validation_json = json.dumps(document, sort_keys=True, separators=(",", ":"))

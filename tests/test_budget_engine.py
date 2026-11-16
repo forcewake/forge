@@ -323,6 +323,21 @@ async def test_new_generation_blocks_old_before_mint_and_uses_remaining_pool(cas
         await case["keys"].grant(old, "https://gateway.invalid", now=case["clock"].now())
 
 
+async def test_a_later_planning_deadline_mints_again_while_the_hold_is_unknown(case):
+    requested = Resources(usd=Decimal("1"), calls=3, tokens=1000)
+
+    async def unavailable(alias):
+        raise RuntimeError("usage unavailable")
+
+    case["gateway"].read_spend = unavailable
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert await case["service"].finish(case["lease"], "planning") == "unknown"
+    case["expires"] = case["clock"].now() + timedelta(seconds=4000)
+    renewed = await prepare(case, purpose="planning", requested=requested)
+    assert isinstance(renewed, Applied)
+    assert case["native"].writes.count("/key/generate") == 2
+
+
 async def test_a_purged_planning_key_can_be_minted_again_after_the_hold_is_known(case):
     from forge.port_values import Refused
     from forge.store.retry import release_unknown_holds

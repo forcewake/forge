@@ -160,6 +160,7 @@ class Reviewer(Protocol):
         *,
         candidate_sha: Sha,
         checks_passed: tuple[str, ...] = (),
+        repair_context: str = "",
     ) -> ReviewVerdict: ...
 
 

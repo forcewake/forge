@@ -63,6 +63,32 @@ async def test_reviewer_receives_complete_frozen_spec_approval_diff_and_sha_with
     assert recorded["required_checks_passed"] == ["unit", "lint"]
     assert "still open" in checked.calls[0]["system"]
     assert "remain separate" not in checked.calls[0]["system"]
+    fenced = Model(
+        "```json\n"
+        + json.dumps(
+            {
+                "candidate_sha": SHA,
+                "approved_digest": approved.approved_digest,
+                "decision": "approve",
+                "body": "The fenced candidate satisfies the frozen request.",
+            }
+        )
+        + "\n```"
+    )
+    verdict = await TextReviewer(frozen, fenced, credential_alias="closing-key").review(
+        DIFF, approved, candidate_sha=SHA
+    )
+    assert verdict.decision == "approve"
+    repaired = Model()
+    await TextReviewer(frozen, repaired, credential_alias="closing-key").review(
+        DIFF,
+        approved,
+        candidate_sha=SHA,
+        repair_context="unit failed: assertion in parser",
+    )
+    repair_prompt = json.loads(repaired.calls[0]["prompt"])
+    assert repair_prompt["failed_check_summary"] == "unit failed: assertion in parser"
+    assert "corrects the prior candidate" in repair_prompt["repair_diff_intent"]
 
 
 @pytest.mark.parametrize(

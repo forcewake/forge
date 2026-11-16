@@ -43,6 +43,15 @@ def test_native_groups_have_bounded_redacted_output_and_close_once(platform):
         assert len(output) == 5
 
 
+def test_trace_finish_keeps_the_server_refusal_detail():
+    output = []
+    trace = Trace("driver", "model", emit=output.append, now=lambda: NOW)
+    trace.finish("server_refused", detail="Lane server refused GET /session: HTTP 503")
+    assert output[-1] == (
+        "12:30:00 ■ server_refused: Lane server refused GET /session: HTTP 503 · hidden 0"
+    )
+
+
 def test_untrusted_text_cannot_emit_commands_or_credentials_and_suppression_is_counted():
     output = []
     trace = Trace(

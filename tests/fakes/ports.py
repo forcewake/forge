@@ -201,6 +201,7 @@ class ScriptedPorts:
         *,
         candidate_sha: Sha,
         checks_passed: tuple[str, ...] = (),
+        repair_context: str = "",
     ) -> ReviewVerdict:
         return cast(
             ReviewVerdict, self.take("review", candidate_diff, approved_input, candidate_sha)

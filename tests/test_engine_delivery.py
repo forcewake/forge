@@ -42,7 +42,7 @@ class Reviewer:
         self.decision = "approve"
         self.wrong_sha = None
 
-    async def review(self, diff, approved, *, candidate_sha, checks_passed=()):
+    async def review(self, diff, approved, *, candidate_sha, checks_passed=(), repair_context=""):
         self.calls.append((diff, approved, candidate_sha))
         return ReviewVerdict(
             candidate_sha=self.wrong_sha or candidate_sha,
@@ -461,3 +461,34 @@ async def test_foreign_published_candidate_cannot_authorize_repair(delivery):
     assert (await env.runner.tick()).parked == 1
     assert len(env.fake.lanes) == 1
     assert (await env.runs.load(run.id)).reason == "handler_error:LaneAuthError"
+
+
+async def test_inconclusive_review_retry_requests_a_new_verdict(delivery):
+    from sqlalchemy import select
+
+    from forge.store.models_execution import EngineEffect, EngineStep
+    from forge.store.models_runs import EngineRun
+
+    env = delivery["env"]
+    run, _, _, sha = await published(delivery)
+    check(delivery, sha)
+    delivery["reviewer"].decision = "inconclusive"
+    assert (await env.runner.tick()).completed == 1
+    assert (await env.runner.tick()).parked == 1
+    assert (await env.runs.load(run.id)).reason == "review_inconclusive"
+    assert len(delivery["reviewer"].calls) == 1
+    delivery["reviewer"].decision = "approve"
+    async with env.factory() as session, session.begin():
+        current = await session.get(EngineRun, run.id)
+        current.state, current.failed_handler, current.reason = "reviewing", None, None
+        step = await session.scalar(
+            select(EngineStep).where(EngineStep.run_id == run.id, EngineStep.handler == "review")
+        )
+        step.state, step.lease_owner, step.lease_expires_at = "scheduled", None, None
+        step.max_attempts = max(step.max_attempts, step.attempts + 1)
+    assert (await env.runner.tick()).completed == 1
+    assert len(delivery["reviewer"].calls) == 2
+    async with env.factory() as session:
+        keys = list(await session.scalars(select(EngineEffect.key)))
+    assert any(key.endswith(":review") for key in keys)
+    assert any(key.endswith(":review:2") for key in keys)

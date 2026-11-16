@@ -175,6 +175,7 @@ class _ReviewStep:
         *,
         candidate_sha: Sha,
         checks_passed: tuple[str, ...] = (),
+        repair_context: str = "",
     ) -> ReviewVerdict:
         spec = await self.inputs.review(
             self.current(), approved_input, candidate_diff, candidate_sha, now=self.clock.now()
@@ -189,4 +190,5 @@ class _ReviewStep:
             approved_input,
             candidate_sha=candidate_sha,
             checks_passed=checks_passed,
+            repair_context=repair_context,
         )

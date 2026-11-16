@@ -186,7 +186,7 @@ class Runner:
             )
             diff_id = None
         if self.trace is not None:
-            self.trace.finish(outcome.classification, outcome.usage)
+            self.trace.finish(outcome.classification, outcome.usage, detail=outcome.reason)
         report = LaneReport(
             **self.client.identity,
             approved_digest=self.dispatch.approved_digest,

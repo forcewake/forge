@@ -479,4 +479,5 @@ async def test_a_bad_citation_is_reasked_with_the_concrete_error():
             task(), snapshot()
         )
     assert "unresolved_citation" in model.calls[1]["prompt"]
+    assert "src/main.py" in model.calls[1]["prompt"] and "lines" in model.calls[1]["prompt"]
     assert len(model.calls) == len(replies)
