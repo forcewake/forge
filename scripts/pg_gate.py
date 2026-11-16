@@ -415,8 +415,9 @@ def migration_tables() -> set[str]:
 
 
 def schema_install_command(database_url: str) -> list[str]:
-    """The shipped installer. Startup never creates tables."""
-    return [sys.executable, "-m", "forge.store.schema", "init", "--database-url", database_url]
+    """The shipped installer. The URL is supplied as DATABASE_URL, not argv."""
+    del database_url
+    return [sys.executable, "-m", "forge.store.schema", "init"]
 
 
 # ---------------------------------------------------------------------------
@@ -506,12 +507,15 @@ async def verify_schema(database_url: str, expected_head: str, expected_tables: 
 
 def run_migrations(database_url: str) -> None:
     """Provision through the shipped schema installer — never create_all."""
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
     process = subprocess.run(
         schema_install_command(database_url),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=300,
+        env=env,
     )
     if process.returncode != 0:
         raise SchemaError(

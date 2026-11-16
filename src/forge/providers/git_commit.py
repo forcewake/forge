@@ -102,7 +102,6 @@ async def publish(
             "--no-tags",
             "--no-recurse-submodules",
             "--depth=1",
-            "--filter=blob:none",
             target.url,
             expected_head,
         )

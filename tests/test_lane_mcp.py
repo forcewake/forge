@@ -190,10 +190,8 @@ async def test_claude_native_status_and_exact_tool_hooks_gate_the_first_query(
     else:
         session = await driver.start(brief, workspace, DriverEnv("test-model", grant()))
         if status == "forbidden_tool":
-            with pytest.raises(LaneFailure) as refused:
-                _ = [event async for event in session.events()]
-            assert refused.value.classification == "tool_policy_refused"
-            assert permissions[0].behavior == "deny"
+            assert [event async for event in session.events()][-1].kind == "completed"
+            assert permissions[0].behavior == "deny" and permissions[0].interrupt is False
         else:
             assert [event async for event in session.events()][-1].kind == "completed"
             assert permissions[0].behavior == "allow"

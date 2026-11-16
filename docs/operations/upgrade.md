@@ -13,17 +13,22 @@ upgrade recommendation. Read the [changelog](../../CHANGELOG.md) and binding
    their durable intent; stopping a consumer does not prove a remote job stopped.
 3. Select the exact reviewed release image digest and wheel/template identity.
    Verify available signatures and provenance; never substitute a moving tag.
-4. Run `forge install` from that image against the intended database before
-   starting new consumers. That command is `python -m forge.store.schema init`.
-   No source mount or automatic schema bypass.
-5. Recreate both consumers on that same composition and preserved shared data.
+4. Do not run `forge install` against a database that already has tables.
+   `forge install` and `python -m forge.store.schema init` refuse unless the
+   database is empty. Pass the URL as `DATABASE_URL` or `--url-file`, not as
+   a `--database-url` value that contains a password.
+5. On an existing 1.0 database, start the new image and run
+   `DATABASE_URL=... python -m forge.store.schema check`. Startup runs the
+   same check. A stale or historical schema refuses; nothing auto-upgrades it.
+   A 0.42 database uses `python -m forge.store.schema migrate` with
+   `--source-url` from `FORGE_LEGACY_DATABASE_URL`, a verification URL from
+   `FORGE_MIGRATION_VERIFY_URL`, and `--url-file` for the new database.
+6. Recreate both consumers on that same composition and preserved shared data.
    Run `forge doctor` and health checks, then reconcile in-flight work before
    dispatch.
 
-Startup runs `python -m forge.store.schema check`. A stale, unknown or
-historical schema refuses; the gate does not auto-upgrade it. An empty
-database stays empty until `forge install`. SQLite uses the same explicit
-installer.
+An empty database stays empty until `forge install`. SQLite uses the same
+explicit installer.
 
 ## Rollback
 

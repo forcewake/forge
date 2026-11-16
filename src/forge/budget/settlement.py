@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
+from forge.domain.budget import Observation
 from forge.ports import BudgetGateway
 from forge.port_values import Applied, Found
 from forge.store.budgets import BudgetStore, PoolPurpose
@@ -25,6 +26,10 @@ class Settlement:
     async def observe(
         self, run_id: str, purpose: PoolPurpose, key: str, alias: str
     ) -> Literal["settled", "accrued", "unknown"]:
+        pool = await self.store.load(run_id, purpose)
+        current = next((item for item in pool.reservations if item.identity == key), None)
+        if current is not None and current.status == "settled":
+            return "settled"
         try:
             proof = await self.gateway.probe_block(alias)
             if (
@@ -46,10 +51,19 @@ class Settlement:
             return "unknown"
         pool = await self.store.load(run_id, purpose)
         previous = next(item for item in pool.reservations if item.identity == key).observed
+        # USD is the enforced axis. Calls and tokens stay unknown when the
+        # gateway only meters money; a stable USD reading is enough to settle.
         stable = (
             first == second
-            and second.complete
+            and second.usd is not None
             and (previous is None or second.lower_bound.covers(previous.lower_bound))
         )
-        await self.store.observe(run_id, purpose, key, second, final=stable)
+        observed = second
+        if stable and not second.complete:
+            observed = Observation(
+                usd=second.usd,
+                calls=0 if second.calls is None else second.calls,
+                tokens=0 if second.tokens is None else second.tokens,
+            )
+        await self.store.observe(run_id, purpose, key, observed, final=stable)
         return "settled" if stable else "accrued"

@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from forge.domain.blob import BlobContent
-from forge.port_values import Applied, Found, Inconclusive, ReadUnavailable
+from forge.port_values import Applied, DefinitelyAbsent, Found, Inconclusive, ReadUnavailable
 from forge.domain.verdicts import Unknown
 from tests import gitlab_engine_fixture as gl
 from tests import native_clients_fixture as fixture
@@ -294,7 +294,7 @@ async def test_get_branch_head_missing_branch_raises_404(gitlab):
     assert len(resource_calls(gitlab, "/repository/branches/feature/gone")) == 1
     assert isinstance(
         await gitlab.repositories.probe_branch(gitlab.repo, "feature/gone", gitlab.sha),
-        Inconclusive,
+        DefinitelyAbsent,
     )
     assert not resource_calls(gitlab, "/repository/commits")
 

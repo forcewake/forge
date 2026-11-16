@@ -195,7 +195,13 @@ class ScriptedPorts:
         return cast(Plan, self.take("plan", task, snapshot))
 
     async def review(
-        self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha
+        self,
+        candidate_diff: bytes,
+        approved_input: ApprovedInput,
+        *,
+        candidate_sha: Sha,
+        checks_passed: tuple[str, ...] = (),
+        repair_context: str = "",
     ) -> ReviewVerdict:
         return cast(
             ReviewVerdict, self.take("review", candidate_diff, approved_input, candidate_sha)
@@ -218,6 +224,9 @@ class ScriptedPorts:
 
     async def block(self, alias: str) -> GatewayOutcome:
         return cast(GatewayOutcome, self.take("block", alias))
+
+    async def delete_alias(self, alias: str) -> None:
+        self.take("delete_alias", alias)
 
     async def read_spend(self, alias: str) -> Observation:
         return cast(Observation, self.take("read_spend", alias))

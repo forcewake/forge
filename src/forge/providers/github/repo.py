@@ -20,6 +20,7 @@ from forge.port_values import (
     BranchRef,
     CommentRef,
     ReviewRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     ProbeResult,
@@ -296,9 +297,7 @@ class GitHubRepo:
             head = await self.head(repo, branch)
             proof = evidence("probe_branch", head=head or "")
             if head is None:
-                return Inconclusive(
-                    reason="branch visibility is not proof of absence", evidence=proof
-                )
+                return DefinitelyAbsent(evidence=proof)
             result: BranchOutcome = (
                 Applied[BranchRef](
                     value=BranchRef(repo=repo, branch=branch, sha=head), evidence=proof
@@ -320,6 +319,8 @@ class GitHubRepo:
     ) -> ProbeResult[CommitOutcome]:
         try:
             head, matches = await self._marker(repo, branch, marker)
+            if not matches and (head is None or head == expected_parent):
+                return DefinitelyAbsent(evidence=evidence("probe_commit", head=head or ""))
             if len(matches) != 1:
                 return Inconclusive(
                     reason="commit marker missing or ambiguous", evidence=evidence("probe_commit")

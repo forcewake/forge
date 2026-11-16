@@ -32,7 +32,7 @@ class OperatorStore:
                 raise StoreConflict("run_scope_mismatch")
             if envelope.issue_action == "unlabeled" and run.state != State.AWAITING_APPROVAL.value:
                 result = CommandResult(status="observed", reason="run_past_gate", run_id=run.id)
-            elif State(run.state) in TERMINAL:
+            elif State(run.state) in TERMINAL and State(run.state) is not State.BLOCKED:
                 result = CommandResult(status="observed", reason="run_terminal", run_id=run.id)
             else:
                 # Commit revocation and withdrawal before any gateway/provider I/O.

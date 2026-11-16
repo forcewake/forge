@@ -6,6 +6,7 @@ not a second schema factory.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,13 +19,16 @@ INIT_TIMEOUT_SECONDS = 120.0
 
 
 def install_schema(database_url: str) -> None:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
     result = subprocess.run(
-        [sys.executable, "-m", "forge.store.schema", "init", "--database-url", database_url],
+        [sys.executable, "-m", "forge.store.schema", "init"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=INIT_TIMEOUT_SECONDS,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(

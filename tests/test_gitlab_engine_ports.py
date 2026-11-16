@@ -11,6 +11,7 @@ from forge.domain.verdicts import Committed, Conflict, Unknown
 from forge.port_values import (
     Applied,
     CommentRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     ReadUnavailable,
@@ -167,7 +168,7 @@ async def test_lost_comment_response_recovers_once_without_forgiving_duplicates(
     wire.routes["issues/7/notes"].append(f.note(11))
     assert isinstance(await subjects.probe_comment(f.SUBJECT, f.MARKER), Inconclusive)
     wire.routes["issues/7/notes"] = []
-    assert isinstance(await subjects.probe_comment(f.SUBJECT, f.MARKER), Inconclusive)
+    assert isinstance(await subjects.probe_comment(f.SUBJECT, f.MARKER), DefinitelyAbsent)
 
 
 async def test_review_command_reply_uses_native_conversation_and_exact_target(case):

@@ -7,7 +7,15 @@ import pytest
 from forge_protocol import digest
 
 from forge.domain.verdicts import Conflict, Unknown
-from forge.port_values import Applied, CommentRef, Found, Inconclusive, ReadUnavailable, Refused
+from forge.port_values import (
+    Applied,
+    CommentRef,
+    DefinitelyAbsent,
+    Found,
+    Inconclusive,
+    ReadUnavailable,
+    Refused,
+)
 from forge.providers.gitlab.commit import GitLabCommitter
 from forge.providers.git_process import GitFailure
 from tests import gitlab_engine_fixture as f
@@ -29,7 +37,7 @@ async def test_branch_probe_preserves_applied_conflict_and_unknown_absence(case)
     conflict = await repo.probe_branch(f.REPO, f.DISPATCH.ref, f.OTHER)
     assert isinstance(conflict, Found) and isinstance(conflict.value, Conflict)
     wire.routes["repository/branches/forge/run-1"] = httpx.Response(404)
-    assert isinstance(await repo.probe_branch(f.REPO, f.DISPATCH.ref, f.SHA), Inconclusive)
+    assert isinstance(await repo.probe_branch(f.REPO, f.DISPATCH.ref, f.SHA), DefinitelyAbsent)
 
 
 async def test_label_mutation_changes_only_the_requested_label_and_probe_observes_exact_state(case):

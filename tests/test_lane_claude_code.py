@@ -255,11 +255,10 @@ async def test_cancel_during_connect_cleans_same_owner_and_has_no_vendor_fallbac
 async def test_policy_denial_and_real_sdk_error_classification_are_honest(tmp_path):
     sdk = FakeSDK(tmp_path, auto_result=False)
     _, session, _ = await start(tmp_path, sdk)
-    await session.policy.permission("Bash", {"command": "git push"}, None)
+    decision = await session.policy.permission("Bash", {"command": "git push"}, None)
+    assert decision.behavior == "deny" and decision.interrupt is False
     sdk.clients[0].messages.put_nowait(Result())
-    with pytest.raises(LaneFailure, match="approved request") as caught:
-        _ = [event async for event in session.events()]
-    assert caught.value.classification == "tool_policy_refused"
+    assert [event async for event in session.events()][-1].kind == "completed"
     sdk.connect_error = type("ProcessError", (Exception,), {})(
         "stderr with synthetic-gateway-secret"
     )

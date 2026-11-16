@@ -8,6 +8,7 @@ from forge_protocol import RunIdentity, ModelKeyGrant
 
 from forge.budget.credentials import Purpose, CredentialUnavailable
 from forge.budget.admission import StrictGatewayAdmission
+from forge.budget.gateway import GatewayUnavailable
 from forge.budget.settlement import Settlement
 from forge.domain.budget import Resources
 from forge.domain.run_spec import RunPolicy
@@ -27,6 +28,10 @@ def alias_for(identity: RunIdentity, purpose: Purpose) -> str:
 
 def reservation_for(identity: RunIdentity, purpose: Purpose) -> str:
     return f"{purpose}:{identity.attempt}:{identity.generation}"
+
+
+def _renewing(stored: KeyRecord | None, expires_at: datetime) -> bool:
+    return stored is not None and stored.state == "purged" and stored.scope.expires_at != expires_at
 
 
 class BudgetService:
@@ -51,17 +56,7 @@ class BudgetService:
         minimum: Resources,
         expires_at: datetime,
     ) -> GatewayOutcome:
-        if requested.usd <= 0 or minimum.usd <= 0:
-            return Refused(
-                reason="positive_metered_usd_required",
-                evidence='{"reason":"positive_metered_usd_required"}',
-            )
-        if purpose == "implementation" and spec.metering != "metered":
-            return Refused(
-                reason="unmetered_driver_has_no_gateway_key",
-                evidence='{"reason":"unmetered_driver"}',
-            )
-        refused = await self.admission.readiness(spec.model)
+        refused = await self._preflight(spec, purpose, requested, minimum)
         if refused is not None:
             return refused
         await self.store.initialize(lease, spec, now=self.clock.now())
@@ -78,6 +73,9 @@ class BudgetService:
                 if not isinstance(outcome, Applied) or not outcome.value.blocked:
                     return Unknown(evidence='{"reason":"previous_key_not_blocked"}')
                 await self.keys.purge(old.scope.alias)
+        stored = await self.keys.get(alias)
+        renewing = _renewing(stored, expires_at)
+        purged = stored is not None and stored.state == "purged"
         reservation = await self.store.reserve(
             lease,
             pool,
@@ -85,8 +83,14 @@ class BudgetService:
             requested,
             minimum,
             planning=purpose == "planning",
+            replace_settled=renewing or (purpose == "closing" and purged),
             now=self.clock.now(),
         )
+        if purged and not renewing and purpose != "closing":
+            return Refused(
+                reason="unproven_planning_hold",
+                evidence='{"reason":"unproven_planning_hold"}',
+            )
         reference = GatewayKeyRef(
             alias=alias,
             model=spec.model,
@@ -95,17 +99,42 @@ class BudgetService:
             blocked=False,
         )
         await self.keys.prepare(lease, purpose, reference, now=self.clock.now())
-        prior = await self.effects.store.get(f"{alias}:mint")
+        mint_key = f"{alias}:mint"
+        if stored is not None and stored.state == "purged":
+            try:
+                await self.effects.delete_alias(alias)
+            except Exception:
+                return Unknown(evidence='{"reason":"alias_delete_failed"}')
+            mint_key = f"{mint_key}:{int(expires_at.timestamp())}"
+        prior = await self.effects.store.get(mint_key)
         original = reservation.allowance
         if prior is not None:
             original = Resources.model_validate_json(
                 json.loads(prior.payload_json)["allowance_json"]
             )
         outcome = await self.effects.gw_mint(
-            lease, f"{alias}:mint", identity, alias, spec.model, original, expires_at
+            lease, mint_key, identity, alias, spec.model, original, expires_at
         )
         latest = await self.keys.get(alias)
         return self._admitted(outcome, latest, identity, spec, expires_at, reservation.allowance)
+
+    async def _preflight(
+        self, spec: RunPolicy, purpose: Purpose, requested: Resources, minimum: Resources
+    ) -> GatewayOutcome | None:
+        if requested.usd <= 0 or minimum.usd <= 0:
+            return Refused(
+                reason="positive_metered_usd_required",
+                evidence='{"reason":"positive_metered_usd_required"}',
+            )
+        if purpose == "implementation" and spec.metering != "metered":
+            return Refused(
+                reason="unmetered_driver_has_no_gateway_key",
+                evidence='{"reason":"unmetered_driver"}',
+            )
+        try:
+            return await self.admission.readiness(spec.model)
+        except GatewayUnavailable:
+            return Unknown(evidence='{"reason":"gateway_readiness_unavailable"}')
 
     @staticmethod
     def _admitted(
@@ -154,7 +183,13 @@ class BudgetService:
             forge_run_id=lease.run_id, attempt=lease.attempt, generation=lease.generation
         )
         alias, key = alias_for(identity, purpose), reservation_for(identity, purpose)
-        outcome = await self.effects.gw_block(lease, f"{alias}:block", alias)
+        current = await self.keys.get(alias)
+        block_key = f"{alias}:block"
+        if current is not None and current.state not in ("blocked", "purged"):
+            prior = await self.effects.store.get(block_key)
+            if prior is not None and prior.state in ("committed", "adopted"):
+                block_key = f"{block_key}:{current.token_digest[:16]}"
+        outcome = await self.effects.gw_block(lease, block_key, alias)
         pool: PoolPurpose = "closing" if purpose == "closing" else "implementation"
         if not isinstance(outcome, Applied) or not outcome.value.blocked:
             await self.store.observe(lease.run_id, pool, key, None, final=False)

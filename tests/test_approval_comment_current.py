@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from forge.domain.states import State
 from forge.engine.approval_comment import displayed_plan
-from forge.port_values import CommentRef, Inconclusive, ReadUnavailable
+from forge.port_values import CommentRef, DefinitelyAbsent, ReadUnavailable
 from forge.providers.fake.state import ref_key
 from forge.store.approval_values import PreparedPlan
 from forge.store.models_execution import EngineEffect, EngineStep
@@ -148,7 +148,7 @@ async def test_github_current_native_display_keeps_exact_bytes_bot_and_identity(
     else:
         assert await displayed_plan(subjects, expected, prepared) == (fault == "exact")
     if fault == "missing":
-        assert isinstance(await subjects.probe_comment(SUBJECT, prepared.marker), Inconclusive)
+        assert isinstance(await subjects.probe_comment(SUBJECT, prepared.marker), DefinitelyAbsent)
     assert all(
         request.method == "GET" or request.url.path.endswith("/access_tokens")
         for request in wire.calls
@@ -189,7 +189,7 @@ async def test_gitlab_current_native_display_keeps_exact_bytes_bot_and_identity(
             assert await displayed_plan(subjects, expected, prepared) == (fault == "exact")
         if fault == "missing":
             assert isinstance(
-                await subjects.probe_comment(f.SUBJECT, prepared.marker), Inconclusive
+                await subjects.probe_comment(f.SUBJECT, prepared.marker), DefinitelyAbsent
             )
         assert all(request.method == "GET" for request in wire.calls)
     finally:

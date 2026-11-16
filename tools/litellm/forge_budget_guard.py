@@ -12,7 +12,15 @@ from fastapi import Depends, HTTPException
 from litellm.integrations.custom_logger import CustomLogger
 
 from guard_ledger import NativeLedger
-from guard_policy import BudgetDenied, LITELLM_VERSION, Policy, code_digest, money, observed_cost
+from guard_policy import (
+    BudgetDenied,
+    LITELLM_VERSION,
+    Policy,
+    code_digest,
+    money,
+    observed_cost,
+    wire_usd,
+)
 from bootstrap import verify_artifact
 
 POLICY_PATH = Path(__file__).with_name("forge-budget-policy.json")
@@ -35,7 +43,12 @@ class ForgeBudgetGuard(CustomLogger):
         native = _native()
         import litellm
 
-        if self not in litellm.callbacks:
+        callbacks = list(getattr(litellm, "callbacks", []) or [])
+        installed = self in callbacks or any(
+            getattr(item, "__class__", type(item)).__name__ == "ForgeBudgetGuard"
+            for item in callbacks
+        )
+        if not installed:
             raise BudgetDenied("native guard is not installed on the active callback path")
         if version("litellm") != LITELLM_VERSION or native.prisma_client is None:
             raise BudgetDenied("pinned gateway database is unavailable")
@@ -152,8 +165,9 @@ class ForgeBudgetGuard(CustomLogger):
                 or forge.get("strict_policy_digest") != self.policy.digest
             ):
                 raise BudgetDenied("key is not bound to the deployed strict pricing policy")
-            cap = money(str(user_api_key_dict.max_budget))
-            if cap > money(forge["allowance"]["usd"]):
+            cap = wire_usd(money(str(user_api_key_dict.max_budget)))
+            approved = wire_usd(money(str(forge["allowance"]["usd"])))
+            if cap > approved:
                 raise BudgetDenied("native key ceiling exceeds the approved allowance")
             channels = []
             for name in ("metadata", "litellm_metadata"):
@@ -171,6 +185,17 @@ class ForgeBudgetGuard(CustomLogger):
                 channel["forge_budget_hold"] = {"request_id": request_id, "token_digest": token}
             return data
         except Exception as error:
+            hold = None
+            for name in ("metadata", "litellm_metadata"):
+                channel = data.get(name) if isinstance(data, dict) else None
+                if isinstance(channel, dict) and isinstance(channel.get("forge_budget_hold"), dict):
+                    hold = channel["forge_budget_hold"]
+                    break
+            if hold is not None:
+                try:
+                    await (await self._ledger()).release(hold["token_digest"], hold["request_id"])
+                except Exception:
+                    pass
             reason = str(error) if isinstance(error, BudgetDenied) else type(error).__name__
             logging.getLogger("forge.strict_budget").warning("Admission refused: %s", reason)
             raise HTTPException(status_code=429, detail="strict_budget_admission_refused") from None
@@ -203,8 +228,21 @@ class ForgeBudgetGuard(CustomLogger):
             return
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
-        # Dispatch may have reached a billable provider even when its response is lost.
-        return
+        # A 4xx that never left the gateway did not spend the provider. Release
+        # that hold. Anything that may have been billed stays held.
+        exception = kwargs.get("exception")
+        status = getattr(exception, "status_code", None)
+        if status not in (400, 401, 403, 404, 422):
+            return
+        parameters = kwargs.get("litellm_params") or {}
+        metadata = parameters.get("metadata") or kwargs.get("metadata") or {}
+        hold = metadata.get("forge_budget_hold")
+        if not isinstance(hold, dict):
+            return
+        try:
+            await (await self._ledger()).release(hold["token_digest"], hold["request_id"])
+        except Exception:
+            return
 
     async def _anthropic_usage(self, data, response):
         body = response if isinstance(response, dict) else response.model_dump(exclude_unset=True)
@@ -296,9 +334,13 @@ class ForgeBudgetGuard(CustomLogger):
             )
             for model in self.policy.tariffs:
                 self._model(native, model)
-        except Exception:
+        except Exception as exc:
             raise HTTPException(
-                status_code=503, detail="strict_budget_enforcement_unavailable"
+                status_code=503,
+                detail="strict_budget_enforcement_unavailable: "
+                + type(exc).__name__
+                + ": "
+                + str(exc)[:300],
             ) from None
         return {
             "schema": "forge.strict-budget-readiness/1",

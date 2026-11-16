@@ -222,10 +222,8 @@ class TestSchemaState:
         command = gate.schema_install_command("postgresql+asyncpg://forge:forge@127.0.0.1/forge")
         assert command[1:4] == ["-m", "forge.store.schema", "init"]
         assert "forge.migrate" not in command
-        assert command[-2:] == [
-            "--database-url",
-            "postgresql+asyncpg://forge:forge@127.0.0.1/forge",
-        ]
+        assert "--database-url" not in command
+        assert "forge:forge" not in " ".join(command)
 
 
 class TestReport:

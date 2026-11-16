@@ -26,6 +26,29 @@ SCHEMA = (
 )
 
 
+async def release_alias(tx: Any, alias: str, *, keep: str | None) -> None:
+    """A blocked or deleted key keeps its holds, but no longer owns the live alias."""
+    rows = await tx.query_raw(
+        "SELECT token_digest FROM forge_budget_guard_accounts WHERE alias=$1 FOR UPDATE",
+        alias,
+    )
+    for row in rows:
+        token = row["token_digest"]
+        if token == keep:
+            continue
+        native = await tx.query_raw(
+            'SELECT blocked FROM "LiteLLM_VerificationToken" WHERE token=$1',
+            token,
+        )
+        if len(native) == 1 and native[0]["blocked"] is not True:
+            raise BudgetDenied("alias is still owned by a live key")
+        await tx.execute_raw(
+            "UPDATE forge_budget_guard_accounts SET blocked=TRUE, alias=$2 WHERE token_digest=$1",
+            token,
+            f"{alias}:retired:{token}",
+        )
+
+
 class NativeLedger:
     def __init__(self, database: Any) -> None:
         self.db = database
@@ -48,13 +71,14 @@ class NativeLedger:
             native = await tx.query_raw(
                 """SELECT key_alias FROM "LiteLLM_VerificationToken"
                 WHERE token=$1 AND (blocked IS NULL OR blocked=FALSE)
-                AND expires>CURRENT_TIMESTAMP AND max_budget>=CAST(CAST($2 AS TEXT) AS DOUBLE PRECISION)
+                AND expires>(CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AND max_budget>=CAST(CAST($2 AS TEXT) AS DOUBLE PRECISION)
                 FOR UPDATE""",
                 token,
                 str(ceiling),
             )
             if len(native) != 1 or native[0]["key_alias"] != alias:
                 raise BudgetDenied("authoritative native key is blocked, expired or changed")
+            await release_alias(tx, alias, keep=token)
             await tx.execute_raw(
                 """INSERT INTO forge_budget_guard_accounts(token_digest,alias,ceiling)
                 VALUES($1,$2,CAST($3 AS NUMERIC)) ON CONFLICT(token_digest) DO NOTHING""",
@@ -94,6 +118,17 @@ class NativeLedger:
                 token,
                 str(amount),
             )
+
+    async def retire_alias(self, alias: str) -> None:
+        """Free an alias after /key/delete so a later mint can take the same name."""
+        if not alias or len(alias) > 200:
+            raise BudgetDenied("positive bounded native allowance is required")
+        async with self.db.tx() as tx:
+            await release_alias(tx, alias, keep=None)
+
+    async def release(self, token: str, request_id: str) -> None:
+        """A call refused before the provider sees it spends nothing."""
+        await self.settle(token, request_id, Decimal(0), 0, 0)
 
     async def settle(
         self, token: str, request_id: str, cost: Decimal, calls: int | None, tokens: int | None

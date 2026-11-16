@@ -28,13 +28,18 @@ class Proof:
         assert self.policy.accepts(body, nonce, "forge-budget-stub", self.artifact)
         return body
 
-    async def mint(self, usd="3", duration="300s"):
+    async def health(self):
+        response = await self.client.get("/health/readiness")
+        assert response.status_code == 200, response.text[:300]
+        print("PASS gateway /health/readiness")
+
+    async def mint(self, usd="3", duration="300s", alias=None):
         ready = await self.readiness()
         key = "sk-forge-native-proof-" + uuid4().hex
         token = hashlib.sha256(key.encode()).hexdigest()
         body = {
             "key": key,
-            "key_alias": "forge-proof-" + uuid4().hex,
+            "key_alias": alias or "forge-proof-" + uuid4().hex,
             "models": ["forge-budget-stub"],
             "max_budget": float(usd),
             "duration": duration,
@@ -136,6 +141,20 @@ class Proof:
         )
         return token
 
+    async def remint(self):
+        alias = "forge-proof-remint-" + uuid4().hex
+        key, token = await self.mint(alias=alias)
+        assert (await self.send(key)).status_code == 200
+        await asyncio.sleep(0.15)
+        deleted = await self.client.post(
+            "/key/delete", headers=self.admin, json={"key_aliases": [alias]}
+        )
+        assert deleted.status_code == 200, deleted.text[:300]
+        replacement, _new_token = await self.mint(alias=alias)
+        admitted = await self.send(replacement)
+        assert admitted.status_code == 200, admitted.text[:300]
+        print("PASS delete and remint the same alias: the new key is admitted")
+
     async def expiry(self):
         key, token = await self.mint(duration="1s")
         await asyncio.sleep(1.1)
@@ -161,19 +180,22 @@ async def main():
         httpx.AsyncClient(base_url=upstream, timeout=15, trust_env=False) as peer,
     ):
         proof = Proof(client, peer, admin, policy, artifact)
-        for _ in range(60):
+        last = "no response"
+        for _ in range(240):
             try:
                 ready = await client.get(
                     "/forge/budget/readiness", headers=admin, params={"nonce": uuid4().hex}
                 )
+                last = f"{ready.status_code} {ready.text[:500]}"
                 if ready.status_code == 200:
+                    await proof.health()
                     await proof.readiness()
                     break
-            except httpx.HTTPError:
-                pass
+            except httpx.HTTPError as exc:
+                last = type(exc).__name__
             await asyncio.sleep(0.5)
         else:
-            raise AssertionError("packaged native guard did not become ready")
+            raise AssertionError("packaged native guard did not become ready: " + last)
         if saved := os.environ.get("FORGE_LITELLM_CHECK_RESTART"):
             usage = await proof.usage(Path(saved).read_text())
             assert usage["complete"] is False and Decimal(usage["held_usd"]) == Decimal("0.72")
@@ -181,6 +203,7 @@ async def main():
             print("PASS native process restart: PostgreSQL retains the complete unknown hold")
             return
         await proof.routes()
+        await proof.remint()
         await proof.refusal()
         unknown_token = await proof.lost()
         await proof.expiry()

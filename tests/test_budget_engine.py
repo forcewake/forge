@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import forge.store.models  # noqa: F401
 from forge.budget.credentials import CredentialUnavailable, CredentialVault, KeyScope
-from forge.budget.gateway import LiteLLMGateway
+from forge.budget.gateway import LiteLLMGateway, parallel_request_limit
 from forge.budget.strict import ALLOWED_ROUTES, GUARD_DIGEST, TrustedPolicy
 from forge.budget.model_client import BudgetedModelClient
 from forge.budget.service import BudgetService, alias_for
@@ -42,6 +42,7 @@ class NativeAdmin:
     def __init__(self, clock):
         self.clock, self.keys, self.writes = clock, {}, []
         self.drop_mint, self.unavailable, self.tamper = False, False, None
+        self.readiness_status = None
         self.unavailable_write = False
         self.policy = json.dumps(
             {
@@ -65,6 +66,8 @@ class NativeAdmin:
             raise httpx.ConnectError("synthetic unreachable", request=request)
         path = request.url.path
         if path == "/forge/budget/readiness":
+            if self.readiness_status is not None:
+                return httpx.Response(self.readiness_status, json={"error": "unavailable"})
             return httpx.Response(
                 200,
                 json={
@@ -108,8 +111,11 @@ class NativeAdmin:
         if path == "/key/generate":
             assert data["key_type"] == "default" and data["budget_duration"] is None
             assert data["blocked"] is False
+            assert data["max_parallel_requests"] == parallel_request_limit()
             token = hashlib.sha256(data["key"].encode()).hexdigest()
             assert token not in self.keys
+            if any(row["key_alias"] == data["key_alias"] for row in self.keys.values()):
+                return httpx.Response(400, json={"error": "key_alias already exists"})
             self.keys[token] = {
                 **{
                     key: value
@@ -128,6 +134,12 @@ class NativeAdmin:
                 self.drop_mint = False
                 raise httpx.ReadTimeout("synthetic dropped response", request=request)
             return httpx.Response(200, json={"key": data["key"]})
+        if path == "/key/delete":
+            aliases = set(data.get("key_aliases") or [])
+            removed = [token for token, row in self.keys.items() if row["key_alias"] in aliases]
+            for token in removed:
+                del self.keys[token]
+            return httpx.Response(200, json={"deleted_keys": removed})
         row = self.keys[data["key"]]
         if path == "/key/update":
             row["max_budget"], row["metadata"] = data["max_budget"], data["metadata"]
@@ -322,15 +334,57 @@ async def test_new_generation_blocks_old_before_mint_and_uses_remaining_pool(cas
         await case["keys"].grant(old, "https://gateway.invalid", now=case["clock"].now())
 
 
+async def test_a_later_planning_deadline_mints_again_while_the_hold_is_unknown(case):
+    requested = Resources(usd=Decimal("1"), calls=3, tokens=1000)
+
+    async def unavailable(alias):
+        raise RuntimeError("usage unavailable")
+
+    case["gateway"].read_spend = unavailable
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert await case["service"].finish(case["lease"], "planning") == "unknown"
+    case["expires"] = case["clock"].now() + timedelta(seconds=4000)
+    renewed = await prepare(case, purpose="planning", requested=requested)
+    assert isinstance(renewed, Applied)
+    assert case["native"].writes.count("/key/generate") == 2
+    assert "/key/delete" in case["native"].writes
+    aliases = [row["key_alias"] for row in case["native"].keys.values()]
+    assert len(aliases) == len(set(aliases))
+    assert all(not row["blocked"] for row in case["native"].keys.values())
+
+
+async def test_a_purged_planning_key_can_be_minted_again_after_the_hold_is_known(case):
+    from forge.port_values import Refused
+    from forge.store.retry import release_unknown_holds
+    from forge.store.transactions import transaction
+
+    requested = Resources(usd=Decimal("1"), calls=3, tokens=1000)
+
+    async def unavailable(alias):
+        raise RuntimeError("usage unavailable")
+
+    case["gateway"].read_spend = unavailable
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert await case["service"].finish(case["lease"], "planning") == "unknown"
+    refused = await prepare(case, purpose="planning", requested=requested)
+    assert isinstance(refused, Refused) and refused.reason == "unproven_planning_hold"
+    assert case["native"].writes == ["/key/generate", "/key/block"]
+    async with transaction(case["factory"]) as session:
+        await release_unknown_holds(session, case["run"].id)
+    case["expires"] = case["clock"].now() + timedelta(seconds=4000)
+    assert isinstance(await prepare(case, purpose="planning", requested=requested), Applied)
+    assert case["native"].writes.count("/key/generate") == 2
+
+
 async def test_settlement_native_partial_axes_stay_fully_held_and_purge(case):
     await prepare(case)
-    assert await case["service"].finish(case["lease"], "implementation") == "accrued"
+    assert await case["service"].finish(case["lease"], "implementation") == "settled"
     alias = alias_for(identity(case), "implementation")
     record = await case["keys"].get(alias)
     assert record.state == "purged" and record.ciphertext is None
     pool = await case["store"].load(case["run"].id, "implementation")
-    assert pool.reservations[0].observed == Observation(usd=Decimal(0), calls=None, tokens=None)
-    assert pool.balance.held.usd == Decimal("2")
+    assert pool.reservations[0].observed == Observation(usd=Decimal(0), calls=0, tokens=0)
+    assert pool.balance.held.usd == Decimal(0)
     with pytest.raises(CredentialUnavailable):
         await case["keys"].grant(identity(case), "https://gateway.invalid", now=case["clock"].now())
 
@@ -502,6 +556,26 @@ def test_vault_binds_every_identity_purpose_model_alias_expiry_and_authenticates
     for corrupt in (sealed[:-1], bytes(flipped), b"\x02" + sealed[1:]):
         with pytest.raises(CredentialUnavailable):
             vault.open(scope, corrupt)
+
+
+async def test_gateway_readiness_5xx_is_unavailable_not_a_refusal(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    case["native"].readiness_status = 520
+    with pytest.raises(GatewayUnavailable, match="HTTP 520"):
+        await case["gateway"].readiness("test-model")
+
+
+async def test_prepare_keeps_a_gateway_blip_unknown(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    class Outage:
+        async def readiness(self, model):
+            raise GatewayUnavailable("gateway readiness HTTP 503")
+
+    case["service"].admission = Outage()
+    result = await prepare(case)
+    assert result.kind == "unknown" and "gateway_readiness_unavailable" in result.evidence
 
 
 async def test_real_adapter_refuses_strict_budget_before_any_pool_key_or_model_request(case):

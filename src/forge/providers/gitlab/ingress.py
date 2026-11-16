@@ -8,7 +8,7 @@ from typing import cast
 from uuid import UUID
 
 from forge.domain.plan import RepositoryIdentity
-from forge.ingress_values import Command, CommandKind, IngressEvent
+from forge.ingress_values import Command, CommandKind, IngressEvent, WebhookUnauthenticated
 from forge.port_values import Actor, RepoRef, ReviewRef, SubjectRef
 from forge.providers.gitlab.values import array, native_id, numeric, obj, text
 
@@ -76,8 +76,10 @@ class GitLabIngress:
         if len(lowered) != len(headers):
             raise ValueError("ambiguous webhook headers")
         token = lowered.get("x-gitlab-token", "")
-        if len(body) > MAX_WEBHOOK or not hmac.compare_digest(token.encode(), self._secret):
-            raise ValueError("webhook secret or size refused")
+        if len(body) > MAX_WEBHOOK:
+            raise ValueError("webhook exceeds size bound")
+        if not hmac.compare_digest(token.encode(), self._secret):
+            raise WebhookUnauthenticated("webhook secret refused")
         delivery, event = lowered.get("x-gitlab-event-uuid", ""), lowered.get("x-gitlab-event", "")
         try:
             if str(UUID(delivery)) != delivery.lower() or event not in EVENTS:

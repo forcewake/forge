@@ -196,9 +196,9 @@ class TestReserve:
 
     async def test_close_budget_is_idempotent(self, case):
         await prepare(case)
-        assert await case["service"].finish(case["lease"], "implementation") == "accrued"
+        assert await case["service"].finish(case["lease"], "implementation") == "settled"
         first = await current(case)
-        assert await case["service"].finish(case["lease"], "implementation") == "accrued"
+        assert await case["service"].finish(case["lease"], "implementation") == "settled"
         assert await current(case) == first
         assert case["native"].writes.count("/key/block") == 1
 

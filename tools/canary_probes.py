@@ -106,24 +106,27 @@ async def sql(query, url=None):
             result=await connection.execute(text(query)); return result.fetchall() if result.returns_rows else []
     finally: await engine.dispose()
 def rows(): return asyncio.run(sql("SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name"))
+def check_schema(expected=0):
+    os.environ['DATABASE_URL']=os.environ['CANARY_DATABASE']
+    cli('forge-schema','check',expected=expected)
 assert rows()==[]
-cli('forge-schema','check','--database-url',os.environ['CANARY_DATABASE'],expected=1)
+check_schema(expected=1)
 cli('forge','--config',str(root/'forge.toml'),'serve',expected=3)
 assert rows()==[], 'startup must never initialize an empty database'
 cli('forge','--config',str(root/'forge.toml'),'install')
-cli('forge-schema','check','--database-url',os.environ['CANARY_DATABASE'])
+check_schema()
 cli('forge','--config',str(root/'forge.toml'),'install',expected=1)
 installed=rows(); assert ('schema_installation',) in installed and ('runs',) in installed
 fresh=os.environ['CANARY_DATABASE']; os.environ['CANARY_DATABASE']=os.environ['CANARY_LEGACY_DATABASE']
 for query in ("CREATE TABLE alembic_version (version_num TEXT NOT NULL)","INSERT INTO alembic_version VALUES ('032')","CREATE TABLE historical_evidence (body TEXT NOT NULL)","INSERT INTO historical_evidence VALUES ('immutable-old-evidence')"): asyncio.run(sql(query))
 before=rows()
-cli('forge-schema','check','--database-url',os.environ['CANARY_DATABASE'],expected=1)
+check_schema(expected=1)
 cli('forge','--config',str(root/'forge.toml'),'serve',expected=3)
 cli('forge','--config',str(root/'forge.toml'),'install',expected=1)
 assert rows()==before and asyncio.run(sql('SELECT body FROM historical_evidence'))==[('immutable-old-evidence',)]
 assert asyncio.run(sql('SELECT version_num FROM alembic_version'))==[('032',)]
 os.environ['CANARY_DATABASE']=fresh
-cli('forge-schema','check','--database-url',os.environ['CANARY_DATABASE'])
+check_schema()
 app=subprocess.Popen(['forge','--config',str(root/'forge.toml'),'serve','--port','8420'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 try:
     for attempt in range(100):

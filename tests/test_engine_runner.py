@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass, replace
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -103,12 +104,20 @@ async def test_renewal_updates_context_lease_for_effects_and_final_commit(store)
     observed = []
 
     async def handler(ctx):
+        original = ctx.lease.expires_at
+        observed.append(original)
+        # A loaded runner can miss a 120ms lease. Wait for the renewal, then
+        # stay past the original expiry so the commit has to use the new one.
+        deadline = asyncio.get_running_loop().time() + 5
+        while ctx.lease.expires_at == original and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
         observed.append(ctx.lease.expires_at)
-        await asyncio.sleep(0.14)
-        observed.append(ctx.lease.expires_at)
+        remaining = (original - clock.now()).total_seconds()
+        if remaining > 0:
+            await asyncio.sleep(remaining + 0.05)
         return StepResult("{}")
 
-    tick = await runner(store, clock, handler, lease_seconds=0.12, renew_seconds=0.02).tick()
+    tick = await runner(store, clock, handler, lease_seconds=3, renew_seconds=0.05).tick()
     assert tick.completed == 1 and observed[1] > observed[0]
     assert (await StepStore(store).load(step.id)).lease_epoch == 1
 
@@ -190,18 +199,55 @@ async def test_unknown_effect_is_a_terminal_park_not_an_automatic_retry(store):
     )
 
 
-async def test_handler_errors_park_with_nonsecret_reason_and_never_retry(store):
+async def test_exhausted_retry_posts_the_block_reason(store):
+    clock = ManualClock(datetime.now(timezone.utc))
+    run, _step = await seeded(store, clock, max_attempts=1)
+    seen: list[tuple[str, str]] = []
+
+    async def handler(ctx):
+        raise Retryable("planner_model_unavailable")
+
+    async def on_blocked(lease, reason):
+        seen.append((lease.run_id, reason))
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    parked = await RunStore(store).load(run.id)
+    assert parked.state == State.BLOCKED
+    assert parked.reason == "retry_exhausted:planner_model_unavailable"
+    assert seen == [(run.id, "retry_exhausted:planner_model_unavailable")]
+
+
+async def test_a_park_announces_the_block_before_the_run_stops(store):
+    clock = RealClock()
+    run, _step = await seeded(store, clock)
+    seen: list[tuple[str, str]] = []
+
+    async def handler(ctx):
+        return StepResult("{}", park=Park("planning_deadline_expired"))
+
+    async def on_blocked(lease, reason):
+        seen.append((lease.run_id, reason))
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    assert seen == [(run.id, "planning_deadline_expired")]
+
+
+async def test_handler_errors_park_with_nonsecret_reason_and_never_retry(store, caplog):
+    import logging
+
     clock = RealClock()
     run, step = await seeded(store, clock)
 
     async def handler(ctx):
         raise ValueError("secret-sentinel-never-persist")
 
-    assert (await runner(store, clock, handler).tick()).parked == 1
+    with caplog.at_level(logging.ERROR, logger="forge.worker"):
+        assert (await runner(store, clock, handler).tick()).parked == 1
     receipt = await StepStore(store).load(step.id)
     parked = await RunStore(store).load(run.id)
     assert receipt.state == "failed" and "secret-sentinel" not in receipt.result_json
     assert parked.reason == "handler_error:ValueError"
+    assert run.id in caplog.text and "ValueError" in caplog.text and "Traceback" in caplog.text
 
 
 async def test_worker_cancellation_leaves_reclaimable_step_without_false_result(store):
@@ -251,6 +297,71 @@ async def test_crash_during_successor_insert_rolls_back_result_and_all_children(
     persisted = await StepStore(store).load(step.id)
     assert persisted.state == "running" and persisted.result_json is None
     assert await StepStore(store).get("crash-child") is None
+
+
+async def test_reconciler_waits_and_does_not_poll_a_blocked_gateway_key(store):
+    from forge.engine.reconciler import probe_due_delay
+
+    clock = ManualClock(datetime.now(timezone.utc))
+    run, _step = await seeded(store, clock)
+    (lease,) = await StepStore(store).claim_due("one", clock.now(), 60)
+    gateway = await intent(store, lease, key="gw", kind="gw_block", payload="{}")
+    dispatched = await EffectStore(store).mark_dispatched(
+        gateway.id, lease, expected_version=gateway.version
+    )
+    later = clock.now() + timedelta(seconds=40)
+    evidence = json.dumps({"next_probe_at": later.isoformat()}, separators=(",", ":"))
+    outcome = json.dumps(
+        {"evidence": evidence, "kind": "unknown"}, separators=(",", ":"), sort_keys=True
+    )
+    await EffectStore(store).record_observation(
+        dispatched.id,
+        state="unknown",
+        outcome_json=outcome,
+    )
+    waiting = await intent(store, lease, key="comment", kind="post_comment", payload="{}")
+    waiting = await EffectStore(store).mark_dispatched(
+        waiting.id, lease, expected_version=waiting.version
+    )
+    await EffectStore(store).record_observation(
+        waiting.id,
+        state="unknown",
+        outcome_json=outcome,
+    )
+    await RunStore(store).transition(
+        run.id,
+        expected_version=run.version,
+        target=State.BLOCKED,
+        failed_handler=Handler.PLAN,
+        reason="stopped",
+    )
+    saved = await EffectStore(store).get(gateway.key)
+    assert probe_due_delay(saved, clock.now()) > 0
+    assert probe_due_delay(saved, "now") is None
+    assert probe_due_delay(replace(saved, outcome_json="not-json"), clock.now()) is None
+    assert probe_due_delay(replace(saved, outcome_json='{"evidence":"nope"}'), clock.now()) is None
+
+    async def probe(record):
+        raise AssertionError(record.key)
+
+    result = await Reconciler(
+        EffectStore(store), RecoveryStore(store), probe=probe, clock=clock
+    ).pass_once()
+    assert result.recovered == 0 and result.next_delay is not None and result.next_delay > 0
+
+
+async def test_a_failed_block_comment_still_parks_the_run(store):
+    clock = RealClock()
+    run, _step = await seeded(store, clock)
+
+    async def handler(ctx):
+        return StepResult("{}", park=Park("planning_deadline_expired"))
+
+    async def on_blocked(lease, reason):
+        raise RuntimeError("comment transport failed")
+
+    assert (await runner(store, clock, handler, on_blocked=on_blocked).tick()).parked == 1
+    assert (await RunStore(store).load(run.id)).state == State.BLOCKED
 
 
 async def test_reconciler_recovers_original_requested_step_after_t1_crash(store):

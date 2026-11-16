@@ -91,6 +91,7 @@ async def test_server_http_request_has_live_scope_and_durable_unknown_receipt_be
             {"role": "user", "content": "prompt"},
         ]
         assert body["num_retries"] == body["max_retries"] == 0 and body["stream"] is False
+        assert "temperature" not in body
         calls.append(request)
         return wire()
 

@@ -238,8 +238,8 @@ class EffectStore:
         canonical_json(evidence_json)
         if outcome_json is not None:
             canonical_json(outcome_json)
-        if state not in {"adopted", "unknown", "requested"} or (
-            state == "adopted" and outcome_json is None
+        if state not in {"adopted", "unknown", "requested", "failed"} or (
+            state in {"adopted", "failed"} and outcome_json is None
         ):
             raise ValueError("invalid probe resolution")
         async with transaction(self.factory) as session:

@@ -11,7 +11,7 @@ from uuid import UUID
 from forge_protocol import digest
 
 from forge.domain.plan import RepositoryIdentity
-from forge.ingress_values import Command, CommandKind, IngressEvent
+from forge.ingress_values import Command, CommandKind, IngressEvent, WebhookUnauthenticated
 from forge.port_values import Actor, RepoRef, ReviewRef, SubjectRef, ReadUnavailable
 from forge.providers.github.repo import native_id, object_doc, text
 
@@ -100,7 +100,7 @@ class GitHubIngress:
         if not re.fullmatch(r"sha256=[0-9a-f]{64}", signature) or not hmac.compare_digest(
             signature, expected
         ):
-            raise ValueError("webhook signature or size refused")
+            raise WebhookUnauthenticated("webhook signature refused")
         delivery, event = lowered.get("x-github-delivery", ""), lowered.get("x-github-event", "")
         try:
             if str(UUID(delivery)) != delivery.lower() or event not in _EVENTS:

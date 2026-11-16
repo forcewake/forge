@@ -42,12 +42,40 @@ class _SessionPending(LaneFailure):
     pass
 
 
+_TRANSIENT_HTTP = tuple(f"HTTP {code}" for code in (429, 502, 503, 504, 520, 521, 522, 523, 524))
+
+
+def transient(exc: LaneFailure) -> bool:
+    if exc.classification == "transport_error":
+        return True
+    return exc.classification == "server_refused" and any(
+        code in exc.detail for code in _TRANSIENT_HTTP
+    )
+
+
 class LaneClient:
     def __init__(self, dispatch: LaneDispatch, http: httpx.AsyncClient):
         self.dispatch = dispatch
         self.http = http
         self.token: SessionToken | None = None
+        self._sleep = asyncio.sleep
         self.prefix = str(dispatch.server_url).rstrip("/") + "/lane/v1"
+
+    async def call(
+        self, method: str, path: str, *, retry: bool = False, **kwargs: Any
+    ) -> httpx.Response:
+        """Retry a transient blip for about 15s. Each pause doubles and stops at 5s."""
+        waited, delay = 0.0, 1.0
+        while True:
+            try:
+                return await self.request(method, path, **kwargs)
+            except LaneFailure as exc:
+                pause = min(delay, 5.0, 15.0 - waited)
+                if not retry or not transient(exc) or pause <= 0:
+                    raise
+                await self._sleep(pause)
+                waited += pause
+                delay = min(delay * 2, 5.0)
 
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         limit = kwargs.pop("response_limit", 2 * 1024 * 1024)
@@ -161,7 +189,7 @@ class LaneClient:
         return brief
 
     async def controls(self, after: int) -> list[ControlCommand]:
-        response = await self.request("GET", "/controls", params={"after": after})
+        response = await self.call("GET", "/controls", retry=True, params={"after": after})
         try:
             documents = response.json()
             if not isinstance(documents, list):
@@ -175,8 +203,8 @@ class LaneClient:
             raise LaneFailure(ExitCode.TRANSPORT, "identity_mismatch", "Wrong control identity")
         return commands
 
-    async def send(self, path: str, value: T, *, method: str = "POST") -> T:
-        response = await self.request(method, path, json=value.model_dump(mode="json"))
+    async def send(self, path: str, value: T, *, method: str = "POST", retry: bool = False) -> T:
+        response = await self.call(method, path, retry=retry, json=value.model_dump(mode="json"))
         result = self.parse(type(value), response)
         if result != value:
             raise LaneFailure(
@@ -198,9 +226,10 @@ class LaneClient:
 
     async def put_blob(self, data: bytes) -> str:
         identity = sha256(data).hexdigest()
-        response = await self.request(
+        response = await self.call(
             "PUT",
             f"/blobs/{identity}",
+            retry=True,
             content=data,
             headers={"Content-Type": "application/octet-stream"},
         )
@@ -229,16 +258,18 @@ class LaneClient:
             ) from None
 
     async def checkpoint(self, manifest: CheckpointManifest) -> None:
-        await self.send(f"/checkpoints/{manifest.checkpoint_id}", manifest, method="PUT")
+        await self.send(
+            f"/checkpoints/{manifest.checkpoint_id}", manifest, method="PUT", retry=True
+        )
 
     async def candidate(self, value: CandidateBundle) -> None:
         await self.send("/candidate", value)
 
     async def report(self, value: LaneReport) -> None:
-        await self.send("/report", value)
+        await self.send("/report", value, retry=True)
 
     async def heartbeat(self, value: Heartbeat) -> None:
-        await self.send("/heartbeat", value)
+        await self.send("/heartbeat", value, retry=True)
 
     async def model_key(self) -> ModelKeyGrant:
         response = await self.request("POST", "/model-key")

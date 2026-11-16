@@ -159,7 +159,7 @@ async def plan(self, task: TaskSnapshot, snapshot: PlanningSnapshot) -> Plan:
 Review the exact candidate; an unknown review cannot authorize readiness.
 
 ```python
-async def review(self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha) -> ReviewVerdict:
+async def review(self, candidate_diff: bytes, approved_input: ApprovedInput, *, candidate_sha: Sha, checks_passed: tuple[str, ...]=(), repair_context: str='') -> ReviewVerdict:
     ...
 ```
 
@@ -178,6 +178,9 @@ async def update(self, alias: str, allowance: Resources) -> GatewayOutcome:
     ...
 
 async def block(self, alias: str) -> GatewayOutcome:
+    ...
+
+async def delete_alias(self, alias: str) -> None:
     ...
 
 async def read_spend(self, alias: str) -> Observation:

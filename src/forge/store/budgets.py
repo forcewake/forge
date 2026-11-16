@@ -157,6 +157,7 @@ class BudgetStore:
         minimum: Resources,
         *,
         planning: bool = False,
+        replace_settled: bool = False,
         now: datetime,
     ) -> Reservation:
         if planning and purpose != "implementation":
@@ -166,6 +167,27 @@ class BudgetStore:
             row = await self._pool(session, lease.run_id, purpose)
             pool = Pool.model_validate_json(row.state_json)
             existing = next((item for item in pool.reservations if item.identity == key), None)
+            if (
+                existing is not None
+                and planning
+                and replace_settled
+                and existing.status == "settled"
+            ):
+                archived = f"{existing.identity}:closed"
+                taken = {item.identity for item in pool.reservations}
+                while archived in taken:
+                    archived += ":closed"
+                pool = pool.model_copy(
+                    update={
+                        "reservations": tuple(
+                            item.model_copy(update={"identity": archived})
+                            if item.identity == key
+                            else item
+                            for item in pool.reservations
+                        )
+                    }
+                )
+                existing = None
             if existing is not None:
                 return await self._existing(session, row, existing, requested, minimum)
             original_request = requested
@@ -173,7 +195,12 @@ class BudgetStore:
                 limit = (await self._policy(session, lease.run_id)).planning_allowance
                 prior = Resources()
                 for item in pool.reservations:
-                    if item.identity.startswith("planning:") and item.identity != key:
+                    if not item.identity.startswith("planning:") or item.identity == key:
+                        continue
+                    if item.status == "settled":
+                        spent = item.observed.lower_bound if item.observed else Resources()
+                        prior = prior + spent
+                    else:
                         prior = prior + item.allowance.high_water(
                             item.observed.lower_bound if item.observed else Resources()
                         )

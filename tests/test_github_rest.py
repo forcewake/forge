@@ -298,8 +298,10 @@ async def test_branch_policy_refuses_before_any_native_mutation(provider, policy
         wire.metadata.pop("archived")
     assert isinstance(
         await writer.ensure_branch(REPO, branch, SHA),
-        Unknown
-        if policy in ("rules_unavailable", "missing_default", "missing_archived")
+        Applied
+        if policy == "rules_unavailable"
+        else Unknown
+        if policy in ("missing_default", "missing_archived")
         else Refused,
     )
     assert not [

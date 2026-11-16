@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 
 from forge.domain.verdicts import Committed, Conflict, Unknown
-from forge.port_values import Applied, Found, Inconclusive, ReadUnavailable
+from forge.port_values import Applied, DefinitelyAbsent, Found, Inconclusive, ReadUnavailable
 from forge.providers.github.transport import Transport, TransportFailure
 from tests import test_github_reads as reads
 from tests import test_github_rest as rest
@@ -108,6 +108,7 @@ async def test_client_re_mints_once_on_401(github):
     assert (await github.api.metadata(github.repo)).document["id"] == 123
     assert len(attempts) == len(github.wire.mints) == 2
     assert attempts[0].headers["authorization"] != attempts[1].headers["authorization"]
+    github.api._metadata_cache.clear()
     github.wire.metadata_response = httpx.Response(401)
     with pytest.raises(TransportFailure):
         await github.api.metadata(github.repo)
@@ -198,7 +199,7 @@ async def test_get_branch_head_falls_back_to_commits_endpoint(github):
     assert await github.repositories.head(github.repo, "main") is None
     assert not resource_calls(github, "/commits/main")
     assert isinstance(
-        await github.repositories.probe_branch(github.repo, "main", github.sha), Inconclusive
+        await github.repositories.probe_branch(github.repo, "main", github.sha), DefinitelyAbsent
     )
 
 

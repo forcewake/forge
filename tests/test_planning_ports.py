@@ -10,6 +10,7 @@ import pytest
 from forge.domain.budget import Observation
 from forge.domain.plan import Plan, RepositoryIdentity
 from forge.planning import PlanningLimits, PlanningRefused, ResearchPlanner, freeze_snapshot
+from forge.planning.limits import ModelTransportError
 from forge.planning.tools import ReadTools, ToolCall
 from forge.planning.planner import decode_reply
 from forge.port_values import (
@@ -254,12 +255,14 @@ async def test_gateway_planner_keeps_full_plan_and_refuses_unavailable_or_widene
             "planner_requires_clarification",
         ),
     ):
-        failed_model = Model([reply])
-        with pytest.raises(PlanningRefused, match=reason):
+        copies = 1 + PlanningLimits().reasks if reason == "invalid_planner_output" else 1
+        failed_model = Model([reply] * copies)
+        expected = ModelTransportError if reason == "planner_model_unavailable" else PlanningRefused
+        with pytest.raises(expected, match=reason):
             await ResearchPlanner(
                 Reader(), failed_model, model="route", credential_alias="server-alias"
             ).plan(task(), snapshot())
-        assert len(failed_model.calls) == 1
+        assert len(failed_model.calls) == copies
 
 
 async def test_neighbor_authorization_is_explicit_and_freezes_heads_once():
@@ -415,13 +418,14 @@ async def test_work_bounds_and_uncited_plans_never_trigger_a_hidden_retry(bounda
         golden["steps"][0]["citations"] = []
         reply = {"kind": "plan", "plan": golden}
         reason = "plan_has_no_citation"
-    model = Model([reply])
+    copies = 1 + limits.reasks if boundary in ("output", "uncited") else 1
+    model = Model([reply] * copies)
     planner = ResearchPlanner(
         reader, model, model="server-route", credential_alias="scoped-alias", limits=limits
     )
     with pytest.raises(PlanningRefused, match=reason):
         await planner.plan(task(), snapshot())
-    assert len(model.calls) == (0 if boundary == "input" else 1)
+    assert len(model.calls) == (0 if boundary == "input" else copies)
     if boundary != "model":
         assert not reader.calls
 
@@ -431,9 +435,49 @@ async def test_work_bounds_and_uncited_plans_never_trigger_a_hidden_retry(bounda
     [
         '{"kind":"blocked","kind":"tools","calls":[]}',
         '{"kind":"tools","calls":[{"tool":"read_file","repo":"primary","path":"src/main.py","sha":"unbound"}]}',
-        '```json\n{"kind":"blocked","question":"not a pure object"}\n```',
+        '```json\n{"kind":"blocked","kind":"tools"}\n```',
     ],
 )
 def test_duplicate_or_unbound_model_authority_refuses(raw):
     with pytest.raises(PlanningRefused, match="invalid_planner_output"):
         decode_reply(raw, 65536)
+
+
+def test_numeric_step_ids_and_an_empty_list_path_are_accepted():
+    plan = {
+        "kind": "plan",
+        "plan": {
+            "summary": "Keep the root listing.",
+            "steps": [
+                {
+                    "step_id": 1,
+                    "title": "List",
+                    "instructions": "List the repository root.",
+                    "citations": [],
+                }
+            ],
+        },
+    }
+    decoded = decode_reply(json.dumps(plan), 100_000)
+    assert decoded.kind == "plan" and decoded.plan.steps[0].step_id == "1"
+    listed = decode_reply(
+        json.dumps(
+            {"kind": "tools", "calls": [{"tool": "list_paths", "repo": "primary", "path": ""}]}
+        ),
+        100_000,
+    )
+    assert listed.calls[0].path is None and listed.calls[0].prefix == ""
+
+
+async def test_a_bad_citation_is_reasked_with_the_concrete_error():
+    bad = json.loads(GOLDEN.read_text())
+    bad["steps"][0]["citations"][0]["source_sha"] = "b" * 40
+    replies = [{"kind": "plan", "plan": bad}] * (1 + PlanningLimits().reasks)
+    model = Model(replies)
+    with pytest.raises(PlanningRefused, match="unresolved_citation"):
+        await ResearchPlanner(Reader(), model, model="route", credential_alias="alias").plan(
+            task(), snapshot()
+        )
+    assert "unresolved_citation" in model.calls[1]["prompt"]
+    assert "src/main.py" in model.calls[1]["prompt"] and "lines" in model.calls[1]["prompt"]
+    assert len(model.calls) == len(replies)

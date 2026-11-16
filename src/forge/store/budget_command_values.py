@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.budget.command_values import AmendmentRequest, parse_amendment
 from forge.command_values import CommandEnvelope, CommandResult
 from forge.domain.budget import Pool, Resources
-from forge.domain.states import TERMINAL, State
+from forge.domain.states import State
 from forge.port_values import GatewayKeyRef
 from forge.store.command_runs import target_runs
 from forge.store.models_budget import EngineBudgetAmendment, EngineBudgetPool, EngineGatewayKey
@@ -55,7 +55,7 @@ async def active_key(
     )
     if (
         run.cancel_requested
-        or State(run.state) in TERMINAL
+        or State(run.state) in {State.CANCELLED, State.READY_FOR_HUMAN}
         or row is None
         or row.run_id != run.id
         or row.purpose != purpose

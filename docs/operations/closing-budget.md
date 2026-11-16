@@ -9,6 +9,13 @@ closing review uses the full cap. An explicit absolute reserve
 workload calibration. A missing reserve policy is reported, never silently
 converted to zero or unlimited funds. Already approved ceilings stay frozen.
 
+A planning allowance has to cover two model calls at the trusted policy's
+per-call minimum (one full input context plus one full output). The included
+Haiku tariff is about $1.32 per call, so a planning allowance under about
+$2.64 is refused with `planning_budget_exhausted`. Amounts are plain decimal
+text (`20`, not `2E+1`). An unknown reservation is settled at its known lower
+bound when the operator retries, which returns the unused hold to the pool.
+
 ## Exposure
 
 Finality, not presence of a number, decides settlement:

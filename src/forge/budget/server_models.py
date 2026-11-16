@@ -4,6 +4,7 @@ from collections.abc import Callable
 from decimal import Decimal, DecimalException, ROUND_CEILING, localcontext
 import hashlib
 import json
+import os
 import re
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -23,6 +24,23 @@ from forge.store.records import Lease, StoreConflict
 
 ServerPurpose = Literal["planning", "closing"]
 MAX_BYTES = 1048576
+
+
+def server_model_timeout(raw: str | None = None) -> float:
+    """Bounded wait for one planner or closing-review reply.
+
+    GLM-class models often need longer than 30s. ``FORGE_SERVER_MODEL_TIMEOUT_SECONDS``
+    overrides the 120s default and stays within 1..600.
+    """
+    if raw is None:
+        raw = os.environ.get("FORGE_SERVER_MODEL_TIMEOUT_SECONDS", "120")
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError("server model timeout must be a number of seconds") from None
+    if not 1 <= value <= 600:
+        raise ValueError("server model timeout must be from 1 to 600 seconds")
+    return value
 
 
 class ModelUnavailable(ValueError):
@@ -83,7 +101,7 @@ class ServerModels:
         clock: Clock,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 30,
+        timeout: float | None = None,
     ) -> None:
         url = urlsplit(gateway_url)
         if (
@@ -99,8 +117,10 @@ class ServerModels:
             url.scheme == "http" and url.hostname in ("127.0.0.1", "localhost", "litellm")
         ):
             raise ValueError("server model gateway requires HTTPS outside local development")
-        if not 0 < timeout <= 60:
-            raise ValueError("server model timeout must be bounded")
+        if timeout is None:
+            timeout = server_model_timeout()
+        if not 1 <= timeout <= 600:
+            raise ValueError("server model timeout must be from 1 to 600 seconds")
         self.keys, self.calls, self.admission, self.clock = keys, calls, admission, clock
         self.policy = policy
         self._http = httpx.AsyncClient(
@@ -172,7 +192,6 @@ class _ScopedText:
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": max_output_tokens,
-            "temperature": 0,
             "stream": False,
             "num_retries": 0,
             "max_retries": 0,

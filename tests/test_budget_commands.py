@@ -300,7 +300,9 @@ async def test_closing_increment_uses_the_current_readonly_grant_without_recalli
     calls = []
 
     class Waiting:
-        async def review(self, diff, approved, *, candidate_sha):
+        async def review(
+            self, diff, approved, *, candidate_sha, checks_passed=(), repair_context=""
+        ):
             calls.append((diff, candidate_sha))
             entered.set()
             await release.wait()

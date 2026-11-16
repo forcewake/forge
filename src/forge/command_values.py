@@ -120,4 +120,67 @@ REFUSALS = {
 def render(result: CommandResult) -> str:
     message = REFUSALS.get(result.reason, result.reason.replace("_", " "))
     run = f"\nRun: `{result.run_id}`" if result.run_id is not None else ""
-    return message + run + ("\n" + result.data_json if result.status == "observed" else "")
+    extra = ""
+    if result.status == "observed" and result.data_json not in ("", "{}"):
+        facts = json.loads(result.data_json)
+        state = facts.get("state") if isinstance(facts, dict) else None
+        # A blocked or failed run is explained in prose. Other snapshots keep
+        # the canonical evidence so a status comment can name the candidate.
+        if result.reason == "effects_observed" and isinstance(facts, dict):
+            lines = [
+                f"`{item['key']}` is {item['state'].replace('_', ' ')}"
+                for item in facts.get("effects") or []
+                if isinstance(item, dict)
+                and isinstance(item.get("key"), str)
+                and isinstance(item.get("state"), str)
+            ]
+            extra = ("\nObserved effects: " + "; ".join(lines) + ".") if lines else ""
+        else:
+            extra = (
+                "\n" + human_status(result.data_json)
+                if state in {"blocked", "failed"}
+                else "\n" + result.data_json
+            )
+    return message + run + extra
+
+
+def human_status(raw: str) -> str:
+    """Operator-facing status. Raw snapshots stay out of the issue comment."""
+    import json
+
+    try:
+        facts = json.loads(raw)
+    except ValueError:
+        return "The current status could not be read."
+    if not isinstance(facts, dict):
+        return "The current status could not be read."
+    state = str(facts.get("state") or "unknown").replace("_", " ")
+    reason = facts.get("reason")
+    handler = facts.get("failed_handler")
+    lines = [f"State: {state}."]
+    if isinstance(reason, str) and reason:
+        lines.append("Reason: " + _display(reason) + ".")
+    if isinstance(handler, str) and handler:
+        lines.append("Stopped during: " + handler.replace("_", " ") + ".")
+    lines.append(_next_step(reason if isinstance(reason, str) else ""))
+    return "\n".join(lines)
+
+
+def _display(reason: str) -> str:
+    code, separator, detail = reason.partition(": ")
+    shown = code.replace("_", " ")
+    return shown if not separator else f"{shown}: {detail}"
+
+
+def _next_step(reason: str) -> str:
+    if reason.split(":", 1)[0].strip() == "planning_budget_exhausted":
+        return "Start a new /implement. /retry cannot raise this run's planning budget."
+    return "Use /retry when this work can continue, or /implement to start again."
+
+
+def blocked_comment(reason: str) -> str:
+    if reason.split(":", 1)[0] == "planning_budget_exhausted":
+        follow = "Start a new /implement. /retry cannot raise this run's planning budget."
+    else:
+        follow = "Comment /why-blocked for the current facts, or /retry if this work can continue."
+    return f"Forge stopped this run before it finished.\nReason: {_display(reason)}.\n{follow}"

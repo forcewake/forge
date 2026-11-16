@@ -1,9 +1,10 @@
 """Pinned LiteLLM admin contract; all gateway writes are called through Effects."""
 
 from datetime import datetime
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_DOWN, localcontext
 import json
 import math
+import os
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -37,10 +38,30 @@ class GatewayUnavailable(ValueError):
     pass
 
 
+def parallel_request_limit() -> int:
+    """Lane calls share one key. One in-flight request produces 429s."""
+    raw = os.environ.get("FORGE_GATEWAY_MAX_PARALLEL_REQUESTS", "4")
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError("gateway parallel request limit must be an integer")
+    value = int(raw)
+    if not 1 <= value <= 32:
+        raise ValueError("gateway parallel request limit is outside 1..32")
+    return value
+
+
+def quantize_usd(value: Decimal) -> Decimal:
+    """Shared 1e-6 USD scale. Float storage keeps about 15 significant digits."""
+    quantum = Decimal("0.000001")
+    floored = value.quantize(quantum, rounding=ROUND_DOWN)
+    snapped = Decimal(format(float(floored), "f")).quantize(quantum, rounding=ROUND_DOWN)
+    if snapped < 0 or not snapped.is_finite():
+        raise ValueError("USD budget cannot be represented at micro-dollar precision")
+    return snapped
+
+
 def _usd(value: Decimal) -> float:
-    result = float(value)
-    if Decimal.from_float(result) > value:
-        result = math.nextafter(result, 0)
+    snapped = quantize_usd(value)
+    result = float(snapped)
     if not math.isfinite(result) or result <= 0:
         raise ValueError("positive USD budget cannot be represented by gateway")
     return result
@@ -88,15 +109,22 @@ class LiteLLMGateway:
 
     async def readiness(self, model: str) -> Refused | None:
         nonce = uuid4().hex
-        if self.policy is not None:
-            try:
-                status, body = await self._request(
-                    "GET", "/forge/budget/readiness", params={"nonce": nonce}
-                )
-                if status == 200 and self.policy.accepts(body, nonce, model, self.artifact_digest):
-                    return None
-            except GatewayUnavailable:
-                pass
+        if self.policy is None:
+            return Refused(
+                reason="strict_budget_enforcement_unavailable",
+                evidence=_evidence("trusted_guard_or_pricing_not_verified"),
+            )
+        try:
+            status, body = await self._request(
+                "GET", "/forge/budget/readiness", params={"nonce": nonce}
+            )
+        except GatewayUnavailable:
+            raise
+        if status == 200 and self.policy.accepts(body, nonce, model, self.artifact_digest):
+            return None
+        # A blip is not proof that the guard is unconfigured.
+        if status == 429 or status >= 500:
+            raise GatewayUnavailable(f"gateway readiness HTTP {status}")
         return Refused(
             reason="strict_budget_enforcement_unavailable",
             evidence=_evidence("trusted_guard_or_pricing_not_verified"),
@@ -135,12 +163,21 @@ class LiteLLMGateway:
         rows, count = data.get("keys"), data.get("total_count")
         if count == 0 and rows == []:
             return None
-        if type(count) is not int or count != 1 or not isinstance(rows, list) or len(rows) != 1:
+        if (
+            type(count) is not int
+            or not isinstance(rows, list)
+            or count != len(rows)
+            or not 1 <= count <= 2
+        ):
             raise GatewayUnavailable("gateway alias is not unique")
-        row = rows[0]
-        if not isinstance(row, dict) or row.get("token") != record.token_digest:
+        matched = [
+            row for row in rows if isinstance(row, dict) and row.get("token") == record.token_digest
+        ]
+        if len(matched) != 1:
             raise GatewayUnavailable("gateway alias resolves to different material")
-        return row
+        if any(row.get("blocked") is not True for row in rows if row is not matched[0]):
+            raise GatewayUnavailable("gateway alias is not unique")
+        return matched[0]
 
     def _metadata(self, record: KeyRecord, allowance: Resources) -> dict[str, Any]:
         return {
@@ -168,10 +205,10 @@ class LiteLLMGateway:
         if (
             row.get("key_alias") != record.scope.alias
             or row.get("models") != [record.scope.model]
-            or Decimal(cap) != Decimal(str(_usd(allowance.usd)))
+            or quantize_usd(Decimal(cap)) != quantize_usd(Decimal(str(_usd(allowance.usd))))
             or row.get("metadata") != self._metadata(record, allowance)
             or row.get("allowed_routes") != list(ALLOWED_ROUTES)
-            or row.get("max_parallel_requests") != 1
+            or row.get("max_parallel_requests") != parallel_request_limit()
             or row.get("config") not in (None, {})
             or row.get("aliases") not in (None, {})
             or row.get("budget_duration") is not None
@@ -254,7 +291,10 @@ class LiteLLMGateway:
         allowance: Resources,
         expires_at: datetime,
     ) -> GatewayOutcome:
-        readiness = await self.readiness(model)
+        try:
+            readiness = await self.readiness(model)
+        except GatewayUnavailable:
+            return Unknown(evidence=_evidence("gateway_readiness_unavailable"))
         if readiness is not None:
             return readiness
         record = await self.keys.get(alias)
@@ -290,7 +330,7 @@ class LiteLLMGateway:
                 "budget_duration": None,
                 "key_type": "default",
                 "allowed_routes": list(ALLOWED_ROUTES),
-                "max_parallel_requests": 1,
+                "max_parallel_requests": parallel_request_limit(),
                 "blocked": False,
             },
             alias,
@@ -317,6 +357,15 @@ class LiteLLMGateway:
             alias,
             allowance,
         )
+
+    async def delete_alias(self, alias: str) -> None:
+        """Drop a blocked alias so a later mint is not rejected as a duplicate."""
+        try:
+            status, _ = await self._request("POST", "/key/delete", json={"key_aliases": [alias]})
+        except GatewayUnavailable:
+            raise
+        if status not in (200, 404):
+            raise GatewayUnavailable("gateway alias delete failed")
 
     async def block(self, alias: str) -> GatewayOutcome:
         record = await self.keys.get(alias)
@@ -351,12 +400,15 @@ class LiteLLMGateway:
             or usage.get("policy_digest") != self.policy.digest
         ):
             raise GatewayUnavailable("durable gateway usage is unavailable")
-        settled, held = Decimal(usage["settled_usd"]), Decimal(usage["held_usd"])
+        settled, held = (
+            quantize_usd(Decimal(usage["settled_usd"])),
+            quantize_usd(Decimal(usage["held_usd"])),
+        )
         if min(settled, held) < 0 or not settled.is_finite() or not held.is_finite():
             raise GatewayUnavailable("durable gateway money is invalid")
         with localcontext() as context:
             context.prec = 80
-            total = settled + held
+            total = quantize_usd(settled + held)
         if usage.get("complete") is True and held != 0:
             raise GatewayUnavailable("complete usage still has an unresolved hold")
         return Observation(

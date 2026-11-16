@@ -1,23 +1,47 @@
 """Current engine lane API transactions and their cancellation/version fence."""
 
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 import inspect
 from typing import Any, TypeVar, cast
 
 from forge_protocol import ControlCommand, RunIdentity
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import and_, delete, exists, or_, select, update
+from sqlalchemy.sql.selectable import Select
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.api.lane_auth_values import PendingDispatch, identity_of
 from forge.api.lane_v1_values import LaneConflict
 from forge.domain.states import TERMINAL
 from forge.store.lane_auth import locked_current
 from forge.store.lane_state import load_namespace, persist_namespace
+from forge.store.models_execution import EngineStep
 from forge.store.models_lane import EngineBlob, EngineLaneSession
 from forge.store.models_runs import EngineRun
-from forge.store.transactions import SessionFactory, transaction
+from forge.store.transactions import SessionFactory, notify_steps, transaction
 
 T = TypeVar("T")
+
+
+async def release_await_step(session: AsyncSession, row: EngineLaneSession) -> None:
+    """A stored lane report should not wait out the await poll interval."""
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(EngineStep)
+        .where(
+            EngineStep.run_id == row.run_id,
+            EngineStep.attempt == row.attempt,
+            EngineStep.generation == row.generation,
+            EngineStep.handler == "await_lane",
+            EngineStep.state == "scheduled",
+            EngineStep.due_at > now,
+        )
+        .values(due_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if cast(CursorResult[Any], result).rowcount:
+        await notify_steps(session)
 
 
 class EngineLaneV1Store:
@@ -66,43 +90,66 @@ class EngineLaneV1Store:
                 )
                 if cast(CursorResult[Any], result_row).rowcount != 1:
                     raise LaneConflict("run changed during lane mutation")
+                if isinstance(state.get("report"), dict):
+                    await release_await_step(session, row)
             return result
 
-    async def terminal_only_digests(self, limit: int) -> list[str]:
-        terminal = tuple(item.value for item in TERMINAL)
-        live = (
-            select(EngineBlob.digest)
-            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-            .where(EngineRun.state.not_in(terminal))
+    def _reapable_runs(self, now: datetime, grace_seconds: int) -> Select[tuple[str]]:
+        cutoff = now - timedelta(seconds=grace_seconds)
+        unretryable = or_(
+            EngineRun.state.in_(("cancelled", "ready_for_human")),
+            and_(
+                EngineRun.state.in_(("blocked", "failed")),
+                EngineRun.failed_handler.is_(None),
+            ),
         )
+        return select(EngineRun.id).where(unretryable, EngineRun.updated_at <= cutoff)
+
+    async def terminal_only_digests(
+        self, limit: int, *, now: datetime | None = None, grace_seconds: int = 24 * 3600
+    ) -> list[str]:
+        moment = now or datetime.now(timezone.utc)
+        eligible = self._reapable_runs(moment, grace_seconds)
+        retained = select(EngineBlob.digest).where(EngineBlob.run_id.not_in(eligible))
         async with self.session_factory() as session:
             rows = await session.scalars(
                 select(EngineBlob.digest)
-                .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-                .where(EngineRun.state.in_(terminal), EngineBlob.digest.not_in(live))
+                .where(EngineBlob.run_id.in_(eligible), EngineBlob.digest.not_in(retained))
                 .limit(limit)
             )
         return list(dict.fromkeys(rows))
 
-    async def forget_terminal_digests(self, digests: list[str]) -> None:
+    async def forget_terminal_digests(
+        self,
+        digests: list[str],
+        *,
+        now: datetime | None = None,
+        grace_seconds: int = 24 * 3600,
+    ) -> list[str]:
         if not digests:
-            return
-        terminal = tuple(item.value for item in TERMINAL)
-        live = (
-            select(EngineBlob.digest)
-            .join(EngineRun, EngineRun.id == EngineBlob.run_id)
-            .where(EngineRun.state.not_in(terminal))
-        )
+            return []
+        moment = now or datetime.now(timezone.utc)
+        eligible = self._reapable_runs(moment, grace_seconds)
         async with transaction(self.session_factory) as session:
             await session.execute(
                 delete(EngineBlob).where(
                     EngineBlob.digest.in_(digests),
-                    EngineBlob.digest.not_in(live),
-                    EngineBlob.run_id.in_(
-                        select(EngineRun.id).where(EngineRun.state.in_(terminal))
-                    ),
+                    EngineBlob.run_id.in_(eligible),
                 )
             )
+            remaining = set(
+                await session.scalars(
+                    select(EngineBlob.digest).where(EngineBlob.digest.in_(digests))
+                )
+            )
+        return [digest for digest in digests if digest not in remaining]
+
+    async def digest_referenced(self, digest: str) -> bool:
+        async with self.session_factory() as session:
+            row = await session.scalar(
+                select(EngineBlob.digest).where(EngineBlob.digest == digest).limit(1)
+            )
+        return row is not None
 
     async def enqueue_control(self, command: ControlCommand) -> ControlCommand:
         def append(

@@ -8,6 +8,7 @@ lane_requirements_url = "https://releases.example.com/forge/lane-requirements.tx
 lane_requirements_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 [gateway]
+# https is required except for the hosts 127.0.0.1, localhost and litellm.
 url = "https://gateway.example.com"
 admin_key_env = "FORGE_GATEWAY_ADMIN_KEY"
 policy_path = "/etc/forge/forge-budget-policy.json"
@@ -21,6 +22,7 @@ api_url = "https://api.github.com"
 git_url = "https://github.com"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 oidc_jwks_url = "https://token.actions.githubusercontent.com/.well-known/jwks"
+# tls_ca_path = "/etc/forge/native-ca.pem"
 webhook_secret_env = "FORGE_GITHUB_WEBHOOK_SECRET"
 app_issuer = "123456"
 app_private_key_env = "FORGE_GITHUB_APP_PRIVATE_KEY"
@@ -57,6 +59,8 @@ calls = 20
 tokens = 2000000
 wallclock_seconds = 900
 
+# At least twice the trusted model's per-call minimum. The included Haiku
+# tariff needs about $2.64; a $1 allowance is refused before planning.
 [connections.repositories.policy.planning_allowance]
 usd = "5"
 calls = 6

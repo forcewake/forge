@@ -51,7 +51,7 @@ async def test_rest_resolves_native_id_for_each_call_and_uses_current_name(key):
         reply = await api.request(REPO, "GET", "git/ref/heads/fix%2Fissue")
         assert reply.document == {"object": {"sha": "a" * 40}}
         await api.request(REPO, "GET", "git/ref/heads/fix/issue")
-        assert sum(request.url.path == "/installation/repositories" for request in requests) == 2
+        assert sum(request.url.path == "/installation/repositories" for request in requests) == 1
         assert all("old" not in request.url.path for request in requests)
     finally:
         await transport.close()
@@ -183,6 +183,8 @@ async def test_documented_installation_metadata_discards_clone_credentials_and_r
         assert metadata.document == {"id": 42, "full_name": "owner/repo"}
         assert "synthetic-secret" not in repr(metadata)
         count = 2
+        assert (await api.metadata(REPO)).document["full_name"] == "owner/repo"
+        api._metadata_cache.clear()
         with pytest.raises(TransportFailure, match="identity_mismatch"):
             await api.metadata(REPO)
         assert all("/repositories/42" not in request.url.path for request in requests)

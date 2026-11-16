@@ -108,6 +108,7 @@ async def case(env, settings, tmp_path):
             api=api,
             admission=admission,
             policy=policy,
+            gateway=gateway,
         )
     finally:
         await gateway.aclose()
@@ -175,7 +176,9 @@ async def test_dispatch_past_its_bootstrap_deadline_parks_without_a_native_job(c
 async def test_unreported_lane_past_its_deadline_parks_unquiesced(case):
     env = case["env"]
     run, _, _ = await started(case)
-    advance(case, 721)
+    from forge.engine.dispatch import startup_grace_seconds
+
+    advance(case, 600 + startup_grace_seconds() + 1)
     assert (await env.runner.tick()).parked == 1
     current = await env.runs.load(run.id)
     assert current.state == State.BLOCKED and current.reason == "lane_timeout_unquiesced"
@@ -184,12 +187,23 @@ async def test_unreported_lane_past_its_deadline_parks_unquiesced(case):
 async def test_server_waits_through_startup_grace_before_parking_a_working_lane(case):
     env = case["env"]
     run, _, _ = await started(case)
+    from forge.engine.dispatch import startup_grace_seconds
+
     advance(case, 601)
     assert (await env.runner.tick()).parked == 0
     assert (await env.runs.load(run.id)).state == State.RUNNING
-    advance(case, 130)
+    advance(case, startup_grace_seconds())
     assert (await env.runner.tick()).parked == 1
     assert (await env.runs.load(run.id)).reason == "lane_timeout_unquiesced"
+
+
+async def test_unavailable_lane_branch_retries_instead_of_parking(case):
+    env = case["env"]
+    run, _frozen = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    env.fake.fail_next("ensure_branch", Fault(http_5xx=True))
+    assert (await env.runner.tick()).rescheduled == 1
+    assert (await env.runs.load(run.id)).state != State.BLOCKED
 
 
 async def test_dispatch_lost_response_recovers_same_nonce_and_native_job(case):
@@ -231,7 +245,78 @@ async def test_never_started_lane_is_bounded_without_a_second_native_dispatch(ca
     assert not env.fake.lanes
     assert (await case["keys"].get(f"forge:{run.id}:1:1")).state == "purged"
     assert sum(call[0] == "dispatch_lane" for call in env.fake.calls) == 1
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("2")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
+
+
+async def test_dispatch_resume_keeps_going_when_the_gateway_blips(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    env = case["env"]
+    run, _frozen = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    env.fake.fail_next("ensure_branch", Fault(http_5xx=True))
+    assert (await env.runner.tick()).rescheduled == 1
+    assert (await case["keys"].get(f"forge:{run.id}:1:1")).state == "active"
+
+    class Outage:
+        def __init__(self):
+            self.calls = 0
+
+        async def readiness(self, model):
+            self.calls += 1
+            raise GatewayUnavailable("gateway readiness HTTP 520")
+
+    outage = Outage()
+    case["budget"].admission = outage
+    advance(case)
+    tick = await env.runner.tick()
+    assert tick.parked == 0 and outage.calls == 0
+    current = await env.runs.load(run.id)
+    assert current.state != State.BLOCKED
+    assert current.reason != "strict_budget_enforcement_unavailable"
+
+
+async def test_gateway_outage_before_a_key_defers_instead_of_blocking(case):
+    from forge.budget.gateway import GatewayUnavailable
+
+    env = case["env"]
+
+    class Outage:
+        async def readiness(self, model):
+            raise GatewayUnavailable("gateway readiness HTTP 520")
+
+    case["budget"].admission = Outage()
+    run, _ = await approved(case)
+    assert (await env.runner.tick()).completed == 1
+    assert (await env.runner.tick()).rescheduled == 1
+    current = await env.runs.load(run.id)
+    assert current.state != State.BLOCKED
+    assert await case["keys"].get(f"forge:{run.id}:1:1") is None
+
+
+async def test_blocking_dispatch_releases_the_implementation_hold(case):
+    env = case["env"]
+    run, _, _pending = await started(case)
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd > 0
+    advance(case, 601)
+    # Only the original dispatch step should observe its own deadline.
+    from forge.store.models_execution import EngineStep
+    from sqlalchemy import select
+
+    async with env.factory() as session, session.begin():
+        rows = (await session.scalars(select(EngineStep).where(EngineStep.run_id == run.id))).all()
+        for row in rows:
+            if row.handler == "await_lane":
+                row.due_at = env.clock.now() + timedelta(hours=2)
+            elif row.handler == "dispatch" and "settings" in (row.payload_json or ""):
+                row.state = "scheduled"
+                row.due_at = env.clock.now()
+                row.lease_owner = None
+                row.lease_expires_at = None
+    assert (await env.runner.tick()).parked == 1
+    current = await env.runs.load(run.id)
+    assert current.state == State.BLOCKED and current.reason == "dispatch_expired"
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
 
 
 async def test_budget_refusal_never_dispatches_or_serves_a_credential(case):
@@ -283,7 +368,7 @@ async def test_completed_report_consumes_only_the_current_accepted_candidate(cas
     step = await env.steps.get(lane_key(pending.identity) + ":publish")
     assert candidate.diff_sha256 in step.payload_json and step.handler == Handler.PUBLISH
     assert not any(call[0] == "commit" for call in env.fake.calls)
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("2")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("0")
 
 
 async def test_transient_failure_atomically_advances_identity_and_reserves_again(case):
@@ -301,7 +386,7 @@ async def test_transient_failure_atomically_advances_identity_and_reserves_again
     assert second.dispatch.nonce != old_nonce
     assert len(env.fake.lanes) == 2 and case["native"].writes.count("/key/generate") == 2
     pool = await case["budgets"].load(run.id, "implementation")
-    assert len(pool.reservations) == 2 and pool.balance.held.usd == Decimal("4")
+    assert len(pool.reservations) == 2 and pool.balance.held.usd == Decimal("2")
 
 
 async def test_fatal_failure_preserves_reason_without_revival(case):
@@ -324,6 +409,8 @@ async def test_pool_too_small_for_another_attempt_is_budget_exhausted(case):
         update={"requested": Resources(usd=Decimal("8"), calls=8, tokens=9000)}
     )
     run, _, pending = await started(case)
+    for row in case["native"].keys.values():
+        row["spend"] = 8
     await report(case, pending)
     assert (await env.runner.tick()).completed == 1
     advance(case)
@@ -332,7 +419,9 @@ async def test_pool_too_small_for_another_attempt_is_budget_exhausted(case):
     current = await env.runs.load(run.id)
     assert current.reason == "budget_exhausted" and current.state == State.BLOCKED
     assert len(env.fake.lanes) == 1
-    assert (await case["budgets"].load(run.id, "implementation")).balance.held.usd == Decimal("8")
+    assert (await case["budgets"].load(run.id, "implementation")).balance.settled.usd == Decimal(
+        "8"
+    )
 
 
 async def test_native_success_without_candidate_remains_waiting(case):

@@ -7,7 +7,7 @@ import re
 from fnmatch import fnmatchcase
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from forge_protocol import canonical_json
 
@@ -20,6 +20,7 @@ from forge.ports import RepoPort
 from .limits import PlanningLimits, PlanningRefused
 
 DECLARATION = re.compile(r"\b(?:async\s+def|def|class)\s+([A-Za-z_]\w*)")
+MAX_READ_LINES = 100
 
 
 class ToolCall(Value):
@@ -27,9 +28,17 @@ class ToolCall(Value):
     repo: Annotated[str, Field(min_length=1, max_length=32)]
     path: RepoPath | None = None
     prefix: RepoPath | Literal[""] = ""
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def empty_path_is_the_repository_root(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
+
     query: Annotated[str, Field(max_length=256)] = ""
     start_line: Annotated[int, Field(gt=0)] = 1
-    line_count: Annotated[int, Field(gt=0, le=100)] = 100
+    line_count: Annotated[int, Field(gt=0, le=10_000)] = MAX_READ_LINES
 
 
 def lf_lines(text: str) -> tuple[str, ...]:
@@ -177,7 +186,8 @@ class ReadTools:
             "next_line": None,
         }
         kept = 0
-        for line in lines[start : start + request.line_count]:
+        limit = min(request.line_count, MAX_READ_LINES)
+        for line in lines[start : start + limit]:
             previous = result["content"]
             result["content"] += line
             result["next_line"] = start + kept + 2 if start + kept + 1 < len(lines) else None
@@ -187,6 +197,8 @@ class ReadTools:
                 result["truncated"] = True
                 break
             kept += 1
+        if request.line_count > limit and start + kept < len(lines):
+            result["truncated"] = True
         result["complete"] = not result["truncated"] and start + kept >= len(lines)
         if not self.fits(result):
             raise PlanningRefused("tool_output_limit")
@@ -225,11 +237,15 @@ class ReadTools:
         for step in plan.steps:
             for citation in step.citations:
                 key = by_identity.get(citation.repository.digest)
-                if key is None or citation.source_sha != self.scopes[key].sha:
-                    raise PlanningRefused("unresolved_citation")
+                if key is None:
+                    raise PlanningRefused(
+                        "unresolved_citation",
+                        f"path {citation.path} is not in an authorized snapshot; line count unavailable",
+                    )
                 lines = await self.lines(key, citation.path)
-                if citation.end_line > len(lines):
-                    raise PlanningRefused("unresolved_citation")
+                detail = f"path {citation.path} has {len(lines)} lines"
+                if citation.source_sha != self.scopes[key].sha or citation.end_line > len(lines):
+                    raise PlanningRefused("unresolved_citation", detail)
                 seen = self.observed.get((key, citation.path), set())
                 if any(
                     line not in seen for line in range(citation.start_line, citation.end_line + 1)

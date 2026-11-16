@@ -24,6 +24,18 @@ from forge_protocol import RunIdentity
 ReviewerFactory = Callable[[Callable[[], Lease], str], Reviewer]
 
 
+def review_effect_key(lease: Lease, attempts: int, *, fresh: bool) -> str:
+    key = f"{lease.run_id}:{lease.attempt}:{lease.generation}:review"
+    return f"{key}:{attempts}" if fresh and attempts > 1 else key
+
+
+def stored_review(evidence: dict[str, object]) -> ReviewVerdict | None:
+    raw = evidence.get("review")
+    if not isinstance(raw, dict) or raw.get("decision") == "inconclusive":
+        return None
+    return ReviewVerdict.model_validate(raw)
+
+
 class ReviewHandler:
     def __init__(
         self,
@@ -61,9 +73,8 @@ class ReviewHandler:
             or await self.reviews.review_head(work.review) != work.candidate_sha
         ):
             return stopped("review_stale:branch_drift")
-        if "review" in evidence:
-            result = ReviewVerdict.model_validate_json(json.dumps(evidence["review"]))
-        else:
+        result = stored_review(evidence)
+        if result is None:
             try:
                 grant = await self.budget.prepare(
                     context.lease,
@@ -93,6 +104,12 @@ class ReviewHandler:
                         diff,
                         ApprovedInput.from_spec(approved.spec),
                         candidate_sha=work.candidate_sha,
+                        checks_passed=verification.successful,
+                        repair_context=(
+                            approved.brief.repair.failure_context
+                            if approved.brief.repair is not None
+                            else ""
+                        ),
                     )
             except Exception:
                 await self.budget.finish(context.lease, "closing")
@@ -108,14 +125,19 @@ class ReviewHandler:
             or await self.reviews.review_head(work.review) != work.candidate_sha
         ):
             return stopped("review_stale:branch_drift")
-        return await self.post(context, work, result)
+        return await self.post(context, work, result, fresh=stored_review(evidence) is None)
 
     async def post(
-        self, context: StepContext[Effects], work: ClosingWork, result: ReviewVerdict
+        self,
+        context: StepContext[Effects],
+        work: ClosingWork,
+        result: ReviewVerdict,
+        *,
+        fresh: bool,
     ) -> StepResult:
         posted = await context.effects.post_review(
             context.lease,
-            f"{context.lease.run_id}:{context.lease.attempt}:{context.lease.generation}:review",
+            review_effect_key(context.lease, context.step.attempts, fresh=fresh),
             work.review,
             ReviewBody(**result.model_dump(exclude={"evidence"})),
             f"<!-- forge:{context.lease.run_id}:review:{work.candidate_sha} -->",

@@ -17,7 +17,7 @@ class ControlQueue:
         self.pending: deque[ControlCommand] = deque()
 
     async def poll(self) -> None:
-        for command in await self.client.controls(self.after):
+        for command in await self._controls():
             if command.sequence <= self.after or command.command_id in self.seen:
                 raise LaneFailure(
                     ExitCode.TRANSPORT, "control_order", "Controls are not unique and ordered"
@@ -29,6 +29,9 @@ class ControlQueue:
             self.after = command.sequence
             self.seen.add(command.command_id)
             self.pending.append(command)
+
+    async def _controls(self) -> list[ControlCommand]:
+        return await self.client.controls(self.after)
 
     async def next(self) -> ControlCommand:
         while not self.pending:

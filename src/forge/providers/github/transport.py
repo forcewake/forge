@@ -1,6 +1,7 @@
 """Bounded same-origin HTTP; response errors never retain request credentials."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import re
 from typing import Any
@@ -117,6 +118,11 @@ class Transport:
                         if retry and len(retry) <= 10 and retry.isascii() and retry.isdecimal()
                         else None
                     )
+                    reset = response.headers.get("x-ratelimit-reset")
+                    if delay is None and reset is not None and _clock_reset(reset):
+                        delay = min(
+                            3600, max(0, int(reset) - int(datetime.now(timezone.utc).timestamp()))
+                        )
                     limited = response.status_code == 429 or (
                         response.status_code == 403
                         and (
@@ -147,6 +153,10 @@ class Transport:
                     raise TransportFailure("malformed_response", request_id=request_id) from None
         except httpx.HTTPError:
             raise TransportFailure("transport_unavailable") from None
+
+
+def _clock_reset(value: str) -> bool:
+    return len(value) <= 12 and value.isascii() and value.isdecimal()
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

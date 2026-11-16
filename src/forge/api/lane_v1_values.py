@@ -1,6 +1,7 @@
 """Typed lane storage interface and pure submission/authorization rules."""
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, Protocol, TypeVar
 
 from forge_protocol import CheckpointManifest, ControlCommand, RunIdentity
@@ -27,8 +28,13 @@ class LaneV1Store(Protocol):
         write: bool = False,
     ) -> T: ...
     async def enqueue_control(self, command: ControlCommand) -> ControlCommand: ...
-    async def terminal_only_digests(self, limit: int) -> list[str]: ...
-    async def forget_terminal_digests(self, digests: list[str]) -> None: ...
+    async def terminal_only_digests(
+        self, limit: int, *, now: datetime | None = None, grace_seconds: int = 24 * 3600
+    ) -> list[str]: ...
+    async def forget_terminal_digests(
+        self, digests: list[str], *, now: datetime | None = None, grace_seconds: int = 24 * 3600
+    ) -> list[str]: ...
+    async def digest_referenced(self, digest: str) -> bool: ...
 
 
 def resume_checkpoint(

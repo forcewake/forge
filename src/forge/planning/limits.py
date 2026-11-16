@@ -11,6 +11,7 @@ Positive = Annotated[int, Field(gt=0)]
 
 class PlanningLimits(Value):
     model_calls: Positive = 4
+    reasks: Positive = 2
     tool_calls: Positive = 16
     output_tokens: Positive = 4096
     wallclock_seconds: Positive = 90
@@ -22,9 +23,21 @@ class PlanningLimits(Value):
     scan_files: Positive = 32
 
 
+class ModelTransportError(Exception):
+    """The model was not reached. The planning step may retry with backoff."""
+
+
 class PlanningRefused(Exception):
     """A precise refusal, never a guessed plan after a failed read or model call."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, detail: str = ""):
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail or reason
+
+    def surfaced(self) -> str:
+        """Operator text. A citation refusal keeps the path and line count."""
+        detail = " ".join(self.detail.split())
+        if not detail or detail == self.reason:
+            return self.reason[:300]
+        return f"{self.reason}: {detail}"[:300]

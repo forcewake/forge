@@ -134,6 +134,53 @@ async def test_blob_checkpoint_candidate_and_terminal_report_are_durable_idempot
     assert "access_token" not in json.dumps(state)
 
 
+async def test_terminal_report_pulls_a_deferred_await_step_forward(api):
+    from forge.domain.states import Handler
+    from forge.store.models_execution import EngineStep
+    from forge.store.records import StepRequest
+    from forge.store.steps import StepStore
+
+    _lane, factory, pending, client = api
+    later = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await StepStore(factory).enqueue(
+        StepRequest(
+            pending.identity.forge_run_id,
+            Handler.AWAIT_LANE,
+            pending.identity.forge_run_id + ":await-report",
+            "{}",
+            later,
+        )
+    )
+    digest = await upload(client)
+    candidate = bundle(pending, digest)
+    assert (
+        await client.post("/lane/v1/candidate", json=candidate.model_dump(mode="json"))
+    ).status_code == 201
+    terminal = LaneReport(
+        **pending.identity.model_dump(),
+        approved_digest=pending.dispatch.approved_digest,
+        status="completed",
+        classification="success",
+        driver=pending.dispatch.driver,
+        model=pending.dispatch.model,
+        terminal_reason="completed",
+        candidate_diff_sha256=digest,
+    )
+    assert (
+        await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
+    ).status_code == 201
+    async with factory() as session:
+        step = await session.scalar(
+            select(EngineStep).where(
+                EngineStep.key == pending.identity.forge_run_id + ":await-report"
+            )
+        )
+    due = step.due_at
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    assert due <= datetime.now(timezone.utc) + timedelta(seconds=5)
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -201,12 +248,38 @@ async def test_declared_oversize_and_quota_refuse_before_keeping_bytes(api):
         await client.post("/lane/v1/report", json=terminal.model_dump(mode="json"))
     ).status_code == 201
     assert (lane.blobs.root / first).is_file()
+    from datetime import datetime, timedelta, timezone
+    import os
+
+    old = datetime.now(timezone.utc) - timedelta(days=2)
     async with factory() as session, session.begin():
-        run = await session.get(EngineRun, pending.identity.forge_run_id)
-        run.state = "failed"
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(state="failed", failed_handler=None, updated_at=old)
+        )
+    os.utime(lane.blobs.root / first, (old.timestamp(), old.timestamp()))
     assert await lane.reap_terminal_blobs() == 1
     assert not (lane.blobs.root / first).exists()
     assert await lane.reap_terminal_blobs() == 0
+
+
+async def test_retryable_blocked_publish_keeps_its_blob(api):
+    from datetime import datetime, timedelta, timezone
+    import os
+
+    lane, factory, pending, client = api
+    first = await upload(client, b"keep")
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+    async with factory() as session, session.begin():
+        await session.execute(
+            update(EngineRun)
+            .where(EngineRun.id == pending.identity.forge_run_id)
+            .values(state="blocked", failed_handler="publish", updated_at=old)
+        )
+    os.utime(lane.blobs.root / first, (old.timestamp(), old.timestamp()))
+    assert await lane.reap_terminal_blobs() == 0
+    assert (lane.blobs.root / first).is_file()
 
 
 async def test_blob_digest_limits_corruption_and_symlinks_are_refused(api, tmp_path):

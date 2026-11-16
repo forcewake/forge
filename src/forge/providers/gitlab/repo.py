@@ -15,6 +15,7 @@ from forge.port_values import (
     Applied,
     BranchOutcome,
     BranchRef,
+    DefinitelyAbsent,
     Found,
     Inconclusive,
     ProbeResult,
@@ -182,9 +183,7 @@ class GitLabRepo:
             head = await self.head(repo, branch)
             proof = evidence("probe_branch", head=head or "")
             if head is None:
-                return Inconclusive(
-                    reason="branch visibility is not proof of absence", evidence=proof
-                )
+                return DefinitelyAbsent(evidence=proof)
             outcome: BranchOutcome = (
                 Applied[BranchRef](
                     value=BranchRef(repo=repo, branch=branch, sha=head), evidence=proof
@@ -214,6 +213,8 @@ class GitLabRepo:
                     evidence=evidence("probe_commit"),
                 )
             head, matches = await self._markers(repo, branch, marker)
+            if not matches and (head is None or head == expected_parent):
+                return DefinitelyAbsent(evidence=evidence("probe_commit", head=head or ""))
             if len(matches) != 1:
                 return Inconclusive(
                     reason="commit marker missing or ambiguous", evidence=evidence("probe_commit")
